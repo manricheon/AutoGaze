@@ -1,7 +1,7 @@
 _target_: autogaze.tasks.video_mae_reconstruction.VideoMAEReconstruction
 recon_model: 'facebook/vit-mae-base'
 recon_sample_rate: 1
-attn_mode: 'flash_attention_2'  # flex_attention / sdpa / flash_attention_2 / eager
+attn_mode: 'sdpa'  # flex_attention / sdpa / flash_attention_2 / eager
 recon_model_config:
   scale_embed: True
   max_num_frames: 256

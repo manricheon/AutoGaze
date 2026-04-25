@@ -191,7 +191,7 @@ class Trainer:
         # temperature annealing
         self.temperature = get_scheduled_temperature(self.train_step, self.total_steps, self.temp_schedule_args)
         # Predict the gaze
-        gaze_outputs = self.gaze_model(inputs, temperature=self.temperature, **getattr(self.task.module, 'gaze_model_kwargs', {}))
+        gaze_outputs = self.gaze_model(inputs, temperature=self.temperature, **getattr(unwrap_model(self.task), 'gaze_model_kwargs', {}))
 
         # Run through the task
         if self.detach_task:
@@ -210,7 +210,7 @@ class Trainer:
         gt_gazing_info = inputs['gt_gazing_info']
 
         # Get the probability of gazing
-        gaze_outputs = self.gaze_model(inputs, gazing_info=gt_gazing_info, **getattr(self.task.module, 'gaze_model_kwargs', {}))
+        gaze_outputs = self.gaze_model(inputs, gazing_info=gt_gazing_info, **getattr(unwrap_model(self.task), 'gaze_model_kwargs', {}))
 
         # Get the task losses from the GT gazing info
         task_outputs = {}
@@ -363,7 +363,7 @@ class Trainer:
             inputs = move_inputs_to_cuda(inputs)
 
             # Forward gaze, task, and get metrics
-            gaze_outputs = self.gaze_model(inputs, **getattr(self.task.module, 'gaze_model_kwargs', {}))
+            gaze_outputs = self.gaze_model(inputs, **getattr(unwrap_model(self.task), 'gaze_model_kwargs', {}))
             task_outputs = self.task(inputs, gaze_outputs)
             metrics = self.extract_metrics(gaze_outputs, task_outputs)
 
@@ -374,7 +374,7 @@ class Trainer:
             total += B
 
             # Visualizations
-            self.task.module.visualize(inputs, gaze_outputs, task_outputs)
+            unwrap_model(self.task).visualize(inputs, gaze_outputs, task_outputs)
 
             if pbar is not None:
                 pbar.update(1)
