@@ -8,6 +8,10 @@
 #   # Single video, all output formats (json + viz + npy)
 #   bash scripts/run_inference.sh assets/example_input.mp4
 #
+#   # ALL frames (chunked 16-frame windows, no downsampling) — per-frame PNGs + video
+#   bash scripts/run_inference.sh assets/example_input.mp4 results/ \
+#       --all-frames --output-format frames,video
+#
 #   # Directory of videos, JSON only (generate NTP training labels)
 #   bash scripts/run_inference.sh /data/my_videos/ results/labels/ --output-format json
 #

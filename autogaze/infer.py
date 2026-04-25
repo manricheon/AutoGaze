@@ -23,6 +23,9 @@ Usage examples:
   # Per-frame images + video
   python -m autogaze.infer assets/example_input.mp4 --output-format frames,video
 
+  # ALL frames (chunked inference, no temporal downsampling)
+  python -m autogaze.infer assets/example_input.mp4 --all-frames --output-format frames,video
+
   # Directory → JSON labels only (NTP training data generation)
   python -m autogaze.infer /data/my_videos/ --output-format json
 
@@ -83,6 +86,114 @@ def load_video(video_path: Path, num_frames: int) -> np.ndarray:
     raw = read_video_pyav(container, indices)
     container.close()
     return process_video_frames(raw, num_frames)
+
+
+def load_all_frames(video_path: Path) -> np.ndarray:
+    """Decode every frame from the video (no temporal sampling).
+
+    Returns uint8 (T, H, W, 3) at the native video resolution.
+    Spatial resizing happens later via the AutoGazeImageProcessor transform.
+    """
+    container = av.open(str(video_path))
+    frames = []
+    for frame in container.decode(video=0):
+        frames.append(frame.to_ndarray(format="rgb24"))
+    container.close()
+    if not frames:
+        raise ValueError(f"No frames decoded from {video_path}")
+    return np.stack(frames)
+
+
+def _merge_chunk_results(chunk_results: list[dict], actual_lengths: list[int]) -> dict:
+    """Merge per-chunk AutoGaze outputs into one result dict.
+
+    Each chunk covers `actual_lengths[i]` real frames (the last may be padded
+    to chunk_size with black frames for the model, so we trim those away here).
+    """
+    num_tokens_per_frame = chunk_results[0]["num_vision_tokens_each_frame"]
+    scales = chunk_results[0]["scales"]
+
+    # gazing_mask: list of (1, T_chunk, N_scale) → (1, T_total, N_scale)
+    merged_masks = []
+    for si in range(len(scales)):
+        parts = [res["gazing_mask"][si][:, :actual_lengths[ci], :]
+                 for ci, res in enumerate(chunk_results)]
+        merged_masks.append(torch.cat(parts, dim=1))
+
+    # num_gazing_each_frame: trim to actual frames per chunk
+    merged_num_each = torch.cat([
+        res["num_gazing_each_frame"][:actual_lengths[ci]]
+        for ci, res in enumerate(chunk_results)
+    ])
+
+    # gazing_pos / if_padded_gazing: flat token sequences with shifted offsets
+    merged_pos_parts = []
+    merged_pad_parts = []
+    frame_offset = 0
+    for ci, res in enumerate(chunk_results):
+        actual_len = actual_lengths[ci]
+        tok_count = int(res["num_gazing_each_frame"][:actual_len].sum().item())
+        pos = res["gazing_pos"][0][:tok_count]
+        pad = res["if_padded_gazing"][0][:tok_count]
+        # Shift absolute token indices by the global frame offset
+        merged_pos_parts.append(pos + frame_offset * num_tokens_per_frame)
+        merged_pad_parts.append(pad)
+        frame_offset += actual_len
+
+    return {
+        "gazing_mask": merged_masks,
+        "gazing_pos": torch.cat(merged_pos_parts).unsqueeze(0),
+        "if_padded_gazing": torch.cat(merged_pad_parts).unsqueeze(0),
+        "num_gazing_each_frame": merged_num_each,
+        "num_vision_tokens_each_frame": num_tokens_per_frame,
+        "scales": scales,
+    }
+
+
+def run_inference_chunked(
+    model,
+    all_frames: np.ndarray,
+    transform,
+    device,
+    chunk_size: int,
+    gazing_ratio: float,
+    task_loss_req,
+) -> dict:
+    """Run AutoGaze on every frame by splitting into chunk_size windows.
+
+    The last window is zero-padded to chunk_size if it is shorter, then
+    the padded frames are stripped before merging.
+    Returns a single merged result dict covering all frames.
+    """
+    T = len(all_frames)
+    chunk_results = []
+    actual_lengths = []
+
+    for start in range(0, T, chunk_size):
+        chunk = all_frames[start: start + chunk_size]
+        actual_len = len(chunk)
+
+        # Zero-pad if this is the last (short) chunk
+        if actual_len < chunk_size:
+            pad = np.zeros(
+                (chunk_size - actual_len, *chunk.shape[1:]), dtype=chunk.dtype
+            )
+            chunk = np.concatenate([chunk, pad], axis=0)
+
+        video_input = transform_video_for_pytorch(chunk, transform)
+        video_input = video_input.unsqueeze(0).to(device)
+
+        with torch.inference_mode():
+            result = model(
+                {"video": video_input},
+                gazing_ratio=gazing_ratio,
+                task_loss_requirement=task_loss_req,
+            )
+
+        chunk_results.append(result)
+        actual_lengths.append(actual_len)
+
+    return _merge_chunk_results(chunk_results, actual_lengths)
 
 
 def _unnorm_video(raw_video: np.ndarray, transform, normalize_mean,
@@ -436,7 +547,16 @@ def parse_args():
     p.add_argument("--no-task-loss-requirement", action="store_true",
                    help="Disable early stopping; use --gazing-ratio only")
     p.add_argument("--num-frames", type=int, default=16,
-                   help="Number of frames to sample per video (default: 16)")
+                   help="Number of frames to sample per video (default: 16). Ignored with --all-frames.")
+    p.add_argument("--all-frames", action="store_true",
+                   help=(
+                       "Process EVERY frame of the video (no temporal downsampling). "
+                       "The video is split into consecutive --chunk-size windows and AutoGaze "
+                       "is run on each; results are concatenated. "
+                       "Use --output-format frames,video for the most useful visualisation."
+                   ))
+    p.add_argument("--chunk-size", type=int, default=16,
+                   help="Frames per chunk when using --all-frames (default: 16)")
     p.add_argument("--video-fps", type=float, default=4.0,
                    help="FPS for output video (default: 4.0; low fps = easier to inspect)")
     return p.parse_args()
@@ -480,23 +600,37 @@ def main():
         print(f"[{idx+1}/{len(video_paths)}] {video_path.name}")
 
         try:
-            raw_video = load_video(video_path, num_frames)
+            if args.all_frames:
+                raw_video = load_all_frames(video_path)
+                T_total = len(raw_video)
+                n_chunks = (T_total + args.chunk_size - 1) // args.chunk_size
+                print(f"  All-frames mode: {T_total} frames → {n_chunks} chunk(s) of {args.chunk_size}")
+                if "viz" in fmts and T_total > 32:
+                    print(f"  WARNING: viz grid with {T_total} columns will be very wide; "
+                          "consider --output-format frames,video instead.")
+                gaze_outputs = run_inference_chunked(
+                    model, raw_video, transform, device,
+                    chunk_size=args.chunk_size,
+                    gazing_ratio=args.gazing_ratio,
+                    task_loss_req=task_loss_req,
+                )
+            else:
+                raw_video = load_video(video_path, num_frames)
+                video_input = transform_video_for_pytorch(raw_video, transform)
+                video_input = video_input.unsqueeze(0).to(device)
+                with torch.inference_mode():
+                    gaze_outputs = model(
+                        {"video": video_input},
+                        gazing_ratio=args.gazing_ratio,
+                        task_loss_requirement=task_loss_req,
+                    )
         except Exception as e:
-            print(f"  WARNING: could not load — {e}")
+            print(f"  WARNING: could not process — {e}")
             continue
 
-        video_input = transform_video_for_pytorch(raw_video, transform)
-        video_input = video_input.unsqueeze(0).to(device)
-
-        with torch.inference_mode():
-            gaze_outputs = model(
-                {"video": video_input},
-                gazing_ratio=args.gazing_ratio,
-                task_loss_requirement=task_loss_req,
-            )
-
+        T_actual = len(raw_video)
         n_real  = int((~gaze_outputs["if_padded_gazing"]).sum().item())
-        n_total = gaze_outputs["num_vision_tokens_each_frame"] * num_frames
+        n_total = gaze_outputs["num_vision_tokens_each_frame"] * T_actual
         per_frame = gaze_outputs["num_gazing_each_frame"].tolist()
         print(f"  Gazed: {n_real}/{n_total} ({100*n_real/n_total:.1f}%)  |  per frame: {per_frame}")
 
