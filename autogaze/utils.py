@@ -157,13 +157,36 @@ def format_kwargs(cfg, optional_args):
     }
 
 
-def move_inputs_to_cuda(inputs):
+def get_device():
+    """Return the best available device: cuda > mps > cpu."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def get_autocast_device():
+    """Return the device type string for torch.autocast."""
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def move_inputs_to_device(inputs, device):
+    """Move all tensor inputs to the given device."""
     for k, v in inputs.items():
         if isinstance(v, torch.Tensor):
-            inputs[k] = v.cuda()
+            inputs[k] = v.to(device)
         elif isinstance(v, dict):
-            inputs[k] = move_inputs_to_cuda(v)
+            inputs[k] = move_inputs_to_device(v, device)
     return inputs
+
+
+def move_inputs_to_cuda(inputs):
+    return move_inputs_to_device(inputs, get_device())
 
 
 def unwrap_model(model):

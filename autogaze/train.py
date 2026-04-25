@@ -28,7 +28,8 @@ from torch.distributed import init_process_group, destroy_process_group
 from autogaze.utils import (
     seed_everything,
     seed_worker,
-    dump_cfg, suppress_print, suppress_wandb, suppress_logging
+    dump_cfg, suppress_print, suppress_wandb, suppress_logging,
+    get_device,
 )
 from autogaze.datasets.collate import collate_fn
 from autogaze.models.autogaze import AutoGaze, AutoGazeConfig
@@ -68,8 +69,11 @@ def _determine_batch_size(global_batch_size, per_gpu_max_size, world_size, globa
 
 
 def setup_dist():
+    # Use nccl for CUDA, gloo otherwise (MPS / CPU on Mac)
+    dist_backend = 'nccl' if torch.cuda.is_available() else 'gloo'
+
     if 'LOCAL_RANK' in os.environ and 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
-        init_process_group(backend='nccl')
+        init_process_group(backend=dist_backend)
         local_rank = int(os.environ['LOCAL_RANK'])
         global_rank = int(os.environ['RANK'])
         world_size = int(os.environ["WORLD_SIZE"])
@@ -80,12 +84,13 @@ def setup_dist():
         os.environ['WORLD_SIZE'] = '1'
         os.environ['MASTER_ADDR'] = 'localhost'
         os.environ['MASTER_PORT'] = '12355'
-        init_process_group(backend='nccl', init_method='env://', rank=0, world_size=1)
+        init_process_group(backend=dist_backend, init_method='env://', rank=0, world_size=1)
         local_rank = 0
         global_rank = 0
         world_size = 1
 
-    torch.cuda.set_device(local_rank)
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
     return local_rank, global_rank, world_size
 
 
@@ -142,13 +147,20 @@ def main(cfg: DictConfig):
     cfg.model.max_num_frames = cfg.dataset.clip_len
     model_cfg = AutoGazeConfig(**OmegaConf.to_container(cfg.model))
     model = AutoGaze(model_cfg)
-    cur_device = torch.cuda.current_device()
-    ddp_model = DDP(model.cuda(), find_unused_parameters=True, device_ids=[cur_device], output_device=cur_device)
+    device = get_device()
+    model = model.to(device)
+    if torch.cuda.is_available():
+        ddp_model = DDP(model, find_unused_parameters=True, device_ids=[local_rank], output_device=local_rank)
+    else:
+        ddp_model = DDP(model, find_unused_parameters=True)
 
     # Create task
     task = instantiate(cfg.task)
-    cur_device = torch.cuda.current_device()
-    ddp_task = DDP(task.cuda(), find_unused_parameters=True, device_ids=[cur_device], output_device=cur_device)
+    task = task.to(device)
+    if torch.cuda.is_available():
+        ddp_task = DDP(task, find_unused_parameters=True, device_ids=[local_rank], output_device=local_rank)
+    else:
+        ddp_task = DDP(task, find_unused_parameters=True)
 
     # Create transforms: AutoGaze uses its own preprocessing config but overrides size with task's scales
     task_scales = sorted([int(s) for s in str(cfg.task.scales).split('+')])

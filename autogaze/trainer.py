@@ -20,7 +20,7 @@ from collections import defaultdict
 from transformers import get_linear_schedule_with_warmup
 
 
-from autogaze.utils import get_scheduled_temperature, move_inputs_to_cuda, unwrap_model
+from autogaze.utils import get_scheduled_temperature, move_inputs_to_cuda, get_device, unwrap_model
 from autogaze.train import seed_everything
 
 
@@ -385,10 +385,11 @@ class Trainer:
                 pbar.set_description_str(f'val: {" ".join(desc_parts)}')
 
         # Gather from all processes
-        total = torch.tensor(total).cuda()
+        _device = get_device()
+        total = torch.tensor(total).to(_device)
         torch.distributed.all_reduce(total, torch.distributed.ReduceOp.SUM, async_op=False)
         for k in accum_metrics:
-            accum_metrics[k] = torch.tensor(accum_metrics[k]).cuda()
+            accum_metrics[k] = torch.tensor(accum_metrics[k]).to(_device)
             torch.distributed.all_reduce(accum_metrics[k], torch.distributed.ReduceOp.SUM, async_op=False)
             accum_metrics[k] = accum_metrics[k].item() / total
 

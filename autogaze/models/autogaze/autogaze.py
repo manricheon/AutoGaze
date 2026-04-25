@@ -20,7 +20,7 @@ from einops import rearrange
 from omegaconf import OmegaConf
 
 from transformers.modeling_utils import PreTrainedModel
-from autogaze.utils import get_gazing_pos_from_gazing_mask
+from autogaze.utils import get_gazing_pos_from_gazing_mask, get_autocast_device
 from .modeling_autogaze import AutoGazeModel
 from .configuration_autogaze import AutoGazeConfig
 
@@ -62,7 +62,7 @@ class AutoGaze(PreTrainedModel):
                 ratio = random.expovariate(self.gazing_ratio_config['exponential']['lambda'])
         
         if sync_across_ranks:
-            ratio = torch.tensor(ratio).cuda()
+            ratio = torch.tensor(ratio).to(next(self.parameters()).device)
             if torch.distributed.is_initialized():
                 torch.distributed.broadcast(ratio, src=0)  # Make every rank use the same gazing ratio. Otherwise, each rank will have different gazing ratio, and the train/inference time is bounded by the slowest rank (with highest gazing ratio).
             ratio = ratio.item()
@@ -323,7 +323,7 @@ class AutoGaze(PreTrainedModel):
         # If gazing_pos is already provided, then directly calculate the probability of taking such gaze. Usually in the cases of calculating pi(a|s) in PPO/GRPO/etc.
         # Otherwise, run the gazing model first to predict gazing positions.
         if gazing_info is None or len(gazing_info) == 0:
-            with torch.autocast("cuda", dtype=torch.bfloat16) if self.attn_mode == "flash_attention_2" else nullcontext():
+            with torch.autocast(get_autocast_device(), dtype=torch.bfloat16) if self.attn_mode == "flash_attention_2" else nullcontext():
 
                 if gazing_ratio is not None and task_loss_requirement is not None:
                     # If the user specifies the gazing ratio and task loss requirement, then use gazing ratio as the max gazing ratio and use task loss requirement to control when to stop
@@ -391,7 +391,7 @@ class AutoGaze(PreTrainedModel):
 
         # Get the log probablity of taking such gaze (log_action_probs)
         if not generate_only:
-            with torch.autocast("cuda", dtype=torch.bfloat16):
+            with torch.autocast(get_autocast_device(), dtype=torch.bfloat16):
                 forward_outputs = self.gazing_model(video, gazing_info)  # B * N
                 action_probs = forward_outputs.gaze_probs
                 task_loss_prediction = forward_outputs.task_loss_prediction

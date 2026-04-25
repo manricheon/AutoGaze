@@ -19,6 +19,7 @@ from transformers.models.siglip2.modeling_siglip2 import Siglip2VisionModel
 
 from .modeling_video_mae import ViTMAEForPreTraining
 from .visualize_video_mae_reconstruction import VisualizeReconstruction
+from autogaze.utils import get_autocast_device
 
 
 class VideoMAEReconstruction(nn.Module):
@@ -58,7 +59,6 @@ class VideoMAEReconstruction(nn.Module):
             "target_patch_size": self.mae.config.patch_size,
         }
     
-    @torch.autocast("cuda", dtype=torch.bfloat16)
     def forward_output(self, inputs, gaze_outputs, frame_idx_to_reconstruct=None):
         """
         Get all the outputs from the inputs
@@ -174,7 +174,8 @@ class VideoMAEReconstruction(nn.Module):
         gaze_outputs:
             gazing_pos: B, N
         """
-        outputs = self.forward_output(inputs, gaze_outputs)
+        with torch.autocast(get_autocast_device(), dtype=torch.bfloat16):
+            outputs = self.forward_output(inputs, gaze_outputs)
         loss, reconstruction_loss_each_gazing_token, reconstruction_loss_each_gazing_token_mask = self.loss(inputs, gaze_outputs, outputs)
         reward, traj_len_each_reward = self.reward(inputs, gaze_outputs, outputs)
         metric = self.metric(inputs, gaze_outputs, outputs)

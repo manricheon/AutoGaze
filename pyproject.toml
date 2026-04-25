@@ -12,7 +12,6 @@ requires-python = ">=3.8"
 dependencies = [
     "torch",
     "torchvision",
-    "flash_attn",
     "hydra-core>=1.3.2",
     "wandb",
     "loguru",
@@ -36,6 +35,9 @@ dev = [
     "pytest>=8.0.0",
     "pytest-cov>=4.1.0",
     "pytest-mock>=3.12.0",
+]
+cuda = [
+    "flash_attn",
 ]
 
 [tool.setuptools.packages.find]
