@@ -23,6 +23,7 @@
    - 5.2 [Stage 1 — NTP 사전학습](#52-stage-1--ntp-사전학습)
    - 5.3 [Stage 2 — GRPO RL 후학습](#53-stage-2--grpo-rl-후학습)
    - 5.4 [단일 GPU에서 테스트 학습 (Mac / 소규모 실험)](#54-단일-gpu에서-테스트-학습-mac--소규모-실험)
+   - 5.5 [VideoMAE 도메인 적응 및 Joint Fine-tuning](#55-videomae-도메인-적응-및-joint-fine-tuning)
 6. [파라미터 상세 설명](#6-파라미터-상세-설명)
 7. [체크포인트 관리](#7-체크포인트-관리)
 8. [자주 묻는 질문 / 트러블슈팅](#8-자주-묻는-질문--트러블슈팅)
@@ -60,6 +61,28 @@ gazing_pos / gazing_mask  → 이 인덱스만 Vision Encoder에 전달
 | --- | --- | --- |
 | Stage 1 | NTP (Next Token Prediction) | GT 가이즈 시퀀스를 학습해 기본 능력 습득 |
 | Stage 2 | GRPO RL (재건 보상) | VideoMAE 재건 품질을 보상으로 삼아 더 나은 가이즈 전략 탐색 |
+
+### 모델 크기 비교
+
+| 모델 | 파라미터 | 파일 크기 | 역할 |
+| --- | --- | --- | --- |
+| **AutoGaze** | **3M** | ~50 MB | 패치 선택 (inference + training) |
+| **VideoMAE** (ViT-L encoder) | ~307M | ~2 GB | 재건 보상 모델 (training 전용) |
+| **VideoMAE** (MAE decoder) | ~8M | (포함) | 패치 → 전체 프레임 복원 |
+
+AutoGaze는 VideoMAE의 약 **100분의 1** 크기입니다. 배포(inference) 시에는 AutoGaze만 필요합니다.
+
+### VideoMAE 필요 시점 요약
+
+| 상황 | VideoMAE 필요? | 이유 |
+| --- | --- | --- |
+| 패치 선택 인퍼런스 | **불필요** | AutoGaze 자체에 `task_loss_prediction_head` 내장 |
+| `task_loss_requirement` 조기 종료 | **불필요** | 위와 동일 — 학습 중 내재화된 예측 헤드 사용 |
+| 복원 영상 생성 | 필요 | MAE 디코더로 선택 패치 → 전체 프레임 복원 |
+| Stage 1 NTP 학습 | 필요 | `task_loss_prediction_head` 학습용 GT loss 제공 (frozen) |
+| Stage 2 RL 학습 | **필수** | reward = `-reconstruction_loss` (frozen) |
+
+`task_loss_requirement`가 VideoMAE 없이 동작하는 원리: AutoGaze 내부의 `task_loss_prediction_head`가 "이 패치까지 선택하면 재건 손실이 얼마일지"를 스텝마다 예측합니다. 이 헤드는 Stage 1/2 학습 중 VideoMAE의 실제 loss를 정답으로 학습됩니다.
 
 ---
 
@@ -107,10 +130,12 @@ bash scripts/download_models.sh
 
 위 스크립트는 아래 두 모델을 `weights/` 디렉터리에 저장합니다.
 
-| 모델 | 저장 경로 | 용도 |
-| --- | --- | --- |
-| `nvidia/AutoGaze` | `weights/AutoGaze/` | 인퍼런스 및 학습 초기화 |
-| `bfshi/VideoMAE_AutoGaze` | `weights/VideoMAE_AutoGaze/` | 재건 태스크 모델 (학습 시 필요) |
+| 모델 | 저장 경로 | 크기 | 필요 시점 |
+| --- | --- | --- | --- |
+| `nvidia/AutoGaze` | `weights/AutoGaze/` | ~50 MB | 인퍼런스 + 학습 (항상 필요) |
+| `bfshi/VideoMAE_AutoGaze` | `weights/VideoMAE_AutoGaze/` | ~2 GB | 학습 시에만 필요 (인퍼런스 불필요) |
+
+> 패치 선택 인퍼런스만 할 경우 VideoMAE를 다운로드하지 않아도 됩니다.
 
 ### 수동 다운로드
 
@@ -557,6 +582,56 @@ python -m autogaze.train \
 
 ---
 
+### 5.5 VideoMAE 도메인 적응 및 Joint Fine-tuning
+
+#### VideoMAE도 함께 튜닝할 수 있나요?
+
+기본 학습 설정에서는 VideoMAE가 **동결(frozen)** 상태입니다 (`trainer.train_task=False`).  
+하지만 새 도메인(의료·위성·공장 등)에서는 VideoMAE도 함께 학습하면 성능이 향상될 수 있습니다.
+
+#### 전략별 비교
+
+| 전략 | 설정 | 메모리 | 적합 상황 |
+| --- | --- | --- | --- |
+| AutoGaze만 RL fine-tune (기본) | `train_task=False` | 낮음 | 원본 도메인과 유사한 경우 |
+| VideoMAE + AutoGaze 동시 학습 | `train_task=True, detach_task=False` | 매우 높음 (+100배) | 완전한 도메인 특화 |
+| **단계별 적응 (권장)** | VideoMAE 먼저 → AutoGaze RL | 단계별 낮음 | 새 도메인, 현실적 선택 |
+
+#### 권장: 단계별 도메인 적응
+
+```bash
+# Step 1. VideoMAE를 새 도메인 비디오로 MAE 학습 (AutoGaze 없이)
+python -m autogaze.train \
+    --config-name video_folder_video_mae_reconstruction_ar_gaze_grpo \
+    dataset.root="'<새 도메인 데이터 경로>'" \
+    trainer.train_gaze=False \
+    trainer.train_task=True \
+    trainer.detach_task=False \
+    trainer.task_weights=weights/VideoMAE_AutoGaze/videomae.pt \
+    trainer.exp_name=videomae_domain_adapt
+
+# Step 2. 적응된 VideoMAE를 reward 모델로 사용해 AutoGaze RL
+python -m autogaze.train \
+    --config-name video_folder_video_mae_reconstruction_ar_gaze_grpo \
+    dataset.root="'<새 도메인 데이터 경로>'" \
+    trainer.train_gaze=True \
+    trainer.train_task=False \
+    trainer.detach_task=True \
+    trainer.task_weights=exps/videomae_domain_adapt/checkpoint_latest_task \
+    trainer.gaze_weights=weights/AutoGaze \
+    trainer.exp_name=autogaze_domain_rl
+```
+
+#### 관련 파라미터
+
+| 파라미터 | 기본값 | 설명 |
+| --- | --- | --- |
+| `trainer.train_task` | `False` | `True`로 설정하면 VideoMAE 가중치도 업데이트 |
+| `trainer.detach_task` | `True` | `False`로 설정하면 VideoMAE에 gradient 전파 (메모리 증가) |
+| `trainer.train_gaze` | `True` | `False`로 설정하면 VideoMAE만 학습 (Step 1용) |
+
+---
+
 ## 6. 파라미터 상세 설명
 
 ### 데이터셋 파라미터
@@ -728,6 +803,31 @@ python -m autogaze.infer video.mp4 --all-frames --output-format npy
 
 **A.** 가능하지만 권장하지 않습니다. NTP로 기본 가이즈 능력을 먼저 학습해야 RL이 의미 있는 보상 신호를 받을 수 있습니다.  
 빠른 실험을 원한다면 공개된 `nvidia/AutoGaze` 가중치를 `trainer.gaze_weights`로 사용하고 RL만 수행하세요.
+
+---
+
+### Q. 인퍼런스 시 VideoMAE가 반드시 필요한가요
+
+**A.** **패치 선택 인퍼런스에는 불필요합니다.** VideoMAE는 학습(Stage 1/2)에서만 필요합니다.
+
+`task_loss_requirement` 파라미터로 조기 종료를 사용할 때도 VideoMAE가 필요 없습니다. AutoGaze 내부에 `task_loss_prediction_head`라는 경량 선형 레이어가 있어, 패치를 하나 선택할 때마다 "이 패치까지 선택했을 때 재건 손실이 얼마일지"를 예측합니다. 이 헤드는 학습 중 VideoMAE의 실제 loss를 ground truth로 학습해 해당 기능을 내재화합니다.
+
+VideoMAE가 인퍼런스에 필요한 경우는 선택된 패치로 **실제 복원 영상을 생성**할 때뿐입니다 (`05_reconstruction_ko.ipynb` 참고).
+
+---
+
+### Q. VideoMAE를 새 도메인 데이터로 함께 학습시킬 수 있나요
+
+**A.** 가능합니다. 코드에 이미 지원이 구현되어 있습니다.
+
+기본 설정은 `trainer.train_task=False` (VideoMAE frozen)이지만, `train_task=True, detach_task=False`로 변경하면 VideoMAE 가중치도 업데이트됩니다.
+
+다만 VideoMAE(~315M)는 AutoGaze(3M)보다 약 100배 크므로, 동시 학습 시 메모리와 연산량이 크게 증가합니다. **권장 전략은 단계별 적응**입니다:
+
+1. `trainer.train_gaze=False, train_task=True` — VideoMAE를 새 도메인 비디오로 먼저 적응
+2. `trainer.train_gaze=True, train_task=False` — 적응된 VideoMAE를 reward 모델로 AutoGaze RL
+
+자세한 설정은 [5.5 VideoMAE 도메인 적응 및 Joint Fine-tuning](#55-videomae-도메인-적응-및-joint-fine-tuning)을 참고하세요.
 
 ---
 
