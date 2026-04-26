@@ -290,7 +290,7 @@ print(gaze_outputs['num_gazing_each_frame'])     # 프레임별 가이즈 수 (�
 
 | 변수 | 형태 | 설명 |
 | --- | --- | --- |
-| `gazing_pos` | `(B, N)` | 가이즈된 패치의 **전역** 토큰 인덱스.<br>프레임 `t`의 패치 `k`는 `t * num_tokens_per_frame + k` |
+| `gazing_pos` | `(B, N)` | 가이즈된 패치의 **전역** 토큰 인덱스. 프레임 `t`의 패치 `k`는 `t * num_tokens_per_frame + k` |
 | `if_padded_gazing` | `(B, N)` bool | `True`이면 패딩(더미) 가이즈 — 무시해야 함 |
 | `num_gazing_each_frame` | `(T,)` | 프레임별 가이즈 토큰 수 (패딩 포함) |
 | `gazing_mask` | `list[(B, T, N_scale)]` | 스케일별 per-frame 가이즈 마스크 (boolean) |
@@ -670,7 +670,7 @@ trainer.gaze_weights=exps/ntp_single_gpu/checkpoint_latest_gaze
 
 ## 8. 자주 묻는 질문 / 트러블슈팅
 
-### Q. Mac에서 `flash_attn` 관련 오류가 납니다.
+### Q. Mac에서 `flash_attn` 관련 오류가 납니다
 
 **A.** macOS는 `flash_attn`을 지원하지 않습니다.  
 `autogaze/configs/task/video_mae_reconstruction.yaml`의 `attn_mode`가 `sdpa`로 설정되어 있는지 확인하세요.
@@ -681,7 +681,7 @@ attn_mode: 'sdpa'   # flash_attention_2 → sdpa 로 변경되어 있어야 함
 
 ---
 
-### Q. VideoMAE 가중치 로드 시 크기 불일치 오류 (`time_embed`)가 납니다.
+### Q. VideoMAE 가중치 로드 시 크기 불일치 오류 (`time_embed`)가 납니다
 
 **A.** 체크포인트가 `max_num_frames=256`으로 학습되었는데, 모델이 16으로 초기화될 때 발생합니다.  
 `autogaze/tasks/video_mae_reconstruction/task_video_mae_reconstruction.py`에서 `max_num_frames=256`이 설정되어 있는지 확인하세요.
@@ -691,7 +691,7 @@ attn_mode: 'sdpa'   # flash_attention_2 → sdpa 로 변경되어 있어야 함
 
 ---
 
-### Q. `gazing_pos`의 인덱스가 어떻게 계산되나요?
+### Q. `gazing_pos`의 인덱스가 어떻게 계산되나요
 
 **A.** 전역 인덱스 = `프레임 번호(0-based) × num_tokens_per_frame + 프레임 내 패치 번호(0-based)`
 
@@ -700,7 +700,7 @@ attn_mode: 'sdpa'   # flash_attention_2 → sdpa 로 변경되어 있어야 함
 
 ---
 
-### Q. 단일 GPU에서 메모리가 부족합니다.
+### Q. 단일 GPU에서 메모리가 부족합니다
 
 **A.** 아래 파라미터를 줄여보세요:
 
@@ -712,7 +712,7 @@ trainer.detach_task=True            # VideoMAE를 no_grad로 실행
 
 ---
 
-### Q. 비디오 전체 프레임을 처리하면 시간이 너무 오래 걸립니다.
+### Q. 비디오 전체 프레임을 처리하면 시간이 너무 오래 걸립니다
 
 **A.** `--all-frames` 모드는 청크 수만큼 모델을 반복 실행합니다. 64프레임 비디오는 4번 실행됩니다.  
 속도가 중요하다면 기본 16-프레임 샘플링을 사용하거나, `--output-format npy`만 저장해 렌더링 오버헤드를 줄이세요.
@@ -724,11 +724,11 @@ python -m autogaze.infer video.mp4 --all-frames --output-format npy
 
 ---
 
-### Q. NTP 학습 없이 RL만 해도 되나요?
+### Q. NTP 학습 없이 RL만 해도 되나요
 
 **A.** 가능하지만 권장하지 않습니다. NTP로 기본 가이즈 능력을 먼저 학습해야 RL이 의미 있는 보상 신호를 받을 수 있습니다.  
 빠른 실험을 원한다면 공개된 `nvidia/AutoGaze` 가중치를 `trainer.gaze_weights`로 사용하고 RL만 수행하세요.
 
 ---
 
-*문서 최종 갱신: 2026-04-25*
+문서 최종 갱신: 2026-04-26
