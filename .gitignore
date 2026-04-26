@@ -1,5 +1,9 @@
 exps/
 outputs/
+results/
+weights/
+.DS_Store
+**/.DS_Store
 .idea/
 __pycache__/
 **/**/__pycache__/
