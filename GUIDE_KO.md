@@ -8,6 +8,7 @@
 ## 목차
 
 1. [개요](#1-개요)
+   - 1.1 [전체 파이프라인 다이어그램](#11-전체-파이프라인-다이어그램)
 2. [환경 설정](#2-환경-설정)
 3. [모델 가중치 다운로드](#3-모델-가중치-다운로드)
 4. [인퍼런스 (Inference)](#4-인퍼런스-inference)
@@ -83,6 +84,151 @@ AutoGaze는 VideoMAE의 약 **100분의 1** 크기입니다. 배포(inference) �
 | Stage 2 RL 학습 | **필수** | reward = `-reconstruction_loss` (frozen) |
 
 `task_loss_requirement`가 VideoMAE 없이 동작하는 원리: AutoGaze 내부의 `task_loss_prediction_head`가 "이 패치까지 선택하면 재건 손실이 얼마일지"를 스텝마다 예측합니다. 이 헤드는 Stage 1/2 학습 중 VideoMAE의 실제 loss를 정답으로 학습됩니다.
+
+---
+
+### 1.1 전체 파이프라인 다이어그램
+
+#### 범례
+
+| 기호 | 의미 |
+| --- | --- |
+| ✏️ | 학습/업데이트 대상 (trainable) |
+| 🔒 | 동결 상태 (frozen) |
+| — | 해당 단계에서 미사용 |
+
+---
+
+#### Inference (패치 선택 → Vision Encoder → MLLM)
+
+```text
+비디오 입력
+    │
+    ▼
+┌─────────────────────────────────────┐
+│  AutoGaze 🔒  (3M 파라미터)          │  ← AR 디코더, 패치를 순서대로 선택
+│  ConvNeXt → Connector → LLaMA AR   │
+└───────────────┬─────────────────────┘
+                │  gazing_pos / gazing_mask
+                │  (전체 패치의 ~25 % 선택)
+                ▼
+┌─────────────────────────────────────┐
+│  SigLIP / DINOv2 / ViT 🔒           │  ← 선택된 패치만 인코딩 (연산 절감)
+└───────────────┬─────────────────────┘
+                │  patch features (N_gazed, D)
+                ▼
+┌─────────────────────────────────────┐
+│  MLLM / Downstream Task 🔒          │  ← 비디오 QA, 분류, 캡셔닝 등
+└─────────────────────────────────────┘
+
+    * VideoMAE 불필요
+    * task_loss_requirement 조기 종료도 내부 task_loss_prediction_head 사용
+```
+
+---
+
+#### Stage 1 — NTP 사전학습
+
+```text
+비디오 + gazing_labels.json (GT)
+    │
+    ├─────────────────────────────────────────────────────┐
+    ▼                                                     ▼
+┌───────────────────────────────┐         ┌──────────────────────────────┐
+│  AutoGaze ✏️  (3M)             │         │  VideoMAE 🔒  (~315M)         │
+│  → 예측 gazing 시퀀스          │         │  → GT reconstruction loss    │
+│  → task_loss_prediction_head  │         │    (각 스텝의 실제 재건 손실)  │
+└───────────────┬───────────────┘         └──────────────┬───────────────┘
+                │                                        │
+                └──────────────┬─────────────────────────┘
+                               ▼
+                  NTP Cross-Entropy Loss
+                  + task_loss_prediction MSE Loss
+                               │
+                               ▼
+                       AutoGaze 가중치 업데이트
+```
+
+---
+
+#### Stage 2 — GRPO RL 후학습
+
+```text
+비디오  (GT 레이블 불필요)
+    │
+    ▼
+┌──────────────────────────────────────────────────────────┐
+│  AutoGaze ✏️   G=4~12 개의 가이즈 시퀀스 샘플링 (GRPO)    │
+└──────────────────────────────┬───────────────────────────┘
+                               │  G × gazing_pos 시퀀스
+                               ▼
+┌──────────────────────────────────────────────────────────┐
+│  VideoMAE 🔒   각 시퀀스의 MAE reconstruction loss 계산   │
+└──────────────────────────────┬───────────────────────────┘
+                               │  reward = -reconstruction_loss
+                               ▼
+              GRPO Advantage 계산 (그룹 내 상대 보상)
+                               │
+                               ▼
+                 discount_factor γ=0.995 로 스텝별 가중치 부여
+                               │
+                               ▼
+                       AutoGaze 가중치 업데이트
+```
+
+---
+
+#### 도메인 적응 — 단계별 권장 전략
+
+```text
+Step 1 ─ VideoMAE 도메인 적응  (AutoGaze 미사용)
+──────────────────────────────────────────────────
+새 도메인 비디오
+    │
+    ▼
+┌──────────────────────────────────────────────────┐
+│  VideoMAE ✏️  (train_task=True, train_gaze=False) │
+│  → MAE self-supervised reconstruction 학습        │
+└──────────────────────────────────────────────────┘
+    │
+    ▼
+exps/videomae_domain_adapt/checkpoint_latest_task
+
+
+Step 2 ─ AutoGaze RL  (적응된 VideoMAE를 reward 모델로)
+──────────────────────────────────────────────────────
+새 도메인 비디오
+    │
+    ▼
+┌──────────────────────────────────────────────────┐
+│  AutoGaze ✏️   (train_gaze=True)                  │
+│  → G개 시퀀스 샘플링                               │
+└──────────────────────────────┬───────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────┐
+│  VideoMAE 🔒  (Step 1에서 적응된 가중치)           │
+│  → 도메인-특화 reconstruction reward 제공         │
+└──────────────────────────────────────────────────┘
+                               │
+                               ▼
+                       AutoGaze 가중치 업데이트
+```
+
+---
+
+#### 컴포넌트별 역할 요약표
+
+| 컴포넌트 | 파라미터 | Inference | Stage 1 NTP | Stage 2 RL | VideoMAE 적응 Step 1 | VideoMAE 적응 Step 2 |
+| --- | ---: | :---: | :---: | :---: | :---: | :---: |
+| **AutoGaze** (AR decoder) | 3M | 🔒 | ✏️ | ✏️ | — | ✏️ |
+| **VideoMAE** (ViT-L encoder) | ~307M | — | 🔒 | 🔒 | ✏️ | 🔒 |
+| **VideoMAE** (MAE decoder) | ~8M | — | 🔒 | 🔒 | ✏️ | 🔒 |
+| **SigLIP / DINOv2 / ViT** | 수백M | 🔒 | — | — | — | — |
+| **MLLM** | 수십~수백B | 🔒 | — | — | — | — |
+
+> **핵심 요약**: AutoGaze와 VideoMAE는 학습 시 항상 짝을 이루지만, **배포(inference) 시에는 AutoGaze(3M)만 필요**합니다.  
+> 복원 영상 생성이 목적일 때만 VideoMAE decoder를 추가로 불러오면 됩니다 (`05_reconstruction_ko.ipynb` 참고).
 
 ---
 
