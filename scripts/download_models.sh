@@ -75,6 +75,7 @@ download_autogaze() {
     info "[AutoGaze] nvidia/AutoGaze (~50 MB)"
     info "  용도: inference + 학습 (항상 필요)"
     huggingface-cli download nvidia/AutoGaze \
+        --resume-download \
         --local-dir "$TARGET_DIR/AutoGaze"
     success "AutoGaze → $TARGET_DIR/AutoGaze"
 }
@@ -83,6 +84,7 @@ download_videomae() {
     info "[VideoMAE] bfshi/VideoMAE_AutoGaze (~2 GB)"
     info "  용도: Stage1 NTP / Stage2 RL 학습용 보상 모델 (inference 불필요)"
     huggingface-cli download bfshi/VideoMAE_AutoGaze \
+        --resume-download \
         --local-dir "$TARGET_DIR/VideoMAE_AutoGaze"
     success "VideoMAE → $TARGET_DIR/VideoMAE_AutoGaze"
     info "  videomae.pt 경로: $TARGET_DIR/VideoMAE_AutoGaze/videomae.pt"
@@ -96,6 +98,7 @@ download_nvila() {
     info "  라이선스: CC-BY-NC-4.0 (비상업적 용도)"
     echo ""
     huggingface-cli download nvidia/NVILA-8B-HD-Video \
+        --resume-download \
         --local-dir "$TARGET_DIR/NVILA-8B-HD-Video"
     success "NVILA → $TARGET_DIR/NVILA-8B-HD-Video"
 }

@@ -33,6 +33,7 @@ download_and_extract() {
     echo "--- Downloading $label ($filename) ---"
     huggingface-cli download "$REPO" "$filename" \
         --repo-type dataset \
+        --resume-download \
         --local-dir "$TARGET_DIR"
     echo "--- Extracting $filename ---"
     tar -xzf "$TARGET_DIR/$filename" -C "$TARGET_DIR"
@@ -43,6 +44,7 @@ download_labels() {
     echo "--- Downloading gazing_labels.json ---"
     huggingface-cli download "$REPO" gazing_labels.json \
         --repo-type dataset \
+        --resume-download \
         --local-dir "$TARGET_DIR"
     echo "--- Done: gazing_labels.json ---"
 }

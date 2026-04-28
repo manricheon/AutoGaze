@@ -242,6 +242,7 @@ else
     else
         info "AutoGaze 가중치 다운로드 중 (nvidia/AutoGaze) ..."
         "$VENV_DIR/bin/huggingface-cli" download nvidia/AutoGaze \
+            --resume-download \
             --local-dir "$WEIGHTS_DIR/AutoGaze" && \
             success "AutoGaze 가중치 다운로드 완료" || \
             warn "AutoGaze 가중치 다운로드 실패. 수동 실행: bash scripts/download_models.sh"
@@ -257,6 +258,7 @@ else
         if [[ "$ans" =~ ^[Yy]$ ]]; then
             info "VideoMAE 가중치 다운로드 중 (bfshi/VideoMAE_AutoGaze) ..."
             "$VENV_DIR/bin/huggingface-cli" download bfshi/VideoMAE_AutoGaze \
+                --resume-download \
                 --local-dir "$WEIGHTS_DIR/VideoMAE_AutoGaze" && \
                 success "VideoMAE 가중치 다운로드 완료" || \
                 warn "VideoMAE 다운로드 실패. 수동 실행: bash scripts/download_models.sh"

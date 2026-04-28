@@ -132,6 +132,7 @@ download_annotations() {
     info "QA 어노테이션 다운로드 중..."
     huggingface-cli download "$REPO" \
         --repo-type dataset \
+        --resume-download \
         --include "data/*.parquet" \
         --local-dir "$TARGET_DIR/annotations"
     success "어노테이션 다운로드 완료 → $TARGET_DIR/annotations/"
@@ -183,6 +184,7 @@ download_and_extract_part() {
     info "파트 $part_num / $TOTAL_PARTS 다운로드: $filename"
     huggingface-cli download "$REPO" "$filename" \
         --repo-type dataset \
+        --resume-download \
         --local-dir "$TARGET_DIR/videos_parts"
 
     local tar_path="$TARGET_DIR/videos_parts/$filename"
