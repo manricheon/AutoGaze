@@ -176,8 +176,10 @@ def main(cfg: DictConfig):
 
     # Determine the batch size
     local_train_batch_size, local_val_batch_size, grad_acc_steps = _determine_batch_size(cfg.trainer.batch_size, cfg.trainer.per_gpu_max_batch_size, world_size, global_rank)
-    train_loader = DataLoader(train_dataset, local_train_batch_size,  num_workers=4, drop_last=True, shuffle=False, sampler=train_sampler, worker_init_fn=seed_worker, collate_fn=collate_fn)
-    val_loader = DataLoader(val_dataset, local_val_batch_size, num_workers=4, drop_last=False, shuffle=False, sampler=val_sampler, worker_init_fn=seed_worker, collate_fn=collate_fn)
+    # Use 'spawn' context to avoid CUDA re-initialization errors when forking after init_process_group
+    mp_context = 'spawn' if torch.cuda.is_available() else None
+    train_loader = DataLoader(train_dataset, local_train_batch_size,  num_workers=4, drop_last=True, shuffle=False, sampler=train_sampler, worker_init_fn=seed_worker, collate_fn=collate_fn, multiprocessing_context=mp_context)
+    val_loader = DataLoader(val_dataset, local_val_batch_size, num_workers=4, drop_last=False, shuffle=False, sampler=val_sampler, worker_init_fn=seed_worker, collate_fn=collate_fn, multiprocessing_context=mp_context)
 
     # Create optimizer
     if cfg.trainer.optimizer == 'adam':

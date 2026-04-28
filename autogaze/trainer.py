@@ -162,8 +162,8 @@ class Trainer:
 
             logger.info(f"Resuming from {resume_path}")
             
-            task_ckpt = torch.load(task_ckpt_path, map_location='cpu')
-            train_ckpt = torch.load(train_ckpt_path, map_location='cpu')
+            task_ckpt = torch.load(task_ckpt_path, map_location='cpu', weights_only=False)
+            train_ckpt = torch.load(train_ckpt_path, map_location='cpu', weights_only=False)
 
             unwrap_model(self.gaze_model).from_pretrained(gaze_ckpt_path)
             self.task.load_state_dict(task_ckpt)
@@ -182,7 +182,7 @@ class Trainer:
                 logger.info(f"Unexpected keys: {unexpected_keys}")
             if task_path is not None:
                 logger.info(f"Loading task model from {task_path}")
-                task_ckpt = torch.load(task_path, map_location='cpu')
+                task_ckpt = torch.load(task_path, map_location='cpu', weights_only=False)
                 missing_keys, unexpected_keys = self.task.load_state_dict(task_ckpt, strict=False)
                 logger.info(f"Missing keys: {missing_keys}")
                 logger.info(f"Unexpected keys: {unexpected_keys}")

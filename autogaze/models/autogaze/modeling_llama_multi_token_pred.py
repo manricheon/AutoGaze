@@ -281,11 +281,19 @@ class LlamaForCausalLM_MultiTokenPred(LlamaPreTrainedModel, GenerationMixin):
         This function is copied from transformers.generation.utils.GenerationMixin._sample.
         """
         # init values
-        pad_token_id = generation_config._pad_token_tensor
+        # _pad_token_tensor was added in transformers 4.44; fall back to pad_token_id tensor
+        if hasattr(generation_config, "_pad_token_tensor"):
+            pad_token_id = generation_config._pad_token_tensor
+        else:
+            _ptid = generation_config.pad_token_id
+            pad_token_id = (
+                torch.tensor(_ptid, dtype=torch.long, device=input_ids.device)
+                if _ptid is not None else None
+            )
         output_attentions = generation_config.output_attentions
         output_hidden_states = generation_config.output_hidden_states
         output_scores = generation_config.output_scores
-        output_logits = generation_config.output_logits
+        output_logits = getattr(generation_config, "output_logits", False)
         return_dict_in_generate = generation_config.return_dict_in_generate
         do_sample = generation_config.do_sample
         task_loss_requirement = generation_config.task_loss_requirement
@@ -312,17 +320,20 @@ class LlamaForCausalLM_MultiTokenPred(LlamaPreTrainedModel, GenerationMixin):
 
         model_forward = self.__call__
         if isinstance(model_kwargs.get("past_key_values"), Cache):
-            is_compileable = model_kwargs["past_key_values"].is_compileable and self._supports_static_cache
+            pkv = model_kwargs["past_key_values"]
+            is_compileable = getattr(pkv, "is_compileable", False) and getattr(self, "_supports_static_cache", False)
             if getattr(self, "hf_quantizer", None) is not None:
-                is_compileable &= self.hf_quantizer.is_compileable
-            is_compileable = is_compileable and not generation_config.disable_compile
-            if is_compileable and (
-                self.device.type == "cuda" or generation_config.compile_config._compile_all_devices
+                is_compileable &= getattr(self.hf_quantizer, "is_compileable", False)
+            is_compileable = is_compileable and not getattr(generation_config, "disable_compile", True)
+            compile_config = getattr(generation_config, "compile_config", None)
+            if is_compileable and compile_config is not None and (
+                self.device.type == "cuda" or getattr(compile_config, "_compile_all_devices", False)
             ):
                 os.environ["TOKENIZERS_PARALLELISM"] = "0"
-                model_forward = self.get_compiled_call(generation_config.compile_config)
+                model_forward = self.get_compiled_call(compile_config)
 
-        if generation_config.prefill_chunk_size is not None:
+        prefill_chunk_size = getattr(generation_config, "prefill_chunk_size", None)
+        if prefill_chunk_size is not None:
             model_kwargs = self._prefill_chunking(input_ids, generation_config, **model_kwargs)
             is_prefill = False
         else:
