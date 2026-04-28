@@ -165,7 +165,10 @@ class Trainer:
             task_ckpt = torch.load(task_ckpt_path, map_location='cpu', weights_only=False)
             train_ckpt = torch.load(train_ckpt_path, map_location='cpu', weights_only=False)
 
-            unwrap_model(self.gaze_model).from_pretrained(gaze_ckpt_path)
+            gaze_ckpt = unwrap_model(self.gaze_model).from_pretrained(gaze_ckpt_path)
+            missing_keys, unexpected_keys = unwrap_model(self.gaze_model).load_state_dict(gaze_ckpt.state_dict(), strict=False)
+            if missing_keys:
+                logger.warning(f"Missing keys when resuming gaze model: {missing_keys}")
             self.task.load_state_dict(task_ckpt)
             self.optimizer.load_state_dict(train_ckpt['optimizer_state_dict'])
             self.scheduler.load_state_dict(train_ckpt['scheduler_state_dict'])
