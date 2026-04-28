@@ -268,29 +268,53 @@ huggingface-cli login
 
 ## 3. 모델 가중치 다운로드
 
-### 한 번에 다운로드 (권장)
+### HuggingFace 컬렉션 전체 리소스
+
+AutoGaze 관련 모든 공개 리소스는 [bfshi/autogaze 컬렉션](https://huggingface.co/collections/bfshi/autogaze)에서 확인할 수 있습니다.
+
+| 이름 | 타입 | HF ID | 크기 | 다운로드 스크립트 |
+| --- | --- | --- | --- | --- |
+| **AutoGaze** | 모델 | `nvidia/AutoGaze` | ~50 MB | `download_models.sh` |
+| **VideoMAE_AutoGaze** | 모델 | `bfshi/VideoMAE_AutoGaze` | ~2 GB | `download_models.sh` |
+| **NVILA-8B-HD-Video** | 모델 | `nvidia/NVILA-8B-HD-Video` | ~16 GB | `download_models.sh nvila` |
+| **AutoGaze-Training-Data** | 데이터셋 | `bfshi/AutoGaze-Training-Data` | ~646 GB | `download_data.sh` |
+| **HLVid** | 벤치마크 | `bfshi/HLVid` | ~152 GB | `download_hlvid.sh` |
+
+### 모델 다운로드 (subset 선택 가능)
 
 ```bash
+# 기본: AutoGaze + VideoMAE (학습·인퍼런스 필수 세트, ~2 GB)
 bash scripts/download_models.sh
+
+# AutoGaze만 (패치 선택 인퍼런스 전용, ~50 MB)
+bash scripts/download_models.sh weights autogaze
+
+# 전부 (AutoGaze + VideoMAE + NVILA, ~18 GB)
+bash scripts/download_models.sh weights all
+
+# NVILA만 (~16 GB, AutoGaze 통합 8B MLLM)
+bash scripts/download_models.sh weights nvila
 ```
 
-위 스크립트는 아래 두 모델을 `weights/` 디렉터리에 저장합니다.
-
-| 모델 | 저장 경로 | 크기 | 필요 시점 |
+| 모델 키 | HF ID | 크기 | 필요 시점 |
 | --- | --- | --- | --- |
-| `nvidia/AutoGaze` | `weights/AutoGaze/` | ~50 MB | 인퍼런스 + 학습 (항상 필요) |
-| `bfshi/VideoMAE_AutoGaze` | `weights/VideoMAE_AutoGaze/` | ~2 GB | 학습 시에만 필요 (인퍼런스 불필요) |
+| `autogaze` | `nvidia/AutoGaze` | ~50 MB | 인퍼런스 + 학습 (항상 필요) |
+| `videomae` | `bfshi/VideoMAE_AutoGaze` | ~2 GB | Stage 1/2 학습 (인퍼런스 불필요) |
+| `nvila` | `nvidia/NVILA-8B-HD-Video` | ~16 GB | 4K/1K-frame 비디오 이해 데모 |
 
-> 패치 선택 인퍼런스만 할 경우 VideoMAE를 다운로드하지 않아도 됩니다.
+> **NVILA 사용 시 주의**: AutoGaze가 내장된 8B MLLM입니다. 실행하려면 [VILA 리포지터리](https://github.com/NVlabs/VILA/tree/main/vila_hd/nvila_hd_video)를 별도로 설치해야 합니다. 라이선스: CC-BY-NC-4.0 (비상업적 사용).
 
 ### 수동 다운로드
 
 ```bash
-# AutoGaze 모델
+# AutoGaze 패치 선택 모델
 huggingface-cli download nvidia/AutoGaze --local-dir weights/AutoGaze
 
-# VideoMAE 재건 모델 (~2 GB)
+# VideoMAE 재건 보상 모델 (~2 GB)
 huggingface-cli download bfshi/VideoMAE_AutoGaze --local-dir weights/VideoMAE_AutoGaze
+
+# NVILA 통합 MLLM (~16 GB, 4개 safetensors shard)
+huggingface-cli download nvidia/NVILA-8B-HD-Video --local-dir weights/NVILA-8B-HD-Video
 ```
 
 ### 다운로드 후 확인
@@ -299,11 +323,29 @@ huggingface-cli download bfshi/VideoMAE_AutoGaze --local-dir weights/VideoMAE_Au
 weights/
 ├── AutoGaze/
 │   ├── config.json
-│   ├── model.safetensors (또는 pytorch_model.bin)
+│   ├── model.safetensors
 │   └── preprocessor_config.json
-└── VideoMAE_AutoGaze/
-    ├── videomae.pt          ← Stage 1/2 학습에 필요한 핵심 가중치
-    └── config.yaml
+├── VideoMAE_AutoGaze/
+│   ├── videomae.pt          ← Stage 1/2 학습에 필요한 핵심 가중치
+│   └── config.yaml
+└── NVILA-8B-HD-Video/       ← nvila 옵션 사용 시
+    ├── model-0000{1..4}-of-00004.safetensors
+    ├── config.json
+    ├── modeling_nvila.py
+    └── processing_nvila.py
+```
+
+### 벤치마크 데이터셋 다운로드
+
+```bash
+# HLVid 어노테이션만 (QA 268개, ~수 MB)
+bash scripts/download_hlvid.sh --annotations-only
+
+# HLVid 파트 1~4만 (~34 GB)
+bash scripts/download_hlvid.sh --parts 1-4
+
+# HLVid 전체 (~152 GB)
+bash scripts/download_hlvid.sh
 ```
 
 ---
