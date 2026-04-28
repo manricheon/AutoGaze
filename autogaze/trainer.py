@@ -178,19 +178,25 @@ class Trainer:
             self.start_iteration = train_ckpt['iteration']
         else:
             if gaze_model_path is not None:
-                logger.info(f"Loading gaze model from {gaze_model_path}")
-                gaze_ckpt = unwrap_model(self.gaze_model).from_pretrained(gaze_model_path)
-                missing_keys, unexpected_keys = unwrap_model(self.gaze_model).load_state_dict(gaze_ckpt.state_dict(), strict=False)
-                logger.info(f"Missing keys: {missing_keys}")
-                logger.info(f"Unexpected keys: {unexpected_keys}")
+                if not os.path.exists(gaze_model_path):
+                    logger.warning(f"Gaze model path not found, skipping: {gaze_model_path}")
+                else:
+                    logger.info(f"Loading gaze model from {gaze_model_path}")
+                    gaze_ckpt = unwrap_model(self.gaze_model).from_pretrained(gaze_model_path)
+                    missing_keys, unexpected_keys = unwrap_model(self.gaze_model).load_state_dict(gaze_ckpt.state_dict(), strict=False)
+                    logger.info(f"Missing keys: {missing_keys}")
+                    logger.info(f"Unexpected keys: {unexpected_keys}")
             if task_path is not None:
-                logger.info(f"Loading task model from {task_path}")
-                task_ckpt = torch.load(task_path, map_location='cpu', weights_only=False)
-                if isinstance(task_ckpt, dict) and 'model' in task_ckpt and not any(isinstance(v, torch.Tensor) for v in task_ckpt.values()):
-                    task_ckpt = task_ckpt['model']
-                missing_keys, unexpected_keys = unwrap_model(self.task).load_state_dict(task_ckpt, strict=False)
-                logger.info(f"Missing keys: {missing_keys}")
-                logger.info(f"Unexpected keys: {unexpected_keys}")
+                if not os.path.exists(task_path):
+                    logger.warning(f"Task weights path not found, skipping: {task_path}")
+                else:
+                    logger.info(f"Loading task model from {task_path}")
+                    task_ckpt = torch.load(task_path, map_location='cpu', weights_only=False)
+                    if isinstance(task_ckpt, dict) and 'model' in task_ckpt and not any(isinstance(v, torch.Tensor) for v in task_ckpt.values()):
+                        task_ckpt = task_ckpt['model']
+                    missing_keys, unexpected_keys = unwrap_model(self.task).load_state_dict(task_ckpt, strict=False)
+                    logger.info(f"Missing keys: {missing_keys}")
+                    logger.info(f"Unexpected keys: {unexpected_keys}")
     
     def _one_step(self, inputs):
         # temperature annealing
