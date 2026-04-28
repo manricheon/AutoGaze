@@ -24,6 +24,34 @@ from autogaze.utils import get_scheduled_temperature, move_inputs_to_cuda, get_d
 from autogaze.train import seed_everything
 
 
+def _remap_task_state_dict(ckpt: dict, model_state: dict) -> dict:
+    """Remap checkpoint keys to match model keys.
+
+    Handles two common mismatches:
+      - DDP-saved checkpoints have a 'module.' prefix → strip it
+      - Raw ViTMAE checkpoints lack the 'mae.' wrapper prefix → add it
+    """
+    model_keys = set(model_state.keys())
+    ckpt_keys = set(ckpt.keys())
+    if model_keys & ckpt_keys:
+        return ckpt  # already matches
+
+    # Strip 'module.' prefix (DDP artifact)
+    stripped = {k[len('module.'):] if k.startswith('module.') else k: v for k, v in ckpt.items()}
+    if model_keys & set(stripped.keys()):
+        logger.info("Remapping task checkpoint: stripped 'module.' prefix")
+        return stripped
+
+    # Add 'mae.' prefix (raw ViTMAE → VideoMAEReconstruction wrapper)
+    prefixed = {'mae.' + k: v for k, v in stripped.items()}
+    if model_keys & set(prefixed.keys()):
+        logger.info("Remapping task checkpoint: added 'mae.' prefix")
+        return prefixed
+
+    logger.warning("Could not remap task checkpoint keys — loading as-is")
+    return ckpt
+
+
 class Trainer:
     def __init__(self, gaze_model, task, algorithm, train_loader, val_loader, optimizer, n_epochs, temp_schedule_args, 
                  train_gaze=True, train_task=True, detach_task=False, val_nsteps=100, save_nsteps=300, save_dir=None, grad_acc_steps=1, resume=False, gaze_weights=None, task_weights=None, 
@@ -179,7 +207,7 @@ class Trainer:
         else:
             if gaze_model_path is not None:
                 if not os.path.exists(gaze_model_path):
-                    logger.warning(f"Gaze model path not found, skipping: {gaze_model_path}")
+                    logger.warning(f"Gaze model path not found, skipping: {gaze_model_path}  (resolved: {os.path.abspath(gaze_model_path)})")
                 else:
                     logger.info(f"Loading gaze model from {gaze_model_path}")
                     gaze_ckpt = unwrap_model(self.gaze_model).from_pretrained(gaze_model_path)
@@ -188,15 +216,18 @@ class Trainer:
                     logger.info(f"Unexpected keys: {unexpected_keys}")
             if task_path is not None:
                 if not os.path.exists(task_path):
-                    logger.warning(f"Task weights path not found, skipping: {task_path}")
+                    logger.warning(f"Task weights path not found, skipping: {task_path}  (resolved: {os.path.abspath(task_path)})")
                 else:
                     logger.info(f"Loading task model from {task_path}")
                     task_ckpt = torch.load(task_path, map_location='cpu', weights_only=False)
                     if isinstance(task_ckpt, dict) and 'model' in task_ckpt and not any(isinstance(v, torch.Tensor) for v in task_ckpt.values()):
                         task_ckpt = task_ckpt['model']
+                    task_ckpt = _remap_task_state_dict(task_ckpt, unwrap_model(self.task).state_dict())
                     missing_keys, unexpected_keys = unwrap_model(self.task).load_state_dict(task_ckpt, strict=False)
-                    logger.info(f"Missing keys: {missing_keys}")
-                    logger.info(f"Unexpected keys: {unexpected_keys}")
+                    if missing_keys:
+                        logger.warning(f"Missing keys when loading task: {missing_keys}")
+                    if unexpected_keys:
+                        logger.warning(f"Unexpected keys when loading task: {unexpected_keys}")
     
     def _one_step(self, inputs):
         # temperature annealing
