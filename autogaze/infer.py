@@ -26,6 +26,9 @@ Usage examples:
   # ALL frames (chunked inference, no temporal downsampling)
   python -m autogaze.infer assets/example_input.mp4 --all-frames --output-format frames,video
 
+  # Stride sampling (every 10th frame, processed in 16-frame chunks)
+  python -m autogaze.infer assets/example_input.mp4 --stride 10 --output-format frames,video
+
   # Directory → JSON labels only (NTP training data generation)
   python -m autogaze.infer /data/my_videos/ --output-format json
 
@@ -86,6 +89,35 @@ def load_video(video_path: Path, num_frames: int) -> np.ndarray:
     raw = read_video_pyav(container, indices)
     container.close()
     return process_video_frames(raw, num_frames)
+
+
+def load_frames_stride(video_path: Path, stride: int, chunk_size: int = 16) -> np.ndarray:
+    """Extract every `stride`-th frame sequentially.
+
+    The total count is truncated to a multiple of `chunk_size` (AutoGaze
+    requires input length to be a multiple of max_num_frames).
+    If fewer than `chunk_size` frames are available after striding, the last
+    frame is repeated to reach `chunk_size`.
+
+    Returns uint8 (T, H, W, 3) at native resolution.
+    """
+    container = av.open(str(video_path))
+    all_frames = []
+    for i, frame in enumerate(container.decode(video=0)):
+        if i % stride == 0:
+            all_frames.append(frame.to_ndarray(format="rgb24"))
+    container.close()
+    if not all_frames:
+        raise ValueError(f"No frames decoded from {video_path}")
+
+    # Truncate to nearest multiple of chunk_size
+    n = (len(all_frames) // chunk_size) * chunk_size
+    if n == 0:
+        n = chunk_size
+        while len(all_frames) < n:
+            all_frames.append(all_frames[-1])
+    all_frames = all_frames[:n]
+    return np.stack(all_frames)
 
 
 def load_all_frames(video_path: Path) -> np.ndarray:
@@ -547,7 +579,8 @@ def parse_args():
     p.add_argument("--no-task-loss-requirement", action="store_true",
                    help="Disable early stopping; use --gazing-ratio only")
     p.add_argument("--num-frames", type=int, default=16,
-                   help="Number of frames to sample per video (default: 16). Ignored with --all-frames.")
+                   help="Number of frames to uniformly sample per video (default: 16). "
+                        "Ignored with --all-frames or --stride.")
     p.add_argument("--all-frames", action="store_true",
                    help=(
                        "Process EVERY frame of the video (no temporal downsampling). "
@@ -555,8 +588,13 @@ def parse_args():
                        "is run on each; results are concatenated. "
                        "Use --output-format frames,video for the most useful visualisation."
                    ))
+    p.add_argument("--stride", type=int, default=None,
+                   help="Sample every N-th frame sequentially (stride sampling). "
+                        "Extracted frames are processed in --chunk-size windows. "
+                        "E.g. --stride 10 on a 300-frame video → 30 frames → 16 or 32 used. "
+                        "Takes precedence over --num-frames.")
     p.add_argument("--chunk-size", type=int, default=16,
-                   help="Frames per chunk when using --all-frames (default: 16)")
+                   help="Frames per chunk when using --all-frames or --stride (default: 16)")
     p.add_argument("--video-fps", type=float, default=4.0,
                    help="FPS for output video (default: 4.0; low fps = easier to inspect)")
     return p.parse_args()
@@ -608,6 +646,22 @@ def main():
                 if "viz" in fmts and T_total > 32:
                     print(f"  WARNING: viz grid with {T_total} columns will be very wide; "
                           "consider --output-format frames,video instead.")
+                gaze_outputs = run_inference_chunked(
+                    model, raw_video, transform, device,
+                    chunk_size=args.chunk_size,
+                    gazing_ratio=args.gazing_ratio,
+                    task_loss_req=task_loss_req,
+                )
+            elif args.stride is not None:
+                raw_video = load_frames_stride(video_path, args.stride, args.chunk_size)
+                T_total = len(raw_video)
+                n_chunks = T_total // args.chunk_size
+                container_tmp = av.open(str(video_path))
+                total_orig = container_tmp.streams.video[0].frames
+                container_tmp.close()
+                print(f"  Stride mode: every {args.stride}th frame → "
+                      f"{T_total} frames (from {total_orig} total) → "
+                      f"{n_chunks} chunk(s) of {args.chunk_size}")
                 gaze_outputs = run_inference_chunked(
                     model, raw_video, transform, device,
                     chunk_size=args.chunk_size,
