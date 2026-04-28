@@ -5,11 +5,20 @@ NVILA-8B-HD-Video 추론 테스트 스크립트
 
 Usage:
   python scripts/test_nvila.py [VIDEO_PATH] [--question "질문"] [--frames N]
+  python scripts/test_nvila.py [VIDEO_PATH] [--question "질문"] [--stride N]
+
+프레임 샘플링 방식 (둘 중 하나 선택):
+  --frames N   전체 영상에서 N개를 균일 샘플링 (linspace). 16의 배수.
+  --stride N   매 N번째 프레임을 순서대로 추출. 추출된 수를 16 배수로 truncate.
+               예: 영상 300프레임, stride=10 → 30개 추출 → 32보다 작으므로 16개 사용
+
+두 방식 모두 동시에 지정하면 비교 모드로 실행합니다.
 
 Arguments:
   VIDEO_PATH        비디오 파일 경로 (기본: assets/example_input.mp4)
   --question        단일 질문 (기본: 3가지 예제 질문)
-  --frames N        샘플링 프레임 수, AutoGaze max_num_frames의 배수 (기본: 16)
+  --frames N        균일 샘플링 프레임 수 (16의 배수)
+  --stride N        매 N번째 프레임 추출 (stride 샘플링)
   --model-path PATH NVILA 가중치 경로 (기본: weights/NVILA-8B-HD-Video)
   --autogaze-path P AutoGaze 가중치 경로 (기본: weights/AutoGaze)
 
@@ -35,7 +44,10 @@ import time
 import warnings
 from pathlib import Path
 
+import cv2
+import numpy as np
 import torch
+from PIL import Image
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -47,24 +59,29 @@ DEFAULT_VIDEO  = REPO_ROOT / "assets" / "example_input.mp4"
 
 # ── 인수 파싱 ─────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="NVILA-8B-HD-Video 비디오 질의응답 테스트")
-parser.add_argument("video",          nargs="?", default=str(DEFAULT_VIDEO))
-parser.add_argument("--question",     default=None,             help="단일 질문 (없으면 예제 3가지 실행)")
-parser.add_argument("--frames",       type=int, default=16,     help="샘플링 프레임 수 (16의 배수)")
-parser.add_argument("--model-path",   default=str(DEFAULT_MODEL))
-parser.add_argument("--autogaze-path",default=str(DEFAULT_AG))
+parser.add_argument("video",            nargs="?", default=str(DEFAULT_VIDEO))
+parser.add_argument("--question",       default=None,             help="단일 질문 (없으면 예제 3가지 실행)")
+parser.add_argument("--frames",         type=int, default=None,   help="균일 샘플링 프레임 수 (16의 배수). --stride와 동시 지정 시 비교 모드")
+parser.add_argument("--stride",         type=int, default=None,   help="매 N번째 프레임 추출 (stride 샘플링). --frames와 동시 지정 시 비교 모드")
+parser.add_argument("--model-path",     default=str(DEFAULT_MODEL))
+parser.add_argument("--autogaze-path",  default=str(DEFAULT_AG))
 parser.add_argument("--max-new-tokens", type=int, default=256)
 args = parser.parse_args()
 
 video_path   = args.video
 model_path   = args.model_path
 ag_path      = args.autogaze_path
-n_frames     = args.frames
 max_new_tok  = args.max_new_tokens
+
+# --frames / --stride 둘 다 없으면 기본값 16
+if args.frames is None and args.stride is None:
+    args.frames = 16
 
 assert Path(video_path).exists(),   f"비디오 없음: {video_path}"
 assert Path(model_path).exists(),   f"NVILA 가중치 없음: {model_path}\n  → bash scripts/download_models.sh weights nvila"
 assert Path(ag_path).exists(),      f"AutoGaze 가중치 없음: {ag_path}\n  → bash scripts/download_models.sh weights autogaze"
-assert n_frames % 16 == 0 and n_frames >= 16, "--frames 는 16의 배수여야 합니다 (예: 16, 32, 64)"
+if args.frames is not None:
+    assert args.frames % 16 == 0 and args.frames >= 16, "--frames 는 16의 배수여야 합니다 (예: 16, 32, 64)"
 
 questions = (
     [args.question] if args.question
@@ -83,15 +100,48 @@ device = (
 )
 dtype = torch.bfloat16
 
-print("=" * 60)
-print("NVILA-8B-HD-Video 추론 테스트")
-print("=" * 60)
-print(f"디바이스     : {device}  ({dtype})")
-print(f"비디오       : {video_path}")
-print(f"NVILA 경로   : {model_path}")
-print(f"AutoGaze 경로: {ag_path}")
-print(f"프레임 수    : {n_frames}")
-print()
+
+# ── stride 샘플링 헬퍼 ────────────────────────────────────────────
+def load_frames_stride(video_path: str, stride: int) -> tuple[list[Image.Image], int]:
+    """
+    매 stride번째 프레임을 순서대로 추출.
+    추출된 프레임 수를 16 배수로 truncate (AutoGaze 요건).
+    반환: (PIL 이미지 리스트, 실제 사용 프레임 수)
+    """
+    cap = cv2.VideoCapture(video_path)
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    indices = list(range(0, total, stride))
+
+    # 16 배수로 truncate
+    n = (len(indices) // 16) * 16
+    if n == 0:
+        n = 16  # 최소 16개 보장 (부족하면 마지막 프레임 반복)
+    indices = indices[:n]
+
+    frames = []
+    for idx in indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        ok, frame = cap.read()
+        if ok:
+            frames.append(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
+        elif frames:
+            frames.append(frames[-1])  # 읽기 실패 시 이전 프레임 복사
+    cap.release()
+
+    # 부족한 경우 마지막 프레임 패딩
+    while len(frames) < n:
+        frames.append(frames[-1])
+
+    return frames, len(frames)
+
+
+def get_video_info(video_path: str) -> tuple[int, float]:
+    cap = cv2.VideoCapture(video_path)
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps   = cap.get(cv2.CAP_PROP_FPS)
+    cap.release()
+    return total, fps
+
 
 # ── 재귀 디바이스 이동 헬퍼 ─────────────────────────────────────
 def _to_device(v):
@@ -105,6 +155,49 @@ def _to_device(v):
     return v
 
 
+# ── 비디오 메타데이터 출력 ────────────────────────────────────────
+total_frames, fps = get_video_info(video_path)
+duration = total_frames / fps if fps else 0
+
+print("=" * 60)
+print("NVILA-8B-HD-Video 추론 테스트")
+print("=" * 60)
+print(f"디바이스     : {device}  ({dtype})")
+print(f"비디오       : {video_path}")
+print(f"  총 프레임  : {total_frames}  ({fps:.1f} fps, {duration:.1f}초)")
+print(f"NVILA 경로   : {model_path}")
+print(f"AutoGaze 경로: {ag_path}")
+print()
+
+
+# ── 샘플링 시나리오 구성 ──────────────────────────────────────────
+# 각 시나리오: (이름, videos_arg, n_frames_label, processor_frames_override)
+#   videos_arg: 문자열 경로(균일 샘플링) 또는 PIL 리스트(stride 샘플링)
+#   processor_frames_override: None이면 덮어쓰지 않음
+
+scenarios = []
+
+if args.frames is not None:
+    scenarios.append({
+        "name":      f"균일 샘플링 {args.frames}프레임 (linspace)",
+        "videos":    video_path,          # 문자열 → processor가 linspace 샘플링
+        "n_frames":  args.frames,
+        "proc_override": args.frames,     # processor.num_video_frames 덮어쓰기
+    })
+
+if args.stride is not None:
+    pil_frames, n_actual = load_frames_stride(video_path, args.stride)
+    coverage = n_actual * args.stride / total_frames * 100 if total_frames else 0
+    scenarios.append({
+        "name":      f"stride={args.stride} 샘플링 ({n_actual}프레임, 전체의 {coverage:.0f}% 커버)",
+        "videos":    pil_frames,          # PIL 리스트 → processor가 그대로 사용
+        "n_frames":  n_actual,
+        "proc_override": n_actual,
+    })
+
+compare_mode = len(scenarios) > 1
+
+
 # ── 1. 프로세서 로드 ──────────────────────────────────────────────
 print("[1/3] 프로세서 로드 중 ...")
 t0 = time.perf_counter()
@@ -113,19 +206,16 @@ from transformers import AutoProcessor
 processor = AutoProcessor.from_pretrained(
     model_path,
     trust_remote_code=True,
-    autogaze_model_id=ag_path,   # 로컬 AutoGaze 가중치 사용
+    autogaze_model_id=ag_path,
 )
 
-# num_video_frames를 실행 시점에 덮어쓰기 (패치 없이도 동작)
-processor.num_video_frames = n_frames
-
 t_proc = time.perf_counter() - t0
-video_token = processor.tokenizer.video_token   # '<vila/video>'
+video_token = processor.tokenizer.video_token
 print(f"  완료 ({t_proc:.1f}s)")
-print(f"  프레임: {processor.num_video_frames} tile + {processor.num_video_frames_thumbnail} thumbnail")
-print(f"  gazing_ratio: tile={processor.gazing_ratio_tile}, thumb={processor.gazing_ratio_thumbnail}")
 print(f"  비디오 토큰: {repr(video_token)}")
+print(f"  gazing_ratio: tile={processor.gazing_ratio_tile}, thumb={processor.gazing_ratio_thumbnail}")
 print()
+
 
 # ── 2. 모델 로드 ──────────────────────────────────────────────────
 print("[2/3] NVILA 모델 로드 중 (~16 GB) ...")
@@ -136,7 +226,7 @@ model = AutoModel.from_pretrained(
     model_path,
     trust_remote_code=True,
     dtype=dtype,
-    device_map="auto",          # GPU VRAM / Unified Memory에 자동 분산
+    device_map="auto",
 )
 model.eval()
 
@@ -145,26 +235,21 @@ n_params = sum(p.numel() for p in model.parameters()) / 1e9
 print(f"  완료 ({t_model:.1f}s)  파라미터: {n_params:.2f}B")
 print()
 
-# ── 3. 질의응답 루프 ──────────────────────────────────────────────
-print("[3/3] 비디오 질의응답")
-print("=" * 60)
 
-for qi, question in enumerate(questions):
-    print(f"\n[Q{qi + 1}] {question}")
-    print("-" * 55)
+# ── 3. 추론 함수 ──────────────────────────────────────────────────
+def run_inference(scenario: dict, question: str) -> tuple[str, float, float, int]:
+    """
+    단일 시나리오 추론.
+    반환: (답변, 전처리 시간, 생성 시간, 생성 토큰 수)
+    """
+    processor.num_video_frames = scenario["proc_override"]
 
-    # NVILA 텍스트 형식: 비디오 토큰 플레이스홀더 + 질문
-    # processor 내부에서 <vila/video>를 실제 vision token 수만큼 확장함
     prompt = f"{video_token}\n{question}"
 
     t0 = time.perf_counter()
-    inputs = processor(
-        text=prompt,
-        videos=video_path,      # 문자열 경로 → processor 내에서 프레임 추출 + AutoGaze 실행
-    )
+    inputs = processor(text=prompt, videos=scenario["videos"])
     t_prep = time.perf_counter() - t0
 
-    # 모든 값을 device로 이동 (list → tensor 변환 포함)
     inputs_dev = _to_device(dict(inputs))
     for key in ("input_ids", "attention_mask"):
         if key in inputs_dev and isinstance(inputs_dev[key], list):
@@ -189,10 +274,35 @@ for qi, question in enumerate(questions):
     answer  = processor.batch_decode(new_ids, skip_special_tokens=True)[0].strip()
     n_tok   = new_ids.shape[1]
 
-    print(f"[A{qi + 1}] {answer}")
-    print()
-    print(f"  전처리: {t_prep:.1f}s  |  생성: {t_gen:.1f}s  |  "
-          f"{n_tok}토큰  |  {n_tok / max(t_gen, 1e-3):.1f} tok/s")
+    return answer, t_prep, t_gen, n_tok
+
+
+# ── 4. 질의응답 ───────────────────────────────────────────────────
+print("[3/3] 비디오 질의응답")
+
+for qi, question in enumerate(questions):
+    print("=" * 60)
+    print(f"[Q{qi + 1}] {question}")
+
+    if compare_mode:
+        # 시나리오별 답변을 나란히 출력
+        for sc in scenarios:
+            print(f"\n  ▶ {sc['name']}  ({sc['n_frames']}프레임)")
+            print("  " + "-" * 53)
+            answer, t_prep, t_gen, n_tok = run_inference(sc, question)
+            for line in answer.splitlines():
+                print(f"  {line}")
+            print(f"\n  전처리: {t_prep:.1f}s | 생성: {t_gen:.1f}s | "
+                  f"{n_tok}토큰 | {n_tok / max(t_gen, 1e-3):.1f} tok/s")
+    else:
+        sc = scenarios[0]
+        print(f"샘플링: {sc['name']}")
+        print("-" * 55)
+        answer, t_prep, t_gen, n_tok = run_inference(sc, question)
+        print(f"[A{qi + 1}] {answer}")
+        print()
+        print(f"  전처리: {t_prep:.1f}s | 생성: {t_gen:.1f}s | "
+              f"{n_tok}토큰 | {n_tok / max(t_gen, 1e-3):.1f} tok/s")
 
 print()
 print("=" * 60)
