@@ -110,7 +110,7 @@ class Trainer:
             self.load_checkpoint(resume_path=resume, resume=True)
 
     def save_checkpoint(self, epoch, iteration):
-        task_ckpt = self.task.state_dict()
+        task_ckpt = unwrap_model(self.task).state_dict()
         train_ckpt = {
             'epoch': epoch,
             'iteration': iteration,
@@ -169,7 +169,7 @@ class Trainer:
             missing_keys, unexpected_keys = unwrap_model(self.gaze_model).load_state_dict(gaze_ckpt.state_dict(), strict=False)
             if missing_keys:
                 logger.warning(f"Missing keys when resuming gaze model: {missing_keys}")
-            self.task.load_state_dict(task_ckpt)
+            unwrap_model(self.task).load_state_dict(task_ckpt)
             self.optimizer.load_state_dict(train_ckpt['optimizer_state_dict'])
             self.scheduler.load_state_dict(train_ckpt['scheduler_state_dict'])
             self.train_step = train_ckpt['train_step']
@@ -186,7 +186,9 @@ class Trainer:
             if task_path is not None:
                 logger.info(f"Loading task model from {task_path}")
                 task_ckpt = torch.load(task_path, map_location='cpu', weights_only=False)
-                missing_keys, unexpected_keys = self.task.load_state_dict(task_ckpt, strict=False)
+                if isinstance(task_ckpt, dict) and 'model' in task_ckpt and not any(isinstance(v, torch.Tensor) for v in task_ckpt.values()):
+                    task_ckpt = task_ckpt['model']
+                missing_keys, unexpected_keys = unwrap_model(self.task).load_state_dict(task_ckpt, strict=False)
                 logger.info(f"Missing keys: {missing_keys}")
                 logger.info(f"Unexpected keys: {unexpected_keys}")
     
