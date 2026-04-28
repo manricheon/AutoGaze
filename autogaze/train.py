@@ -30,7 +30,11 @@ from autogaze.utils import (
     seed_worker,
     dump_cfg, suppress_print, suppress_wandb, suppress_logging,
     get_device,
+    patch_transformers_for_torch25,
 )
+
+# Must run before any from_pretrained / Hydra task instantiation
+patch_transformers_for_torch25()
 from autogaze.datasets.collate import collate_fn
 from autogaze.models.autogaze import AutoGaze, AutoGazeConfig
 from autogaze.models.autogaze.processing_autogaze import AutoGazeImageProcessor

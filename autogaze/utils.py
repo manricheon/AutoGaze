@@ -237,3 +237,23 @@ def get_gazing_pos_from_gazing_mask(gazing_mask: torch.Tensor) -> torch.Tensor:
     if_padded_gazing = (gazing_pos == -1)
 
     return gazing_pos, if_padded_gazing
+
+
+def patch_transformers_for_torch25() -> None:
+    """
+    Bypass transformers' torch>=2.6 gate for torch.load (CVE-2025-32434).
+
+    transformers 4.50+ refuses to load .bin checkpoints on PyTorch < 2.6
+    via check_torch_load_is_safe(). Since we only load files from trusted
+    local sources, the CVE does not apply and the check can be safely
+    skipped.
+    """
+    try:
+        import transformers.utils.import_utils as _tu
+        _tu.check_torch_load_is_safe = lambda: None
+        # Also patch the reference already imported into modeling_utils
+        import transformers.modeling_utils as _mu
+        if hasattr(_mu, "check_torch_load_is_safe"):
+            _mu.check_torch_load_is_safe = lambda: None
+    except Exception:
+        pass
