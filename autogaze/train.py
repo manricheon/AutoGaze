@@ -131,14 +131,15 @@ def main(cfg: DictConfig):
         logger.info(f'Logging to {exp_path}')
         logger.info(f'Config: \n {OmegaConf.to_yaml(cfg)}')
 
-        wandb.init(
-            project='autogaze',
-            name=exp_name,
-            id=exp_name,
-            config=OmegaConf.to_container(cfg),
-            dir=exp_path,
-            resume='allow',
-        )
+        if cfg.trainer.get('use_wandb', True):
+            wandb.init(
+                project='autogaze',
+                name=exp_name,
+                id=exp_name,
+                config=OmegaConf.to_container(cfg),
+                dir=exp_path,
+                resume='allow',
+            )
     else:
         suppress_print()
         suppress_wandb()

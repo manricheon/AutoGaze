@@ -15,6 +15,7 @@ save_nsteps: 300
 n_epochs: 10
 logdir: 'exps/'
 exp_name:
+use_wandb: True
 resume: 'auto'
 gaze_weights:
 task_weights:
