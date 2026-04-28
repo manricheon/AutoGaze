@@ -79,7 +79,7 @@ def collect_video_paths(input_path: str) -> list[Path]:
     return videos
 
 
-def load_video(video_path: Path, num_frames: int) -> np.ndarray:
+def load_video(video_path: Path, num_frames: int) -> tuple[np.ndarray, list[int]]:
     container = av.open(str(video_path))
     total = container.streams.video[0].frames
     indices = sample_frame_indices(
@@ -88,10 +88,10 @@ def load_video(video_path: Path, num_frames: int) -> np.ndarray:
     )
     raw = read_video_pyav(container, indices)
     container.close()
-    return process_video_frames(raw, num_frames)
+    return process_video_frames(raw, num_frames), list(indices)
 
 
-def load_frames_stride(video_path: Path, stride: int, chunk_size: int = 16) -> np.ndarray:
+def load_frames_stride(video_path: Path, stride: int, chunk_size: int = 16) -> tuple[np.ndarray, list[int]]:
     """Extract every `stride`-th frame sequentially.
 
     The total count is truncated to a multiple of `chunk_size` (AutoGaze
@@ -99,13 +99,15 @@ def load_frames_stride(video_path: Path, stride: int, chunk_size: int = 16) -> n
     If fewer than `chunk_size` frames are available after striding, the last
     frame is repeated to reach `chunk_size`.
 
-    Returns uint8 (T, H, W, 3) at native resolution.
+    Returns (uint8 array (T, H, W, 3), original frame indices).
     """
     container = av.open(str(video_path))
     all_frames = []
+    orig_indices = []
     for i, frame in enumerate(container.decode(video=0)):
         if i % stride == 0:
             all_frames.append(frame.to_ndarray(format="rgb24"))
+            orig_indices.append(i)
     container.close()
     if not all_frames:
         raise ValueError(f"No frames decoded from {video_path}")
@@ -114,16 +116,19 @@ def load_frames_stride(video_path: Path, stride: int, chunk_size: int = 16) -> n
     n = (len(all_frames) // chunk_size) * chunk_size
     if n == 0:
         n = chunk_size
+        last_idx = orig_indices[-1] if orig_indices else 0
         while len(all_frames) < n:
             all_frames.append(all_frames[-1])
+            orig_indices.append(last_idx)
     all_frames = all_frames[:n]
-    return np.stack(all_frames)
+    orig_indices = orig_indices[:n]
+    return np.stack(all_frames), orig_indices
 
 
-def load_all_frames(video_path: Path) -> np.ndarray:
+def load_all_frames(video_path: Path) -> tuple[np.ndarray, list[int]]:
     """Decode every frame from the video (no temporal sampling).
 
-    Returns uint8 (T, H, W, 3) at the native video resolution.
+    Returns (uint8 array (T, H, W, 3), original frame indices).
     Spatial resizing happens later via the AutoGazeImageProcessor transform.
     """
     container = av.open(str(video_path))
@@ -133,7 +138,7 @@ def load_all_frames(video_path: Path) -> np.ndarray:
     container.close()
     if not frames:
         raise ValueError(f"No frames decoded from {video_path}")
-    return np.stack(frames)
+    return np.stack(frames), list(range(len(frames)))
 
 
 def _merge_chunk_results(chunk_results: list[dict], actual_lengths: list[int]) -> dict:
@@ -300,7 +305,8 @@ def save_json(result: dict, video_path: Path, all_results: dict):
 
 
 def save_viz(result: dict, raw_video: np.ndarray, out_dir: Path, video_path: Path,
-             transform, normalize_mean, normalize_std, normalize_rescale) -> Path:
+             transform, normalize_mean, normalize_std, normalize_rescale,
+             frame_indices: list[int] | None = None) -> Path:
     """Single PNG grid: rows = [original, scale32, scale64, scale112, scale224], cols = frames."""
     scales = result["scales"]
     gazing_mask = result["gazing_mask"]
@@ -309,13 +315,16 @@ def save_viz(result: dict, raw_video: np.ndarray, out_dir: Path, video_path: Pat
 
     video_np = _unnorm_video(raw_video, transform, normalize_mean, normalize_std, normalize_rescale)
 
+    def _flabel(t: int) -> str:
+        return f"F{frame_indices[t]}" if frame_indices else f"Frame {t+1}"
+
     fig, axes = plt.subplots(num_scales + 1, T,
                              figsize=(max(2 * T, 4), 2.5 * (num_scales + 1)),
                              squeeze=False)
 
     for t in range(T):
         axes[0, t].imshow(np.clip(video_np[t].transpose(1, 2, 0), 0, 1))
-        axes[0, t].set_title(f"Frame {t+1}", fontsize=7)
+        axes[0, t].set_title(_flabel(t), fontsize=7)
         axes[0, t].axis("off")
 
     for si, scale in enumerate(scales):
@@ -326,7 +335,7 @@ def save_viz(result: dict, raw_video: np.ndarray, out_dir: Path, video_path: Pat
             img = _overlay_gaze_on_frame(video_np[t], mask_hw, patch_grid, scale)
             axes[si + 1, t].imshow(img)
             _draw_patch_borders(axes[si + 1, t], mask_hw, patch_grid, scale)
-            axes[si + 1, t].set_title(f"Scale {scale} F{t+1}", fontsize=7)
+            axes[si + 1, t].set_title(f"Scale {scale} {_flabel(t)}", fontsize=7)
             axes[si + 1, t].axis("off")
 
     plt.tight_layout(pad=0.3)
@@ -337,7 +346,8 @@ def save_viz(result: dict, raw_video: np.ndarray, out_dir: Path, video_path: Pat
 
 
 def save_frames(result: dict, raw_video: np.ndarray, out_dir: Path, video_path: Path,
-                transform, normalize_mean, normalize_std, normalize_rescale) -> list[Path]:
+                transform, normalize_mean, normalize_std, normalize_rescale,
+                frame_indices: list[int] | None = None) -> list[Path]:
     """One PNG per frame: columns = [original, scale32, scale64, scale112, scale224]."""
     scales = result["scales"]
     gazing_mask = result["gazing_mask"]
@@ -350,18 +360,20 @@ def save_frames(result: dict, raw_video: np.ndarray, out_dir: Path, video_path: 
     frames_dir = out_dir / f"{video_path.stem}_frames"
     frames_dir.mkdir(exist_ok=True)
 
+    def _fnum(t: int) -> int:
+        return frame_indices[t] if frame_indices else t + 1
+
     out_paths = []
     for t in range(T):
-        n_gazed = int((~result["if_padded_gazing"][0]).sum().item())  # total across frames shown in title
         n_this = int(num_each[t].item())
+        fnum = _fnum(t)
 
         cols = 1 + num_scales
         fig, axes = plt.subplots(1, cols, figsize=(3.5 * cols, 3.5), squeeze=False)
 
-        # Original frame (from raw_video at full resolution)
-        orig_hw = raw_video[t]                          # H W 3  uint8
+        orig_hw = raw_video[t]
         axes[0, 0].imshow(orig_hw)
-        axes[0, 0].set_title(f"Frame {t+1}  ({n_this} gazed)", fontsize=9)
+        axes[0, 0].set_title(f"Frame {fnum}  ({n_this} gazed)", fontsize=9)
         axes[0, 0].axis("off")
 
         for si, scale in enumerate(scales):
@@ -375,9 +387,9 @@ def save_frames(result: dict, raw_video: np.ndarray, out_dir: Path, video_path: 
             axes[0, si + 1].set_title(f"Scale {scale}  ({gazed_count} patches)", fontsize=9)
             axes[0, si + 1].axis("off")
 
-        plt.suptitle(f"{video_path.name} — Frame {t+1}/{T}", fontsize=10, y=1.01)
+        plt.suptitle(f"{video_path.name} — Frame {fnum}/{T}", fontsize=10, y=1.01)
         plt.tight_layout(pad=0.4)
-        out_path = frames_dir / f"frame_{t+1:03d}.png"
+        out_path = frames_dir / f"frame_{fnum:04d}.png"
         fig.savefig(out_path, dpi=120, bbox_inches="tight")
         plt.close(fig)
         out_paths.append(out_path)
@@ -387,7 +399,7 @@ def save_frames(result: dict, raw_video: np.ndarray, out_dir: Path, video_path: 
 
 def save_video(result: dict, raw_video: np.ndarray, out_dir: Path, video_path: Path,
                transform, normalize_mean, normalize_std, normalize_rescale,
-               fps: float = 4.0) -> Path:
+               fps: float = 4.0, frame_indices: list[int] | None = None) -> Path:
     """
     MP4 video.
     Each frame is a 3-panel layout:
@@ -506,7 +518,8 @@ def save_video(result: dict, raw_video: np.ndarray, out_dir: Path, video_path: P
         for lx, ly, txt in labels:
             ax_c.text(lx, ly, txt, ha="center", va="center",
                       fontsize=8, color="white", fontweight="bold")
-        ax_c.text(total_w - 6, 12, f"Frame {t+1}/{T}",
+        fnum = frame_indices[t] if frame_indices else t + 1
+        ax_c.text(total_w - 6, 12, f"Frame {fnum}/{T}",
                   ha="right", va="center", fontsize=8, color="#aaaaaa")
         ax_c.axis("off")
         ax_c.set_position([0, 0, 1, 1])
@@ -638,8 +651,9 @@ def main():
         print(f"[{idx+1}/{len(video_paths)}] {video_path.name}")
 
         try:
+            frame_indices = None
             if args.all_frames:
-                raw_video = load_all_frames(video_path)
+                raw_video, frame_indices = load_all_frames(video_path)
                 T_total = len(raw_video)
                 n_chunks = (T_total + args.chunk_size - 1) // args.chunk_size
                 print(f"  All-frames mode: {T_total} frames → {n_chunks} chunk(s) of {args.chunk_size}")
@@ -653,7 +667,7 @@ def main():
                     task_loss_req=task_loss_req,
                 )
             elif args.stride is not None:
-                raw_video = load_frames_stride(video_path, args.stride, args.chunk_size)
+                raw_video, frame_indices = load_frames_stride(video_path, args.stride, args.chunk_size)
                 T_total = len(raw_video)
                 n_chunks = T_total // args.chunk_size
                 container_tmp = av.open(str(video_path))
@@ -669,7 +683,7 @@ def main():
                     task_loss_req=task_loss_req,
                 )
             else:
-                raw_video = load_video(video_path, num_frames)
+                raw_video, frame_indices = load_video(video_path, num_frames)
                 video_input = transform_video_for_pytorch(raw_video, transform)
                 video_input = video_input.unsqueeze(0).to(device)
                 with torch.inference_mode():
@@ -693,6 +707,7 @@ def main():
             normalize_mean=normalize_mean,
             normalize_std=normalize_std,
             normalize_rescale=normalize_rescale,
+            frame_indices=frame_indices,
         )
 
         if "json" in fmts:
