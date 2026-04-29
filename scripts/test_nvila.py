@@ -16,7 +16,7 @@ Usage:
 
 Arguments:
   VIDEO_PATH        비디오 파일 경로 (기본: assets/example_input.mp4)
-  --question        단일 질문 (기본: 3가지 예제 질문)
+  --question        단일 질문 (없으면 예제 3가지 실행)
   --frames N        균일 샘플링 프레임 수 (16의 배수)
   --stride N        매 N번째 프레임 추출 (stride 샘플링)
   --model-path PATH NVILA 가중치 경로 (기본: weights/NVILA-8B-HD-Video)
@@ -155,6 +155,111 @@ def _to_device(v):
     return v
 
 
+# ── 타이밍 누산기 ─────────────────────────────────────────────────
+_t: dict = {}
+
+def _reset_timing(n_text_tok: int = 0) -> None:
+    _t.clear()
+    _t.update({
+        'autogaze':     0.0,   # AutoGaze forward 누적
+        'vit':          0.0,   # _run_vision_tower_batched 누적
+        'proj':         0.0,   # _embed 전체 - vit (projection + token 조립)
+        'llm_prefill':  0.0,   # llm.forward 첫 번째 호출 (prefill)
+        'llm_decode':   0.0,   # llm.forward 이후 호출 누적 (decode)
+        'llm_calls':    0,
+        'llm_seq_len':  0,     # prefill 시 LLM 입력 시퀀스 길이
+        'embed_seq_len':0,     # _embed 출력 시퀀스 길이 (multimodal)
+        'n_text_tok':   n_text_tok,
+    })
+
+
+def _install_timing_hooks(processor, model) -> None:
+    """processor/model 에 타이밍 래퍼를 설치한다 (1회 호출)."""
+
+    # 1) AutoGaze ─────────────────────────────────────────────────
+    if getattr(processor, '_autogaze_model', None) is not None:
+        _orig_ag = processor._autogaze_model.forward
+        def _ag_forward(*args, **kwargs):
+            t0 = time.perf_counter()
+            result = _orig_ag(*args, **kwargs)
+            _t['autogaze'] += time.perf_counter() - t0
+            return result
+        processor._autogaze_model.forward = _ag_forward
+
+    # 2) ViT (_run_vision_tower_batched) ──────────────────────────
+    _orig_vit = model._run_vision_tower_batched
+    def _vit_batched(*args, **kwargs):
+        t0 = time.perf_counter()
+        result = _orig_vit(*args, **kwargs)
+        _t['vit'] += time.perf_counter() - t0
+        return result
+    model._run_vision_tower_batched = _vit_batched
+
+    # 3) _embed (ViT + projection 전체, 시각 토큰 수 캡처) ─────────
+    _orig_embed = model._embed
+    def _embed(*args, **kwargs):
+        vit_before = _t['vit']
+        t0 = time.perf_counter()
+        result = _orig_embed(*args, **kwargs)
+        elapsed = time.perf_counter() - t0
+        _t['proj'] += max(0.0, elapsed - (_t['vit'] - vit_before))
+        _t['embed_seq_len'] = result.shape[1]
+        return result
+    model._embed = _embed
+
+    # 4) LLM (prefill / decode 분리) ──────────────────────────────
+    _orig_llm = model.llm.forward
+    def _llm_forward(*args, **kwargs):
+        t0 = time.perf_counter()
+        result = _orig_llm(*args, **kwargs)
+        elapsed = time.perf_counter() - t0
+        _t['llm_calls'] += 1
+        if _t['llm_calls'] == 1:
+            _t['llm_prefill'] = elapsed
+            # prefill 시 inputs_embeds 로 시퀀스 길이 기록
+            ie = kwargs.get('inputs_embeds')
+            if ie is not None:
+                _t['llm_seq_len'] = ie.shape[1]
+            elif args:
+                a0 = args[0]
+                if isinstance(a0, torch.Tensor):
+                    _t['llm_seq_len'] = a0.shape[1]
+        else:
+            _t['llm_decode'] += elapsed
+        return result
+    model.llm.forward = _llm_forward
+
+
+def _print_timing(t_prep: float, t_gen: float, n_tok: int, n_frames: int) -> None:
+    n_vis   = max(0, _t['embed_seq_len'] - _t['n_text_tok'])
+    tok_s   = n_tok / max(_t['llm_decode'], 1e-4)
+    other_p = max(0.0, t_prep - _t['autogaze'])
+    other_g = max(0.0, t_gen  - _t['vit'] - _t['llm_prefill'] - _t['llm_decode'])
+
+    lines = [
+        ("전처리 (합계)",       f"{t_prep:.2f}s",        ""),
+        ("  AutoGaze",          f"{_t['autogaze']:.2f}s", f"{n_frames} 프레임 입력"),
+        ("  기타 전처리",        f"{other_p:.2f}s",       ""),
+        ("생성 (합계)",          f"{t_gen:.2f}s",         ""),
+        ("  ViT 인코딩",         f"{_t['vit']:.2f}s",     f"→ {n_vis} 시각 토큰"),
+        ("  LLM 프리필",         f"{_t['llm_prefill']:.2f}s", f"{_t['llm_seq_len']} 입력 토큰"),
+        ("  LLM 디코드",         f"{_t['llm_decode']:.2f}s",  f"{n_tok} 토큰  /  {tok_s:.1f} tok/s"),
+        ("  기타 생성",          f"{other_g:.2f}s",       ""),
+    ]
+    w1 = max(len(l[0]) for l in lines)
+    w2 = max(len(l[1]) for l in lines)
+    width = w1 + w2 + max(len(l[2]) for l in lines) + 6
+    sep = "  " + "─" * (width + 4)
+
+    print()
+    print(sep)
+    for name, t, detail in lines:
+        print(f"  {name:<{w1}}  {t:>{w2}}   {detail}")
+    print(sep)
+    print(f"  {'전체':<{w1}}  {t_prep + t_gen:>{w2}.2f}s")
+    print(sep)
+
+
 # ── 비디오 메타데이터 출력 ────────────────────────────────────────
 total_frames, fps = get_video_info(video_path)
 duration = total_frames / fps if fps else 0
@@ -235,6 +340,9 @@ n_params = sum(p.numel() for p in model.parameters()) / 1e9
 print(f"  완료 ({t_model:.1f}s)  파라미터: {n_params:.2f}B")
 print()
 
+# 타이밍 훅 설치 (1회)
+_install_timing_hooks(processor, model)
+
 
 # ── 3. 추론 함수 ──────────────────────────────────────────────────
 def run_inference(scenario: dict, question: str) -> tuple[str, float, float, int]:
@@ -245,6 +353,9 @@ def run_inference(scenario: dict, question: str) -> tuple[str, float, float, int
     processor.num_video_frames = scenario["proc_override"]
 
     prompt = f"{video_token}\n{question}"
+    n_text_tok = len(processor.tokenizer.encode(prompt)) - 1  # <video> 토큰 제외
+
+    _reset_timing(n_text_tok)
 
     t0 = time.perf_counter()
     inputs = processor(text=prompt, videos=scenario["videos"])
@@ -292,17 +403,14 @@ for qi, question in enumerate(questions):
             answer, t_prep, t_gen, n_tok = run_inference(sc, question)
             for line in answer.splitlines():
                 print(f"  {line}")
-            print(f"\n  전처리: {t_prep:.1f}s | 생성: {t_gen:.1f}s | "
-                  f"{n_tok}토큰 | {n_tok / max(t_gen, 1e-3):.1f} tok/s")
+            _print_timing(t_prep, t_gen, n_tok, sc['n_frames'])
     else:
         sc = scenarios[0]
         print(f"샘플링: {sc['name']}")
         print("-" * 55)
         answer, t_prep, t_gen, n_tok = run_inference(sc, question)
         print(f"[A{qi + 1}] {answer}")
-        print()
-        print(f"  전처리: {t_prep:.1f}s | 생성: {t_gen:.1f}s | "
-              f"{n_tok}토큰 | {n_tok / max(t_gen, 1e-3):.1f} tok/s")
+        _print_timing(t_prep, t_gen, n_tok, sc['n_frames'])
 
 print()
 print("=" * 60)
