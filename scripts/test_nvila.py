@@ -69,6 +69,8 @@ parser.add_argument("--autogaze-path",  default=str(DEFAULT_AG))
 parser.add_argument("--max-new-tokens",   type=int,   default=256)
 parser.add_argument("--gazing-ratio",     type=float, default=0.75, help="AutoGaze gazing ratio (0~1, 기본 0.75). 낮을수록 더 적은 패치 선택.")
 parser.add_argument("--compare-autogaze", action="store_true",      help="AutoGaze ON/OFF 결과를 나란히 비교")
+parser.add_argument("--sweep-ratio",      action="store_true",      help="ratio 0.1~1.0 단계별 비교 (--ratio-step 으로 간격 조정)")
+parser.add_argument("--ratio-step",       type=float, default=0.1,  help="--sweep-ratio 간격 (기본 0.1)")
 args = parser.parse_args()
 
 video_path   = args.video
@@ -295,6 +297,79 @@ def _print_timing_compare(n_frames: int,
     print(sep)
 
 
+def _run_ratio_sweep(sc: dict, question: str) -> list:
+    """ratio 0.1 → 1.0 단계별로 추론하여 결과 리스트 반환."""
+    step    = args.ratio_step
+    ratios  = [round(r * step, 10) for r in range(1, round(1.0 / step) + 1)]
+    if ratios[-1] < 1.0:
+        ratios.append(1.0)
+
+    orig_tile  = processor.gazing_ratio_tile
+    orig_thumb = processor.gazing_ratio_thumbnail
+    results = []
+    try:
+        for r in ratios:
+            processor.gazing_ratio_tile      = r
+            processor.gazing_ratio_thumbnail = r
+            print(f"  ratio={r:.2f} 추론 중...", end="\r", flush=True)
+            answer, t_prep, t_gen, n_tok, snap = run_inference(sc, question, autogaze_enabled=True)
+            results.append((r, answer, t_prep, t_gen, n_tok, snap))
+    finally:
+        processor.gazing_ratio_tile      = orig_tile
+        processor.gazing_ratio_thumbnail = orig_thumb
+    print(" " * 30, end="\r")  # clear progress line
+    return results
+
+
+def _print_ratio_sweep(results: list) -> None:
+    """ratio sweep 결과를 컴팩트 타이밍 테이블 + 답변 요약으로 출력."""
+    # ── 타이밍 테이블 ──────────────────────────────────────────────
+    hdrs = ["ratio", "전처리", "AutoGaze", "ViT", "시각토큰", "LLM프리필", "LLM디코드", "tok/s", "전체"]
+    rows = []
+    for r, answer, t_prep, t_gen, n_tok, snap in results:
+        n_vis = max(0, snap['embed_seq_len'] - snap['n_text_tok'])
+        tok_s = n_tok / max(snap['llm_decode'], 1e-4)
+        ag_s  = f"{snap['autogaze']:.2f}s" if r < 1.0 else "OFF"
+        rows.append([
+            f"{r:.2f}",
+            f"{t_prep:.2f}s",
+            ag_s,
+            f"{snap['vit']:.2f}s",
+            str(n_vis),
+            f"{snap['llm_prefill']:.2f}s",
+            f"{snap['llm_decode']:.2f}s",
+            f"{tok_s:.1f}",
+            f"{t_prep + t_gen:.2f}s",
+        ])
+
+    col_w = [max(len(hdrs[i]), max(len(row[i]) for row in rows)) for i in range(len(hdrs))]
+    sep   = "  " + "─┼─".join("─" * w for w in col_w)
+    hdr   = "  " + " │ ".join(f"{h:^{w}}" for h, w in zip(hdrs, col_w))
+
+    print()
+    print(hdr)
+    print(sep)
+    for row in rows:
+        print("  " + " │ ".join(f"{v:>{w}}" for v, w in zip(row, col_w)))
+    print(sep)
+
+    # ── 답변 요약 ─────────────────────────────────────────────────
+    MAX_ANS = 72
+    ans_col_w = max(len(r[1][:MAX_ANS]) for r in results)
+    ratio_w   = max(len(f"{r[0]:.2f}") for r in results)
+    ans_sep   = "  " + "─" * ratio_w + "─┼─" + "─" * ans_col_w
+
+    print()
+    print(f"  {'ratio':>{ratio_w}}  │  답변 (앞 {MAX_ANS}자)")
+    print(ans_sep)
+    for r, answer, *_ in results:
+        truncated = answer.replace("\n", " ")[:MAX_ANS]
+        if len(answer) > MAX_ANS:
+            truncated += "…"
+        print(f"  {r:.2f}  │  {truncated}")
+    print(ans_sep)
+
+
 # ── AutoGaze ON/OFF 전환 헬퍼 ────────────────────────────────────
 @contextmanager
 def _no_autogaze(proc):
@@ -459,7 +534,13 @@ for qi, question in enumerate(questions):
         if compare_mode:
             print(f"\n  ▶ {sc['name']}  ({sc['n_frames']}프레임)")
 
-        if args.compare_autogaze:
+        if args.sweep_ratio:
+            # ratio 0.1 ~ 1.0 단계별 비교
+            print(f"\n[ratio sweep: step={args.ratio_step}]")
+            sweep_results = _run_ratio_sweep(sc, question)
+            _print_ratio_sweep(sweep_results)
+
+        elif args.compare_autogaze:
             # AutoGaze ON
             print(f"\n── AutoGaze ON ──────────────────────────────")
             print("-" * 55)
