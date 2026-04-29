@@ -42,6 +42,7 @@ Arguments:
 import argparse
 import time
 import warnings
+from contextlib import contextmanager
 from pathlib import Path
 
 import cv2
@@ -65,7 +66,8 @@ parser.add_argument("--frames",         type=int, default=None,   help="균일 �
 parser.add_argument("--stride",         type=int, default=None,   help="매 N번째 프레임 추출 (stride 샘플링). --frames와 동시 지정 시 비교 모드")
 parser.add_argument("--model-path",     default=str(DEFAULT_MODEL))
 parser.add_argument("--autogaze-path",  default=str(DEFAULT_AG))
-parser.add_argument("--max-new-tokens", type=int, default=256)
+parser.add_argument("--max-new-tokens",   type=int, default=256)
+parser.add_argument("--compare-autogaze", action="store_true", help="AutoGaze ON/OFF 결과를 나란히 비교")
 args = parser.parse_args()
 
 video_path   = args.video
@@ -260,6 +262,24 @@ def _print_timing(t_prep: float, t_gen: float, n_tok: int, n_frames: int) -> Non
     print(sep)
 
 
+# ── AutoGaze ON/OFF 전환 헬퍼 ────────────────────────────────────
+@contextmanager
+def _no_autogaze(proc):
+    """gazing_ratio를 1.0으로 설정해 AutoGaze 선택을 비활성화한다.
+
+    ratio=1.0 이면 processor가 모든 패치를 gazed로 처리 (gaze 모델 미호출).
+    """
+    orig_tile  = proc.gazing_ratio_tile
+    orig_thumb = proc.gazing_ratio_thumbnail
+    proc.gazing_ratio_tile       = 1.0
+    proc.gazing_ratio_thumbnail  = 1.0
+    try:
+        yield
+    finally:
+        proc.gazing_ratio_tile       = orig_tile
+        proc.gazing_ratio_thumbnail  = orig_thumb
+
+
 # ── 비디오 메타데이터 출력 ────────────────────────────────────────
 total_frames, fps = get_video_info(video_path)
 duration = total_frames / fps if fps else 0
@@ -345,9 +365,10 @@ _install_timing_hooks(processor, model)
 
 
 # ── 3. 추론 함수 ──────────────────────────────────────────────────
-def run_inference(scenario: dict, question: str) -> tuple[str, float, float, int]:
+def run_inference(scenario: dict, question: str, autogaze_enabled: bool = True) -> tuple[str, float, float, int]:
     """
     단일 시나리오 추론.
+    autogaze_enabled=False 이면 gazing_ratio=1.0 으로 AutoGaze 선택을 우회한다.
     반환: (답변, 전처리 시간, 생성 시간, 생성 토큰 수)
     """
     processor.num_video_frames = scenario["proc_override"]
@@ -358,7 +379,11 @@ def run_inference(scenario: dict, question: str) -> tuple[str, float, float, int
     _reset_timing(n_text_tok)
 
     t0 = time.perf_counter()
-    inputs = processor(text=prompt, videos=scenario["videos"])
+    if autogaze_enabled:
+        inputs = processor(text=prompt, videos=scenario["videos"])
+    else:
+        with _no_autogaze(processor):
+            inputs = processor(text=prompt, videos=scenario["videos"])
     t_prep = time.perf_counter() - t0
 
     inputs_dev = _to_device(dict(inputs))
@@ -389,6 +414,12 @@ def run_inference(scenario: dict, question: str) -> tuple[str, float, float, int
 
 
 # ── 4. 질의응답 ───────────────────────────────────────────────────
+ag_modes = (
+    [(True, "AutoGaze ON"), (False, "AutoGaze OFF (전체 패치)")]
+    if args.compare_autogaze
+    else [(True, None)]
+)
+
 print("[3/3] 비디오 질의응답")
 
 for qi, question in enumerate(questions):
@@ -396,21 +427,27 @@ for qi, question in enumerate(questions):
     print(f"[Q{qi + 1}] {question}")
 
     if compare_mode:
-        # 시나리오별 답변을 나란히 출력
+        # 프레임 샘플링 시나리오 비교
         for sc in scenarios:
             print(f"\n  ▶ {sc['name']}  ({sc['n_frames']}프레임)")
-            print("  " + "-" * 53)
-            answer, t_prep, t_gen, n_tok = run_inference(sc, question)
-            for line in answer.splitlines():
-                print(f"  {line}")
-            _print_timing(t_prep, t_gen, n_tok, sc['n_frames'])
+            for ag_on, ag_label in ag_modes:
+                if ag_label:
+                    print(f"\n  ── {ag_label} ──")
+                print("  " + "-" * 53)
+                answer, t_prep, t_gen, n_tok = run_inference(sc, question, ag_on)
+                for line in answer.splitlines():
+                    print(f"  {line}")
+                _print_timing(t_prep, t_gen, n_tok, sc['n_frames'])
     else:
         sc = scenarios[0]
         print(f"샘플링: {sc['name']}")
-        print("-" * 55)
-        answer, t_prep, t_gen, n_tok = run_inference(sc, question)
-        print(f"[A{qi + 1}] {answer}")
-        _print_timing(t_prep, t_gen, n_tok, sc['n_frames'])
+        for ag_on, ag_label in ag_modes:
+            if ag_label:
+                print(f"\n── {ag_label} ──────────────────────────────")
+            print("-" * 55)
+            answer, t_prep, t_gen, n_tok = run_inference(sc, question, ag_on)
+            print(f"[A{qi + 1}] {answer}")
+            _print_timing(t_prep, t_gen, n_tok, sc['n_frames'])
 
 print()
 print("=" * 60)
