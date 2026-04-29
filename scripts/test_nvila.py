@@ -233,38 +233,65 @@ def _install_timing_hooks(processor, model) -> None:
     model.llm.forward = _llm_forward
 
 
-def _print_timing(t_prep: float, t_gen: float, n_tok: int, n_frames: int,
-                  autogaze_enabled: bool = True) -> None:
-    n_vis   = max(0, _t['embed_seq_len'] - _t['n_text_tok'])
-    tok_s   = n_tok / max(_t['llm_decode'], 1e-4)
-    other_p = max(0.0, t_prep - _t['autogaze'])
-    other_g = max(0.0, t_gen  - _t['vit'] - _t['llm_prefill'] - _t['llm_decode'])
-
-    ag_time   = f"{_t['autogaze']:.2f}s"
-    ag_detail = f"{n_frames} 프레임 입력  (ratio={args.gazing_ratio})" if autogaze_enabled else "OFF"
-
-    lines = [
-        ("전처리 (합계)",   f"{t_prep:.2f}s",               ""),
-        ("  AutoGaze",      ag_time,                         ag_detail),
-        ("  기타 전처리",    f"{other_p:.2f}s",              ""),
-        ("생성 (합계)",      f"{t_gen:.2f}s",                ""),
-        ("  ViT 인코딩",     f"{_t['vit']:.2f}s",            f"→ {n_vis} 시각 토큰"),
-        ("  LLM 프리필",     f"{_t['llm_prefill']:.2f}s",    f"{_t['llm_seq_len']} 입력 토큰"),
-        ("  LLM 디코드",     f"{_t['llm_decode']:.2f}s",     f"{n_tok} 토큰  /  {tok_s:.1f} tok/s"),
-        ("  기타 생성",      f"{other_g:.2f}s",              ""),
-        ("전체",             f"{t_prep + t_gen:.2f}s",       ""),
+def _make_timing_rows(t_prep: float, t_gen: float, n_tok: int,
+                      n_frames: int, ag_enabled: bool, snap: dict) -> list:
+    n_vis   = max(0, snap['embed_seq_len'] - snap['n_text_tok'])
+    tok_s   = n_tok / max(snap['llm_decode'], 1e-4)
+    other_p = max(0.0, t_prep - snap['autogaze'])
+    other_g = max(0.0, t_gen  - snap['vit'] - snap['llm_prefill'] - snap['llm_decode'])
+    ag_det  = f"ratio={args.gazing_ratio}" if ag_enabled else "OFF"
+    return [
+        ("전처리 (합계)",  f"{t_prep:.2f}s",               ""),
+        ("  AutoGaze",     f"{snap['autogaze']:.2f}s",      ag_det),
+        ("  기타 전처리",   f"{other_p:.2f}s",              ""),
+        ("생성 (합계)",     f"{t_gen:.2f}s",                ""),
+        ("  ViT 인코딩",    f"{snap['vit']:.2f}s",          f"→ {n_vis} 시각 토큰"),
+        ("  LLM 프리필",    f"{snap['llm_prefill']:.2f}s",  f"{snap['llm_seq_len']} 입력 토큰"),
+        ("  LLM 디코드",    f"{snap['llm_decode']:.2f}s",   f"{n_tok}tok / {tok_s:.1f}tok/s"),
+        ("  기타 생성",     f"{other_g:.2f}s",              ""),
+        ("전체",            f"{t_prep + t_gen:.2f}s",       ""),
     ]
-    w1 = max(len(l[0]) for l in lines)
-    w2 = max(len(l[1]) for l in lines)
-    w3 = max(len(l[2]) for l in lines)
-    sep = "  " + "─" * (w1 + w2 + w3 + 8)
 
+
+def _print_timing(t_prep: float, t_gen: float, n_tok: int, n_frames: int,
+                  ag_enabled: bool = True) -> None:
+    rows = _make_timing_rows(t_prep, t_gen, n_tok, n_frames, ag_enabled, dict(_t))
+    w1 = max(len(r[0]) for r in rows)
+    w2 = max(len(r[1]) for r in rows)
+    w3 = max(len(r[2]) for r in rows)
+    sep = "  " + "─" * (w1 + w2 + w3 + 8)
     print()
     print(sep)
-    for i, (name, t, detail) in enumerate(lines):
-        if i == len(lines) - 1:
+    for i, (name, val, detail) in enumerate(rows):
+        if i == len(rows) - 1:
             print(sep)
-        print(f"  {name:<{w1}}  {t:>{w2}}   {detail}")
+        print(f"  {name:<{w1}}  {val:>{w2}}   {detail}")
+    print(sep)
+
+
+def _print_timing_compare(n_frames: int,
+                          res_on:  tuple,   # (t_prep, t_gen, n_tok, snap)
+                          res_off: tuple) -> None:
+    rows_on  = _make_timing_rows(*res_on[:3],  n_frames, True,  res_on[3])
+    rows_off = _make_timing_rows(*res_off[:3], n_frames, False, res_off[3])
+
+    w_name = max(len(r[0]) for r in rows_on)
+    w_val  = max(max(len(r[1]) for r in rows_on),  max(len(r[1]) for r in rows_off))
+    w_det  = max(max(len(r[2]) for r in rows_on),  max(len(r[2]) for r in rows_off))
+    col_w  = w_val + w_det + 3
+
+    sep      = "  " + "─" * (w_name + col_w * 2 + 9)
+    hdr_line = (f"  {'':>{w_name}}  {'AutoGaze ON':^{col_w}}  │  "
+                f"{'AutoGaze OFF':^{col_w}}")
+    print()
+    print(hdr_line)
+    print(sep)
+    for i, (row_on, row_off) in enumerate(zip(rows_on, rows_off)):
+        if i == len(rows_on) - 1:
+            print(sep)
+        cell_on  = f"{row_on[1]:>{w_val}}   {row_on[2]:<{w_det}}"
+        cell_off = f"{row_off[1]:>{w_val}}   {row_off[2]:<{w_det}}"
+        print(f"  {row_on[0]:<{w_name}}  {cell_on}  │  {cell_off}")
     print(sep)
 
 
@@ -373,11 +400,11 @@ _install_timing_hooks(processor, model)
 
 
 # ── 3. 추론 함수 ──────────────────────────────────────────────────
-def run_inference(scenario: dict, question: str, autogaze_enabled: bool = True) -> tuple[str, float, float, int]:
+def run_inference(scenario: dict, question: str, autogaze_enabled: bool = True):
     """
     단일 시나리오 추론.
     autogaze_enabled=False 이면 gazing_ratio=1.0 으로 AutoGaze 선택을 우회한다.
-    반환: (답변, 전처리 시간, 생성 시간, 생성 토큰 수)
+    반환: (답변, t_prep, t_gen, n_tok, timing_snapshot)
     """
     processor.num_video_frames = scenario["proc_override"]
 
@@ -418,44 +445,44 @@ def run_inference(scenario: dict, question: str, autogaze_enabled: bool = True) 
     answer  = processor.batch_decode(new_ids, skip_special_tokens=True)[0].strip()
     n_tok   = new_ids.shape[1]
 
-    return answer, t_prep, t_gen, n_tok
+    return answer, t_prep, t_gen, n_tok, dict(_t)
 
 
 # ── 4. 질의응답 ───────────────────────────────────────────────────
-ag_modes = (
-    [(True, "AutoGaze ON"), (False, "AutoGaze OFF (전체 패치)")]
-    if args.compare_autogaze
-    else [(True, None)]
-)
-
 print("[3/3] 비디오 질의응답")
 
 for qi, question in enumerate(questions):
     print("=" * 60)
     print(f"[Q{qi + 1}] {question}")
 
-    if compare_mode:
-        # 프레임 샘플링 시나리오 비교
-        for sc in scenarios:
+    for sc in (scenarios if compare_mode else [scenarios[0]]):
+        if compare_mode:
             print(f"\n  ▶ {sc['name']}  ({sc['n_frames']}프레임)")
-            for ag_on, ag_label in ag_modes:
-                if ag_label:
-                    print(f"\n  ── {ag_label} ──")
-                print("  " + "-" * 53)
-                answer, t_prep, t_gen, n_tok = run_inference(sc, question, ag_on)
-                for line in answer.splitlines():
-                    print(f"  {line}")
-                _print_timing(t_prep, t_gen, n_tok, sc['n_frames'], ag_on)
-    else:
-        sc = scenarios[0]
-        print(f"샘플링: {sc['name']}")
-        for ag_on, ag_label in ag_modes:
-            if ag_label:
-                print(f"\n── {ag_label} ──────────────────────────────")
+
+        if args.compare_autogaze:
+            # AutoGaze ON
+            print(f"\n── AutoGaze ON ──────────────────────────────")
             print("-" * 55)
-            answer, t_prep, t_gen, n_tok = run_inference(sc, question, ag_on)
+            answer_on, t_prep_on, t_gen_on, n_tok_on, snap_on = run_inference(sc, question, True)
+            print(f"[A{qi + 1}] {answer_on}")
+
+            # AutoGaze OFF
+            print(f"\n── AutoGaze OFF (전체 패치) ──────────────────")
+            print("-" * 55)
+            answer_off, t_prep_off, t_gen_off, n_tok_off, snap_off = run_inference(sc, question, False)
+            print(f"[A{qi + 1}] {answer_off}")
+
+            # 나란히 타이밍 비교
+            _print_timing_compare(
+                sc['n_frames'],
+                (t_prep_on,  t_gen_on,  n_tok_on,  snap_on),
+                (t_prep_off, t_gen_off, n_tok_off, snap_off),
+            )
+        else:
+            print("-" * 55)
+            answer, t_prep, t_gen, n_tok, snap = run_inference(sc, question, True)
             print(f"[A{qi + 1}] {answer}")
-            _print_timing(t_prep, t_gen, n_tok, sc['n_frames'], ag_on)
+            _print_timing(t_prep, t_gen, n_tok, sc['n_frames'])
 
 print()
 print("=" * 60)
