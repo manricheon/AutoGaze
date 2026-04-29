@@ -66,8 +66,9 @@ parser.add_argument("--frames",         type=int, default=None,   help="균일 �
 parser.add_argument("--stride",         type=int, default=None,   help="매 N번째 프레임 추출 (stride 샘플링). --frames와 동시 지정 시 비교 모드")
 parser.add_argument("--model-path",     default=str(DEFAULT_MODEL))
 parser.add_argument("--autogaze-path",  default=str(DEFAULT_AG))
-parser.add_argument("--max-new-tokens",   type=int, default=256)
-parser.add_argument("--compare-autogaze", action="store_true", help="AutoGaze ON/OFF 결과를 나란히 비교")
+parser.add_argument("--max-new-tokens",   type=int,   default=256)
+parser.add_argument("--gazing-ratio",     type=float, default=0.75, help="AutoGaze gazing ratio (0~1, 기본 0.75). 낮을수록 더 적은 패치 선택.")
+parser.add_argument("--compare-autogaze", action="store_true",      help="AutoGaze ON/OFF 결과를 나란히 비교")
 args = parser.parse_args()
 
 video_path   = args.video
@@ -232,33 +233,38 @@ def _install_timing_hooks(processor, model) -> None:
     model.llm.forward = _llm_forward
 
 
-def _print_timing(t_prep: float, t_gen: float, n_tok: int, n_frames: int) -> None:
+def _print_timing(t_prep: float, t_gen: float, n_tok: int, n_frames: int,
+                  autogaze_enabled: bool = True) -> None:
     n_vis   = max(0, _t['embed_seq_len'] - _t['n_text_tok'])
     tok_s   = n_tok / max(_t['llm_decode'], 1e-4)
     other_p = max(0.0, t_prep - _t['autogaze'])
     other_g = max(0.0, t_gen  - _t['vit'] - _t['llm_prefill'] - _t['llm_decode'])
 
+    ag_time   = f"{_t['autogaze']:.2f}s"
+    ag_detail = f"{n_frames} 프레임 입력  (ratio={args.gazing_ratio})" if autogaze_enabled else "OFF"
+
     lines = [
-        ("전처리 (합계)",       f"{t_prep:.2f}s",        ""),
-        ("  AutoGaze",          f"{_t['autogaze']:.2f}s", f"{n_frames} 프레임 입력"),
-        ("  기타 전처리",        f"{other_p:.2f}s",       ""),
-        ("생성 (합계)",          f"{t_gen:.2f}s",         ""),
-        ("  ViT 인코딩",         f"{_t['vit']:.2f}s",     f"→ {n_vis} 시각 토큰"),
-        ("  LLM 프리필",         f"{_t['llm_prefill']:.2f}s", f"{_t['llm_seq_len']} 입력 토큰"),
-        ("  LLM 디코드",         f"{_t['llm_decode']:.2f}s",  f"{n_tok} 토큰  /  {tok_s:.1f} tok/s"),
-        ("  기타 생성",          f"{other_g:.2f}s",       ""),
+        ("전처리 (합계)",   f"{t_prep:.2f}s",               ""),
+        ("  AutoGaze",      ag_time,                         ag_detail),
+        ("  기타 전처리",    f"{other_p:.2f}s",              ""),
+        ("생성 (합계)",      f"{t_gen:.2f}s",                ""),
+        ("  ViT 인코딩",     f"{_t['vit']:.2f}s",            f"→ {n_vis} 시각 토큰"),
+        ("  LLM 프리필",     f"{_t['llm_prefill']:.2f}s",    f"{_t['llm_seq_len']} 입력 토큰"),
+        ("  LLM 디코드",     f"{_t['llm_decode']:.2f}s",     f"{n_tok} 토큰  /  {tok_s:.1f} tok/s"),
+        ("  기타 생성",      f"{other_g:.2f}s",              ""),
+        ("전체",             f"{t_prep + t_gen:.2f}s",       ""),
     ]
     w1 = max(len(l[0]) for l in lines)
     w2 = max(len(l[1]) for l in lines)
-    width = w1 + w2 + max(len(l[2]) for l in lines) + 6
-    sep = "  " + "─" * (width + 4)
+    w3 = max(len(l[2]) for l in lines)
+    sep = "  " + "─" * (w1 + w2 + w3 + 8)
 
     print()
     print(sep)
-    for name, t, detail in lines:
+    for i, (name, t, detail) in enumerate(lines):
+        if i == len(lines) - 1:
+            print(sep)
         print(f"  {name:<{w1}}  {t:>{w2}}   {detail}")
-    print(sep)
-    print(f"  {'전체':<{w1}}  {t_prep + t_gen:>{w2}.2f}s")
     print(sep)
 
 
@@ -332,6 +338,8 @@ processor = AutoProcessor.from_pretrained(
     model_path,
     trust_remote_code=True,
     autogaze_model_id=ag_path,
+    gazing_ratio_tile=args.gazing_ratio,
+    gazing_ratio_thumbnail=args.gazing_ratio,
 )
 
 t_proc = time.perf_counter() - t0
@@ -437,7 +445,7 @@ for qi, question in enumerate(questions):
                 answer, t_prep, t_gen, n_tok = run_inference(sc, question, ag_on)
                 for line in answer.splitlines():
                     print(f"  {line}")
-                _print_timing(t_prep, t_gen, n_tok, sc['n_frames'])
+                _print_timing(t_prep, t_gen, n_tok, sc['n_frames'], ag_on)
     else:
         sc = scenarios[0]
         print(f"샘플링: {sc['name']}")
@@ -447,7 +455,7 @@ for qi, question in enumerate(questions):
             print("-" * 55)
             answer, t_prep, t_gen, n_tok = run_inference(sc, question, ag_on)
             print(f"[A{qi + 1}] {answer}")
-            _print_timing(t_prep, t_gen, n_tok, sc['n_frames'])
+            _print_timing(t_prep, t_gen, n_tok, sc['n_frames'], ag_on)
 
 print()
 print("=" * 60)
