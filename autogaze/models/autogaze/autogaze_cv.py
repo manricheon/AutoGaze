@@ -99,9 +99,10 @@ class AutoGazeTokenSelector:
         if was_training:
             self.ag.train()
 
-        # gazing_mask: list[(B, T, N_i)] — concatenate scales
-        raw = torch.cat(gaze_outputs['gazing_mask'], dim=-1)  # (B, T, N)
-        raw = raw[:, 0].float()                                # (B, 196) — first frame
+        # gazing_mask is a list of (B, T, N_i) at multiple scales (2×2, 4×4, 7×7, 14×14).
+        # Use only the finest 14×14 scale (last element = 196 tokens).
+        raw = gaze_outputs['gazing_mask'][-1]   # (B, T, 196)
+        raw = raw[:, 0].float()                 # (B, 196) — first frame
         raw_2d = raw.reshape(-1, self.AG_GRID, self.AG_GRID)  # (B, 14, 14)
 
         if target_h != self.AG_GRID or target_w != self.AG_GRID:
@@ -133,21 +134,35 @@ class AutoGazeTokenSelector:
             has_cls_token: True for most ViTs (first token is [CLS]).
         """
         _mask = mask  # captured by closure
+        N_mask = mask.shape[-1]  # number of patch tokens in mask
 
         def _hook(module, input, output):
             # output shape: (B, N_seq, D)
-            # N_seq = num_prefix_tokens + N_patches
+            # N_seq = [CLS] + N_patches + [suffix tokens, e.g. YOLOS det-tokens]
             B = output.shape[0]
             if has_cls_token:
-                prefix = output[:, :1, :]                   # [CLS]
-                patches = output[:, 1:, :]
-                N = patches.shape[1]
-                w = _mask[:B, :N].float().unsqueeze(-1)     # (B, N, 1)
-                return torch.cat([prefix, patches * w], dim=1)
+                prefix = output[:, :1, :]           # [CLS]
+                rest = output[:, 1:, :]
+                if rest.shape[1] > N_mask:
+                    # suffix tokens exist (e.g. YOLOS detection tokens)
+                    patches = rest[:, :N_mask, :]
+                    suffix  = rest[:, N_mask:, :]
+                    w = _mask[:B].float().unsqueeze(-1)
+                    return torch.cat([prefix, patches * w, suffix], dim=1)
+                else:
+                    N = rest.shape[1]
+                    w = _mask[:B, :N].float().unsqueeze(-1)
+                    return torch.cat([prefix, rest * w], dim=1)
             else:
-                N = output.shape[1]
-                w = _mask[:B, :N].float().unsqueeze(-1)
-                return output * w
+                if output.shape[1] > N_mask:
+                    patches = output[:, :N_mask, :]
+                    suffix  = output[:, N_mask:, :]
+                    w = _mask[:B].float().unsqueeze(-1)
+                    return torch.cat([patches * w, suffix], dim=1)
+                else:
+                    N = output.shape[1]
+                    w = _mask[:B, :N].float().unsqueeze(-1)
+                    return output * w
 
         handle = embed_module.register_forward_hook(_hook)
         try:
