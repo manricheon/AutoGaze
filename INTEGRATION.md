@@ -168,6 +168,26 @@ Add `gazing_info: Optional[dict] = None` to the forward methods of both the embe
 <br>
 <br>
 
+# Integrating AutoGaze into Video-Native ViTs (V-JEPA2)
+
+The guide above targets **image ViTs repurposed for video** (e.g., SigLIP). For
+**video-native ViTs** like V-JEPA2, the same Step 1 applies but Step 2 differs:
+
+| | Image ViT for video (SigLIP) | Video-native ViT (V-JEPA2) |
+|---|---|---|
+| **Step 1** | `mask_with_gazing` — select gazed patches | Same (`mask_with_gazing`) |
+| **Step 2** | Block-causal attention mask across frames | Not needed — model already trained with full cross-temporal attention |
+| **Position** | Standard position embedding | Pass original flat indices as `position_mask` for correct RoPE |
+
+V-JEPA2's `VJEPA2RopeAttention` uses RoPE (Rotary Position Embedding) derived from
+the flat token index. After patch selection the sequence indices shift, so the
+original flat indices must be forwarded as `position_mask` to each transformer layer.
+
+See [`autogaze/vision_encoders/vjepa2/modeling_vjepa2_ag.py`](autogaze/vision_encoders/vjepa2/modeling_vjepa2_ag.py)
+for the complete implementation.
+
+---
+
 # Integrating AutoGaze into MLLMs
 
 After adding AutoGaze to a ViT, it's conceptually trivial to use it in an MLLM--all you need is to send the ViT features of gazed patches into the LLM.
