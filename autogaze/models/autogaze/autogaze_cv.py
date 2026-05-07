@@ -178,6 +178,53 @@ class AutoGazeTokenSelector:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Conv feature selector — for SegFormer-style patch embeddings
+# ══════════════════════════════════════════════════════════════════════════════
+
+class ConvFeatureSelector:
+    """Apply AutoGaze gaze mask to a Conv2d-based patch embedding (e.g. SegFormer).
+
+    SegFormer's patch_embeddings use a Conv2d projection that outputs a spatial
+    feature map ``(B, C, H, W)`` rather than a sequence ``(B, N, D)``.
+    This class hooks the Conv2d output and multiplies it by a bilinearly-
+    resized gaze mask.
+
+    Usage::
+
+        conv_sel = ConvFeatureSelector(selector, ag_video, grid_h, grid_w)
+        stage0_proj = seg_model.segformer.encoder.patch_embeddings[0].proj
+        with conv_sel.apply(stage0_proj):
+            output = seg_model(**inputs)
+    """
+
+    def __init__(
+        self,
+        selector: 'AutoGazeTokenSelector',
+        ag_video: torch.Tensor,
+        grid_h: int,
+        grid_w: int,
+    ):
+        mask_flat = selector.compute_gaze_mask(ag_video, target_h=grid_h, target_w=grid_w)
+        self.mask_2d = mask_flat.float().reshape(-1, 1, grid_h, grid_w)
+
+    @contextmanager
+    def apply(self, module: nn.Module):
+        """Hook the Conv2d output and apply the spatial gaze mask."""
+        mask = self.mask_2d
+
+        def _hook(m, inp, out):
+            B, C, H, W = out.shape
+            m2 = F.interpolate(mask[:B], size=(H, W), mode='nearest')
+            return out * m2
+
+        handle = module.register_forward_hook(_hook)
+        try:
+            yield
+        finally:
+            handle.remove()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Encoder wrapper (kept for future fine-tuning experiments)
 # ══════════════════════════════════════════════════════════════════════════════
 

@@ -18,6 +18,13 @@
    - 4.4 [Python API로 직접 사용](#44-python-api로-직접-사용)
    - 4.5 [다양한 해상도·패치 크기 지원](#45-다양한-해상도패치-크기-지원)
    - 4.6 [스트리밍 비디오 처리](#46-스트리밍-비디오-처리)
+9. [CV 태스크 비교 파이프라인](#9-cv-태스크-비교-파이프라인)
+   - 9.1 [개요 및 지원 태스크](#91-개요-및-지원-태스크)
+   - 9.2 [이미지 모드](#92-이미지-모드)
+   - 9.3 [비디오 모드](#93-비디오-모드)
+   - 9.4 [VideoMAE 재구성 패널](#94-videomae-재구성-패널)
+   - 9.5 [결과 시각화](#95-결과-시각화)
+   - 9.6 [주요 인자 레퍼런스](#96-주요-인자-레퍼런스)
    - 4.7 [Vision Encoder 연동 (SigLIP)](#47-vision-encoder-연동-siglip)
 5. [학습 (Training)](#5-학습-training)
    - 5.1 [학습 데이터 다운로드](#51-학습-데이터-다운로드)
@@ -1019,4 +1026,189 @@ VideoMAE가 인퍼런스에 필요한 경우는 선택된 패치로 **실제 복
 
 ---
 
-문서 최종 갱신: 2026-04-26
+---
+
+## 9. CV 태스크 비교 파이프라인
+
+`scripts/run_cv_tasks.py`는 AutoGaze의 토큰 선택이 다운스트림 CV 태스크에 미치는 영향을 실험하는 스크립트입니다.  
+**전체 토큰**으로 실행한 결과와 **AutoGaze가 선택한 토큰만** 사용한 결과를 나란히 비교하고,  
+선택적으로 **VideoMAE로 비선택 패치를 재구성**한 뒤 동일한 CV 태스크를 적용한 4번째 패널도 추가할 수 있습니다.
+
+---
+
+### 9.1 개요 및 지원 태스크
+
+| 태스크 | 모델 | 출력 형태 |
+|--------|------|-----------|
+| `depth` | Depth Anything V2 Small | depth 컬러맵 (근접=빨강, 원거리=파랑) |
+| `yolos` | YOLOS-tiny | bounding box + label + confidence |
+| `dinov2` | DINOv2 + ImageNet1K head | top-5 클래스 확률 막대 |
+| `segformer` | SegFormer-B2 (ADE20K) | 150-class 세그멘테이션 컬러맵 |
+| `siglip` | SigLIP Base Patch16-224 | zero-shot 유사도 확률 막대 |
+
+각 태스크는 `AutoGazeTokenSelector` (ViT 계열) 또는 `ConvFeatureSelector` (SegFormer Conv 계열)를 통해 gaze 마스크를 적용합니다.  
+AutoGaze는 단 **한 번**의 temporal forward pass(`chunk_size=16`)로 전체 청크의 gaze map을 계산하고, 이후 프레임별 태스크 추론에 재사용합니다.
+
+---
+
+### 9.2 이미지 모드
+
+단일 이미지에 대해 비율(`--ratios`)별 비교 PNG와 `metrics.json`을 생성합니다.
+
+```bash
+python scripts/run_cv_tasks.py \
+  --input assets/example_input.jpg \
+  --output-dir results/cv_tasks \
+  --tasks depth yolos dinov2 segformer siglip \
+  --ratios 0.75 0.5 0.25
+```
+
+출력:
+```
+results/cv_tasks/20260502_120000/
+├── depth_comparison.png        # [원본+gaze | full | AG75 | AG50 | AG25]
+├── detection_comparison.png
+├── recognition_comparison.png
+├── segmentation_comparison.png
+├── siglip_comparison.png
+├── summary.png                 # RMSE / 박스 수 요약 차트
+└── metrics.json                # 수치 결과
+```
+
+---
+
+### 9.3 비디오 모드
+
+MP4 입력 시 자동으로 비디오 모드로 전환됩니다.  
+프레임을 `--temporal-window`(기본 16) 단위 청크로 나누어 AutoGaze에 입력하고,  
+청크당 한 번의 forward pass로 모든 프레임의 gaze map을 구합니다.
+
+```bash
+python scripts/run_cv_tasks.py \
+  --input assets/example_bbb.mp4 \
+  --output-dir results/cv_tasks \
+  --tasks depth yolos dinov2 segformer siglip \
+  --ag-ratio 0.5 \
+  --stride 2 \
+  --save-frames
+```
+
+| 인자 | 설명 |
+|------|------|
+| `--stride N` | N프레임마다 1프레임 처리 (기본 1) |
+| `--temporal-window T` | AutoGaze 청크 크기, 기본 16 (학습 시 사용 크기) |
+| `--ag-ratio R` | 전체 패치 중 선택 비율 (0~1) |
+| `--save-frames` | `frames/<task>/frame_XXXX.png`로 프레임별 PNG 저장 |
+
+출력:
+```
+results/cv_tasks/20260502_120000/
+├── depth_video.mp4
+├── yolos_video.mp4
+├── dinov2_video.mp4
+├── segformer_video.mp4
+├── siglip_video.mp4
+└── frames/
+    ├── depth/        frame_0000.png …
+    ├── yolos/        frame_0000.png …
+    ├── dinov2/       frame_0000.png …
+    ├── segformer/    frame_0000.png …
+    └── siglip/       frame_0000.png …
+```
+
+각 프레임 PNG는 4-panel 형식입니다 (VideoMAE 옵션 없을 때는 3-panel):
+
+```
+[원본+gaze overlay | 전체 토큰 결과 | AG 선택 토큰 결과 | VideoMAE 재구성 결과]
+```
+
+> **비율 일관성**: 모든 패널은 원본 프레임 해상도로 정규화되어 aspect ratio가 동일합니다.
+
+---
+
+### 9.4 VideoMAE 재구성 패널
+
+`--videomae-recon` 플래그를 추가하면 4번째 패널이 생성됩니다.
+
+```bash
+python scripts/run_cv_tasks.py \
+  --input assets/example_bbb.mp4 \
+  --output-dir results/cv_tasks \
+  --tasks depth segformer siglip \
+  --ag-ratio 0.5 \
+  --stride 2 \
+  --save-frames \
+  --videomae-recon
+```
+
+**동작 원리:**
+
+```
+원본 비디오 (T=16 청크)
+    │
+    ├─→ AutoGaze → gaze map (14×14)
+    │
+    └─→ VideoMAE (MCG-NJU/videomae-base)
+            ├── bool_masked_pos = ~gaze_bool  (비선택 패치 = MASKED)
+            ├── tubelet_size=2, 총 1568 패치
+            ├── 재구성 logits → per-patch un-normalize → ImageNet un-normalize
+            └── 재구성 프레임 (224×224 → 원본 해상도로 리사이즈)
+                    │
+                    └─→ 동일한 CV 태스크 적용 → 4번째 패널
+```
+
+VideoMAE는 **non-gaze 패치를 마스크**하고 복원하므로, 재구성 프레임에서의 CV 태스크 결과는  
+"AutoGaze가 보지 않은 영역을 모델이 어떻게 추정하는지"를 보여줍니다.
+
+> **주의**: 재구성 품질은 gaze 선택 비율에 따라 달라집니다. ratio가 낮을수록 더 많은 패치가 마스크되어 재구성 품질이 저하됩니다.
+
+---
+
+### 9.5 결과 시각화
+
+저장된 결과를 다시 불러와 시각화하려면:
+
+```bash
+# 특정 run 디렉토리 확인
+python scripts/visualize_cv_results.py \
+  --results-dir results/cv_tasks/20260502_120000 \
+  --show depth segmentation siglip metrics
+
+# 최신 run 자동 선택
+python scripts/visualize_cv_results.py \
+  --results-dir results/cv_tasks \
+  --latest
+
+# 모든 run 목록
+python scripts/visualize_cv_results.py \
+  --results-dir results/cv_tasks \
+  --list
+
+# 파일로 저장
+python scripts/visualize_cv_results.py \
+  --results-dir results/cv_tasks/20260502_120000 \
+  --save overview.png
+```
+
+---
+
+### 9.6 주요 인자 레퍼런스
+
+```
+--input PATH              이미지(.jpg/.png) 또는 비디오(.mp4)
+--output-dir DIR          결과 저장 루트 디렉토리
+--tasks [TASK ...]        depth yolos dinov2 segformer siglip (기본: 전체)
+--ratios [R ...]          이미지 모드: 비교할 ratio 목록 (기본: 0.75 0.5 0.25)
+--ag-ratio R              비디오 모드: 단일 ratio (기본: 0.5)
+--stride N                비디오 프레임 샘플링 간격 (기본: 1)
+--temporal-window T       AutoGaze 청크 크기, 기본 16
+--save-frames             프레임별 PNG 저장 (비디오 모드)
+--videomae-recon          VideoMAE 재구성 패널 추가 (비디오 모드)
+--score-thr THR           YOLOS confidence threshold (기본: 0.3)
+--ag-path PATH            AutoGaze 가중치 경로 (기본: weights/AutoGaze)
+--device DEVICE           cpu / cuda / mps
+```
+
+---
+
+문서 최종 갱신: 2026-05-02
