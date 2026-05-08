@@ -144,5 +144,6 @@ class VJEPA2Projector(nn.Module):
     @classmethod
     def new_for_lm(cls, lm_model, vit_hidden: int = 1024) -> "VJEPA2Projector":
         """LLM 모델에서 hidden_size를 자동으로 읽어 프로젝터 생성."""
-        lm_hidden = lm_model.config.hidden_size
+        conf = lm_model.config
+        lm_hidden = getattr(conf, "hidden_size", getattr(conf, "text_config", conf).hidden_size)
         return cls(vit_hidden=vit_hidden, lm_hidden=lm_hidden)

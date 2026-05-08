@@ -1005,8 +1005,11 @@ class VJEPA2LLMRunner(VJEPA2Runner):
         self.lm_tokenizer = AutoTokenizer.from_pretrained(lm_path, local_files_only=_lfo)
         if self.lm_tokenizer.pad_token is None:
             self.lm_tokenizer.pad_token = self.lm_tokenizer.eos_token
-        log.info("VJEPA2LLMRunner: LLM ready  hidden_size=%d",
-                 self.lm.config.hidden_size)
+
+        # NVILAConfig stores LLM params in text_config
+        conf = self.lm.config
+        h_size = getattr(conf, "hidden_size", getattr(conf, "text_config", conf).hidden_size)
+        log.info("VJEPA2LLMRunner: LLM ready  hidden_size=%d", h_size)
 
     def _load_projector(self, projector_path: Optional[str]) -> None:
         from autogaze.vision_encoders.vjepa2 import VJEPA2Projector
@@ -1261,8 +1264,11 @@ class NVILAVjepa2Runner(VJEPA2LLMRunner):
         if self.lm_tokenizer.pad_token is None:
             self.lm_tokenizer.pad_token = self.lm_tokenizer.eos_token
 
-        log.info("NVILAVjepa2Runner: LLM ready  hidden_size=%d",
-                 self.lm.config.hidden_size)
+
+        # NVILAConfig stores LLM params in text_config
+        conf = self.lm.config
+        h_size = getattr(conf, "hidden_size", getattr(conf, "text_config", conf).hidden_size)
+        log.info("NVILAVjepa2Runner: LLM ready  hidden_size=%d", h_size)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
