@@ -6,6 +6,7 @@ MLLM runner registry for video QA benchmarks.
 
 Built-in runners:
   - nvila           NVILA-8B with native AutoGaze processor integration
+  - nvila_vjepa2    V-JEPA2 ViT + projector + NVILA LLM; MCQ video QA
   - qwen25vl        Qwen2.5-VL-7B with AutoGaze applied via zero-shot forward hook
   - qwen25vl_full   Qwen2.5-VL-7B with AutoGaze full ViT integration (per-temporal-chunk)
   - vjepa2          V-JEPA2 encoder with AutoGaze applied via zero-shot forward hook
@@ -62,6 +63,7 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
@@ -167,8 +169,13 @@ class NVILARunner(BaseMLLMRunner):
         prompt: str,
         max_new_tokens: int = 16,
     ) -> str:
+        # NVILA processor requires a <video> token in the text so it knows
+        # where to insert visual tokens.  Prepend it before the question.
+        video_token = self.processor.tokenizer.video_token
+        text = f"{video_token}\n{prompt}"
+
         inputs = self.processor(
-            text=[prompt],
+            text=text,
             videos=[frames],
             return_tensors="pt",
             padding=True,
@@ -1127,6 +1134,121 @@ class VJEPA2LLMRunner(VJEPA2Runner):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# NVILA + V-JEPA2 runner  (V-JEPA2 ViT backbone, NVILA language model)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class NVILAVjepa2Runner(VJEPA2LLMRunner):
+    """AutoGaze + V-JEPA2 ViT + NVILA LLM for video QA.
+
+    Architecture
+    ------------
+    Video (T frames)
+      ↓  AutoGaze  [optional, controlled by gazing_ratio]
+      ↓  V-JEPA2 encoder  (loaded from *vjepa2_path*)
+    (B, T_p × k, 1024) patch features
+      ↓  temporal mean pooling  → (B, T_p, 1024)
+      ↓  VJEPA2Projector (LayerNorm + 2-layer MLP)
+    (B, T_p, nvila_lm_hidden) video tokens
+      ↓  prepend to text embeddings
+    NVILA LLM  → answer
+
+    This replaces NVILA's native SigLIP ViT with the more capable V-JEPA2
+    video encoder while keeping the same NVILA language model.
+
+    *model_path* points to NVILA weights (provides the LLM component);
+    *vjepa2_path* points to V-JEPA2 weights (provides the ViT encoder).
+
+    The projector must be fine-tuned to bridge the two; pass a trained
+    *projector_path* for inference or None to initialise randomly for training.
+
+    Usage::
+
+        runner = load_runner(
+            mllm           = "nvila_vjepa2",
+            model_path     = "weights/NVILA-8B-HD-Video",
+            vjepa2_path    = "weights/vjepa2-vitl-fpc64-256",
+            autogaze_path  = "weights/AutoGaze",
+            gazing_ratio   = 0.75,
+            projector_path = "weights/nvila_vjepa2_projector",
+        )
+    """
+
+    name = "nvila_vjepa2"
+    supports_mcq = True
+
+    def __init__(
+        self,
+        model_path: str,
+        vjepa2_path: str,
+        autogaze_path: Optional[str],
+        gazing_ratio: float,
+        dtype: torch.dtype = torch.bfloat16,
+        projector_path: Optional[str] = None,
+        integration: str = "full",
+    ):
+        """
+        Args:
+            model_path:      HF ID or path to NVILA weights (provides the LLM).
+            vjepa2_path:     HF ID or path to V-JEPA2 weights (provides the ViT).
+            autogaze_path:   AutoGaze weights, or None for baseline.
+            gazing_ratio:    Fraction of patches to keep (0–1).
+            dtype:           Torch dtype (default: bfloat16).
+            projector_path:  Path to a saved ``VJEPA2Projector`` checkpoint, or
+                             None to use a randomly-initialised projector.
+            integration:     ``'full'`` (default) or ``'hook'``.
+        """
+        # 1. V-JEPA2 encoder + AutoGaze  (skip VJEPA2LLMRunner.__init__ to
+        #    avoid loading a Qwen LM; we bring our own LLM from NVILA instead)
+        VJEPA2Runner.__init__(
+            self,
+            model_path    = vjepa2_path,
+            autogaze_path = autogaze_path,
+            gazing_ratio  = gazing_ratio,
+            dtype         = dtype,
+            integration   = integration,
+        )
+
+        # 2. NVILA language model
+        self._load_nvila_lm(model_path, dtype)
+
+        # 3. Projector: V-JEPA2 hidden_size (1024) → NVILA LLM hidden_size
+        self._load_projector(projector_path)
+
+    # ------------------------------------------------------------------ #
+    # Loading helpers
+    # ------------------------------------------------------------------ #
+
+    def _load_nvila_lm(self, model_path: str, dtype: torch.dtype) -> None:
+        from transformers import AutoModel, AutoTokenizer
+        _lfo = _local(model_path)
+
+        log.info("NVILAVjepa2Runner: loading NVILA from %s", model_path)
+        nvila = AutoModel.from_pretrained(
+            model_path,
+            trust_remote_code=True,
+            torch_dtype=dtype,
+            device_map="auto",
+            local_files_only=_lfo,
+        )
+        nvila.eval()
+
+        # Extract the LLM sub-module from NVILA's composite model
+        self.lm = getattr(nvila, "language_model", nvila)
+
+        log.info("NVILAVjepa2Runner: loading NVILA tokenizer from %s", model_path)
+        self.lm_tokenizer = AutoTokenizer.from_pretrained(
+            model_path,
+            trust_remote_code=True,
+            local_files_only=_lfo,
+        )
+        if self.lm_tokenizer.pad_token is None:
+            self.lm_tokenizer.pad_token = self.lm_tokenizer.eos_token
+
+        log.info("NVILAVjepa2Runner: LLM ready  hidden_size=%d",
+                 self.lm.config.hidden_size)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Vanilla SigLIP runner  (HuggingFace transformers, unmodified)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1348,6 +1470,7 @@ class SigLIPRunner(BaseMLLMRunner):
 
 RUNNERS: Dict[str, type] = {
     "nvila"         : NVILARunner,
+    "nvila_vjepa2"  : NVILAVjepa2Runner,   # V-JEPA2 ViT + NVILA LLM + projector, MCQ video QA
     "qwen25vl"      : Qwen25VLRunner,      # zero-shot hook (integration='hook')
     "qwen25vl_full" : Qwen25VLRunner,      # full modified-ViT integration
     "vjepa2"        : VJEPA2Runner,        # V-JEPA2 encoder, feature extraction only
@@ -1363,6 +1486,7 @@ _RUNNER_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "vjepa2"        : {"integration": "hook"},
     "vjepa2_full"   : {"integration": "full"},
     "vjepa2_llm"    : {"integration": "full"},
+    "nvila_vjepa2"  : {"integration": "full"},
 }
 
 
@@ -1378,23 +1502,50 @@ def load_runner(
 
     Args:
         mllm:          Runner key — one of ``RUNNERS``.
+                       ``'nvila'``         → NVILA-8B with native AutoGaze processor.
+                       ``'nvila_vjepa2'``  → V-JEPA2 ViT + NVILA LLM; requires
+                                             ``vjepa2_path=`` kwarg.
                        ``'qwen25vl'``      → Qwen2.5-VL, zero-shot hook.
                        ``'qwen25vl_full'`` → Qwen2.5-VL, full ViT integration.
                        ``'vjepa2'``        → V-JEPA2 encoder, feature extraction (hook).
                        ``'vjepa2_full'``   → V-JEPA2 encoder, feature extraction (full).
                        ``'vjepa2_llm'``    → V-JEPA2 ViT + projector + LLM, video QA.
                        ``'siglip'``        → Vanilla HF SigLIP, feature extraction.
-        model_path:    Path or HF hub ID for the MLLM weights.
+        model_path:    Path or HF hub ID for the primary model weights.
+                       For ``'nvila_vjepa2'`` this is the NVILA path (LLM source);
+                       pass V-JEPA2 path via ``vjepa2_path=``.
         autogaze_path: Path to AutoGaze weights, or None for baseline.
         gazing_ratio:  Fraction of patches retained per frame (0–1).
         dtype:         Torch dtype for the MLLM (default: bfloat16).
         **kwargs:      Extra keyword arguments forwarded to the runner constructor.
+                       ``vjepa2_path``     (str, required for ``'nvila_vjepa2'``)
+                       ``lm_path``         (str, required for ``'vjepa2_llm'``)
+                       ``projector_path``  (str, optional for LLM runners)
+                       ``integration``     (str, ``'full'`` or ``'hook'``)
     """
     if mllm not in RUNNERS:
         raise ValueError(
             f"Unknown MLLM '{mllm}'.  Available: {sorted(RUNNERS.keys())}"
         )
     cls = RUNNERS[mllm]
+
+    # nvila_vjepa2 has an extra required positional-style kwarg
+    if mllm == "nvila_vjepa2":
+        vjepa2_path = kwargs.pop("vjepa2_path", None)
+        if vjepa2_path is None:
+            raise ValueError(
+                "load_runner with mllm='nvila_vjepa2' requires vjepa2_path=<path>."
+            )
+        merged = {**_RUNNER_DEFAULTS.get(mllm, {}), **kwargs}
+        return cls(
+            model_path    = model_path,
+            vjepa2_path   = vjepa2_path,
+            autogaze_path = autogaze_path,
+            gazing_ratio  = gazing_ratio,
+            dtype         = dtype,
+            **merged,
+        )
+
     # Merge runner-specific defaults (e.g. integration mode) then user kwargs
     merged = {**_RUNNER_DEFAULTS.get(mllm, {}), **kwargs}
     return cls(
