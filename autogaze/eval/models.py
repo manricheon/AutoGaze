@@ -128,14 +128,25 @@ class NVILARunner(BaseMLLMRunner):
     ):
         from transformers import AutoProcessor, AutoModel
 
-        _lfo = _local(model_path)
-        proc_kwargs: Dict[str, Any] = dict(trust_remote_code=True, local_files_only=_lfo)
-        if autogaze_path is not None:
-            proc_kwargs.update(
-                autogaze_model_id=autogaze_path,
-                gazing_ratio_tile=gazing_ratio,
-                gazing_ratio_thumbnail=gazing_ratio,
+        # processing_nvila.py internally fetches AutoGaze config from HF when
+        # autogaze_model_id is omitted, even for the baseline case.  To avoid
+        # any network call we always supply autogaze_model_id: for the true
+        # baseline pass autogaze_path with gazing_ratio=1.0 (all patches).
+        if autogaze_path is None:
+            raise ValueError(
+                "NVILARunner requires autogaze_path even for the baseline. "
+                "Pass autogaze_path=<AG_PATH> with gazing_ratio=1.0 to process "
+                "all patches (equivalent to AutoGaze OFF) without a Hub lookup."
             )
+
+        _lfo = _local(model_path)
+        proc_kwargs: Dict[str, Any] = dict(
+            trust_remote_code=True,
+            local_files_only=_lfo,
+            autogaze_model_id=autogaze_path,
+            gazing_ratio_tile=gazing_ratio,
+            gazing_ratio_thumbnail=gazing_ratio,
+        )
 
         log.info("NVILARunner: loading processor from %s", model_path)
         self.processor = AutoProcessor.from_pretrained(model_path, **proc_kwargs)
