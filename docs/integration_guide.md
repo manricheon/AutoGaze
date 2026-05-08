@@ -1,92 +1,337 @@
-# Integrating AutoGaze into ViTs and MLLMs: A Comparative Guide
+# AutoGaze Integration Guide
 
-This document provides a technical overview and performance comparison of integrating **AutoGaze** into various Vision Transformers (ViTs) and Multimodal Large Language Models (MLLMs).
+This document covers two topics:
 
----
-
-## 1. System Architecture (시스템 아키텍처)
-
-AutoGaze acts as an **intelligent token filter** that sits between the raw video frames and the vision encoder.
-
-AutoGaze는 원본 비디오 프레임과 비전 인코더 사이에서 동작하는 **지능형 토큰 필터** 역할을 합니다.
+1. **Integration modes** — how AutoGaze attaches to an existing ViT/MLLM.
+2. **Adding a new backend** — step-by-step guide for plugging in a new ViT, a new LLM, or a new ViT+LLM combination.
 
 ---
 
-## 2. Integration Modes: Hook vs. Full (통합 모드 비교)
+## 1. System Architecture
 
-| Feature (기능) | Hook Mode (Zero-shot) | Full Mode (Integrated) |
-| :--- | :--- | :--- |
-| **Mechanism** | PyTorch Forward Hook | Forward Method Override |
-| **Sequence Length** | **Unchanged ($N_{all}$)** | **Reduced ($N_{gazed}$)** |
-| **Computation** | Zeroes non-selected tokens | Skips non-selected tokens |
-| **Complexity** | $O(N^2)$ attention overhead | **$O(k^2)$ quadratic saving** |
-| **Main Use Case** | Accuracy/Task Validation | Efficiency/Latency Benchmark |
+AutoGaze sits between raw video frames and the vision encoder.  It selects the most informative patch positions and discards the rest before (or inside) the ViT.
 
-### Key Differences in Usage (사용 시 주요 차이점)
-
-#### **Hook Mode (훅 모드)**
-- **KOR**: 모델의 소스 코드를 수정할 필요 없이, 인코더의 출력층에 "가이즈 마스크"를 곱해주는 방식입니다. 토큰의 개수 자체는 줄어들지 않지만(0으로 채워짐), 어텐션 층에서 해당 토큰들이 무시되도록 유도합니다.
-- **Why use it?**: 새로운 모델에 AutoGaze를 빠르게 적용해보고, **정확도(Accuracy)**가 유지되는지 테스트할 때 가장 좋습니다. (속도 향상은 미미함)
-
-#### **Full Mode (풀 모드)**
-- **KOR**: 인코더 내부의 `forward` 함수를 직접 수정하여, 선택되지 않은 토큰을 메모리 상에서 **완전히 제거**하는 방식입니다.
-- **Why use it?**: AutoGaze의 진정한 효과인 **추론 속도 향상(Latency)**과 **메모리 절감(VRAM)**을 검증할 때 반드시 필요합니다.
+```
+Video frames
+    │
+    ▼
+AutoGaze model  →  gaze mask  (14 × 14 binary per frame)
+    │
+    ▼
+Vision Encoder  (processes only selected patches)
+    │
+    ▼
+LLM / task head  →  answer / features
+```
 
 ---
 
-## 3. Testing Strategy: Which mode should I use? (테스트 전략)
+## 2. Integration Modes
 
-> **"To test AutoGaze effect, we should use Full mode, isn't it?"**
-> **"AutoGaze의 효과를 제대로 보려면 풀 모드를 써야 하나요?"**
+| Mode | Mechanism | Sequence length | Use case |
+|:--|:--|:--|:--|
+| **native** | AutoGaze baked into the model processor | Reduced internally | NVILA only; most transparent |
+| **hook** | Forward hook zeroes non-selected token embeddings | **Unchanged** ($N_{all}$) | Zero-shot accuracy validation for new models |
+| **full** | ViT `forward()` modified to skip non-selected tokens | **Reduced** ($N_{gazed}$) | Latency and VRAM benchmarks |
 
-**YES and NO.** It depends on what "effect" you are measuring:
-어떤 "효과"를 측정하느냐에 따라 달라집니다:
+### Which mode should I use?
 
-1.  **If testing Accuracy (성능/정확도 테스트)**:
-    - **Hook Mode** is sufficient. Since tokens are zeroed, they don't contribute to the output. If the model works well in Hook mode, it will work even better (or identical) in Full mode.
-    - **훅 모드**로 충분합니다. 토큰이 0으로 처리되어 결과에 영향을 주지 않으므로, 이 모드에서 정확도가 잘 나온다면 알고리즘적으로 검증된 것입니다.
+- **Start with hook** when adding a new model.  It requires no model code changes and lets you confirm that AutoGaze helps accuracy before investing in full integration.
+- **Switch to full** once hook accuracy is validated.  Only full mode gives the $O(k^2)$ attention speedup and VRAM reduction.
 
-2.  **If testing Efficiency (효율성/속도 테스트)**:
-    - **Full Mode** is mandatory. You cannot see the $O(k^2)$ speedup or VRAM savings in Hook mode because the GPU still allocates memory for all tokens.
-    - **풀 모드**가 필수입니다. 훅 모드에서는 GPU가 모든 토큰을 위한 메모리를 여전히 할당하기 때문에, 실제 연산량 감소와 속도 향상을 확인하려면 토큰을 물리적으로 제거하는 풀 모드가 필요합니다.
-
----
-
-## 4. Compatibility Matrix (호환성 매트릭스)
-
-All ViT variants can technically support both modes, but **Full Mode** requires specific architectural "fixes."
-
-| ViT Variant | Hook Mode | Full Mode | Engineering Requirement |
-| :--- | :---: | :---: | :--- |
-| **Image-based** (e.g. SigLIP) | ✅ | ✅ | Block-Causal Masking |
-| **Video-native** (Absolute PE) | ✅ | ✅ | None (Native awareness) |
-| **Video-native** (RoPE) | ✅ | ✅ | **RoPE Position Correction** |
-| **Hierarchical** (e.g. Qwen2.5) | ✅ | ✅ | Pre-reordering Masking |
+Hook mode accuracy ≈ full mode accuracy.  Speed improvement only visible in full mode.
 
 ---
 
-## 5. Structural Comparison (구조적 비교)
+## 3. Compatibility Matrix
 
-| Attribute (속성) | SigLIP (Vanilla/NVILA) | V-JEPA2 (Native) |
-| :--- | :--- | :--- |
-| **Base Domain** | Image (2D) | Video (3D) |
-| **Patching** | 2D ($16 \times 16$) | 3D Tubelet ($2 \times 16 \times 16$) |
-| **Attention** | Causal (via block-mask) | Full Bidirectional |
-| **Positional Enc.** | Absolute (sin/cos or learned) | **Rotary (RoPE)** |
-| **AutoGaze Sync** | Flattening + Masking | **Index-based RoPE Mapping** |
+| ViT type | Hook | Full | Required fix for Full |
+|:--|:--:|:--:|:--|
+| Image ViT (SigLIP / CLIP) | ✅ | ✅ | Block-causal attention mask |
+| Video ViT — absolute PE (V-JEPA2) | ✅ | ✅ | None (native temporal awareness) |
+| Video ViT — RoPE (e.g. future models) | ✅ | ✅ | RoPE position re-indexing after masking |
+| Hierarchical / window attention (Qwen2.5) | ✅ | ✅ | Pre-reorder masking (before cu_seqlens) |
+
+---
+
+## 4. Runner Naming Convention
+
+Runner keys follow **`{vit}_{lm}`** — ViT name first, LLM name second.  Integration mode is a separate `--integration` flag, not part of the key.
+
+| Runner key | ViT | LLM | Default integration |
+|:--|:--|:--|:--|
+| `nvila` | SigLIP (custom) | NVILA | native |
+| `vjepa2_nvila` | V-JEPA2 | NVILA | full |
+| `siglip_qwen25` | SigLIP (Qwen internal) | Qwen2.5-VL | hook |
+| `vjepa2_qwen25` | V-JEPA2 | Qwen2.5-7B | full |
+| `vjepa2` | V-JEPA2 | — (features only) | hook |
+| `siglip` | SigLIP (HF vanilla) | — (features only) | hook |
 
 ---
 
-## 6. Performance Comparison (성능 비교)
+## 5. Adding a New Backend
 
-Average results across 16-frame 224px video chunks on A100 GPU.
+### 5.1 Adding a New ViT (hook mode — fast path)
 
-| Model Config | Structure | Token Count | Latency (ms) | VRAM (GB) |
-| :--- | :---: | :---: | :---: | :---: |
-| **SigLIP (NVILA)** | Baseline | 3,136 | ~320 | ~18.5 |
-| **SigLIP (NVILA)** | **Variant 1 (Full)** | **784** | **~145** | **~16.8** |
-| **V-JEPA2 (Substitute)** | Baseline | 1,568 | ~55 (ViT) | ~2.1 (ViT) |
-| **V-JEPA2 (Substitute)** | **Variant 4 (Full)** | **392** | **~22 (ViT)** | **~1.1 (ViT)** |
+Hook mode needs no model code changes.  The only requirement is that the ViT produces patch-level token embeddings you can zero out.
+
+**Step 1 — create the encoder module** (optional, only if you need custom loading):
+
+```
+autogaze/vision_encoders/<your_vit>/
+    __init__.py
+    modeling_<your_vit>_ag.py   ← AutoGaze-aware forward wrapper
+```
+
+**Step 2 — implement the hook**:
+
+```python
+import torch
+from autogaze.models.autogaze.autogaze import AutoGazeModel
+from autogaze.models.autogaze.image_processing_autogaze import AutoGazeImageProcessor
+
+def apply_autogaze_hook(vit_model, ag_model, ag_processor, frames, gazing_ratio):
+    """Zero out non-selected token embeddings via a forward hook."""
+    # 1. Run AutoGaze to get the gaze mask
+    inputs = ag_processor(images=frames, return_tensors="pt")
+    with torch.no_grad():
+        out = ag_model(inputs, gazing_ratio=gazing_ratio)
+    gaze_mask = out["gazing_mask"][-1]   # (T, H_ag*W_ag)  — 14×14 = 196 positions
+
+    # 2. Interpolate to the ViT's patch grid
+    H_vit = W_vit = int(vit_model.config.image_size / vit_model.config.patch_size)
+    mask_2d = gaze_mask.reshape(-1, 14, 14).float()
+    mask_vit = torch.nn.functional.interpolate(
+        mask_2d.unsqueeze(0), size=(H_vit, W_vit), mode="bilinear"
+    ).squeeze(0).reshape(-1, H_vit * W_vit)   # (T, N_patches)
+
+    # 3. Register the hook
+    def _hook(module, input, output):
+        # output: (B, N, C)  where N = H_vit * W_vit (+ optional CLS)
+        n_patch = H_vit * W_vit
+        output[:, -n_patch:] *= mask_vit.unsqueeze(-1).to(output.device)
+        return output
+
+    handle = vit_model.encoder.layers[-1].register_forward_hook(_hook)
+    return handle   # call handle.remove() after the forward pass
+```
+
+**Step 3 — create a runner class**:
+
+```python
+from autogaze.eval.models import BaseMLLMRunner, _local
+import torch
+
+class MyViTRunner(BaseMLLMRunner):
+    name = "myvit"
+    supports_mcq = False   # feature extraction only (no LLM)
+
+    def __init__(self, model_path, autogaze_path, gazing_ratio,
+                 dtype=torch.bfloat16, integration="hook"):
+        from transformers import AutoModel, AutoProcessor
+        self.model = AutoModel.from_pretrained(
+            model_path, local_files_only=_local(model_path), torch_dtype=dtype,
+        ).eval()
+        self.integration = integration
+        self.gazing_ratio = gazing_ratio
+        # load AutoGaze if requested
+        if autogaze_path:
+            from autogaze.models.autogaze.autogaze import AutoGazeModel
+            from autogaze.models.autogaze.image_processing_autogaze import AutoGazeImageProcessor
+            self.ag_model = AutoGazeModel.from_pretrained(autogaze_path).eval()
+            self.ag_proc  = AutoGazeImageProcessor.from_pretrained(autogaze_path)
+        else:
+            self.ag_model = self.ag_proc = None
+
+    def run(self, frames, prompt, max_new_tokens=16):
+        raise NotImplementedError("MyViTRunner is feature-extraction only.")
+```
+
+**Step 4 — register in `RUNNERS`**:
+
+```python
+# autogaze/eval/models.py  (bottom of file, primary keys section)
+from autogaze.vision_encoders.myvit.modeling_myvit_ag import MyViTRunner
+
+RUNNERS["myvit"] = MyViTRunner
+_RUNNER_DEFAULTS["myvit"] = {"integration": "hook"}
+```
+
+**Step 5 — test with the benchmark CLI**:
+
+```bash
+python -m autogaze.eval.run_benchmark \
+    --task videomme \
+    --mllm myvit \
+    --model-path weights/MyViT \
+    --autogaze-path weights/AutoGaze \
+    --integration hook \
+    --max-samples 50
+```
 
 ---
-*Document generated for AutoGaze Architecture Analysis (2026).*
+
+### 5.2 Upgrading to Full Mode
+
+Full mode physically removes non-selected tokens inside the ViT's `forward()`.  This requires modifying (or wrapping) the ViT's transformer backbone.
+
+**Pattern**:
+
+```python
+# autogaze/vision_encoders/<your_vit>/modeling_<your_vit>_ag.py
+
+class AutoGazeMyViTEncoder(nn.Module):
+    """Drop-in replacement for <YourViT>.encoder with AutoGaze masking."""
+
+    def __init__(self, original_encoder, gaze_mask):
+        super().__init__()
+        self.encoder = original_encoder
+        # gaze_mask: (N_patches,) bool — True = keep
+        self.register_buffer("gaze_mask", gaze_mask)
+
+    def forward(self, hidden_states, **kwargs):
+        # Select only gazed tokens
+        hidden_states = hidden_states[:, self.gaze_mask]    # (B, k, C)
+        return self.encoder(hidden_states, **kwargs)
+```
+
+**Key considerations by ViT type**:
+
+| ViT type | What to fix |
+|:--|:--|
+| **Image ViT** (SigLIP) | Token removal changes spatial positions → add block-causal attention mask so remaining tokens attend only to spatially preceding ones |
+| **Video ViT, absolute PE** (V-JEPA2) | No position correction needed; absolute embeddings are set before masking |
+| **Video ViT, RoPE** | After removal, remaining token indices must be remapped to their original positions before applying RoPE frequencies |
+| **Hierarchical / window attn** (Qwen2.5) | Apply mask before the window-reordering step (`cu_seqlens` computation) |
+
+See `autogaze/vision_encoders/vjepa2/modeling_vjepa2_ag.py` (V-JEPA2 full mode) and `autogaze/vision_encoders/qwen25vl/modeling_qwen25vl_ag.py` (Qwen2.5 full mode) as reference implementations.
+
+---
+
+### 5.3 Adding a New LLM (paired with an existing ViT)
+
+**Step 1 — subclass an existing ViT runner**:
+
+```python
+class MyViTMyLLMRunner(MyViTRunner):
+    name = "myvit_myllm"
+    supports_mcq = True
+
+    def __init__(self, model_path, autogaze_path, gazing_ratio,
+                 lm_path, projector_path=None, dtype=torch.bfloat16, **kw):
+        # Load the ViT part via super().__init__
+        super().__init__(model_path, autogaze_path, gazing_ratio, dtype=dtype, **kw)
+
+        # Load the LLM
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        self.lm = AutoModelForCausalLM.from_pretrained(
+            lm_path, local_files_only=_local(lm_path), torch_dtype=dtype, device_map="auto",
+        ).eval()
+        self.tokenizer = AutoTokenizer.from_pretrained(lm_path, local_files_only=_local(lm_path))
+
+        # Load or create a projector (maps ViT dim → LLM dim)
+        from autogaze.vision_encoders.vjepa2.projector import VJEPA2Projector
+        vit_hidden = self.model.config.hidden_size
+        lm_hidden  = self.lm.config.hidden_size
+        if projector_path:
+            self.projector = VJEPA2Projector.from_pretrained(projector_path)
+        else:
+            self.projector = VJEPA2Projector(vit_hidden, lm_hidden)
+
+    def run(self, frames, prompt, max_new_tokens=16):
+        # 1. Encode video with AutoGaze
+        with torch.no_grad():
+            video_feats = self.encode_video(frames)   # (1, T, C_vit)
+        video_tokens = self.projector(video_feats)    # (1, T, C_lm)
+
+        # 2. Build input: [video tokens] + [text tokens]
+        text_ids  = self.tokenizer(prompt, return_tensors="pt").input_ids
+        text_emb  = self.lm.get_input_embeddings()(text_ids.to(video_tokens.device))
+        inputs_emb = torch.cat([video_tokens, text_emb], dim=1)
+
+        # 3. Generate
+        with torch.inference_mode():
+            out = self.lm.generate(inputs_embeds=inputs_emb, max_new_tokens=max_new_tokens)
+        return self.tokenizer.decode(out[0], skip_special_tokens=True).strip()
+```
+
+**Step 2 — register**:
+
+```python
+RUNNERS["myvit_myllm"] = MyViTMyLLMRunner
+_RUNNER_DEFAULTS["myvit_myllm"] = {"integration": "full"}
+```
+
+**Step 3 — run**:
+
+```bash
+python -m autogaze.eval.run_benchmark \
+    --task videomme \
+    --mllm myvit_myllm \
+    --model-path weights/MyViT \
+    --autogaze-path weights/AutoGaze \
+    --gazing-ratio 0.75 \
+    -- lm_path=weights/MyLLM
+```
+
+> **Note**: extra constructor kwargs (`lm_path`, `projector_path`, `vjepa2_path`) can be passed as `**runner_kwargs` via `load_runner()` or from a Python call.  The CLI currently exposes `--vjepa2-path` only for `vjepa2_nvila`; add a similar argument for new runners that need it.
+
+---
+
+### 5.4 Minimal Checklist for a New Backend
+
+```
+□  Encoder module (autogaze/vision_encoders/<vit>/) or inline in models.py
+□  Runner class subclasses BaseMLLMRunner
+□  Runner implements load (in __init__) + run()
+□  name = "<vit>_<lm>" set on the class
+□  RUNNERS["<vit>_<lm>"] = MyRunner registered
+□  _RUNNER_DEFAULTS["<vit>_<lm>"] = {"integration": "hook"|"full"} set
+□  Hook mode validated first (--integration hook, check accuracy delta)
+□  Full mode implemented if latency/VRAM benchmarks needed
+□  Entry added to runner table in docs/eval_guide.md
+□  GEMINI.md updated (local guide)
+```
+
+---
+
+## 6. Integration Mode Deep Dives
+
+### 6.1 Block-Causal Masking (Image ViT → Full Mode)
+
+Standard image ViTs use bidirectional attention.  When tokens are removed, remaining tokens lose their spatial context.  The fix is to re-introduce causal structure so each token only attends to the *lexicographically preceding* retained tokens (preserving relative spatial order without needing absolute position recovery).
+
+Reference: `autogaze/vision_encoders/siglip/` (NVILA native integration).
+
+### 6.2 RoPE Position Correction (RoPE ViT → Full Mode)
+
+RoPE encodes position via query/key rotation.  After token removal, the rotation frequencies must be recomputed from each token's **original** index, not its new position in the shorter sequence.  Otherwise the model sees incorrect relative distances.
+
+Pattern:
+```python
+# After masking, retain original position ids
+kept_positions = torch.where(gaze_mask)[0]   # original indices of kept tokens
+# Pass kept_positions to the RoPE layer instead of arange(N_kept)
+```
+
+### 6.3 Temporal Chunking (Video ViTs)
+
+AutoGaze operates at frame level (T gaze maps for T frames).  Most video ViTs reduce temporal resolution via tubelet embedding (`tubelet_size=2` → $T_p = T / 2$ patch groups).  When applying the gaze mask:
+
+1. Average gaze scores within each tubelet group → one mask per temporal chunk.
+2. Apply the per-chunk mask to the corresponding patch embeddings.
+
+This is already implemented in `autogaze/vision_encoders/vjepa2/` and `autogaze/vision_encoders/qwen25vl/`.
+
+---
+
+## 7. Performance Reference
+
+| Configuration | Tokens | Latency (ms) | VRAM (GB) |
+|:--|:--:|:--:|:--:|
+| SigLIP / NVILA — baseline | 3,136 | ~320 | ~18.5 |
+| SigLIP / NVILA — AutoGaze full (75%) | 784 | ~145 | ~16.8 |
+| V-JEPA2 — baseline | 1,568 | ~55 (ViT) | ~2.1 (ViT) |
+| V-JEPA2 — AutoGaze full (75%) | 392 | ~22 (ViT) | ~1.1 (ViT) |
+
+*16-frame 224px clips, A100 GPU.*

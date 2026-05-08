@@ -4,14 +4,25 @@
 """
 MLLM runner registry for video QA benchmarks.
 
-Built-in runners:
-  - nvila           NVILA-8B with native AutoGaze processor integration
-  - nvila_vjepa2    V-JEPA2 ViT + projector + NVILA LLM; MCQ video QA
-  - qwen25vl        Qwen2.5-VL-7B with AutoGaze applied via zero-shot forward hook
-  - qwen25vl_full   Qwen2.5-VL-7B with AutoGaze full ViT integration (per-temporal-chunk)
-  - vjepa2          V-JEPA2 encoder with AutoGaze applied via zero-shot forward hook
-  - vjepa2_full     V-JEPA2 encoder with AutoGaze full integration (per-temporal-group)
-  - siglip          Vanilla HuggingFace SigLIP, feature extraction (optional AutoGaze hook)
+Runner naming convention: ``{vit}_{lm}``  (ViT always first, then LLM).
+Integration mode is a separate flag, not baked into the runner key.
+
+Built-in runners (primary keys)
+--------------------------------
+  nvila             SigLIP ViT + NVILA LLM  (native/processor integration)
+  vjepa2_nvila      V-JEPA2 ViT + NVILA LLM  (full integration, needs vjepa2_path=)
+  siglip_qwen25     SigLIP ViT + Qwen2.5-VL LLM  (default: hook; pass integration='full')
+  vjepa2_qwen25     V-JEPA2 ViT + Qwen2.5-7B LLM  (full, needs lm_path=)
+  vjepa2            V-JEPA2 encoder only  (feature extraction; hook or full)
+  siglip            SigLIP encoder only   (feature extraction; hook)
+
+Deprecated aliases (still work, emit DeprecationWarning)
+----------------------------------------------------------
+  nvila_vjepa2  →  vjepa2_nvila
+  qwen25vl      →  siglip_qwen25
+  qwen25vl_full →  siglip_qwen25  (with integration='full')
+  vjepa2_full   →  vjepa2         (with integration='full')
+  vjepa2_llm    →  vjepa2_qwen25
 
 Usage (API)
 -----------
@@ -25,10 +36,18 @@ Usage (API)
     )
     answer = runner.run(frames, prompt, max_new_tokens=16)
 
-Adding a new MLLM
------------------
-    1. Subclass BaseMLLMRunner and implement load() + run().
-    2. Register it: RUNNERS["your-key"] = YourRunner
+    # Qwen2.5-VL with full integration
+    runner = load_runner(
+        mllm="siglip_qwen25",
+        model_path="Qwen/Qwen2.5-VL-7B-Instruct",
+        autogaze_path="weights/AutoGaze",
+        gazing_ratio=0.75,
+        integration="full",
+    )
+
+Adding a new backend
+--------------------
+    See docs/integration_guide.md §5 for the step-by-step guide.
 
 Architecture notes (Qwen2.5-VL)
 --------------------------------
@@ -272,7 +291,7 @@ class Qwen25VLRunner(BaseMLLMRunner):
     integration flag is ignored.
     """
 
-    name = "qwen25vl"
+    name = "siglip_qwen25"
 
     TEMPORAL_PATCH_SIZE = 2   # Qwen2.5-VL default
     PATCH_SIZE = 14
@@ -943,7 +962,7 @@ class VJEPA2LLMRunner(VJEPA2Runner):
     Loading for inference::
 
         runner = load_runner(
-            mllm           = "vjepa2_llm",
+            mllm           = "vjepa2_qwen25",
             model_path     = "facebook/vjepa2-vitl-fpc64-256",
             lm_path        = "Qwen/Qwen2.5-7B-Instruct",
             projector_path = "weights/vjepa2_projector/",
@@ -970,7 +989,7 @@ class VJEPA2LLMRunner(VJEPA2Runner):
     LLM generates ``"A"``, ``"B"``, ``"C"``, or ``"D"`` immediately.
     """
 
-    name = "vjepa2_llm"
+    name = "vjepa2_qwen25"
     supports_mcq = True    # has a paired LLM — overrides VJEPA2Runner.supports_mcq
 
     def __init__(
@@ -1204,16 +1223,16 @@ class NVILAVjepa2Runner(VJEPA2LLMRunner):
     Usage::
 
         runner = load_runner(
-            mllm           = "nvila_vjepa2",
+            mllm           = "vjepa2_nvila",
             model_path     = "weights/NVILA-8B-HD-Video",
             vjepa2_path    = "weights/vjepa2-vitl-fpc64-256",
             autogaze_path  = "weights/AutoGaze",
             gazing_ratio   = 0.75,
-            projector_path = "weights/nvila_vjepa2_projector",
+            projector_path = "weights/vjepa2_nvila_projector",
         )
     """
 
-    name = "nvila_vjepa2"
+    name = "vjepa2_nvila"
     supports_mcq = True
 
     def __init__(
@@ -1511,25 +1530,39 @@ class SigLIPRunner(BaseMLLMRunner):
 # Runner registry
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Primary runner keys follow the {vit}_{lm} naming convention.
 RUNNERS: Dict[str, type] = {
-    "nvila"         : NVILARunner,
-    "nvila_vjepa2"  : NVILAVjepa2Runner,   # V-JEPA2 ViT + NVILA LLM + projector, MCQ video QA
-    "qwen25vl"      : Qwen25VLRunner,      # zero-shot hook (integration='hook')
-    "qwen25vl_full" : Qwen25VLRunner,      # full modified-ViT integration
-    "vjepa2"        : VJEPA2Runner,        # V-JEPA2 encoder, feature extraction only
-    "vjepa2_full"   : VJEPA2Runner,        # V-JEPA2 full modified-encoder, feature extraction
-    "vjepa2_llm"    : VJEPA2LLMRunner,     # V-JEPA2 ViT + projector + LLM, MCQ video QA
-    "siglip"        : SigLIPRunner,        # vanilla HF SigLIP, feature extraction (+ optional AutoGaze hook)
+    # ── primary keys ──────────────────────────────────────────────────────
+    "nvila"          : NVILARunner,        # SigLIP ViT + NVILA LLM (native processor)
+    "vjepa2_nvila"   : NVILAVjepa2Runner,  # V-JEPA2 ViT + NVILA LLM (full; needs vjepa2_path=)
+    "siglip_qwen25"  : Qwen25VLRunner,     # SigLIP ViT + Qwen2.5-VL LLM (hook default)
+    "vjepa2_qwen25"  : VJEPA2LLMRunner,    # V-JEPA2 ViT + Qwen2.5-7B LLM (full; needs lm_path=)
+    "vjepa2"         : VJEPA2Runner,       # V-JEPA2 encoder only (feature extraction)
+    "siglip"         : SigLIPRunner,       # SigLIP encoder only (feature extraction)
+    # ── deprecated aliases — emit DeprecationWarning ───────────────────────
+    "nvila_vjepa2"   : NVILAVjepa2Runner,  # → vjepa2_nvila
+    "qwen25vl"       : Qwen25VLRunner,     # → siglip_qwen25
+    "qwen25vl_full"  : Qwen25VLRunner,     # → siglip_qwen25 --integration full
+    "vjepa2_full"    : VJEPA2Runner,       # → vjepa2 --integration full
+    "vjepa2_llm"     : VJEPA2LLMRunner,    # → vjepa2_qwen25
 }
 
-# Default integration mode per runner key
+# Maps deprecated keys → (new_key, integration_override_or_None)
+_DEPRECATED_ALIASES: Dict[str, tuple] = {
+    "nvila_vjepa2"  : ("vjepa2_nvila",  None),
+    "qwen25vl"      : ("siglip_qwen25", None),
+    "qwen25vl_full" : ("siglip_qwen25", "full"),
+    "vjepa2_full"   : ("vjepa2",        "full"),
+    "vjepa2_llm"    : ("vjepa2_qwen25", None),
+}
+
+# Default integration mode per primary runner key
 _RUNNER_DEFAULTS: Dict[str, Dict[str, Any]] = {
-    "qwen25vl"      : {"integration": "hook"},
-    "qwen25vl_full" : {"integration": "full"},
-    "vjepa2"        : {"integration": "hook"},
-    "vjepa2_full"   : {"integration": "full"},
-    "vjepa2_llm"    : {"integration": "full"},
-    "nvila_vjepa2"  : {"integration": "full"},
+    "nvila"          : {"integration": "native"},
+    "vjepa2_nvila"   : {"integration": "full"},
+    "siglip_qwen25"  : {"integration": "hook"},
+    "vjepa2_qwen25"  : {"integration": "full"},
+    "vjepa2"         : {"integration": "hook"},
 }
 
 
@@ -1544,40 +1577,64 @@ def load_runner(
     """Instantiate and return a runner by name.
 
     Args:
-        mllm:          Runner key — one of ``RUNNERS``.
-                       ``'nvila'``         → NVILA-8B with native AutoGaze processor.
-                       ``'nvila_vjepa2'``  → V-JEPA2 ViT + NVILA LLM; requires
-                                             ``vjepa2_path=`` kwarg.
-                       ``'qwen25vl'``      → Qwen2.5-VL, zero-shot hook.
-                       ``'qwen25vl_full'`` → Qwen2.5-VL, full ViT integration.
-                       ``'vjepa2'``        → V-JEPA2 encoder, feature extraction (hook).
-                       ``'vjepa2_full'``   → V-JEPA2 encoder, feature extraction (full).
-                       ``'vjepa2_llm'``    → V-JEPA2 ViT + projector + LLM, video QA.
-                       ``'siglip'``        → Vanilla HF SigLIP, feature extraction.
+        mllm:          Runner key — one of ``RUNNERS``.  Naming convention:
+                       ``'{vit}_{lm}'`` where ViT comes first.
+
+                       Primary keys:
+                         ``'nvila'``          SigLIP ViT + NVILA LLM (native processor)
+                         ``'vjepa2_nvila'``   V-JEPA2 ViT + NVILA LLM; needs vjepa2_path=
+                         ``'siglip_qwen25'``  SigLIP ViT + Qwen2.5-VL LLM
+                         ``'vjepa2_qwen25'``  V-JEPA2 ViT + Qwen2.5-7B LLM; needs lm_path=
+                         ``'vjepa2'``         V-JEPA2 encoder only (feature extraction)
+                         ``'siglip'``         SigLIP encoder only (feature extraction)
+
+                       Deprecated aliases: nvila_vjepa2, qwen25vl, qwen25vl_full,
+                       vjepa2_full, vjepa2_llm — emit DeprecationWarning.
+
         model_path:    Path or HF hub ID for the primary model weights.
-                       For ``'nvila_vjepa2'`` this is the NVILA path (LLM source);
+                       For V-JEPA2+LLM runners this is the LLM/NVILA path;
                        pass V-JEPA2 path via ``vjepa2_path=``.
         autogaze_path: Path to AutoGaze weights, or None for baseline.
         gazing_ratio:  Fraction of patches retained per frame (0–1).
         dtype:         Torch dtype for the MLLM (default: bfloat16).
         **kwargs:      Extra keyword arguments forwarded to the runner constructor.
-                       ``vjepa2_path``     (str, required for ``'nvila_vjepa2'``)
-                       ``lm_path``         (str, required for ``'vjepa2_llm'``)
-                       ``projector_path``  (str, optional for LLM runners)
-                       ``integration``     (str, ``'full'`` or ``'hook'``)
+                       ``vjepa2_path``    (str, required for vjepa2_nvila)
+                       ``lm_path``        (str, required for vjepa2_qwen25)
+                       ``projector_path`` (str, optional for LLM runners)
+                       ``integration``    (str, ``'native'``, ``'full'``, or ``'hook'``)
     """
+    import warnings
+
     if mllm not in RUNNERS:
+        primary = [k for k in RUNNERS if k not in _DEPRECATED_ALIASES]
         raise ValueError(
-            f"Unknown MLLM '{mllm}'.  Available: {sorted(RUNNERS.keys())}"
+            f"Unknown runner '{mllm}'.\n"
+            f"  Primary keys: {primary}\n"
+            f"  Deprecated aliases: {list(_DEPRECATED_ALIASES)}"
         )
+
+    # Resolve deprecated aliases and forward integration override
+    if mllm in _DEPRECATED_ALIASES:
+        new_key, integration_override = _DEPRECATED_ALIASES[mllm]
+        warnings.warn(
+            f"Runner key '{mllm}' is deprecated. Use '{new_key}'"
+            + (f" with integration='{integration_override}'" if integration_override else "")
+            + ".",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if integration_override and "integration" not in kwargs:
+            kwargs["integration"] = integration_override
+        mllm = new_key
+
     cls = RUNNERS[mllm]
 
-    # nvila_vjepa2 has an extra required positional-style kwarg
-    if mllm == "nvila_vjepa2":
+    # vjepa2_nvila (and legacy nvila_vjepa2) require a separate vjepa2_path
+    if mllm == "vjepa2_nvila":
         vjepa2_path = kwargs.pop("vjepa2_path", None)
         if vjepa2_path is None:
             raise ValueError(
-                "load_runner with mllm='nvila_vjepa2' requires vjepa2_path=<path>."
+                "load_runner with mllm='vjepa2_nvila' requires vjepa2_path=<path>."
             )
         merged = {**_RUNNER_DEFAULTS.get(mllm, {}), **kwargs}
         return cls(

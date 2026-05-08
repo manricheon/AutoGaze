@@ -244,6 +244,7 @@ def evaluate(
     resume: bool,
     mllm: str = "nvila",
     hf_data_dir: Optional[Path] = None,
+    runner_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run full evaluation and return result dict."""
 
@@ -292,6 +293,7 @@ def evaluate(
         model_path=model_path,
         autogaze_path=autogaze_path,
         gazing_ratio=gazing_ratio,
+        **(runner_kwargs or {}),
     )
 
     # ── inference loop ───────────────────────────────────────────────────── #
@@ -495,7 +497,22 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--mllm", default="nvila", choices=sorted(RUNNERS.keys()),
-        help="MLLM backend: nvila (native AutoGaze) or qwen25vl (zero-shot hook)",
+        help=(
+            "Runner key ({vit}_{lm} convention). "
+            "Primary: nvila, vjepa2_nvila, siglip_qwen25, vjepa2_qwen25, vjepa2, siglip. "
+            "Deprecated aliases: nvila_vjepa2, qwen25vl, qwen25vl_full, vjepa2_llm, vjepa2_full."
+        ),
+    )
+    p.add_argument(
+        "--integration", default=None,
+        choices=["native", "hook", "full"],
+        help=(
+            "AutoGaze integration mode override. "
+            "native: processor-level (NVILA only). "
+            "hook: zero-shot forward hook (accuracy validation, no latency gain). "
+            "full: tokens physically removed (latency/VRAM benchmark). "
+            "If omitted, each runner uses its own default."
+        ),
     )
     p.add_argument(
         "--video-dir", default=None, type=Path,
@@ -573,6 +590,10 @@ def main() -> None:
         ag_tag  = f"ag{int(args.gazing_ratio*100):03d}" if autogaze_path else "baseline"
         args.output = Path("results") / f"{args.task}_{args.mllm}_{ag_tag}.json"
 
+    extra: Dict[str, Any] = {}
+    if args.integration is not None:
+        extra["integration"] = args.integration
+
     evaluate(
         task_name     = args.task,
         video_dir     = args.video_dir,
@@ -586,6 +607,7 @@ def main() -> None:
         resume        = args.resume,
         mllm          = args.mllm,
         hf_data_dir   = args.hf_data_dir,
+        runner_kwargs = extra,
     )
 
 
