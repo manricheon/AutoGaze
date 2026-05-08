@@ -103,14 +103,68 @@ def _local(path: str) -> bool:
     return os.path.isdir(path)
 
 
+def register_runner(
+    key: str,
+    cls: type,
+    default_integration: str = "hook",
+) -> type:
+    """Register a new runner class under *key*.
+
+    Intended for third-party or experimental backends that live outside this file.
+    Follow the naming convention: ``'{vit}_{lm}'``.
+
+    Args:
+        key:                  Runner key (e.g. ``'dinov2_llama3'``).
+        cls:                  Runner class; must subclass ``BaseMLLMRunner``.
+        default_integration:  Default integration mode (``'hook'``, ``'full'``, or
+                              ``'native'``).  Users can override with ``--integration``.
+
+    Returns:
+        *cls* unchanged (so this can be used as a class decorator).
+
+    Example::
+
+        from autogaze.eval.models import BaseMLLMRunner, register_runner
+
+        @register_runner("dinov2_qwen25", default_integration="hook")
+        class DINOv2Qwen25Runner(BaseMLLMRunner):
+            name = "dinov2_qwen25"
+            ...
+    """
+    if not issubclass(cls, BaseMLLMRunner):
+        raise TypeError(f"cls must subclass BaseMLLMRunner, got {cls}")
+    RUNNERS[key] = cls
+    _RUNNER_DEFAULTS[key] = {"integration": default_integration}
+    log.debug("Registered runner '%s' → %s (integration=%s)", key, cls.__name__, default_integration)
+    return cls
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Base class
 # ─────────────────────────────────────────────────────────────────────────────
 
 class BaseMLLMRunner:
-    """Abstract base for MLLM runners."""
+    """Abstract base for MLLM runners.
 
-    #: Name shown in log / output JSON
+    Subclass this to add a new ViT, LLM, or ViT+LLM backend.
+    See docs/integration_guide.md §5 for the full step-by-step guide.
+
+    Minimal implementation::
+
+        class MyRunner(BaseMLLMRunner):
+            name = "myvit_myllm"   # {vit}_{lm} convention
+
+            def __init__(self, model_path, autogaze_path, gazing_ratio,
+                         dtype=torch.bfloat16, integration="hook", **kw):
+                ...  # load model, optionally load AutoGaze
+
+            def run(self, frames, prompt, max_new_tokens=16):
+                ...  # encode frames → generate answer string
+
+        register_runner("myvit_myllm", MyRunner, default_integration="hook")
+    """
+
+    #: Name shown in log / output JSON — set to the same string as the RUNNERS key.
     name: str = "base"
 
     #: True if run() supports MCQ text generation (has a paired LLM).

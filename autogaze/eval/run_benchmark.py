@@ -599,6 +599,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Skip samples already in --output file",
     )
     p.add_argument(
+        "--vjepa2-path", default=None,
+        help="Path to V-JEPA2 weights (required for vjepa2_nvila runner)",
+    )
+    p.add_argument(
+        "--lm-path", default=None,
+        help="Path to the LLM weights (required for vjepa2_qwen25 runner)",
+    )
+    p.add_argument(
+        "--projector-path", default=None,
+        help="Path to a trained ViT→LLM projector (optional for LLM runners)",
+    )
+    p.add_argument(
         "--log-level", default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
@@ -623,6 +635,12 @@ def main() -> None:
     extra: Dict[str, Any] = {}
     if args.integration is not None:
         extra["integration"] = args.integration
+    if args.vjepa2_path is not None:
+        extra["vjepa2_path"] = args.vjepa2_path
+    if args.lm_path is not None:
+        extra["lm_path"] = args.lm_path
+    if args.projector_path is not None:
+        extra["projector_path"] = args.projector_path
 
     evaluate(
         task_name     = args.task,
