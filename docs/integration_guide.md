@@ -28,16 +28,140 @@ LLM / task head  →  answer / features
 
 ## 2. Integration Modes
 
-| Mode | Mechanism | Sequence length | Use case |
-|:--|:--|:--|:--|
-| **native** | AutoGaze baked into the model processor | Reduced internally | NVILA only; most transparent |
-| **hook** | Forward hook zeroes non-selected token embeddings | **Unchanged** ($N_{all}$) | Zero-shot accuracy validation for new models |
-| **full** | ViT `forward()` modified to skip non-selected tokens | **Reduced** ($N_{gazed}$) | Latency and VRAM benchmarks |
+### Quick reference
+
+| Mode | Mechanism | Sequence length | Latency gain | Use case |
+|:--|:--|:--|:--:|:--|
+| **native** | AutoGaze baked into the model processor | Reduced internally | ✅ yes | NVILA only; most transparent |
+| **hook** | Forward hook zeroes non-selected token embeddings | **Unchanged** | ❌ no | Zero-shot validation — no model code changes |
+| **full** | ViT `forward()` modified to skip non-selected tokens | **Reduced** | ✅ yes | Latency and VRAM benchmarks |
+
+---
+
+### Where each mode intercepts the pipeline
+
+```
+Video frames
+    │
+    ├─ AutoGaze ──→ gaze mask  (T × 196 binary values)
+    │                   │
+    │        ┌──────────┴──────────┬──────────────────┐
+    │        ▼                     ▼                  ▼
+    │   [NATIVE]             [HOOK]              [FULL]
+    │   Processor bakes      ViT runs fully;     ViT skips
+    │   ratio into tiling    hook zeroes         non-selected
+    │   before ViT runs      dead tokens         tokens inside
+    │        │               after last block    forward()
+    │        └──────────┬──────────┘                  │
+    │                   ▼                             ▼
+    │              All N tokens               Only k tokens
+    │              (some = 0)                 (k ≈ ratio × N)
+    │
+    ▼
+   LLM / task head
+```
+
+---
+
+### Token sequence: what the LLM actually sees
+
+Suppose `gazing_ratio = 0.75` and a single frame has `196` patches (14 × 14 grid).
+
+```
+  Baseline (no AutoGaze)        Hook mode                  Full mode
+  ┌───────────────────────┐     ┌───────────────────────┐  ┌─────────────────┐
+  │ █ █ █ █ █ █ █ █ █ █ │     │ █ █ · · · █ · █ █ · │  │ █ █ █ █ █ █ █ █│
+  │ █ █ █ █ █ █ █ █ █ █ │     │ · · █ · █ · · · █ █ │  │ █ █ █ █ █ █ █ █│
+  │ █ █ █ █ █ █ █ █ █ █ │ ──▶ │ █ · · █ · █ █ · · █ │  │ █ █ █ █ █ █ █ █│
+  │ █ █ █ █ █ █ █ █ █ █ │     │ · █ █ · · · █ · █ · │  │ █ █ █ █ █ █ █ █│
+  │          196 tokens         │     196 slots, ~147 ≠ 0│  │   ~147 tokens   │
+  │                       │     │     (zeroed stay in seq)│  │ (rest removed)  │
+  └───────────────────────┘     └───────────────────────┘  └─────────────────┘
+           ▼                              ▼                         ▼
+    LLM sees 196 tokens          LLM sees 196 tokens       LLM sees 147 tokens
+    (no AutoGaze effect)         (dead tokens = 0 vectors)  (real KV cache cut)
+                                  Attention cost: O(196²)   Attention cost: O(147²)
+                                  No latency benefit         ~1.78× faster attention
+```
+
+> `·` = zeroed token (hook) / removed token (full);  `█` = kept token
+
+---
+
+### Mode-by-mode explanation
+
+#### native (NVILA only)
+
+AutoGaze is compiled into the NVILA image processor.  The processor converts `gazing_ratio` into a tiling strategy before the ViT even runs — so no post-hoc patching is needed.
+
+```
+  NVILA Processor
+  ┌─────────────────────────────────────────────────────┐
+  │  image / frame                                      │
+  │       │                                             │
+  │       ├── AutoGaze(frame)  →  gaze_ratio_tile=0.75 │
+  │       │                                             │
+  │       └── select_patches() → compact token list     │
+  │                                    │                │
+  │                             passed to ViT           │
+  └─────────────────────────────────────────────────────┘
+```
+
+Requires `--autogaze-path` even for baseline (the processor reads the config on `__init__`).  Use `--no-autogaze` to set `gazing_ratio=1.0` which passes all patches (equivalent to off).
+
+#### hook
+
+A PyTorch forward hook is registered on the **last encoder block**.  After the block produces its output tensor `(B, N, C)`, the hook multiplies by the gaze mask — zeroing out embeddings for non-selected patches.  No ViT code changes needed.
+
+```
+  ViT encoder block N-1  ──→  output (B, 196, C)
+                                      │
+                       hook applied ──┤  ← gaze_mask (196,) × output
+                                      ▼
+                              masked output (B, 196, C)
+                              (non-selected rows = 0)
+```
+
+**Advantage**: works on any ViT out of the box.  **Limitation**: the full sequence still flows through all attention layers, so no latency reduction.
+
+#### full
+
+The ViT's `forward()` method is modified (or subclassed) to physically remove non-selected tokens before the attention computation.  Only selected tokens enter the transformer layers.
+
+```
+  patch embedding  →  (B, 196, C)
+                            │
+             gaze mask ──▶  gather  →  (B, ~147, C)
+                                             │
+                                       transformer layers
+                                       (smaller KV cache)
+                                             │
+                                       (B, ~147, C)  out
+```
+
+**Advantage**: $O(k^2)$ attention instead of $O(N^2)$ — real latency and VRAM savings.  **Limitation**: requires per-ViT code modification (see compatibility matrix below).
+
+---
 
 ### Which mode should I use?
 
-- **Start with hook** when adding a new model.  It requires no model code changes and lets you confirm that AutoGaze helps accuracy before investing in full integration.
-- **Switch to full** once hook accuracy is validated.  Only full mode gives the $O(k^2)$ attention speedup and VRAM reduction.
+```
+  New model? ──▶ Start with HOOK
+                     │
+                     ▼
+              Accuracy OK? ──No──▶ Check AutoGaze weights / gazing_ratio
+                     │
+                    Yes
+                     │
+                     ▼
+              Need speed? ──No──▶ Stay on HOOK
+                     │
+                    Yes
+                     │
+                     ▼
+               Use FULL mode
+               (see compatibility matrix)
+```
 
 Hook mode accuracy ≈ full mode accuracy.  Speed improvement only visible in full mode.
 
@@ -51,6 +175,144 @@ Hook mode accuracy ≈ full mode accuracy.  Speed improvement only visible in fu
 | Video ViT — absolute PE (V-JEPA2) | ✅ | ✅ | None (native temporal awareness) |
 | Video ViT — RoPE (e.g. future models) | ✅ | ✅ | RoPE position re-indexing after masking |
 | Hierarchical / window attention (Qwen2.5) | ✅ | ✅ | Pre-reorder masking (before cu_seqlens) |
+
+> Hook always works out of the box for any ViT.  The "Required fix" column applies only when upgrading to full mode.
+
+---
+
+### 3.1 Image ViT — Block-Causal Attention Mask
+
+**The problem**: standard image ViTs use full bidirectional attention across all patch positions.  When full mode removes tokens, the spatial relationship between remaining tokens breaks — token `T3` (originally at column 3) now appears adjacent to `T1` (column 1), causing position confusion.
+
+```
+  Original 8-patch sequence (row of a 14×14 grid):
+  ┌────┬────┬────┬────┬────┬────┬────┬────┐
+  │ T1 │ T2 │ T3 │ T4 │ T5 │ T6 │ T7 │ T8 │   positions 0..7
+  └────┴────┴────┴────┴────┴────┴────┴────┘
+   ← full bidirectional attention between all pairs →
+
+  After full mode removes T2, T4, T6 (ratio ≈ 62.5%):
+  ┌────┬────┬────┬────┬────┐
+  │ T1 │ T3 │ T5 │ T7 │ T8 │   new positions 0..4
+  └────┴────┴────┴────┴────┘
+   ⚠ T3 now "thinks" it's at position 1, not 2
+   ⚠ T1 and T3 appear adjacent, but T2 existed between them
+```
+
+**The fix — block-causal attention mask**: restrict each retained token to attend only to tokens that appear *lexicographically before it* in the original grid.  This preserves spatial ordering without needing absolute position recovery.
+
+```
+  Retained tokens: T1  T3  T5  T7  T8
+  Causal attention mask (✓ = can attend):
+
+            T1  T3  T5  T7  T8
+       T1 [  ✓   ·   ·   ·   · ]
+       T3 [  ✓   ✓   ·   ·   · ]   T3 attends to T1 and itself
+       T5 [  ✓   ✓   ✓   ·   · ]
+       T7 [  ✓   ✓   ✓   ✓   · ]
+       T8 [  ✓   ✓   ✓   ✓   ✓ ]
+
+  Result: each token's context is its original left-spatial neighbors — no
+  position confusion, no absolute index needed.
+```
+
+Reference: `autogaze/vision_encoders/siglip/` (NVILA native integration).
+
+---
+
+### 3.2 Video ViT — Absolute Positional Embeddings (V-JEPA2)
+
+**No fix required for full mode.** V-JEPA2 adds absolute positional embeddings to each token *before* any attention layer.  When tokens are removed, the remaining tokens retain their correct embeddings — the model already knows where each token came from.
+
+```
+  Before masking:
+  token_emb + pos_emb(t=0, x=2, y=3)  → T_023
+  token_emb + pos_emb(t=0, x=2, y=5)  → T_025
+  token_emb + pos_emb(t=1, x=2, y=3)  → T_123
+
+  After masking (remove T_025):
+  T_023 and T_123 still carry their original (t,x,y) embeddings.
+  The attention layers receive correct positional signals automatically.
+```
+
+**Temporal chunking note**: V-JEPA2 uses `tubelet_size=2`, so the gaze mask (one per frame) must be averaged over pairs of frames before application.  This is already handled in `autogaze/vision_encoders/vjepa2/`.
+
+---
+
+### 3.3 Video ViT — RoPE Positional Encoding
+
+**The problem**: RoPE (Rotary Position Embedding) encodes position inside the attention operation itself — each query and key vector is *rotated* by an angle proportional to its position index.  After removing tokens, the remaining tokens get new sequential indices (0, 1, 2, …), but their rotations should use their **original** indices.
+
+```
+  Original sequence (5 tokens):
+  T0 T1 T2 T3 T4
+  RoPE rotation angles: θ·0  θ·1  θ·2  θ·3  θ·4
+
+  Full mode removes T1, T3:
+  Remaining: T0  T2  T4
+  ❌ Wrong:  new indices 0, 1, 2 → rotations θ·0  θ·1  θ·2
+             T2 gets angle θ·1 but should have θ·2
+             T4 gets angle θ·2 but should have θ·4
+
+  ✅ Fix: keep original indices
+             T0(idx=0) T2(idx=2) T4(idx=4) → rotations θ·0  θ·2  θ·4
+```
+
+**Implementation**:
+```python
+# After masking, retain original position ids — do NOT renumber
+kept_positions = torch.where(gaze_mask)[0]   # original indices of kept tokens
+# Pass kept_positions into the RoPE layer instead of torch.arange(N_kept)
+rotary_emb = model.rotary_embedding(seq_len=kept_positions.max() + 1)
+cos, sin = rotary_emb[kept_positions]        # select angles by original index
+```
+
+---
+
+### 3.4 Hierarchical / Window Attention (Qwen2.5-VL)
+
+**The problem**: Qwen2.5-VL groups patches into fixed-size spatial windows before the first attention layer.  The window boundaries (`cu_seqlens`) are computed from the total patch count — if masking happens *after* windowing, the window structure becomes inconsistent.
+
+```
+  Original: 8 patches grouped into 2 windows of size 4
+  ┌──────────────────┐  ┌──────────────────┐
+  │ T1  T2  T3  T4  │  │ T5  T6  T7  T8  │
+  │   window 1      │  │   window 2      │
+  └──────────────────┘  └──────────────────┘
+  cu_seqlens = [0, 4, 8]
+
+  ❌ Wrong: mask after windowing
+  After masking T2 and T6 inside already-formed windows:
+  ┌──────────────────┐  ┌──────────────────┐
+  │ T1  ·   T3  T4  │  │ T5  ·   T7  T8  │
+  └──────────────────┘  └──────────────────┘
+  cu_seqlens still [0, 4, 8] → length mismatch, CUDA error
+
+  ✅ Fix: apply mask BEFORE windowing
+  Masked tokens: T1  T3  T4  T5  T7  T8   (6 tokens)
+  Regroup into windows of size 3:
+  ┌──────────────┐  ┌──────────────┐
+  │ T1  T3  T4  │  │ T5  T7  T8  │
+  └──────────────┘  └──────────────┘
+  cu_seqlens = [0, 3, 6]   ← recomputed from masked set
+```
+
+Reference: `autogaze/vision_encoders/qwen25vl/modeling_qwen25vl_ag.py`.
+
+---
+
+### 3.5 Summary: what you need to change per ViT
+
+```
+  ViT type               Attention style    Hook   Full — what to change
+  ─────────────────────  ─────────────────  ─────  ─────────────────────────────────
+  SigLIP / CLIP          Bidirectional       ✅     Add block-causal attention mask
+  V-JEPA2                Absolute PE         ✅     Nothing — works out of the box
+  Future RoPE ViT        Rotary PE           ✅     Pass original indices to RoPE
+  Qwen2.5-VL             Window attention    ✅     Mask before cu_seqlens computation
+  Any new ViT            Unknown             ✅     Start with hook; identify PE type,
+                                                    then apply the matching fix above
+```
 
 ---
 
@@ -299,27 +561,67 @@ python -m autogaze.eval.run_benchmark \
 
 ### 6.1 Block-Causal Masking (Image ViT → Full Mode)
 
-Standard image ViTs use bidirectional attention.  When tokens are removed, remaining tokens lose their spatial context.  The fix is to re-introduce causal structure so each token only attends to the *lexicographically preceding* retained tokens (preserving relative spatial order without needing absolute position recovery).
+Standard image ViTs use bidirectional attention.  When tokens are removed, remaining tokens lose their spatial context.  The fix is to re-introduce causal structure so each token only attends to the *lexicographically preceding* retained tokens.
+
+```text
+  Full 14×14 grid (196 patches), rasterised row-major:
+
+   col →   0   1   2   3   4 … 13
+  row
+   0      T0  T1  T2  T3  T4 … T13
+   1     T14 T15 T16 T17 T18 … T27
+   …
+  13    T182 …                T195
+
+  Gaze mask keeps ~147 of these.  After removal, remaining tokens are
+  re-indexed 0..146.  Block-causal mask ensures token at new index i
+  can only attend to tokens at new indices ≤ i — preserving the
+  original left-to-right, top-to-bottom spatial ordering.
+```
 
 Reference: `autogaze/vision_encoders/siglip/` (NVILA native integration).
 
+---
+
 ### 6.2 RoPE Position Correction (RoPE ViT → Full Mode)
 
-RoPE encodes position via query/key rotation.  After token removal, the rotation frequencies must be recomputed from each token's **original** index, not its new position in the shorter sequence.  Otherwise the model sees incorrect relative distances.
+RoPE encodes position via query/key rotation.  After token removal, the rotation frequencies must be recomputed from each token's **original** index, not its new sequential position.
 
-Pattern:
+```text
+  Without fix:                     With fix:
+  T0  T2  T4  T6                   T0  T2  T4  T6
+  ↓   ↓   ↓   ↓                    ↓   ↓   ↓   ↓
+  θ·0 θ·1 θ·2 θ·3  ← wrong         θ·0 θ·2 θ·4 θ·6  ← correct
+      (gaps ignored)                    (original indices preserved)
+```
+
 ```python
 # After masking, retain original position ids
 kept_positions = torch.where(gaze_mask)[0]   # original indices of kept tokens
 # Pass kept_positions to the RoPE layer instead of arange(N_kept)
 ```
 
+---
+
 ### 6.3 Temporal Chunking (Video ViTs)
 
-AutoGaze operates at frame level (T gaze maps for T frames).  Most video ViTs reduce temporal resolution via tubelet embedding (`tubelet_size=2` → $T_p = T / 2$ patch groups).  When applying the gaze mask:
+AutoGaze produces one gaze map per input frame (T maps total).  Video ViTs typically reduce temporal resolution via tubelet embedding before their attention layers.
 
-1. Average gaze scores within each tubelet group → one mask per temporal chunk.
-2. Apply the per-chunk mask to the corresponding patch embeddings.
+```text
+  AutoGaze output:   F0   F1   F2   F3   F4   F5   (6 frames, 196 scores each)
+
+  V-JEPA2 tubelet:  [F0+F1]  [F2+F3]  [F4+F5]      (tubelet_size=2 → 3 chunks)
+
+  Mask per chunk = avg(F_i, F_{i+1}) ≥ threshold
+  ┌──────────┐  ┌──────────┐  ┌──────────┐
+  │ mask_0   │  │ mask_1   │  │ mask_2   │
+  │(from F0,1)│  │(from F2,3)│  │(from F4,5)│
+  └──────────┘  └──────────┘  └──────────┘
+       │               │               │
+       ▼               ▼               ▼
+  applied to     applied to     applied to
+  chunk_0 emb   chunk_1 emb   chunk_2 emb
+```
 
 This is already implemented in `autogaze/vision_encoders/vjepa2/` and `autogaze/vision_encoders/qwen25vl/`.
 
@@ -328,7 +630,7 @@ This is already implemented in `autogaze/vision_encoders/vjepa2/` and `autogaze/
 ## 7. Performance Reference
 
 | Configuration | Tokens | Latency (ms) | VRAM (GB) |
-|:--|:--:|:--:|:--:|
+| :--- | :---: | :---: | :---: |
 | SigLIP / NVILA — baseline | 3,136 | ~320 | ~18.5 |
 | SigLIP / NVILA — AutoGaze full (75%) | 784 | ~145 | ~16.8 |
 | V-JEPA2 — baseline | 1,568 | ~55 (ViT) | ~2.1 (ViT) |
