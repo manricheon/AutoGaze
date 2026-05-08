@@ -587,6 +587,12 @@ def parse_args():
                    ))
     p.add_argument("--gazing-ratio", type=float, default=0.75,
                    help="Max fraction of patches to gaze at (default: 0.75)")
+    p.add_argument("--compare-autogaze", action="store_true",
+                   help="Compare current ratio against 1.0 (all patches)")
+    p.add_argument("--sweep-ratio", action="store_true",
+                   help="Sweep ratios from 0.1 to 1.0")
+    p.add_argument("--ratio-step", type=float, default=0.25,
+                   help="Step size for --sweep-ratio (default: 0.25)")
     p.add_argument("--task-loss-requirement", type=float, default=0.7,
                    help="Reconstruction quality threshold for early stopping (default: 0.7)")
     p.add_argument("--no-task-loss-requirement", action="store_true",
@@ -647,107 +653,125 @@ def main():
     # -----------------------------------------------------------------------
     # Per-video inference
     # -----------------------------------------------------------------------
+    # Determine ratios to process
+    base_ratios = [args.gazing_ratio]
+    if args.compare_autogaze:
+        base_ratios = [args.gazing_ratio, 1.0]
+    if args.sweep_ratio:
+        base_ratios = [round(i * args.ratio_step, 10) for i in range(1, int(1.0 / args.ratio_step) + 1)]
+        if base_ratios[-1] < 1.0:
+            base_ratios.append(1.0)
+    
+    ratios = sorted(list(set(base_ratios)))
+    ratio_aggregated_json = {r: {} for r in ratios}
+
     for idx, video_path in enumerate(video_paths):
         print(f"[{idx+1}/{len(video_paths)}] {video_path.name}")
 
         try:
+            # ── Load frames once per video ──────────────────────────────────
             frame_indices = None
             if args.all_frames:
                 raw_video, frame_indices = load_all_frames(video_path)
                 T_total = len(raw_video)
                 n_chunks = (T_total + args.chunk_size - 1) // args.chunk_size
-                print(f"  All-frames mode: {T_total} frames → {n_chunks} chunk(s) of {args.chunk_size}")
-                if "viz" in fmts and T_total > 32:
-                    print(f"  WARNING: viz grid with {T_total} columns will be very wide; "
-                          "consider --output-format frames,video instead.")
-                gaze_outputs = run_inference_chunked(
-                    model, raw_video, transform, device,
-                    chunk_size=args.chunk_size,
-                    gazing_ratio=args.gazing_ratio,
-                    task_loss_req=task_loss_req,
-                )
+                print(f"  All-frames mode: {T_total} frames")
             elif args.stride is not None:
                 raw_video, frame_indices = load_frames_stride(video_path, args.stride, args.chunk_size)
                 T_total = len(raw_video)
-                n_chunks = T_total // args.chunk_size
-                container_tmp = av.open(str(video_path))
-                total_orig = container_tmp.streams.video[0].frames
-                container_tmp.close()
-                print(f"  Stride mode: every {args.stride}th frame → "
-                      f"{T_total} frames (from {total_orig} total) → "
-                      f"{n_chunks} chunk(s) of {args.chunk_size}")
-                gaze_outputs = run_inference_chunked(
-                    model, raw_video, transform, device,
-                    chunk_size=args.chunk_size,
-                    gazing_ratio=args.gazing_ratio,
-                    task_loss_req=task_loss_req,
-                )
+                print(f"  Stride mode: {T_total} frames")
             else:
                 raw_video, frame_indices = load_video(video_path, num_frames)
-                video_input = transform_video_for_pytorch(raw_video, transform)
-                video_input = video_input.unsqueeze(0).to(device)
-                with torch.inference_mode():
-                    gaze_outputs = model(
-                        {"video": video_input},
-                        gazing_ratio=args.gazing_ratio,
-                        task_loss_requirement=task_loss_req,
-                    )
+                T_total = len(raw_video)
+                print(f"  Uniform mode: {T_total} frames")
         except Exception as e:
-            print(f"  WARNING: could not process — {e}")
+            print(f"  WARNING: could not load video — {e}")
             continue
 
-        T_actual = len(raw_video)
-        n_real  = int((~gaze_outputs["if_padded_gazing"]).sum().item())
-        n_total = gaze_outputs["num_vision_tokens_each_frame"] * T_actual
-        per_frame = gaze_outputs["num_gazing_each_frame"].tolist()
-        print(f"  Gazed: {n_real}/{n_total} ({100*n_real/n_total:.1f}%)  |  per frame: {per_frame}")
+        # ── Loop over ratios ────────────────────────────────────────────────
+        for r in ratios:
+            r_label = f"r{r:.2f}"
+            print(f"  Processing ratio={r:.2f}...", end=" ", flush=True)
 
-        viz_kwargs = dict(
-            transform=transform,
-            normalize_mean=normalize_mean,
-            normalize_std=normalize_std,
-            normalize_rescale=normalize_rescale,
-            frame_indices=frame_indices,
-        )
+            try:
+                if args.all_frames or args.stride is not None:
+                    gaze_outputs = run_inference_chunked(
+                        model, raw_video, transform, device,
+                        chunk_size=args.chunk_size,
+                        gazing_ratio=r,
+                        task_loss_req=task_loss_req,
+                    )
+                else:
+                    video_input = transform_video_for_pytorch(raw_video, transform)
+                    video_input = video_input.unsqueeze(0).to(device)
+                    with torch.inference_mode():
+                        gaze_outputs = model(
+                            {"video": video_input},
+                            gazing_ratio=r,
+                            task_loss_requirement=task_loss_req,
+                        )
+            except Exception as e:
+                print(f"\n  WARNING: inference failed for ratio {r} — {e}")
+                continue
 
-        if "json" in fmts:
-            save_json(gaze_outputs, video_path, all_json_results)
+            n_real  = int((~gaze_outputs["if_padded_gazing"]).sum().item())
+            n_total_tok = gaze_outputs["num_vision_tokens_each_frame"] * len(raw_video)
+            print(f"Gazed: {n_real}/{n_total_tok} ({100*n_real/n_total_tok:.1f}%)")
 
-        if "viz" in fmts:
-            p = save_viz(gaze_outputs, raw_video, out_dir, video_path, **viz_kwargs)
-            saved_files.append(str(p))
-            print(f"  viz    → {p}")
+            # ── Save outputs with ratio suffix if multiple ratios exist ─────
+            suffix = f"_{r_label}" if len(ratios) > 1 else ""
+            
+            # Helper to modify video_path temporarily for naming
+            v_path_suffixed = video_path.with_name(f"{video_path.stem}{suffix}{video_path.suffix}")
 
-        if "frames" in fmts:
-            paths = save_frames(gaze_outputs, raw_video, out_dir, video_path, **viz_kwargs)
-            saved_files.extend(str(p) for p in paths)
-            print(f"  frames → {paths[0].parent}/  ({len(paths)} files)")
+            viz_kwargs = dict(
+                transform=transform,
+                normalize_mean=normalize_mean,
+                normalize_std=normalize_std,
+                normalize_rescale=normalize_rescale,
+                frame_indices=frame_indices,
+            )
 
-        if "video" in fmts:
-            p = save_video(gaze_outputs, raw_video, out_dir, video_path,
-                           fps=args.video_fps, **viz_kwargs)
-            saved_files.append(str(p))
-            print(f"  video  → {p}")
+            if "json" in fmts:
+                save_json(gaze_outputs, video_path, ratio_aggregated_json[r])
 
-        if "npy" in fmts:
-            p = save_npy(gaze_outputs, out_dir, video_path)
-            saved_files.append(str(p))
-            print(f"  npy    → {p}")
+            if "viz" in fmts:
+                # Viz uses stem for filename
+                p = save_viz(gaze_outputs, raw_video, out_dir, v_path_suffixed, **viz_kwargs)
+                saved_files.append(str(p))
+
+            if "frames" in fmts:
+                # save_frames creates a dir based on stem
+                paths = save_frames(gaze_outputs, raw_video, out_dir, v_path_suffixed, **viz_kwargs)
+                saved_files.extend(str(p) for p in paths)
+
+            if "video" in fmts:
+                p = save_video(gaze_outputs, raw_video, out_dir, v_path_suffixed,
+                               fps=args.video_fps, **viz_kwargs)
+                saved_files.append(str(p))
+
+            if "npy" in fmts:
+                p = save_npy(gaze_outputs, out_dir, v_path_suffixed)
+                saved_files.append(str(p))
 
     # -----------------------------------------------------------------------
     # Write aggregated JSON
     # -----------------------------------------------------------------------
-    if "json" in fmts and all_json_results:
-        json_path = out_dir / "gazing_labels.json"
-        existing: dict = {}
-        if json_path.exists():
-            with open(json_path) as f:
-                existing = json.load(f)
-        existing.update(all_json_results)
-        with open(json_path, "w") as f:
-            json.dump(existing, f)
-        saved_files.append(str(json_path))
-        print(f"\n  json   → {json_path}  ({len(all_json_results)} entries)")
+    if "json" in fmts:
+        for r, results in ratio_aggregated_json.items():
+            if not results: continue
+            suffix = f"_r{r:.2f}" if len(ratios) > 1 else ""
+            json_path = out_dir / f"gazing_labels{suffix}.json"
+            
+            existing: dict = {}
+            if json_path.exists():
+                with open(json_path) as f:
+                    existing = json.load(f)
+            existing.update(results)
+            with open(json_path, "w") as f:
+                json.dump(existing, f)
+            saved_files.append(str(json_path))
+            print(f"  json ({r:.2f}) → {json_path}  ({len(results)} entries)")
 
     print(f"\nDone. {len(saved_files)} file(s) written to '{out_dir}'.")
 
