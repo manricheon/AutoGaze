@@ -163,6 +163,23 @@ class NVILARunner(BaseMLLMRunner):
         )
         self.model.eval()
 
+        # Expose the same interface as selector-based runners so shared notebook
+        # cells (ratio sweep, timing) can work across all runner types.
+        # NVILARunner has no external AutoGazeTokenSelector — AutoGaze is baked
+        # into the processor.  selector=None signals "integrated AutoGaze".
+        self.selector = None
+        self.gazing_ratio = gazing_ratio
+
+    # ------------------------------------------------------------------ #
+    # Gazing ratio adjustment (NVILARunner only)
+    # ------------------------------------------------------------------ #
+
+    def set_gazing_ratio(self, ratio: float) -> None:
+        """Update the gazing ratio forwarded to the NVILA processor."""
+        self.gazing_ratio = ratio
+        self.processor.gazing_ratio_tile = ratio
+        self.processor.gazing_ratio_thumbnail = ratio
+
     def run(
         self,
         frames: List[Image.Image],
