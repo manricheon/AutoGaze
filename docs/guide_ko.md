@@ -11,10 +11,11 @@
 2. [환경 설정 및 설치](#2-환경-설정-및-설치)
 3. [모델 가중치 준비](#3-모델-가중치-준비)
 4. [추론 워크플로우 (Inference)](#4-추론-워크플로우)
-5. [벤치마크 및 성능 평가](#5-벤치마크-및-성능-평가)
-6. [AutoGaze 통합 및 확장](#6-autogaze-통합-및-확장)
-7. [학습 가이드 (Training)](#7-학습-가이드)
-8. [자주 묻는 질문 (FAQ)](#8-자주-묻는-질문)
+5. [비디오 QA 벤치마크 (Video QA)](#5-비디오-qa-벤치마크)
+6. [벤치마크 및 성능 평가 (CV Tasks)](#6-벤치마크-및-성능-평가)
+7. [AutoGaze 통합 및 확장](#7-autogaze-통합-및-확장)
+8. [학습 가이드 (Training)](#8-학습-가이드)
+9. [자주 묻는 질문 (FAQ)](#9-자주-묻는-질문)
 
 ---
 
@@ -76,7 +77,6 @@ bash scripts/download_models.sh weights nvila
 가이즈 선택 결과를 시각화하거나 학습용 레이블을 생성할 때 사용합니다.
 
 ```bash
-# 새로운 비교 및 스윕 옵션 지원
 # 1. 25% 선택 vs 100% 전체 패치 비교 시각화
 python -m autogaze.infer assets/example_input.mp4 --gazing-ratio 0.25 --compare-autogaze
 
@@ -94,7 +94,30 @@ python autogaze/infer_full.py assets/example_input.mp4 --mllm nvila
 
 ---
 
-## 5. 벤치마크 및 성능 평가
+## 5. 비디오 QA 벤치마크 (Video QA)
+
+표준 벤치마크셋(VideoMME, MVBench 등)에서 AutoGaze의 성능을 검증합니다. 자세한 내용은 [평가 가이드](eval_guide.md)를 참고하세요.
+
+### 5.1 ON/OFF 비교 테스트
+AutoGaze 사용 여부에 따른 정확도와 속도 차이를 측정합니다.
+
+```bash
+# 마스터 스크립트로 ON + OFF 자동 실행
+bash scripts/run_benchmarks.sh --tasks videomme --max-samples 100
+```
+
+### 5.2 수동 실행 (Python)
+```bash
+# AutoGaze ON (75% 토큰)
+python -m autogaze.eval.run_benchmark --task videomme --mllm nvila --gazing-ratio 0.75
+
+# AutoGaze OFF (기준선)
+python -m autogaze.eval.run_benchmark --task videomme --mllm nvila --no-autogaze
+```
+
+---
+
+## 6. 벤치마크 및 성능 평가 (CV Tasks)
 
 다양한 하위 태스크(Depth, Detection, Segmentation)에 AutoGaze를 적용하여 효율성을 검증합니다.
 
@@ -106,7 +129,7 @@ python autogaze/infer_full.py assets/example_input.mp4 --mllm nvila
 
 ---
 
-## 6. AutoGaze 통합 및 확장
+## 7. AutoGaze 통합 및 확장
 
 기존의 ViT 기반 모델에 AutoGaze를 붙이는 방법은 두 가지입니다.
 
@@ -117,7 +140,7 @@ python autogaze/infer_full.py assets/example_input.mp4 --mllm nvila
 
 ---
 
-## 7. 학습 가이드 (Training)
+## 8. 학습 가이드 (Training)
 
 AutoGaze는 2단계로 학습됩니다.
 
@@ -128,7 +151,7 @@ AutoGaze는 2단계로 학습됩니다.
 
 ---
 
-## 8. 자주 묻는 질문 (FAQ)
+## 9. 자주 묻는 질문 (FAQ)
 
 **Q: Mac에서 `flash_attn` 오류가 발생합니다.**  
 A: macOS는 `flash_attn`을 지원하지 않습니다. 시스템이 자동으로 `sdpa`로 전환하므로 무시하셔도 되며, 설정 파일에서 `attn_mode`를 `sdpa`로 명시해주시면 좋습니다.
