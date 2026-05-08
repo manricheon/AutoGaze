@@ -8,14 +8,14 @@ This guide covers all inference workflows in the AutoGaze project, from raw gaze
 
 ## 1. Overview (개요)
 
-We provide two primary entry points for inference, which now both support comparative analysis.
+We provide two primary entry points for inference, both supporting comparative analysis.
 
-두 가지 주요 추론 진입점을 제공하며, 현재 두 스크립트 모두 비교 분석 기능을 지원합니다.
+두 가지 주요 추론 진입점을 제공하며, 두 스크립트 모두 비교 분석 기능을 지원합니다.
 
 | Script | Primary Goal (주요 목적) | Key Outputs (주요 출력) |
 | :--- | :--- | :--- |
-| `autogaze/infer.py` | **Qualitative Gaze Analysis**. (정성적 가이즈 분석) | Gaze maps, MP4 overlays, JSON labels. |
-| `autogaze/infer_full.py` | **Performance & Accuracy Benchmark**. (성능 및 정확도 벤치마크) | MLLM Answers, Latency (ms), VRAM (GB). |
+| `autogaze/infer.py` | **Qualitative Gaze Analysis** (정성적 가이즈 분석) | Gaze maps, MP4 overlays, JSON labels |
+| `autogaze/infer_full.py` | **Performance & Accuracy Benchmark** (성능 및 정확도 벤치마크) | MLLM answers, latency (ms), VRAM (GB) |
 
 ---
 
@@ -25,24 +25,24 @@ Use this to visualize what AutoGaze is "looking at" across different token budge
 
 AutoGaze가 다양한 토큰 예산 내에서 무엇을 "보고 있는지" 시각화할 때 사용합니다.
 
-### New Comparative Options (새로운 비교 옵션)
+### Options (옵션)
 
 | Option | Description (설명) |
 | :--- | :--- |
-| `--compare-autogaze` | Compare the current ratio against the 100% full-patch baseline. (설정된 비율과 100% 전체 패치 기준선을 비교) |
-| `--sweep-ratio` | Automatically sweep through ratios (e.g., 0.25, 0.5, 0.75, 1.0) to see gaze evolution. (비율을 단계적으로 변경하며 가이즈 변화 시각화) |
-| `--ratio-step` | Set the step size for the sweep (default: 0.25). (스윕 간격 설정) |
+| `--compare-autogaze` | Compare the current ratio against the 100% full-patch baseline. (설정된 비율과 100% 기준선 비교) |
+| `--sweep-ratio` | Automatically sweep through ratios to see gaze evolution. (비율별 가이즈 변화 시각화) |
+| `--ratio-step` | Step size for the sweep (default: 0.25). (스윕 간격) |
 
 ### Usage Examples (사용 예시)
 
 ```bash
-# 1. Visualization with 25% vs 100% comparison
+# 25% vs 100% 비교 시각화
 python -m autogaze.infer assets/example_input.mp4 --gazing-ratio 0.25 --compare-autogaze
 
-# 2. Sweep from 0.1 to 1.0 with 0.2 intervals
+# 0.1 → 1.0 스윕 (간격 0.2)
 python -m autogaze.infer assets/example_input.mp4 --sweep-ratio --ratio-step 0.2
 
-# 3. Process EVERY frame in 16-frame chunks
+# 전체 프레임 처리 (16-frame 청크 단위)
 python -m autogaze.infer assets/example_input.mp4 --all-frames --output-format video
 ```
 
@@ -58,47 +58,69 @@ This script benchmarks the entire stack: **AutoGaze → ViT → MLLM**.
 
 | Runner Key | Model | Integration Mode | Note |
 | :--- | :--- | :--- | :--- |
-| `nvila` | NVILA-8B | **Full (Native)** | Optimized native implementation. |
-| `qwen25vl` | Qwen2.5-VL | Hook | Quick zero-shot validation. |
-| `qwen25vl_full`| Qwen2.5-VL | **Full** | **Max efficiency benchmark.** |
-| `vjepa2_llm` | V-JEPA2 + LM | **Full** | Substitute ViT testing. |
+| `nvila` | NVILA-8B-HD-Video | **Full (Native)** | Processor-integrated AutoGaze; `--no-autogaze`로 기준선 실행 가능 |
+| `qwen25vl` | Qwen2.5-VL-7B | Hook (Zero-shot) | 빠른 검증용 |
+| `qwen25vl_full` | Qwen2.5-VL-7B | **Full** | 최대 효율 벤치마크 |
+| `vjepa2_llm` | V-JEPA2 ViT + Qwen2.5-7B LM | **Full** | 대체 ViT 테스트 |
+| `nvila_vjepa2` | V-JEPA2 ViT + NVILA LLM | **Full** | V-JEPA2 인코더 + NVILA 언어 모델 조합 |
 
-### Performance Benchmarking (성능 벤치마크)
+### Usage Examples (사용 예시)
 
 ```bash
-# Compare accuracy and speed side-by-side
+# NVILA — AutoGaze ON (비교)
 python autogaze/infer_full.py assets/example_input.mp4 \
     --mllm nvila \
     --compare-autogaze
 
-# Sweep ratios to find the "sweet spot" for accuracy vs latency
+# NVILA — ratio 스윕
+python autogaze/infer_full.py assets/example_input.mp4 \
+    --mllm nvila \
+    --sweep-ratio --ratio-step 0.25
+
+# Qwen2.5-VL (Full mode)
 python autogaze/infer_full.py assets/example_input.mp4 \
     --mllm qwen25vl_full \
+    --model-path weights/Qwen2.5-VL-7B-Instruct \
     --sweep-ratio --ratio-step 0.25
+
+# V-JEPA2 + NVILA LLM
+python autogaze/infer_full.py assets/example_input.mp4 \
+    --mllm nvila_vjepa2 \
+    --model-path weights/NVILA-8B-HD-Video \
+    --vjepa2-path weights/vjepa2-vitl-fpc64-256
 ```
 
 ---
 
 ## 4. Integration Modes: Hook vs. Full (통합 모드)
 
-Understanding these modes is critical for interpreting results.
-
 | Mode (모드) | Mechanism (작동 방식) | Best Use Case (권장 용도) |
 | :--- | :--- | :--- |
-| **Hook** | Zeroes tokens ($N_{all}$ remains). (토큰을 0으로 채움) | **Accuracy validation** for new models. (정확도 검증) |
-| **Full** | Removes tokens ($N_{gazed}$ only). (토큰을 물리적으로 제거) | **Efficiency benchmarks** (Speed/VRAM). (효율성 측정) |
+| **Hook** | Zeroes tokens ($N_{all}$ remains). (토큰을 0으로 채움) | Accuracy validation for new models. (정확도 검증) |
+| **Full** | Removes tokens ($N_{gazed}$ only). (토큰을 물리적으로 제거) | Efficiency benchmarks — speed/VRAM. (효율성 측정) |
+
+Hook Mode에서 정확도가 잘 나온다면 Full Mode에서도 동일하거나 더 좋은 결과가 나옵니다. 속도 향상은 Full Mode에서만 확인 가능합니다.
 
 ---
 
-## 5. Interactive Test Suite (인터랙티브 테스트)
+## 5. Interactive Notebooks (인터랙티브 노트북)
 
-For a more hands-on experience, use the new Master Notebook:
-더 직관적인 테스트를 위해 새로운 마스터 노트북을 사용하세요:
-
-**`notebooks/autogaze_inference_suite.ipynb`**
-
-This notebook allows you to swap backbones (e.g., SigLIP to V-JEPA2) and visualize the "AutoGaze effect" in real-time.
-이 노트북에서는 백본 교체(SigLIP → V-JEPA2) 및 실시간 "AutoGaze 효과" 시각화가 가능합니다.
+| 노트북 | 내용 |
+| :--- | :--- |
+| `notebooks/12_inference_full_ko.ipynb` | 전체 MLLM 추론 파이프라인 (nvila, qwen25vl, nvila_vjepa2 등) |
+| `notebooks/10_autogaze_benchmark_ko.ipynb` | AutoGaze ON/OFF 성능 비교, ratio 스윕 |
+| `notebooks/11_video_qa_benchmark_ko.ipynb` | Video QA 벤치마크 결과 분석 |
+| `notebooks/autogaze_inference_suite.ipynb` | 백본 교체(SigLIP → V-JEPA2) 실험 |
 
 ---
-*Generated by Gemini CLI for AutoGaze Architecture Analysis (2026).*
+
+## 6. Key Source Files (주요 소스 파일)
+
+| Purpose | Path |
+| :--- | :--- |
+| Gaze-only inference | `autogaze/infer.py` |
+| Full MLLM inference | `autogaze/infer_full.py` |
+| MLLM runner registry | `autogaze/eval/models.py` |
+| Benchmark entry point | `autogaze/eval/run_benchmark.py` |
+| Task definitions | `autogaze/eval/tasks.py` |
+| Main inference notebook | `notebooks/12_inference_full_ko.ipynb` |
