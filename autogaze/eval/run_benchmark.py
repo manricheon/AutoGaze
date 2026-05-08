@@ -137,15 +137,25 @@ def load_video_from_bytes(raw: Any, num_frames: int = 16) -> List[Image.Image]:
     *raw* can be:
       - bytes / bytearray
       - dict with a "bytes" key  (HuggingFace datasets Audio/Video format)
-      - dict with a "path" key   (local path fallback)
+      - dict with a "path" key   (absolute local path fallback)
     """
     if isinstance(raw, dict):
         if raw.get("bytes"):
             data = raw["bytes"]
         elif raw.get("path"):
-            return load_video_frames(Path(raw["path"]), num_frames)
+            # HF sometimes stores a relative archive path here, not a real
+            # local path.  Only use it when the file actually exists.
+            p = Path(raw["path"])
+            if p.exists():
+                return load_video_frames(p, num_frames)
+            raise ValueError(
+                f"HF video dict has no bytes and path is not a local file: {raw['path']!r}"
+            )
         else:
-            raise ValueError(f"Unrecognised HF video dict keys: {list(raw.keys())}")
+            raise ValueError(
+                f"HF video dict has neither bytes nor path "
+                f"(keys={list(raw.keys())}, values={list(raw.values())!r:.120})"
+            )
     else:
         data = raw
 
@@ -156,8 +166,16 @@ def load_video_from_bytes(raw: Any, num_frames: int = 16) -> List[Image.Image]:
         container.close()
 
 
-def _resolve_video_path(video_id: str, video_dir: Path, video_ext: str) -> Optional[Path]:
-    """Try several path conventions to locate a local video file."""
+def _resolve_video_path(
+    video_id: str, video_dir: Optional[Path], video_ext: str
+) -> Optional[Path]:
+    """Try several path conventions to locate a local video file.
+
+    Returns None immediately if *video_dir* is None (HF-bytes tasks that
+    don't require a local video directory).
+    """
+    if video_dir is None:
+        return None
     candidates = [
         video_dir / video_id,
         video_dir / (video_id + video_ext),
@@ -290,6 +308,14 @@ def evaluate(
             if use_hf_bytes and sample.get(task.video_bytes_col) is not None:
                 frames = load_video_from_bytes(sample[task.video_bytes_col], num_frames)
             else:
+                # Bytes column was None (missing for this sample).  Try local file.
+                if use_hf_bytes and video_dir is None:
+                    log.warning(
+                        "[%d] Video bytes missing for %s and no --video-dir provided"
+                        " — skipping", idx, video_id,
+                    )
+                    n_skip += 1
+                    continue
                 video_path = _resolve_video_path(video_id, video_dir, task.video_ext)
                 if video_path is None:
                     log.warning("[%d] Video not found: %s — skipping", idx, video_id)
