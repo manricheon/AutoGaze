@@ -180,6 +180,26 @@ class NVILARunner(BaseMLLMRunner):
         self.processor.gazing_ratio_tile = ratio
         self.processor.gazing_ratio_thumbnail = ratio
 
+    def _run_autogaze(self, frames: List[Image.Image]) -> torch.Tensor:
+        """Expose internal AutoGaze model for visualization."""
+        if not hasattr(self.processor, "_autogaze_model") or self.processor._autogaze_model is None:
+            # Fallback: create a dummy all-ones mask if AG is disabled or not found
+            return torch.ones(1, len(frames), 14, 14)
+        
+        ag_model = self.processor._autogaze_model
+        ag_proc = self.processor.autogaze_processor
+        ag_dev = next(ag_model.parameters()).device
+        
+        # Preprocess and run
+        batch = ag_proc(images=frames, return_tensors="pt")["pixel_values"]
+        batch = batch.unsqueeze(0).to(ag_dev)
+        with torch.no_grad():
+            out = ag_model({"video": batch}, gazing_ratio=self.gazing_ratio)
+        
+        mask = out["gazing_mask"][-1][0].float() # (T, 196)
+        return mask.reshape(1, -1, 14, 14)
+
+
     def run(
         self,
         frames: List[Image.Image],

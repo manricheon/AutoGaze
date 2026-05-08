@@ -97,8 +97,16 @@ class TaskConfig:
     # ── public helpers ────────────────────────────────────────────────────── #
 
     def get_video_id(self, sample: Dict[str, Any]) -> str:
-        """Return the raw video identifier from a dataset sample."""
-        return str(sample[self.video_col])
+        """Return the raw video identifier from a dataset sample.
+
+        When the column is a HF video/audio dict ({"bytes": ..., "path": ...}),
+        the path field is used as a stable ID so that _resolve_video_path can
+        locate the file under --video-dir.
+        """
+        val = sample[self.video_col]
+        if isinstance(val, dict) and val.get("path"):
+            return str(val["path"])
+        return str(val)
 
     def get_options(self, sample: Dict[str, Any]) -> List[str]:
         """Return a list of option texts (plain, without 'A.' prefix)."""

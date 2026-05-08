@@ -243,6 +243,7 @@ def evaluate(
     max_samples: Optional[int],
     resume: bool,
     mllm: str = "nvila",
+    hf_data_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Run full evaluation and return result dict."""
 
@@ -263,13 +264,16 @@ def evaluate(
     except ImportError:
         raise ImportError("pip install datasets")
 
-    log.info("Loading dataset %s / %s", task.hf_repo, task.hf_split)
+    hf_source = str(hf_data_dir) if hf_data_dir else task.hf_repo
+    log.info("Loading dataset %s / %s", hf_source, task.hf_split)
+    if hf_data_dir:
+        log.info("  Source: local directory %s", hf_data_dir)
     if use_hf_bytes:
         log.info("  Video mode: HuggingFace bytes (no --video-dir needed)")
     else:
         log.info("  Video mode: local files from %s", video_dir)
 
-    ds = load_dataset(task.hf_repo, split=task.hf_split, **task.hf_kwargs)
+    ds = load_dataset(hf_source, split=task.hf_split, **task.hf_kwargs)
     if max_samples:
         ds = ds.select(range(min(max_samples, len(ds))))
     log.info("  %d samples", len(ds))
@@ -503,6 +507,15 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--hf-data-dir", default=None, type=Path,
+        help=(
+            "Local directory of a pre-downloaded HF dataset repo. "
+            "Overrides the remote HF repo ID so the benchmark runs fully offline. "
+            "Download once with: "
+            "huggingface-cli download <repo> --repo-type dataset --local-dir <dir>"
+        ),
+    )
+    p.add_argument(
         "--model-path", default="weights/NVILA-8B-HD-Video",
         help="Path to MLLM weights (NVILA default; set to HF hub ID for Qwen2.5-VL)",
     )
@@ -572,6 +585,7 @@ def main() -> None:
         max_samples   = args.max_samples,
         resume        = args.resume,
         mllm          = args.mllm,
+        hf_data_dir   = args.hf_data_dir,
     )
 
 
