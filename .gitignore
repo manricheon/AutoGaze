@@ -2,6 +2,8 @@ exps/
 outputs/
 results/
 weights/
+mamba_gaze/
+notebooks/09_mamba_gaze_ko.ipynb
 .DS_Store
 **/.DS_Store
 .idea/

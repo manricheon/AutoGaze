@@ -298,8 +298,8 @@ class Qwen25VLRunner(BaseMLLMRunner):
     def _frames_to_ag_tensor(self, frames: List[Image.Image]) -> torch.Tensor:
         """Preprocess PIL frames for AutoGaze: (1, T, C, 224, 224)."""
         processed = self.ag_processor(images=frames, return_tensors="pt")
-        pv = processed["pixel_values"]  # (T, C, H, W) at 224×224
-        return pv.unsqueeze(0).to(next(self.model.parameters()).device)
+        pv = processed["pixel_values"]  # (1, T, C, H, W) at 224×224
+        return pv.to(next(self.model.parameters()).device)
 
     @torch.no_grad()
     def _run_autogaze(self, frames: List[Image.Image]) -> torch.Tensor:
@@ -617,8 +617,8 @@ class VJEPA2Runner(BaseMLLMRunner):
     def _frames_to_ag_tensor(self, frames: List[Image.Image]) -> torch.Tensor:
         """Preprocess PIL frames for AutoGaze: (1, T, C, 224, 224)."""
         processed = self.ag_processor(images=frames, return_tensors="pt")
-        pv = processed["pixel_values"]                        # (T, C, H, W)
-        return pv.unsqueeze(0).to(next(self.model.parameters()).device)
+        pv = processed["pixel_values"]                        # (1, T, C, H, W)
+        return pv.to(next(self.model.parameters()).device)
 
     def _frames_to_vjepa_tensor(self, frames: List[Image.Image]) -> torch.Tensor:
         """Preprocess PIL frames for V-JEPA2: (1, T, C, H, W).
@@ -1196,8 +1196,8 @@ class SigLIPRunner(BaseMLLMRunner):
     def _frames_to_ag_tensor(self, frames: List[Image.Image]) -> torch.Tensor:
         """Preprocess PIL frames for AutoGaze: (1, T, C, 224, 224)."""
         processed = self.ag_processor(images=frames, return_tensors="pt")
-        pv = processed["pixel_values"]           # (T, C, H, W)
-        return pv.unsqueeze(0).to(next(self.model.parameters()).device)
+        pv = processed["pixel_values"]           # (1, T, C, H, W)
+        return pv.to(next(self.model.parameters()).device)
 
     def _frames_to_siglip_tensor(self, frames: List[Image.Image]) -> torch.Tensor:
         """Preprocess PIL frames for SigLIP: (T, C, H, W)."""
