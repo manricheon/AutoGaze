@@ -25,13 +25,18 @@ Tasks marked "HF bytes" embed video data directly in the dataset parquet — no 
 
 ### MLLM Runners (--mllm)
 
-| `--mllm` | Model | AutoGaze integration |
-| :--- | :--- | :--- |
-| `nvila` | NVILA-8B-HD-Video | processor-integrated (full) |
-| `qwen25vl` | Qwen2.5-VL-7B | zero-shot token selector |
-| `qwen25vl_full` | Qwen2.5-VL-7B | zero-shot token selector (full video) |
-| `vjepa2_llm` | V-JEPA2 ViT + Qwen2.5-7B LLM | zero-shot token selector |
-| `nvila_vjepa2` | V-JEPA2 ViT + NVILA LLM | zero-shot token selector |
+Naming convention: **`{vit}_{lm}`** (ViT first).  Use `--integration` to override the mode.
+
+| `--mllm` | ViT | LLM | Default integration | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| `nvila` | SigLIP (custom) | NVILA | native | processor-integrated; most tested |
+| `vjepa2_nvila` | V-JEPA2 | NVILA | full | needs `--vjepa2-path` |
+| `siglip_qwen25` | SigLIP | Qwen2.5-VL | hook | pass `--integration full` for efficiency |
+| `vjepa2_qwen25` | V-JEPA2 | Qwen2.5-7B | full | needs `--vjepa2-path` + `--lm-path` |
+| `vjepa2` | V-JEPA2 | — | hook | feature extraction only |
+| `siglip` | SigLIP (HF) | — | hook | feature extraction only |
+
+**Deprecated aliases** (still work, emit warning): `nvila_vjepa2` → `vjepa2_nvila`, `qwen25vl` → `siglip_qwen25`, `qwen25vl_full` → `siglip_qwen25 --integration full`, `vjepa2_llm` → `vjepa2_qwen25`.
 
 ---
 
@@ -81,14 +86,38 @@ python -m autogaze.eval.run_benchmark \
     --gazing-ratio 0.75
 ```
 
+### Qwen2.5-VL full integration (higher efficiency)
+
+```bash
+python -m autogaze.eval.run_benchmark \
+    --task mvbench \
+    --mllm siglip_qwen25 \
+    --model-path weights/Qwen2.5-VL-7B-Instruct \
+    --autogaze-path weights/AutoGaze \
+    --integration full \
+    --gazing-ratio 0.75
+```
+
 ### V-JEPA2 + NVILA LLM runner
 
 ```bash
 python -m autogaze.eval.run_benchmark \
     --task videomme \
-    --mllm nvila_vjepa2 \
+    --mllm vjepa2_nvila \
     --model-path weights/NVILA-8B-HD-Video \
     --vjepa2-path weights/vjepa2-vitl-fpc64-256 \
+    --autogaze-path weights/AutoGaze \
+    --gazing-ratio 0.75
+```
+
+### V-JEPA2 + Qwen2.5-7B LLM runner
+
+```bash
+python -m autogaze.eval.run_benchmark \
+    --task videomme \
+    --mllm vjepa2_qwen25 \
+    --model-path weights/vjepa2-vitl-fpc64-256 \
+    --lm-path weights/Qwen2.5-7B-Instruct \
     --autogaze-path weights/AutoGaze \
     --gazing-ratio 0.75
 ```
@@ -175,8 +204,12 @@ python -m autogaze.eval.run_benchmark \
 | Flag | Default | Description |
 | :--- | :--- | :--- |
 | `--task` | required | Benchmark task name (see Section 1) |
-| `--mllm` | `nvila` | MLLM runner (see Section 1) |
-| `--model-path` | `weights/NVILA-8B-HD-Video` | Path to MLLM weights or HF repo ID |
+| `--mllm` | `nvila` | Runner key — `{vit}_{lm}` convention (see Section 1) |
+| `--integration` | runner default | Override integration mode: `native`, `hook`, or `full` |
+| `--model-path` | `weights/NVILA-8B-HD-Video` | Primary model weights path (ViT or ViT+LLM) |
+| `--vjepa2-path` | `None` | V-JEPA2 encoder weights (required for `vjepa2_nvila`) |
+| `--lm-path` | `None` | LLM weights (required for `vjepa2_qwen25`) |
+| `--projector-path` | `None` | Trained ViT→LLM projector (optional for LLM runners) |
 | `--autogaze-path` | `weights/AutoGaze` | Path to AutoGaze weights |
 | `--no-autogaze` | off | Disable AutoGaze (full-patch baseline) |
 | `--gazing-ratio` | `0.75` | Fraction of patches to keep (0–1) |
@@ -235,8 +268,14 @@ Verify that `--model-path` and `--autogaze-path` point to the correct weight dir
 **`AssertionError` in processing_nvila.py (NVILA runner)**
 The NVILA processor requires a `<video>` token in the prompt. This is handled automatically by `NVILARunner.run()` — if you see this error, ensure you are using the runner via `load_runner()` rather than calling the processor directly.
 
-**`nvila_vjepa2` runner fails to load**
+**`vjepa2_nvila` runner fails to load** (previously `nvila_vjepa2`)
 This runner requires both `--model-path` (NVILA) and `--vjepa2-path`. If using `load_runner()` in Python, pass `vjepa2_path=` as a keyword argument.
+
+**Deprecation warnings for old runner keys**
+Keys `nvila_vjepa2`, `qwen25vl`, `qwen25vl_full`, `vjepa2_llm`, `vjepa2_full` still work but emit a `DeprecationWarning`. Update scripts to use the new `{vit}_{lm}` keys.
+
+**Metrics section shows `avg_latency_ms` / `avg_peak_vram_mb` as 0 or missing**
+VRAM metrics require a CUDA GPU. On CPU/MPS, `peak_vram_mb` is omitted per sample and the aggregate is not computed. `n_tokens_visual` is an estimate; exact counts require overriding `n_visual_tokens()` in the runner class.
 
 ---
 
