@@ -333,26 +333,36 @@ def evaluate(
             n_skip += 1
             continue
 
-        # Build prompt and run inference
+        # Build prompt and run inference — capture latency and VRAM
         prompt    = task.build_prompt(sample, use_subtitle=use_subtitle)
+        _cuda_available = torch.cuda.is_available()
+        if _cuda_available:
+            torch.cuda.reset_peak_memory_stats()
         t0        = time.perf_counter()
         generated = runner.run(frames, prompt, max_new_tokens)
         elapsed   = time.perf_counter() - t0
+        peak_vram_mb = (
+            torch.cuda.max_memory_allocated() / 1024 / 1024
+            if _cuda_available else None
+        )
 
         predicted = task.parse_prediction(generated)
         gt        = task.get_ground_truth(sample)
         correct   = predicted == gt
 
-        result = {
-            "sample_id"  : sample_id,
-            "video_id"   : video_id,
-            "question"   : str(sample[task.question_col]),
-            "ground_truth": gt,
-            "predicted"  : predicted,
-            "generated"  : generated,
-            "correct"    : correct,
-            "latency_s"  : round(elapsed, 3),
+        result: Dict[str, Any] = {
+            "sample_id"       : sample_id,
+            "video_id"        : video_id,
+            "question"        : str(sample[task.question_col]),
+            "ground_truth"    : gt,
+            "predicted"       : predicted,
+            "generated"       : generated,
+            "correct"         : correct,
+            "latency_ms"      : round(elapsed * 1000, 1),
+            "n_tokens_visual" : runner.n_visual_tokens(len(frames)),
         }
+        if peak_vram_mb is not None:
+            result["peak_vram_mb"] = round(peak_vram_mb, 1)
         if task.category_col and task.category_col in sample:
             result["category"] = str(sample[task.category_col])
         if task.duration_col and task.duration_col in sample:
@@ -366,11 +376,11 @@ def evaluate(
         n_total   = len(ds)
         acc_so_far = n_correct / n_done * 100
         log.info(
-            "[%d/%d] %s → pred=%s gt=%s %s  (acc=%.1f%%  %.2fs)",
+            "[%d/%d] %s → pred=%s gt=%s %s  (acc=%.1f%%  %.0fms)",
             n_done, n_total,
             sample_id, predicted, gt,
             "✓" if correct else "✗",
-            acc_so_far, elapsed,
+            acc_so_far, elapsed * 1000,
         )
 
         # Incremental save every 50 samples
@@ -407,6 +417,19 @@ def _compute_metrics(
         "n_total"  : len(per_sample),
         "n_correct": n_correct,
     }
+
+    # Efficiency metrics (latency, VRAM, visual token count)
+    latencies = [r["latency_ms"] for r in per_sample if "latency_ms" in r]
+    if latencies:
+        metrics["avg_latency_ms"] = round(sum(latencies) / len(latencies), 1)
+
+    vrams = [r["peak_vram_mb"] for r in per_sample if r.get("peak_vram_mb") is not None]
+    if vrams:
+        metrics["avg_peak_vram_mb"] = round(sum(vrams) / len(vrams), 1)
+
+    tokens = [r["n_tokens_visual"] for r in per_sample if r.get("n_tokens_visual") is not None]
+    if tokens:
+        metrics["avg_n_tokens_visual"] = round(sum(tokens) / len(tokens))
 
     # Per-category breakdown
     for breakdown_col in ("category", "duration"):
@@ -469,6 +492,13 @@ def _print_summary(
     print(f"  Mode    : {ag_tag}")
     print(f"  Total   : {metrics.get('n_total', 0)}  (skipped: {n_skip})")
     print(f"  Accuracy: {metrics.get('overall_accuracy', 0):.2f}%")
+
+    if "avg_latency_ms" in metrics:
+        print(f"  Latency : {metrics['avg_latency_ms']:.1f} ms/sample (avg)")
+    if "avg_peak_vram_mb" in metrics:
+        print(f"  VRAM    : {metrics['avg_peak_vram_mb']:.1f} MB peak (avg)")
+    if "avg_n_tokens_visual" in metrics:
+        print(f"  Tokens  : {metrics['avg_n_tokens_visual']} visual tokens/sample (avg)")
 
     for key in ("accuracy_by_duration", "accuracy_by_category"):
         breakdown = metrics.get(key)

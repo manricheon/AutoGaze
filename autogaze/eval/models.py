@@ -126,6 +126,14 @@ class BaseMLLMRunner:
         """Run one sample inference, return the raw generated string."""
         raise NotImplementedError
 
+    def n_visual_tokens(self, n_frames: int) -> Optional[int]:
+        """Return the number of visual tokens forwarded to the LLM for *n_frames* input.
+
+        Override in subclasses for an exact count.  Default returns None (unknown).
+        Used by the benchmark loop to record per-sample token efficiency.
+        """
+        return None
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # NVILA runner  (native AutoGaze processor)
@@ -218,6 +226,13 @@ class NVILARunner(BaseMLLMRunner):
         mask = out["gazing_mask"][-1][0].float() # (T, 196)
         return mask.reshape(1, -1, 14, 14)
 
+
+    def n_visual_tokens(self, n_frames: int) -> Optional[int]:
+        # NVILA uses multi-scale tiles: thumbnail (1 tile) + spatial tiles (T × tiles_per_frame).
+        # Each tile is ~196 patches; gazing_ratio reduces the count.
+        # Approximate: 196 * (1 + n_frames) * gazing_ratio
+        base = 196 * (1 + n_frames)
+        return max(1, round(base * self.gazing_ratio))
 
     def run(
         self,
@@ -500,6 +515,15 @@ class Qwen25VLRunner(BaseMLLMRunner):
             yield
         finally:
             handle.remove()
+
+    def n_visual_tokens(self, n_frames: int) -> Optional[int]:
+        # Qwen patch grid: image_size / patch_size per side.
+        # Approximate total per frame; gazing_ratio applied if AutoGaze active.
+        # Qwen2.5-VL default: 28×28 = 784 patches per tile.
+        patches_per_frame = 784
+        total = patches_per_frame * n_frames
+        ratio = getattr(self, "gazing_ratio", 1.0)
+        return max(1, round(total * ratio))
 
     # ------------------------------------------------------------------ #
     # Inference
@@ -900,6 +924,13 @@ class VJEPA2Runner(BaseMLLMRunner):
             with self._patch_embed_hook(flat_mask):
                 outputs = self.model.encoder(pixel_values_videos=video)
             return outputs.last_hidden_state
+
+    def n_visual_tokens(self, n_frames: int) -> Optional[int]:
+        # V-JEPA2 LLM runner: after mean pooling over spatial patches,
+        # one token per temporal chunk (T_p = n_frames // tubelet_size) is passed to the LLM.
+        t_p = max(1, n_frames // 2)
+        ratio = getattr(self, "gazing_ratio", 1.0)
+        return max(1, round(t_p * ratio))
 
     # ------------------------------------------------------------------ #
     # MCQ inference
