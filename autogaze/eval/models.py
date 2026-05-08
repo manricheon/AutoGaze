@@ -71,6 +71,17 @@ from PIL import Image
 
 log = logging.getLogger(__name__)
 
+
+def _local(path: str) -> bool:
+    """Return True when *path* is an existing local directory.
+
+    Pass the result as ``local_files_only=`` to ``from_pretrained`` so that
+    local weights never trigger a HuggingFace Hub connection attempt, even
+    when ``trust_remote_code=True`` is set.
+    """
+    return os.path.isdir(path)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Base class
 # ─────────────────────────────────────────────────────────────────────────────
@@ -117,7 +128,8 @@ class NVILARunner(BaseMLLMRunner):
     ):
         from transformers import AutoProcessor, AutoModel
 
-        proc_kwargs: Dict[str, Any] = dict(trust_remote_code=True)
+        _lfo = _local(model_path)
+        proc_kwargs: Dict[str, Any] = dict(trust_remote_code=True, local_files_only=_lfo)
         if autogaze_path is not None:
             proc_kwargs.update(
                 autogaze_model_id=autogaze_path,
@@ -132,6 +144,7 @@ class NVILARunner(BaseMLLMRunner):
         self.model = AutoModel.from_pretrained(
             model_path,
             trust_remote_code=True,
+            local_files_only=_lfo,
             torch_dtype=dtype,
             device_map="auto",
         )
@@ -236,12 +249,14 @@ class Qwen25VLRunner(BaseMLLMRunner):
             )
 
         self.integration = integration
+        _lfo = _local(model_path)
 
         log.info("Qwen25VLRunner: loading processor from %s", model_path)
         self.processor = AutoProcessor.from_pretrained(
             model_path,
             min_pixels=min_pixels,
             max_pixels=max_pixels,
+            local_files_only=_lfo,
         )
 
         log.info("Qwen25VLRunner: loading model from %s (dtype=%s, integration=%s)",
@@ -250,6 +265,7 @@ class Qwen25VLRunner(BaseMLLMRunner):
             model_path,
             torch_dtype=dtype,
             device_map="auto",
+            local_files_only=_lfo,
         )
         self.model.eval()
 
@@ -559,6 +575,7 @@ class VJEPA2Runner(BaseMLLMRunner):
             raise ImportError("transformers>=4.53 required for V-JEPA2.")
 
         self.integration = integration
+        _lfo = _local(model_path)
 
         log.info("VJEPA2Runner: loading model from %s (dtype=%s, integration=%s)",
                  model_path, dtype, integration)
@@ -566,12 +583,13 @@ class VJEPA2Runner(BaseMLLMRunner):
             model_path,
             torch_dtype=dtype,
             device_map="auto",
+            local_files_only=_lfo,
         )
         self.model.eval()
 
         # Try to load a processor/image processor for frame preprocessing
         try:
-            self.processor = AutoProcessor.from_pretrained(model_path)
+            self.processor = AutoProcessor.from_pretrained(model_path, local_files_only=_lfo)
         except Exception:
             self.processor = None
             log.warning("VJEPA2Runner: no processor found at %s — use _frames_to_tensor directly",
@@ -943,12 +961,13 @@ class VJEPA2LLMRunner(VJEPA2Runner):
 
     def _load_lm(self, lm_path: str, dtype: torch.dtype) -> None:
         from transformers import AutoModelForCausalLM, AutoTokenizer
+        _lfo = _local(lm_path)
         log.info("VJEPA2LLMRunner: loading LLM from %s", lm_path)
         self.lm = AutoModelForCausalLM.from_pretrained(
-            lm_path, torch_dtype=dtype, device_map="auto"
+            lm_path, torch_dtype=dtype, device_map="auto", local_files_only=_lfo
         )
         self.lm.eval()
-        self.lm_tokenizer = AutoTokenizer.from_pretrained(lm_path)
+        self.lm_tokenizer = AutoTokenizer.from_pretrained(lm_path, local_files_only=_lfo)
         if self.lm_tokenizer.pad_token is None:
             self.lm_tokenizer.pad_token = self.lm_tokenizer.eos_token
         log.info("VJEPA2LLMRunner: LLM ready  hidden_size=%d",
@@ -1154,12 +1173,14 @@ class SigLIPRunner(BaseMLLMRunner):
 
         self.gazing_ratio = gazing_ratio
 
+        _lfo = _local(model_path)
         log.info("SigLIPRunner: loading model from %s (dtype=%s)", model_path, dtype)
-        self.processor = SiglipProcessor.from_pretrained(model_path)
+        self.processor = SiglipProcessor.from_pretrained(model_path, local_files_only=_lfo)
         self.model = SiglipVisionModel.from_pretrained(
             model_path,
             torch_dtype=dtype,
             device_map="auto",
+            local_files_only=_lfo,
         )
         self.model.eval()
 
