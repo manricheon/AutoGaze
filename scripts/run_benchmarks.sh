@@ -26,6 +26,9 @@
 #   --autogaze-only      Run AutoGaze ON only
 #   --results-dir DIR    Output directory                   (default: results/YYYYMMDD_HHMM)
 #   --hlvid-video-dir D  Local video dir for HLVid          (default: data/HLVid/videos)
+#   --hf-data-dir DIR    Root dir of pre-downloaded HF datasets (optional).
+#                          Expects sub-folders: Video-MME/ MVBench/ NExTQA/ etc.
+#                          Created by: bash scripts/download_data_eval.sh DIR
 #   --model-path P       MLLM model path  (default: weights/NVILA-8B-HD-Video)
 #   --autogaze-path P    AutoGaze path    (default: weights/AutoGaze)
 #   --no-resume          Do not resume from existing outputs
@@ -72,6 +75,10 @@
 #   # Run HLVid (local download required first)
 #   bash scripts/download_hlvid.sh data/HLVid
 #   bash scripts/run_benchmarks.sh --tasks hlvid --hlvid-video-dir data/HLVid/videos
+#
+#   # Use pre-downloaded HF datasets (download once with download_data_eval.sh)
+#   bash scripts/download_data_eval.sh data/eval hf_bytes
+#   bash scripts/run_benchmarks.sh --tasks videomme,mvbench --hf-data-dir data/eval
 
 set -euo pipefail
 
@@ -93,6 +100,7 @@ RUN_BASELINE=true
 RUN_AUTOGAZE=true
 RESULTS_DIR=""
 HLVID_VIDEO_DIR="data/HLVid/videos"
+HF_DATA_DIR=""
 MODEL_PATH="weights/NVILA-8B-HD-Video"
 AG_PATH="weights/AutoGaze"
 RESUME="--resume"
@@ -111,6 +119,7 @@ while [[ $# -gt 0 ]]; do
         --autogaze-only)   RUN_BASELINE=false;      shift ;;
         --results-dir)     RESULTS_DIR="$2";        shift 2 ;;
         --hlvid-video-dir) HLVID_VIDEO_DIR="$2";   shift 2 ;;
+        --hf-data-dir)     HF_DATA_DIR="$2";       shift 2 ;;
         --model-path)      MODEL_PATH="$2";         shift 2 ;;
         --autogaze-path)   AG_PATH="$2";            shift 2 ;;
         --lm-path)         LM_PATH="$2";            shift 2 ;;
@@ -201,13 +210,27 @@ echo "  Tasks       : ${SELECTED_TASKS[*]}"
 echo "  MLLM        : $MLLM"
 echo "  Gazing ratio: $RATIO"
 echo "  Frames      : $FRAMES"
-[[ -n "$MAX_SAMPLES" ]] && echo "  Max samples : $MAX_SAMPLES"
+[[ -n "$MAX_SAMPLES"  ]] && echo "  Max samples : $MAX_SAMPLES"
+[[ -n "$HF_DATA_DIR"  ]] && echo "  HF data dir : $HF_DATA_DIR"
 echo ""
+
+# Mapping from task name to expected sub-folder under --hf-data-dir
+declare -A HF_TASK_DIRS=(
+    [videomme]="Video-MME"
+    [videomme_w_sub]="Video-MME"
+    [mvbench]="MVBench"
+    [nextqa]="NExTQA"
+    [egoschema]="EgoSchema"
+    [mlvu]="MLVU"
+    [longvideobench]="LongVideoBench"
+)
 
 for task in "${SELECTED_TASKS[@]}"; do
 
-    # Determine extra args (HLVid needs --video-dir)
+    # Determine extra args
     extra=()
+
+    # HLVid: always needs --video-dir
     if [[ "$task" == "hlvid" ]]; then
         if [[ ! -d "$HLVID_VIDEO_DIR" ]]; then
             warn "HLVid videos not found at $HLVID_VIDEO_DIR — skipping"
@@ -215,6 +238,16 @@ for task in "${SELECTED_TASKS[@]}"; do
             continue
         fi
         extra+=(--video-dir "$HLVID_VIDEO_DIR")
+    fi
+
+    # HF-bytes tasks: add --hf-data-dir if pre-downloaded dir exists
+    if [[ -n "$HF_DATA_DIR" && -n "${HF_TASK_DIRS[$task]:-}" ]]; then
+        task_data_dir="$HF_DATA_DIR/${HF_TASK_DIRS[$task]}"
+        if [[ -d "$task_data_dir" ]]; then
+            extra+=(--hf-data-dir "$task_data_dir")
+        else
+            warn "$task: --hf-data-dir sub-folder not found ($task_data_dir) — loading from HF hub"
+        fi
     fi
 
     header "$task"
