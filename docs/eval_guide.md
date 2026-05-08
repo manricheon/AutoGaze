@@ -25,16 +25,22 @@ Tasks marked "HF bytes" embed video data directly in the dataset parquet — no 
 
 ### MLLM Runners (--mllm)
 
-Naming convention: **`{vit}_{lm}`** (ViT first).  Use `--integration` to override the mode.
+Naming convention: **`{vit}_{lm}`** (ViT first).  Use `--integration` to select the mode.
 
-| `--mllm` | ViT | LLM | Default integration | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `nvila` | SigLIP (custom) | NVILA | native | processor-integrated; most tested |
-| `vjepa2_nvila` | V-JEPA2 | NVILA | full | needs `--vjepa2-path` |
-| `siglip_qwen25` | SigLIP | Qwen2.5-VL | hook | pass `--integration full` for efficiency |
-| `vjepa2_qwen25` | V-JEPA2 | Qwen2.5-7B | full | needs `--vjepa2-path` + `--lm-path` |
-| `vjepa2` | V-JEPA2 | — | hook | feature extraction only |
-| `siglip` | SigLIP (HF) | — | hook | feature extraction only |
+**Integration mode support matrix**:
+
+| `--mllm` | ViT | LLM | `native` | `hook` | `full` | Extra flags |
+| :--- | :--- | :--- | :---: | :---: | :---: | :--- |
+| `nvila` | SigLIP (custom) | NVILA | ✅ default | ✅ | — | `--autogaze-path` required |
+| `siglip_qwen25` | SigLIP | Qwen2.5-VL | — | ✅ default | ✅ | |
+| `vjepa2_nvila` | V-JEPA2 | NVILA | — | ✅ | ✅ default | `--vjepa2-path` required |
+| `vjepa2_qwen25` | V-JEPA2 | Qwen2.5-7B | — | ✅ | ✅ default | `--vjepa2-path`, `--lm-path` |
+| `vjepa2` | V-JEPA2 | — | — | ✅ default | ✅ | feature extraction only |
+| `siglip` | SigLIP (HF) | — | — | ✅ | — | feature extraction only |
+
+- **native**: AutoGaze fully baked into the model processor — deepest integration, best efficiency, NVILA-specific.
+- **hook**: Gaze mask zeroes non-selected tokens via a forward hook/method patch — zero-shot, easy to add to any model, no latency benefit (sequence length unchanged).
+- **full**: Tokens physically removed inside the ViT forward pass — real latency/VRAM reduction, requires ViT modification.
 
 **Deprecated aliases** (still work, emit warning): `nvila_vjepa2` → `vjepa2_nvila`, `qwen25vl` → `siglip_qwen25`, `qwen25vl_full` → `siglip_qwen25 --integration full`, `vjepa2_llm` → `vjepa2_qwen25`.
 

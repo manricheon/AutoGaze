@@ -7,14 +7,14 @@ MLLM runner registry for video QA benchmarks.
 Runner naming convention: ``{vit}_{lm}``  (ViT always first, then LLM).
 Integration mode is a separate flag, not baked into the runner key.
 
-Built-in runners (primary keys)
---------------------------------
-  nvila             SigLIP ViT + NVILA LLM  (native/processor integration)
-  vjepa2_nvila      V-JEPA2 ViT + NVILA LLM  (full integration, needs vjepa2_path=)
-  siglip_qwen25     SigLIP ViT + Qwen2.5-VL LLM  (default: hook; pass integration='full')
-  vjepa2_qwen25     V-JEPA2 ViT + Qwen2.5-7B LLM  (full, needs lm_path=)
-  vjepa2            V-JEPA2 encoder only  (feature extraction; hook or full)
-  siglip            SigLIP encoder only   (feature extraction; hook)
+Built-in runners (primary keys)    native  hook  full
+-------------------------------------------------
+  nvila             SigLIP+NVILA          ✓      ✓     —   (needs autogaze_path)
+  siglip_qwen25     SigLIP+Qwen2.5-VL    —      ✓     ✓
+  vjepa2_nvila      V-JEPA2+NVILA        —      ✓     ✓   (needs vjepa2_path=)
+  vjepa2_qwen25     V-JEPA2+Qwen2.5-7B  —      ✓     ✓   (needs lm_path=)
+  vjepa2            V-JEPA2 encoder      —      ✓     ✓   (feature extraction)
+  siglip            SigLIP encoder       —      ✓     —   (feature extraction)
 
 Deprecated aliases (still work, emit DeprecationWarning)
 ----------------------------------------------------------
@@ -190,14 +190,31 @@ class BaseMLLMRunner:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# NVILA runner  (native AutoGaze processor)
+# NVILA runner  (SigLIP ViT + NVILA LLM)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class NVILARunner(BaseMLLMRunner):
-    """NVILA with native AutoGaze processor integration.
+    """NVILA (SigLIP ViT + NVILA LLM) with three integration modes.
 
-    When *autogaze_path* is None the processor is loaded without AutoGaze,
-    which produces a full-patch baseline result.
+    integration='native'  (default)
+        AutoGaze fully baked into ``processing_nvila.py``.  Tiles are selectively
+        processed based on the gaze map — the deepest and most efficient integration.
+        Requires the custom NVILA processor with AutoGaze support.
+
+    integration='hook'  (zero-shot)
+        AutoGaze runs as an external module; gaze mask is applied via a temporary
+        monkey-patch of ``model._run_vision_tower_batched``.  Non-gazed patch tokens
+        are zeroed before projection to the LLM.  No modification to the NVILA
+        processor or model weights — useful for comparing integration difficulty.
+
+    integration='full'
+        Physically remove non-selected patch tokens inside the SigLIP encoder's
+        forward pass — requires replacing the vision tower's forward method.
+        Not yet implemented; raises ``NotImplementedError``.
+
+    For all modes, *autogaze_path* is required (processing_nvila.py fetches the
+    AutoGaze config on init even for the baseline).  For AutoGaze OFF pass
+    ``gazing_ratio=1.0`` in native mode, or ``autogaze_path=None`` in hook mode.
     """
 
     name = "nvila"
@@ -208,33 +225,66 @@ class NVILARunner(BaseMLLMRunner):
         autogaze_path: Optional[str],
         gazing_ratio: float,
         dtype: torch.dtype = torch.bfloat16,
+        integration: str = "native",
     ):
-        from transformers import AutoProcessor, AutoModel
-
-        # processing_nvila.py internally fetches AutoGaze config from HF when
-        # autogaze_model_id is omitted, even for the baseline case.  To avoid
-        # any network call we always supply autogaze_model_id: for the true
-        # baseline pass autogaze_path with gazing_ratio=1.0 (all patches).
-        if autogaze_path is None:
-            raise ValueError(
-                "NVILARunner requires autogaze_path even for the baseline. "
-                "Pass autogaze_path=<AG_PATH> with gazing_ratio=1.0 to process "
-                "all patches (equivalent to AutoGaze OFF) without a Hub lookup."
+        if integration not in ("native", "hook", "full"):
+            raise ValueError(f"integration must be 'native', 'hook', or 'full', got '{integration}'")
+        if integration == "full":
+            raise NotImplementedError(
+                "NVILARunner integration='full' is not yet implemented.\n"
+                "It requires replacing NVILA's internal SigLIP forward() to "
+                "physically remove non-selected patch tokens — similar to "
+                "AutoGazeQwen25VisionTransformer but for NVILA's vision tower.\n"
+                "Use integration='native' (best) or integration='hook' instead."
             )
 
+        from transformers import AutoProcessor, AutoModel
+
+        self.integration = integration
+        self.gazing_ratio = gazing_ratio
         _lfo = _local(model_path)
-        proc_kwargs: Dict[str, Any] = dict(
-            trust_remote_code=True,
-            local_files_only=_lfo,
-            autogaze_model_id=autogaze_path,
-            gazing_ratio_tile=gazing_ratio,
-            gazing_ratio_thumbnail=gazing_ratio,
-        )
 
-        log.info("NVILARunner: loading processor from %s", model_path)
-        self.processor = AutoProcessor.from_pretrained(model_path, **proc_kwargs)
+        if integration == "native":
+            # processing_nvila.py internally fetches AutoGaze config from HF when
+            # autogaze_model_id is omitted.  Always supply it to avoid network calls.
+            if autogaze_path is None:
+                raise ValueError(
+                    "NVILARunner (native) requires autogaze_path even for baseline. "
+                    "Pass autogaze_path=<AG_PATH> with gazing_ratio=1.0 for all-patch baseline."
+                )
+            proc_kwargs: Dict[str, Any] = dict(
+                trust_remote_code=True,
+                local_files_only=_lfo,
+                autogaze_model_id=autogaze_path,
+                gazing_ratio_tile=gazing_ratio,
+                gazing_ratio_thumbnail=gazing_ratio,
+            )
+            log.info("NVILARunner[native]: loading processor from %s", model_path)
+            self.processor = AutoProcessor.from_pretrained(model_path, **proc_kwargs)
+            self.selector = None   # AG is baked into the processor
 
-        log.info("NVILARunner: loading model from %s (dtype=%s)", model_path, dtype)
+        else:  # hook mode
+            # Standard NVILA processor — AutoGaze applied externally via method patch.
+            # gazing_ratio=1.0 → processor passes all patches; hook zeros non-gazed ones.
+            proc_kwargs = dict(
+                trust_remote_code=True,
+                local_files_only=_lfo,
+                autogaze_model_id=autogaze_path,   # still required to avoid HF lookup
+                gazing_ratio_tile=1.0,
+                gazing_ratio_thumbnail=1.0,
+            )
+            log.info("NVILARunner[hook]: loading processor from %s (all-patch, hook applies mask)", model_path)
+            self.processor = AutoProcessor.from_pretrained(model_path, **proc_kwargs)
+
+            # Load AutoGaze as an external selector (same pattern as Qwen25VLRunner)
+            self.selector = None
+            if autogaze_path is not None:
+                self._load_autogaze(autogaze_path, gazing_ratio)
+            else:
+                log.info("NVILARunner[hook]: autogaze_path=None → baseline (no masking)")
+
+        log.info("NVILARunner: loading model from %s (dtype=%s, integration=%s)",
+                 model_path, dtype, integration)
         self.model = AutoModel.from_pretrained(
             model_path,
             trust_remote_code=True,
@@ -244,55 +294,104 @@ class NVILARunner(BaseMLLMRunner):
         )
         self.model.eval()
 
-        # Expose the same interface as selector-based runners so shared notebook
-        # cells (ratio sweep, timing) can work across all runner types.
-        # NVILARunner has no external AutoGazeTokenSelector — AutoGaze is baked
-        # into the processor.  selector=None signals "integrated AutoGaze".
-        self.selector = None
-        self.gazing_ratio = gazing_ratio
+    # ------------------------------------------------------------------ #
+    # AutoGaze loading (hook mode)
+    # ------------------------------------------------------------------ #
+
+    def _load_autogaze(self, autogaze_path: str, gazing_ratio: float) -> None:
+        """Load external AutoGaze model for hook mode."""
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+        from autogaze.models.autogaze import AutoGaze, AutoGazeImageProcessor
+        from autogaze.models.autogaze.autogaze_cv import AutoGazeTokenSelector
+
+        ag_model = AutoGaze.from_pretrained(autogaze_path).eval()
+        ag_model = ag_model.to(next(self.model.parameters()).device)
+        self.selector = AutoGazeTokenSelector(ag_model, gazing_ratio=gazing_ratio)
+        self.ag_processor = AutoGazeImageProcessor.from_pretrained(autogaze_path)
+        log.info("NVILARunner[hook]: AutoGaze ready (gazing_ratio=%.2f)", gazing_ratio)
 
     # ------------------------------------------------------------------ #
-    # Gazing ratio adjustment (NVILARunner only)
+    # Gaze mask computation (hook mode)
+    # ------------------------------------------------------------------ #
+
+    @torch.no_grad()
+    def _compute_hook_mask(self, frames: List[Image.Image]) -> torch.Tensor:
+        """Return a mean spatial gaze mask (196,) for hook-mode patching.
+
+        AutoGaze outputs per-frame 14×14 = 196-patch gaze maps.  These are
+        averaged across all T frames and thresholded to produce a single binary
+        mask of the same size as one SigLIP tile (196 positions).
+        """
+        pv = self.ag_processor(images=frames, return_tensors="pt")["pixel_values"]
+        pv = pv.unsqueeze(0).to(next(self.selector.ag.parameters()).device)
+        out = self.selector.ag({"video": pv}, gazing_ratio=self.gazing_ratio, generate_only=True)
+        raw = out["gazing_mask"][-1].float()    # (1, T, 196)
+        mean_map = raw.mean(dim=1).squeeze(0)   # (196,)
+        return (mean_map > _AG_THRESHOLD).float()
+
+    # ------------------------------------------------------------------ #
+    # Gazing ratio adjustment
     # ------------------------------------------------------------------ #
 
     def set_gazing_ratio(self, ratio: float) -> None:
-        """Update the gazing ratio forwarded to the NVILA processor."""
+        """Update the gazing ratio."""
         self.gazing_ratio = ratio
-        self.processor.gazing_ratio_tile = ratio
-        self.processor.gazing_ratio_thumbnail = ratio
+        if self.integration == "native":
+            self.processor.gazing_ratio_tile = ratio
+            self.processor.gazing_ratio_thumbnail = ratio
+        elif self.selector is not None:
+            self.selector.gazing_ratio = ratio
 
     def _run_autogaze(self, frames: List[Image.Image]) -> torch.Tensor:
-        """Expose internal AutoGaze model for visualization."""
-        if not hasattr(self.processor, "_autogaze_model") or self.processor._autogaze_model is None:
-            # Fallback: create a dummy all-ones mask if AG is disabled or not found
-            return torch.ones(1, len(frames), 14, 14)
-        
-        ag_model = self.processor._autogaze_model
-        ag_proc = self.processor.autogaze_processor
-        ag_dev = next(ag_model.parameters()).device
-        
-        # Preprocess and run
-        batch = ag_proc(images=frames, return_tensors="pt")["pixel_values"]
-        batch = batch.unsqueeze(0).to(ag_dev)
-        with torch.no_grad():
-            out = ag_model({"video": batch}, gazing_ratio=self.gazing_ratio)
-        
-        mask = out["gazing_mask"][-1][0].float() # (T, 196)
-        return mask.reshape(1, -1, 14, 14)
+        """Expose the gaze map for visualization — works for both native and hook modes."""
+        if self.integration == "native":
+            if not hasattr(self.processor, "_autogaze_model") or self.processor._autogaze_model is None:
+                return torch.ones(1, len(frames), 14, 14)
+            ag_model = self.processor._autogaze_model
+            ag_proc  = self.processor.autogaze_processor
+            ag_dev   = next(ag_model.parameters()).device
+            batch = ag_proc(images=frames, return_tensors="pt")["pixel_values"]
+            batch = batch.unsqueeze(0).to(ag_dev)
+            with torch.no_grad():
+                out = ag_model({"video": batch}, gazing_ratio=self.gazing_ratio)
+            mask = out["gazing_mask"][-1][0].float()
+            return mask.reshape(1, -1, 14, 14)
+        else:
+            if self.selector is None:
+                return torch.ones(1, len(frames), 14, 14)
+            pv = self.ag_processor(images=frames, return_tensors="pt")["pixel_values"]
+            pv = pv.unsqueeze(0).to(next(self.selector.ag.parameters()).device)
+            with torch.no_grad():
+                out = self.selector.ag({"video": pv}, gazing_ratio=self.gazing_ratio, generate_only=True)
+            raw = out["gazing_mask"][-1][0].float()   # (T, 196)
+            return raw.reshape(1, -1, 14, 14)
 
 
     def n_visual_tokens(self, n_frames: int) -> Optional[int]:
-        # NVILA uses multi-scale tiles: thumbnail (1 tile) + spatial tiles (T × tiles_per_frame).
-        # Each tile is ~196 patches; gazing_ratio reduces the count.
-        # Approximate: 196 * (1 + n_frames) * gazing_ratio
+        # NVILA multi-scale: thumbnail (1 tile) + spatial tiles (≈n_frames tiles).
+        # Each tile = 196 patches.  native: gazing_ratio applied by processor.
+        # hook: gazing_ratio applied as zeroing (seq length same, zeros reduce LLM influence).
         base = 196 * (1 + n_frames)
-        return max(1, round(base * self.gazing_ratio))
+        ratio = self.gazing_ratio if self.integration == "native" else self.gazing_ratio
+        return max(1, round(base * ratio))
 
     def run(
         self,
         frames: List[Image.Image],
         prompt: str,
         max_new_tokens: int = 16,
+    ) -> str:
+        if self.integration == "hook" and self.selector is not None:
+            return self._run_hook(frames, prompt, max_new_tokens)
+        return self._run_native(frames, prompt, max_new_tokens)
+
+    def _run_native(
+        self,
+        frames: List[Image.Image],
+        prompt: str,
+        max_new_tokens: int,
     ) -> str:
         # NVILA processor requires a <video> token in the text so it knows
         # where to insert visual tokens.  Prepend it before the question.
@@ -322,6 +421,69 @@ class NVILARunner(BaseMLLMRunner):
         return self.processor.tokenizer.decode(
             gen_ids[0][prompt_len:], skip_special_tokens=True
         )
+
+    def _run_hook(
+        self,
+        frames: List[Image.Image],
+        prompt: str,
+        max_new_tokens: int,
+    ) -> str:
+        """Run NVILA with a zero-shot hook applied to the vision tower output.
+
+        Pattern:
+          1. Compute per-tile gaze mask via the external AutoGaze model.
+          2. Temporarily monkey-patch ``model._run_vision_tower_batched`` so its
+             output tokens are zeroed at non-selected spatial positions.
+          3. Run normal ``model.generate()``.
+          4. Restore the original method.
+
+        ``model._run_vision_tower_batched`` returns a tensor (or list of tensors)
+        of shape ``(..., N_patches, C)`` where N_patches is a multiple of 196
+        (one SigLIP tile = 196 patches = 14×14).  The gaze mask (196,) is tiled
+        to match N_patches and applied as element-wise multiplication.
+        """
+        gaze_mask_196 = self._compute_hook_mask(frames)  # (196,) binary float
+        device = next(self.model.parameters()).device
+
+        orig_fn = self.model._run_vision_tower_batched
+
+        def _hooked(*args, **kwargs):
+            result = orig_fn(*args, **kwargs)
+            # result may be a tensor or a list of tensors
+            def _apply(t: torch.Tensor) -> torch.Tensor:
+                if t.ndim < 2:
+                    return t
+                n = t.shape[-2]
+                repeats = max(1, n // 196)
+                mask = gaze_mask_196.repeat(repeats)[:n].to(t.device)
+                return t * mask.unsqueeze(-1)
+
+            if isinstance(result, torch.Tensor):
+                return _apply(result)
+            elif isinstance(result, (list, tuple)):
+                applied = [_apply(r) if isinstance(r, torch.Tensor) else r for r in result]
+                return type(result)(applied)
+            return result
+
+        self.model._run_vision_tower_batched = _hooked
+        try:
+            video_token = self.processor.tokenizer.video_token
+            text = f"{video_token}\n{prompt}"
+            inputs = self.processor(text=text, videos=[frames], return_tensors="pt", padding=True)
+            inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
+            with torch.inference_mode():
+                gen_ids = self.model.generate(
+                    **{k: v for k, v in inputs.items() if k != "labels"},
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False,
+                    temperature=None,
+                    top_p=None,
+                )
+        finally:
+            self.model._run_vision_tower_batched = orig_fn  # always restore
+
+        prompt_len = inputs["input_ids"].shape[1]
+        return self.processor.tokenizer.decode(gen_ids[0][prompt_len:], skip_special_tokens=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
