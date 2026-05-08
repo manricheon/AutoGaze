@@ -277,6 +277,10 @@ The NVILA processor requires a `<video>` token in the prompt. This is handled au
 **`vjepa2_nvila` runner fails to load** (previously `nvila_vjepa2`)
 This runner requires both `--model-path` (NVILA) and `--vjepa2-path`. If using `load_runner()` in Python, pass `vjepa2_path=` as a keyword argument.
 
+**`--no-autogaze` with `--mllm nvila` (native)**
+NVILA's processor reads the AutoGaze config on init even for the baseline, so `--autogaze-path` must always be provided.  When you pass `--no-autogaze`, the benchmark automatically keeps the path and forces `--gazing-ratio 1.0` (all patches), which is equivalent to AutoGaze OFF.  You must still supply `--autogaze-path weights/AutoGaze`.
+For hook mode (`--integration hook`), `--no-autogaze` works normally (`autogaze_path=None` → no masking).
+
 **Deprecation warnings for old runner keys**
 Keys `nvila_vjepa2`, `qwen25vl`, `qwen25vl_full`, `vjepa2_llm`, `vjepa2_full` still work but emit a `DeprecationWarning`. Update scripts to use the new `{vit}_{lm}` keys.
 

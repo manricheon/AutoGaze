@@ -628,8 +628,29 @@ def main() -> None:
 
     autogaze_path = None if args.no_autogaze else args.autogaze_path
 
+    # nvila native mode requires autogaze_path on __init__ (NVILA processor fetches the
+    # AutoGaze config at load time even for the baseline).  When --no-autogaze is given,
+    # keep the path but force gazing_ratio=1.0 so all patches pass through — equivalent
+    # to AutoGaze OFF without breaking the processor initialization.
+    _integration = (args.integration or "native") if args.mllm == "nvila" else args.integration
+    _is_nvila_native = args.mllm == "nvila" and _integration == "native"
+    if args.no_autogaze and _is_nvila_native:
+        if args.autogaze_path is None:
+            raise ValueError(
+                "--mllm nvila (native) requires --autogaze-path even with --no-autogaze.\n"
+                "The NVILA processor reads AutoGaze config on init regardless of ratio.\n"
+                "Supply: --autogaze-path weights/AutoGaze --no-autogaze"
+            )
+        log.warning(
+            "nvila native + --no-autogaze: keeping autogaze_path=%s, forcing gazing_ratio=1.0 "
+            "(all patches → equivalent to AutoGaze OFF).",
+            args.autogaze_path,
+        )
+        autogaze_path = args.autogaze_path   # restore — cannot be None for native NVILA
+        args.gazing_ratio = 1.0
+
     if args.output is None:
-        ag_tag  = f"ag{int(args.gazing_ratio*100):03d}" if autogaze_path else "baseline"
+        ag_tag  = f"ag{int(args.gazing_ratio*100):03d}" if not args.no_autogaze else "baseline"
         args.output = Path("results") / f"{args.task}_{args.mllm}_{ag_tag}.json"
 
     extra: Dict[str, Any] = {}
