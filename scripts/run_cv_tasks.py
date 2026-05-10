@@ -108,7 +108,7 @@ def _configure_mpl_cjk():
 # Argument parsing
 # ─────────────────────────────────────────────────────────────────────────────
 
-ALL_TASKS = ["depth", "yolos", "dinov2", "segformer", "siglip"]
+ALL_TASKS = ["depth", "yolos", "dinov2", "segformer", "siglip", "videomae_cls", "xclip"]
 
 DEFAULTS = {
     "ag_path":   "weights/AutoGaze",
@@ -246,6 +246,52 @@ def _load_videomae(device):
     _loaded["videomae"] = (proc, model)
     print("[VideoMAE] ready")
     return _loaded["videomae"]
+
+
+XCLIP_ACTION_TEXTS = [
+    "a person playing basketball",
+    "a person running",
+    "a person swimming",
+    "a person cooking",
+    "a person dancing",
+    "a person playing guitar",
+    "a person riding a bike",
+    "a person playing soccer",
+]
+
+
+def _load_videomae_cls(device):
+    if "videomae_cls" in _loaded:
+        return _loaded["videomae_cls"]
+    from transformers import VideoMAEForVideoClassification, VideoMAEImageProcessor
+    mid = "MCG-NJU/videomae-base-finetuned-kinetics"
+    print(f"[VideoMAE-CLS] loading {mid}…")
+    proc  = VideoMAEImageProcessor.from_pretrained(mid)
+    model = VideoMAEForVideoClassification.from_pretrained(mid).to(device).eval()
+    _loaded["videomae_cls"] = (proc, model)
+    print("[VideoMAE-CLS] ready")
+    return _loaded["videomae_cls"]
+
+
+def _load_xclip(device):
+    if "xclip" in _loaded:
+        return _loaded["xclip"]
+    from transformers import XCLIPModel, XCLIPProcessor
+    mid = "microsoft/xclip-base-patch32"
+    print(f"[X-CLIP] loading {mid}…")
+    proc  = XCLIPProcessor.from_pretrained(mid)
+    model = XCLIPModel.from_pretrained(mid).to(device).eval()
+    _loaded["xclip"] = (proc, model)
+    print("[X-CLIP] ready")
+    return _loaded["xclip"]
+
+
+def _pad_frames_to_T(frames, T):
+    """Pad/truncate a list of PIL images to exactly T frames."""
+    frames = list(frames)
+    if len(frames) >= T:
+        return frames[:T]
+    return frames + [frames[-1]] * (T - len(frames))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -505,6 +551,99 @@ def run_siglip(pil_img, ag_video, ag_model, ratios, device, texts=None):
     return probs_full, ratio_probs, texts, metrics
 
 
+def run_videomae_cls(chunk_pil, ag_video, ag_model, ratios, device):
+    """Video action recognition with VideoMAE-CLS (Kinetics-400).
+
+    chunk_pil: list of T PIL images (repeat single frame in image mode)
+    ag_video:  (1, 1, C, 224, 224) or (1, T, C, 224, 224) AutoGaze input tensor
+    """
+    proc, model = _load_videomae_cls(device)
+    T = 16
+    frames = _pad_frames_to_T(chunk_pil, T)
+    inputs = proc(frames, return_tensors="pt")
+    pv = inputs.pixel_values.to(device)                   # (1, 16, 3, 224, 224)
+    t_dim = pv.shape[1] // model.config.tubelet_size       # 16 // 2 = 8
+
+    def topk_cls(logits, k=5):
+        probs = logits.softmax(-1)[0]
+        top = probs.topk(k)
+        return [(model.config.id2label[i.item()], p.item())
+                for i, p in zip(top.indices, top.values)]
+
+    with torch.no_grad():
+        top_full = topk_cls(model(pv).logits)
+
+    ratio_top5 = {}
+    for r in ratios:
+        sel = make_selector(ag_model, r)
+        m = sel.compute_gaze_mask(ag_video, target_h=14, target_w=14)  # (1, 196) bool
+        spatial = m[0].cpu().numpy()                                     # (196,) bool
+        full_mask = (
+            torch.from_numpy(spatial).unsqueeze(0).expand(t_dim, -1).reshape(1, t_dim * 196)
+        ).to(device)                                                     # (1, 1568)
+
+        def _hook(module, inp, out, mask=full_mask):
+            return out * mask.float().unsqueeze(-1)
+
+        handle = model.videomae.embeddings.register_forward_hook(_hook)
+        try:
+            with torch.no_grad():
+                ratio_top5[r] = topk_cls(model(pv).logits)
+        finally:
+            handle.remove()
+
+    metrics = {"top1_full": top_full[0][0]}
+    for r in ratios:
+        metrics[f"top1_ag{int(r*100)}"] = ratio_top5[r][0][0]
+    return top_full, ratio_top5, metrics
+
+
+def run_xclip(chunk_pil, ag_video, ag_model, ratios, device, texts=None):
+    """Zero-shot video action recognition with X-CLIP.
+
+    chunk_pil: list of T PIL images (repeat single frame in image mode)
+    ag_video:  (1, 1, C, 224, 224) or (1, T, C, 224, 224) AutoGaze input tensor
+    texts:     list of action description strings (default: XCLIP_ACTION_TEXTS)
+    """
+    if texts is None:
+        texts = XCLIP_ACTION_TEXTS
+    proc, model = _load_xclip(device)
+    T = 8
+    frames = _pad_frames_to_T(chunk_pil, T)
+
+    def _infer(spatial_mask=None):
+        inputs_x = proc(text=texts, videos=frames, return_tensors="pt",
+                        padding=True).to(device)
+        if spatial_mask is not None:
+            def _hook(module, inp, out):
+                cls_tok = out[:, :1]
+                spatial = out[:, 1:] * spatial_mask.float().to(out.device).unsqueeze(0).unsqueeze(-1)
+                return torch.cat([cls_tok, spatial], dim=1)
+            handle = model.vision_model.vision_model.embeddings.register_forward_hook(_hook)
+        else:
+            handle = None
+        try:
+            with torch.no_grad():
+                logits = model(**inputs_x).logits_per_video  # (1, n_texts)
+        finally:
+            if handle is not None:
+                handle.remove()
+        probs = logits.softmax(-1)[0].cpu().numpy()
+        return sorted(zip(texts, probs.tolist()), key=lambda x: -x[1])
+
+    top_full = _infer()
+    ratio_top5 = {}
+    for r in ratios:
+        sel = make_selector(ag_model, r)
+        m = sel.compute_gaze_mask(ag_video, target_h=14, target_w=14)  # (1, 196) bool
+        ratio_top5[r] = _infer(m[0].float())
+
+    metrics = {"top1_full": top_full[0][0]}
+    for r in ratios:
+        metrics[f"top1_ag{int(r*100)}"] = ratio_top5[r][0][0]
+    return top_full, ratio_top5, metrics
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Visualization helpers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -623,6 +762,47 @@ def save_siglip_chart(out_path, probs_full, ratio_probs, texts, ratios):
     ax.set_xticklabels([t[:30] for t in texts], rotation=20, ha="right", fontsize=9)
     ax.set_ylabel("유사도 확률")
     ax.set_title("SigLIP Zero-shot 분류 — AutoGaze ratio별", fontweight="bold")
+    ax.legend()
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=110, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  saved: {out_path}")
+
+
+def save_action_chart(out_path, top_full, ratio_top5, ratios, title):
+    """Bar chart comparing top-K action recognition probabilities across ratios."""
+    import matplotlib.pyplot as plt
+    _configure_mpl_cjk()
+
+    # Union of top labels from full + all ratios (capped at 8)
+    union_labels = [lbl for lbl, _ in top_full[:8]]
+    for r in ratios:
+        for lbl, _ in ratio_top5[r]:
+            if lbl not in union_labels:
+                union_labels.append(lbl)
+    union_labels = union_labels[:8]
+
+    def _prob(lst, lbl):
+        return next((p for l, p in lst if l == lbl), 0.0)
+
+    x = np.arange(len(union_labels))
+    n_groups = 1 + len(ratios)
+    width = 0.72 / n_groups
+    offsets = np.linspace(-(n_groups - 1) / 2, (n_groups - 1) / 2, n_groups) * width
+
+    fig, ax = plt.subplots(figsize=(max(13, len(union_labels) * 1.6), 5))
+    ax.bar(x + offsets[0], [_prob(top_full, lbl) for lbl in union_labels],
+           width, label="전체 (100%)", color="steelblue")
+    colors = ["#e67e22", "#e74c3c", "#8e44ad", "#27ae60"]
+    for i, r in enumerate(ratios):
+        ax.bar(x + offsets[1 + i], [_prob(ratio_top5[r], lbl) for lbl in union_labels],
+               width, label=f"AutoGaze {int(r*100)}%", color=colors[i % len(colors)])
+    ax.set_xticks(x)
+    ax.set_xticklabels([lbl[:28] for lbl in union_labels], rotation=30, ha="right", fontsize=9)
+    ax.set_ylabel("확률")
+    ax.set_title(title, fontweight="bold")
     ax.legend()
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -954,7 +1134,9 @@ def run_video(input_path, out_dir, ag_model, ag_proc,
     out_fps   = max(src_fps / stride, 1.0)
     print(f"  {n_frames} frames @ {out_fps:.1f} fps out  |  temporal_window={temporal_window}")
 
-    video_tasks = [t for t in tasks if t in ["depth", "yolos", "dinov2", "segformer", "siglip"]]
+    video_tasks = [t for t in tasks if t in [
+        "depth", "yolos", "dinov2", "segformer", "siglip", "videomae_cls", "xclip",
+    ]]
     video_frames = {task: [] for task in video_tasks}
 
     # Create per-task frame directories if requested
@@ -984,6 +1166,77 @@ def run_video(input_path, out_dir, ag_model, ag_proc,
         # only keep actual_T frames (discard padding)
         gaze_logits = gaze_out["gazing_mask"][-1][0, :actual_T]  # (actual_T, 196)
         gaze_maps = gaze_logits.float().cpu().numpy().reshape(actual_T, 14, 14)
+
+        # ── Chunk-level action recognition (one result per clip) ──────────────
+        # Both tasks need the full clip; result is displayed on every frame of the chunk.
+        chunk_action = {}
+
+        if "videomae_cls" in tasks:
+            vmae_proc, vmae_model = _load_videomae_cls(device)
+            vmae_frames = _pad_frames_to_T(chunk_pil, 16)
+            vmae_pv = vmae_proc(vmae_frames, return_tensors="pt").pixel_values.to(device)
+            t_dim_v = vmae_pv.shape[1] // vmae_model.config.tubelet_size  # 16//2=8
+
+            def _topk_v(logits, k=5):
+                probs = logits.softmax(-1)[0]
+                top = probs.topk(k)
+                return [(vmae_model.config.id2label[i.item()], p.item())
+                        for i, p in zip(top.indices, top.values)]
+
+            with torch.no_grad():
+                vmae_top_full = _topk_v(vmae_model(vmae_pv).logits)
+
+            # Aggregate spatial gaze over time → select top ag_ratio fraction
+            agg = gaze_maps.mean(axis=0).reshape(196)
+            n_keep = max(1, int(ag_ratio * 196))
+            idx_keep = np.argsort(agg)[-n_keep:]
+            sp_bool = np.zeros(196, dtype=bool); sp_bool[idx_keep] = True
+            vmae_mask = (
+                torch.from_numpy(sp_bool).unsqueeze(0).expand(t_dim_v, -1)
+                .reshape(1, t_dim_v * 196).to(device)
+            )
+
+            def _vmae_hook(module, inp, out, mask=vmae_mask):
+                return out * mask.float().unsqueeze(-1)
+
+            hv = vmae_model.videomae.embeddings.register_forward_hook(_vmae_hook)
+            try:
+                with torch.no_grad():
+                    vmae_top_ag = _topk_v(vmae_model(vmae_pv).logits)
+            finally:
+                hv.remove()
+            chunk_action["videomae_cls"] = (vmae_top_full, vmae_top_ag)
+
+        if "xclip" in tasks:
+            xclip_proc, xclip_model = _load_xclip(device)
+            xclip_frames = _pad_frames_to_T(chunk_pil, 8)
+
+            def _xclip_infer(sp_mask=None):
+                xinp = xclip_proc(text=XCLIP_ACTION_TEXTS, videos=xclip_frames,
+                                  return_tensors="pt", padding=True).to(device)
+                if sp_mask is not None:
+                    def _xh(module, inp, out):
+                        cls_tok = out[:, :1]
+                        spt = out[:, 1:] * sp_mask.float().to(out.device).unsqueeze(0).unsqueeze(-1)
+                        return torch.cat([cls_tok, spt], dim=1)
+                    hx = xclip_model.vision_model.vision_model.embeddings.register_forward_hook(_xh)
+                else:
+                    hx = None
+                try:
+                    with torch.no_grad():
+                        log = xclip_model(**xinp).logits_per_video
+                finally:
+                    if hx is not None: hx.remove()
+                probs = log.softmax(-1)[0].cpu().numpy()
+                return sorted(zip(XCLIP_ACTION_TEXTS, probs.tolist()), key=lambda x: -x[1])
+
+            xclip_top_full = _xclip_infer()
+            agg = gaze_maps.mean(axis=0).reshape(196)
+            n_keep = max(1, int(ag_ratio * 196))
+            idx_keep = np.argsort(agg)[-n_keep:]
+            sp_bool_x = np.zeros(196, dtype=bool); sp_bool_x[idx_keep] = True
+            xclip_top_ag = _xclip_infer(torch.from_numpy(sp_bool_x).float())
+            chunk_action["xclip"] = (xclip_top_full, xclip_top_ag)
 
         # ── VideoMAE reconstruction: one pass per chunk, per frame ────────────
         # Reconstruct each frame using only the gaze-selected patches as visible.
@@ -1236,6 +1489,38 @@ def run_video(input_path, out_dir, ag_model, ag_proc,
                 if save_frames:
                     panel.save(frame_dirs["siglip"] / f"frame_{frame_idx:04d}.png")
 
+            # ── VideoMAE-CLS ──────────────────────────────────────────────────
+            if "videomae_cls" in tasks and "videomae_cls" in chunk_action:
+                top_fv, top_av = chunk_action["videomae_cls"]
+                full_img_v = _cls_overlay_pil(pil_img, top_fv,
+                                              f"top-1: {top_fv[0][0][:25]}")
+                ag_img_v   = _cls_overlay_pil(pil_img, top_av,
+                                              f"top-1: {top_av[0][0][:25]}")
+                panel = make_npanel([
+                    (pil_gaze_ov, "원본 + gaze"),
+                    (full_img_v,  "VideoMAE-CLS 전체"),
+                    (ag_img_v,    f"VideoMAE-CLS AG {int(ag_ratio*100)}%"),
+                ], target_size=pil_img.size)
+                video_frames["videomae_cls"].append(panel)
+                if save_frames:
+                    panel.save(frame_dirs["videomae_cls"] / f"frame_{frame_idx:04d}.png")
+
+            # ── X-CLIP ────────────────────────────────────────────────────────
+            if "xclip" in tasks and "xclip" in chunk_action:
+                top_fx, top_ax = chunk_action["xclip"]
+                full_img_x = _cls_overlay_pil(pil_img, top_fx,
+                                              f"top-1: {top_fx[0][0][:25]}")
+                ag_img_x   = _cls_overlay_pil(pil_img, top_ax,
+                                              f"top-1: {top_ax[0][0][:25]}")
+                panel = make_npanel([
+                    (pil_gaze_ov, "원본 + gaze"),
+                    (full_img_x,  "X-CLIP 전체"),
+                    (ag_img_x,    f"X-CLIP AG {int(ag_ratio*100)}%"),
+                ], target_size=pil_img.size)
+                video_frames["xclip"].append(panel)
+                if save_frames:
+                    panel.save(frame_dirs["xclip"] / f"frame_{frame_idx:04d}.png")
+
     print()
 
     # ── write output videos ───────────────────────────────────────────────────
@@ -1369,6 +1654,32 @@ def main():
         )
         all_metrics["siglip"] = siglip_metrics
         save_siglip_chart(out_dir / "siglip_comparison.png", probs_full, ratio_probs, texts, args.ratios)
+
+    if "videomae_cls" in args.tasks:
+        print("[videomae_cls] running…")
+        chunk_pil_v = [pil_img] * 16   # simulate 16-frame clip from a still image
+        top_full_v, ratio_top5_v, vmae_metrics = run_videomae_cls(
+            chunk_pil_v, ag_video, ag_model, args.ratios, device
+        )
+        all_metrics["videomae_cls"] = vmae_metrics
+        save_action_chart(
+            out_dir / "videomae_cls_comparison.png",
+            top_full_v, ratio_top5_v, args.ratios,
+            "VideoMAE-CLS Kinetics-400 동작 인식 — AutoGaze ratio별",
+        )
+
+    if "xclip" in args.tasks:
+        print("[xclip] running…")
+        chunk_pil_x = [pil_img] * 8   # simulate 8-frame clip from a still image
+        top_full_x, ratio_top5_x, xclip_metrics = run_xclip(
+            chunk_pil_x, ag_video, ag_model, args.ratios, device
+        )
+        all_metrics["xclip"] = xclip_metrics
+        save_action_chart(
+            out_dir / "xclip_comparison.png",
+            top_full_x, ratio_top5_x, args.ratios,
+            "X-CLIP Zero-shot 동작 인식 — AutoGaze ratio별",
+        )
 
     save_summary_chart(out_dir / "summary.png", all_metrics, args.ratios)
 

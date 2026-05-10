@@ -289,13 +289,93 @@ VRAM metrics require a CUDA GPU. On CPU/MPS, `peak_vram_mb` is omitted per sampl
 
 ---
 
-## 7. Key Source Files (주요 소스 파일)
+## 7. Video Action Recognition CV Tasks (동작 인식 CV 태스크)
+
+Beyond the VQA benchmarks above, `scripts/run_cv_tasks.py` supports **video action recognition** as a CV-level comparison task — showing how AutoGaze token selection affects classification outputs frame-by-frame.
+
+### Supported action recognition tasks (`--tasks`)
+
+| Task key | Model | Dataset | Mode |
+| :--- | :--- | :--- | :--- |
+| `videomae_cls` | `MCG-NJU/videomae-base-finetuned-kinetics` | Kinetics-400 (400 classes) | supervised classification |
+| `xclip` | `microsoft/xclip-base-patch32` | text-guided, zero-shot | zero-shot with custom labels |
+
+### How AutoGaze is applied
+
+**VideoMAE-CLS** — The gaze mask (14×14 spatial) is broadcast across all 8 temporal positions (16 frames / tubelet_size 2 = 1568 tokens), then zeroed via a forward hook on `model.videomae.embeddings`:
+
+```text
+ AutoGaze gaze mask (14×14)
+         │
+         │  broadcast to 8 temporal positions
+         ▼
+ token mask (8 × 196 = 1568)
+         │
+         │  hook on VideoMAEEmbeddings output
+         ▼
+ non-gaze tokens zeroed → VideoMAE-CLS inference
+```
+
+**X-CLIP** — The spatial gaze mask is applied per-frame inside the shared CLIP vision encoder.  Since all frames share the same spatial ViT, one (196,) mask applies to every frame:
+
+```text
+ AutoGaze gaze mask (196,)
+         │
+         │  broadcast over B×T frames
+         ▼
+ hook on CLIPVisionEmbeddings output (CLS kept, spatial zeroed)
+         │
+         ▼
+ X-CLIP text-video similarity → top-K labels
+```
+
+### Quick start
+
+```bash
+# Image mode — run videomae_cls and xclip on a single frame
+python scripts/run_cv_tasks.py \
+    --input assets/example.jpg \
+    --ag-path weights/AutoGaze \
+    --tasks videomae_cls xclip \
+    --ratios 0.75 0.5 0.25
+
+# Video mode — action recognition per chunk across the full video
+python scripts/run_cv_tasks.py \
+    --input assets/example.mp4 \
+    --ag-path weights/AutoGaze \
+    --tasks videomae_cls xclip \
+    --ag-ratio 0.5 \
+    --temporal-window 16
+```
+
+In **image mode** the single frame is repeated to fill the model's required temporal window (16 frames for VideoMAE, 8 for X-CLIP).  In **video mode** the action is classified once per temporal chunk and the label is overlaid on every frame in that chunk.
+
+### Customizing X-CLIP labels
+
+Pass custom action descriptions via Python:
+
+```python
+from scripts.run_cv_tasks import run_xclip, _load_ag
+
+ag_model, ag_proc, _ = _load_ag("weights/AutoGaze", "cuda")
+# ag_video = prep_for_autogaze(pil_img, ag_proc, "cuda")
+top, ratio_top, metrics = run_xclip(
+    [pil_img] * 8, ag_video, ag_model, [0.75, 0.5],
+    device="cuda",
+    texts=["a goalkeeper saving a penalty", "a crowd cheering"],
+)
+```
+
+---
+
+## 8. Key Source Files (주요 소스 파일)
 
 | Purpose | Path |
 | :--- | :--- |
 | Benchmark entry point | `autogaze/eval/run_benchmark.py` |
 | Task definitions | `autogaze/eval/tasks.py` |
 | MLLM runner registry | `autogaze/eval/models.py` |
+| CV task comparison script | `scripts/run_cv_tasks.py` |
 | Video extraction script | `scripts/extract_hf_videos.py` |
 | HLVid download script | `scripts/download_hlvid.sh` |
 | Master benchmark script | `scripts/run_benchmarks.sh` |
