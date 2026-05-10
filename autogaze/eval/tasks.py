@@ -308,4 +308,19 @@ TASKS: Dict[str, TaskConfig] = {
         answer_type="letter",
         category_col="category",
     ),
+
+    # ── ActionAtlas ──────────────────────────────────────────────────────── #
+    # ActionAtlas/ActionAtlas stores video bytes directly.
+    "actionatlas": TaskConfig(
+        name="actionatlas",
+        hf_repo="ActionAtlas/ActionAtlas",
+        hf_split="test",
+        video_col="video",
+        video_bytes_col="video",
+        question_col="question",
+        options_col="options",
+        answer_col="answer",
+        answer_type="index",
+        category_col="action_category",
+    ),
 }

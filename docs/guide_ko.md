@@ -13,7 +13,29 @@
 4. [추론 워크플로우 (Inference)](#4-추론-워크플로우)
 5. [비디오 QA 벤치마크 (Video QA)](#5-비디오-qa-벤치마크)
 6. [벤치마크 및 성능 평가 (CV Tasks)](#6-벤치마크-및-성능-평가)
-7. [AutoGaze 통합 및 확장](#7-autogaze-통합-및-확장)
+7. [액션 인식 평가 (Action Recognition)](#7-액션-인식-평가)
+8. [AutoGaze 통합 및 확장](#8-autogaze-통합-및-확장)
+
+...
+
+---
+
+## 7. 액션 인식 평가 (Action Recognition)
+
+비디오 내 동작을 분류하는 액션 인식 태스크에서 AutoGaze의 성능을 측정합니다. 자세한 내용은 [액션 인식 가이드](action_recognition_guide.md)를 참고하세요.
+
+### 주요 벤치마크
+- **ActionAtlas**: 스포츠 중심 미세 동작 분류 데이터셋 (~2 GB).
+- **MVBench (Action Recognition)**: 다양한 동작 분류 태스크 포함.
+
+```bash
+# 데이터 다운로드
+bash scripts/download_data_eval.sh data/eval actionatlas
+
+# 벤치마크 실행 (AutoGaze ON)
+python -m autogaze.eval.run_benchmark --task actionatlas --mllm nvila
+```
+
 8. [학습 가이드 (Training)](#8-학습-가이드)
 9. [자주 묻는 질문 (FAQ)](#9-자주-묻는-질문)
 

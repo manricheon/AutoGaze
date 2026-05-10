@@ -12,6 +12,7 @@
 #   videomme       — lmms-lab/Video-MME                        (~73 GB,  900 clips)
 #   mvbench        — OpenGVLab/MVBench                         (~12 GB,  3641 clips)
 #   nextqa         — lmms-lab/NExTQA                           (~6 GB,   4996 clips)
+#   actionatlas    — ActionAtlas/ActionAtlas                    (~2 GB,   934 clips)
 #   egoschema      — lmms-lab/EgoSchema                        (~30 GB,  5031 clips)
 #   mlvu           — MLVU/MLVU                                 (~15 GB,  MCQ subset)
 #   longvideobench — longvideobench/LongVideoBench              (~22 GB,  ~1400 clips)
@@ -93,7 +94,7 @@ if [[ ${#DATASETS[@]} -eq 0 ]]; then
 fi
 
 # ── 그룹 키워드 확장 ────────────────────────────────────────────────────────
-HF_BYTES_DATASETS=("videomme" "mvbench" "nextqa" "egoschema" "mlvu" "longvideobench")
+HF_BYTES_DATASETS=("videomme" "mvbench" "nextqa" "egoschema" "mlvu" "longvideobench" "actionatlas")
 
 EXPANDED=()
 for d in "${DATASETS[@]}"; do
@@ -176,6 +177,10 @@ download_longvideobench() {
     download_hf_dataset "longvideobench" "longvideobench/LongVideoBench" "LongVideoBench" "~22 GB"
 }
 
+download_actionatlas() {
+    download_hf_dataset "actionatlas" "ActionAtlas/ActionAtlas" "ActionAtlas" "~2 GB"
+}
+
 download_hlvid() {
     local hlvid_script="$SCRIPT_DIR/download_hlvid.sh"
     if [[ ! -f "$hlvid_script" ]]; then
@@ -204,6 +209,7 @@ for dataset in "${DATASETS[@]}"; do
         egoschema)      download_egoschema      ;;
         mlvu)           download_mlvu           ;;
         longvideobench) download_longvideobench ;;
+        actionatlas)    download_actionatlas    ;;
         hlvid)          download_hlvid          ;;
         *)
             warn "알 수 없는 데이터셋: '$dataset'"
@@ -230,6 +236,7 @@ declare -A LOCAL_DIRS=(
     [egoschema]="EgoSchema"
     [mlvu]="MLVU"
     [longvideobench]="LongVideoBench"
+    [actionatlas]="ActionAtlas"
     [hlvid]="HLVid"
 )
 
@@ -262,6 +269,7 @@ declare -A RUN_TASKS=(
     [egoschema]="egoschema"
     [mlvu]="mlvu"
     [longvideobench]="longvideobench"
+    [actionatlas]="actionatlas"
     [hlvid]="hlvid"
 )
 
