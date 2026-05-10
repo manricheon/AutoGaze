@@ -142,7 +142,6 @@ python -m autogaze.eval.run_benchmark \
 python -m autogaze.eval.run_benchmark \
     --task videomme \
     --mllm vjepa2_qwen25 \
-    --model-path weights/NVILA-8B-HD-Video \
     --vjepa2-path weights/vjepa2-vitl-fpc64-256 \
     --lm-path weights/Qwen2.5-7B-Instruct \
     --autogaze-path weights/AutoGaze \
@@ -234,7 +233,7 @@ python -m autogaze.eval.run_benchmark \
 | `--mllm` | `nvila` | Runner key — `{vit}_{lm}` convention (see Section 1) |
 | `--integration` | runner default | Override integration mode: `native`, `hook`, or `full` |
 | `--model-path` | `weights/NVILA-8B-HD-Video` | Primary model weights path (ViT or ViT+LLM) |
-| `--vjepa2-path` | `None` | V-JEPA2 encoder weights (required for `vjepa2_nvila`) |
+| `--vjepa2-path` | `None` | V-JEPA2 encoder weights (required for `vjepa2_nvila`; recommended user-facing path flag for `vjepa2` and `vjepa2_qwen25`) |
 | `--lm-path` | `None` | LLM weights (required for `vjepa2_qwen25`) |
 | `--projector-path` | `None` | Trained ViT→LLM projector (optional for LLM runners) |
 | `--autogaze-path` | `weights/AutoGaze` | Path to AutoGaze weights |

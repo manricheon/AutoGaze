@@ -157,22 +157,29 @@ class TaskConfig:
         Returns '?' if no letter can be extracted.
         """
         text = generated.strip()
-        # First: look for a standalone letter at the start
-        m = re.match(r"^([A-Ja-j])[^a-zA-Z]", text)
+        # First: look for an option marker at the start, e.g. "A", "A.", "(A)".
+        m = re.match(r"^\(?([A-Ja-j])\)?(?:[\s\.\):,-]|$)", text)
         if m:
             return m.group(1).upper()
-        # Second: look for 'Answer: X' pattern
-        m = re.search(r"[Aa]nswer[:\s]+([A-Ja-j])", text)
+
+        # Second: look for explicit answer phrases, e.g. "Answer: C",
+        # "answer is (D)", or "Answer - B".
+        m = re.search(
+            r"\b[Aa]nswer(?:\s+is)?\s*[:\-]?\s*\(?([A-Ja-j])\)?(?:[\s\.\),:-]|$)",
+            text,
+        )
         if m:
             return m.group(1).upper()
-        # Third: look for '(X)' pattern
+
+        # Third: look for a parenthesized option marker.
         m = re.search(r"\(([A-Ja-j])\)", text)
         if m:
             return m.group(1).upper()
-        # Last: first capital letter in the string
-        m = re.search(r"[A-Ja-j]", text)
+
+        # Last: look for option-like markers elsewhere, e.g. "I choose B.".
+        m = re.search(r"(?:^|\s)([A-Ja-j])(?:[\s\.\),:-]|$)", text)
         if m:
-            return m.group(0).upper()
+            return m.group(1).upper()
         return "?"
 
 

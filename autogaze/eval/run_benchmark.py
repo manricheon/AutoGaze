@@ -600,7 +600,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--vjepa2-path", default=None,
-        help="Path to V-JEPA2 weights (required for vjepa2_nvila runner)",
+        help=(
+            "Path to V-JEPA2 weights. Required for vjepa2_nvila; also used "
+            "as the encoder path for vjepa2 and vjepa2_qwen25 when provided."
+        ),
     )
     p.add_argument(
         "--lm-path", default=None,
@@ -653,11 +656,18 @@ def main() -> None:
         ag_tag  = f"ag{int(args.gazing_ratio*100):03d}" if not args.no_autogaze else "baseline"
         args.output = Path("results") / f"{args.task}_{args.mllm}_{ag_tag}.json"
 
+    model_path = args.model_path
     extra: Dict[str, Any] = {}
     if args.integration is not None:
         extra["integration"] = args.integration
-    if args.vjepa2_path is not None:
+
+    if args.mllm in {"vjepa2_nvila", "nvila_vjepa2"}:
         extra["vjepa2_path"] = args.vjepa2_path
+    elif args.vjepa2_path is not None and args.mllm in {"vjepa2", "vjepa2_qwen25", "vjepa2_full", "vjepa2_llm"}:
+        # These runners inherit VJEPA2Runner, whose model_path is the V-JEPA2
+        # encoder itself. Keep --vjepa2-path as the user-facing CLI flag so the
+        # documented commands are consistent across V-JEPA2-based runners.
+        model_path = args.vjepa2_path
     if args.lm_path is not None:
         extra["lm_path"] = args.lm_path
     if args.projector_path is not None:
@@ -666,7 +676,7 @@ def main() -> None:
     evaluate(
         task_name     = args.task,
         video_dir     = args.video_dir,
-        model_path    = args.model_path,
+        model_path    = model_path,
         autogaze_path = autogaze_path,
         gazing_ratio  = args.gazing_ratio,
         num_frames    = args.num_frames,
