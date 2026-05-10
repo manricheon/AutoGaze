@@ -19,7 +19,7 @@
 ## 1. 두 가지 통합 방식
 
 | 구분 | 방식 A: Zero-shot | 방식 B: 완전 통합 |
-|------|-------------------|-------------------|
+| :--- | :--- | :--- |
 | 모델 수정 | 불필요 | 패치 임베딩 + forward 수정 |
 | FLOPs 절감 | ✗ (연산은 그대로, 출력만 마스킹) | ✓ (선택된 토큰만 처리) |
 | 지연 시간 절감 | KV cache 절감 (LLM에서 효과적) | ViT 인코딩 속도 직접 향상 |
@@ -38,21 +38,23 @@
 ### 방식 A 기준 즉시 사용 가능
 
 | 모델 | HF model ID | 임베딩 모듈 경로 | 패치 크기 | 그리드 |
-|------|------------|----------------|-----------|--------|
+| :--- | :--- | :--- | :---: | :---: |
 | **DINOv2-base** | `facebook/dinov2-base` | `model.embeddings` | 14 px | 16×16 |
 | **DINOv2-large** | `facebook/dinov2-large` | `model.embeddings` | 14 px | 16×16 |
 | **ViT-B/16** | `google/vit-base-patch16-224` | `model.vit.embeddings` | 16 px | 14×14 |
 | **ViT-L/16** | `google/vit-large-patch16-224` | `model.vit.embeddings` | 16 px | 14×14 |
 | **YOLOS-tiny** | `hustvl/yolos-tiny` | `model.vit.embeddings` | 16 px | 14×14 |
 | **Depth-Anything-V2-S** | `depth-anything/Depth-Anything-V2-Small-hf` | `model.backbone.embeddings` | 14 px | 16×16 |
-| **SigLIP-base/16** | `google/siglip-base-patch16-224` | (local `autogaze/vision_encoders/siglip/`) | 16 px | 14×14 |
-| **VideoMAE-base** | `MCG-NJU/videomae-base` | `model.patch_embed` | 16 px | 14×14 |
+| **SigLIP-base/16** | `google/siglip-base-patch16-224` | `model.vision_model.embeddings` | 16 px | 14×14 |
+| **VideoMAE-base** (pre-training) | `MCG-NJU/videomae-base` | `model.videomae.embeddings` | 16 px | 8×14×14 |
+| **VideoMAE-base** (Kinetics-400 cls) | `MCG-NJU/videomae-base-finetuned-kinetics` | `model.videomae.embeddings` | 16 px | 8×14×14 |
+| **X-CLIP-base/32** | `microsoft/xclip-base-patch32` | `model.vision_model.vision_model.embeddings` | 32 px | 7×7 |
 | **CLIP-ViT-B/32** | `openai/clip-vit-base-patch32` | `model.vision_model.embeddings` | 32 px | 7×7 |
 
 ### 방식 B 구현 완료
 
 | 모델 | 상태 |
-|------|------|
+| :--- | :--- |
 | NVILA-8B-HD-Video (SigLIP) | ✅ 프로덕션 |
 
 ---
@@ -251,7 +253,7 @@ python scripts/test_nvila.py assets/example_input.mp4 --gazing-ratio 0.5
 ### CLI — CV 태스크 벤치마크
 
 ```bash
-# 이미지 모든 태스크
+# 이미지 모든 태스크 (depth, yolos, dinov2, segformer, siglip, videomae_cls, xclip)
 python scripts/run_cv_tasks.py --input assets/sample.jpg --output-dir results/
 
 # 특정 태스크만
@@ -259,7 +261,32 @@ python scripts/run_cv_tasks.py --input assets/sample.jpg --tasks depth dinov2 yo
 
 # ratio 그리드
 python scripts/run_cv_tasks.py --input assets/sample.jpg --ratios 0.25 0.5 0.75 1.0
+
+# 동작 인식 태스크 (VideoMAE-CLS + X-CLIP)
+python scripts/run_cv_tasks.py \
+    --input assets/sample.jpg \
+    --tasks videomae_cls xclip \
+    --ratios 0.75 0.5 0.25
+
+# 비디오 모드 — 청크 단위 동작 인식 결과를 각 프레임에 오버레이
+python scripts/run_cv_tasks.py \
+    --input assets/example.mp4 \
+    --tasks videomae_cls xclip \
+    --ag-ratio 0.5 \
+    --temporal-window 16
 ```
+
+지원 태스크 전체 목록:
+
+| 태스크 키 | 모델 | 유형 |
+| :--- | :--- | :--- |
+| `depth` | Depth-Anything-V2-S | 깊이 추정 |
+| `yolos` | YOLOS-tiny | 객체 탐지 |
+| `dinov2` | DINOv2-base (ImageNet1k) | 이미지 분류 |
+| `segformer` | SegFormer-B2 (ADE20K) | 세그멘테이션 |
+| `siglip` | SigLIP-base/16 | Zero-shot 분류 |
+| `videomae_cls` | VideoMAE-base (Kinetics-400) | 동작 인식 (supervised) |
+| `xclip` | X-CLIP-base/32 | 동작 인식 (zero-shot) |
 
 ### MambaGaze 지연 시간 벤치마크
 
@@ -278,7 +305,7 @@ python -m mamba_gaze.eval.latency \
 ### 핵심 지표
 
 | 지표 | 설명 | 단위 | 목표 |
-|------|------|------|------|
+| :--- | :--- | :--- | :--- |
 | **시각 토큰 수** | 선택된 패치 토큰 수 | count | 비율에 비례 감소 |
 | **KV cache 크기** | 토큰×헤드×차원 | MB | 줄수록 LLM 속도↑ |
 | **ViT 인코딩 시간** | 방식 B에서만 절감 | ms | 비율에 비례 감소 |
@@ -289,7 +316,7 @@ python -m mamba_gaze.eval.latency \
 ### Gazing Ratio 선택 가이드
 
 | 시나리오 | 추천 ratio |
-|----------|-----------|
+| :--- | :---: |
 | 실시간 스트리밍 (지연 최우선) | 0.25 ~ 0.4 |
 | 균형 (속도 + 품질) | 0.5 ~ 0.6 |
 | 품질 우선 (긴 비디오) | 0.7 ~ 0.8 |
@@ -298,7 +325,7 @@ python -m mamba_gaze.eval.latency \
 ### 예상 절감 효과 (NVILA 기준)
 
 | ratio | 시각 토큰 | ViT 시간 | LLM 프리필 |
-|-------|----------|---------|-----------|
+| :---: | :---: | :---: | :---: |
 | 0.25 | −75% | −60~70% (방식 B) | −60~70% |
 | 0.50 | −50% | −40~50% (방식 B) | −40~50% |
 | 0.75 | −25% | −20~30% (방식 B) | −20~30% |
@@ -308,7 +335,7 @@ python -m mamba_gaze.eval.latency \
 ## 참고 파일
 
 | 용도 | 경로 |
-|------|------|
+| :--- | :--- |
 | Zero-shot 유틸리티 | `autogaze/models/autogaze/autogaze_cv.py` |
 | NVILA 프로세서 | `weights/NVILA-8B-HD-Video/processing_nvila.py` |
 | SigLIP 완전 통합 | `autogaze/vision_encoders/siglip/modeling_siglip.py` |

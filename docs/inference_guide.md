@@ -56,13 +56,16 @@ This script benchmarks the entire stack: **AutoGaze → ViT → MLLM**.
 
 ### Supported Runners (지원 러너)
 
-| Runner Key | Model | Integration Mode | Note |
-| :--- | :--- | :--- | :--- |
-| `nvila` | NVILA-8B-HD-Video | **Full (Native)** | Processor-integrated AutoGaze; `--no-autogaze`로 기준선 실행 가능 |
-| `qwen25vl` | Qwen2.5-VL-7B | Hook (Zero-shot) | 빠른 검증용 |
-| `qwen25vl_full` | Qwen2.5-VL-7B | **Full** | 최대 효율 벤치마크 |
-| `vjepa2_llm` | V-JEPA2 ViT + Qwen2.5-7B LM | **Full** | 대체 ViT 테스트 |
-| `nvila_vjepa2` | V-JEPA2 ViT + NVILA LLM | **Full** | V-JEPA2 인코더 + NVILA 언어 모델 조합 |
+Use `--integration` to override the default mode shown below.
+
+| Runner Key | ViT | LLM | Default Mode | Note |
+| :--- | :--- | :--- | :--- | :--- |
+| `nvila` | SigLIP (custom) | NVILA | **native** | Processor-integrated; `--autogaze-path` always required |
+| `siglip_qwen25` | SigLIP (HF) | Qwen2.5-VL-7B | hook | `--integration full` for latency benchmarks |
+| `vjepa2_nvila` | V-JEPA2 | NVILA | full | `--vjepa2-path` required |
+| `vjepa2_qwen25` | V-JEPA2 | Qwen2.5-7B | full | `--vjepa2-path` + `--lm-path` required |
+| `vjepa2` | V-JEPA2 | — | hook | Feature extraction only |
+| `siglip` | SigLIP (HF) | — | hook | Feature extraction only |
 
 ### Usage Examples (사용 예시)
 
@@ -70,24 +73,29 @@ This script benchmarks the entire stack: **AutoGaze → ViT → MLLM**.
 # NVILA — AutoGaze ON (비교)
 python autogaze/infer_full.py assets/example_input.mp4 \
     --mllm nvila \
+    --autogaze-path weights/AutoGaze \
     --compare-autogaze
 
 # NVILA — ratio 스윕
 python autogaze/infer_full.py assets/example_input.mp4 \
     --mllm nvila \
+    --autogaze-path weights/AutoGaze \
     --sweep-ratio --ratio-step 0.25
 
-# Qwen2.5-VL (Full mode)
+# Qwen2.5-VL (Full mode — real latency savings)
 python autogaze/infer_full.py assets/example_input.mp4 \
-    --mllm qwen25vl_full \
+    --mllm siglip_qwen25 \
     --model-path weights/Qwen2.5-VL-7B-Instruct \
+    --autogaze-path weights/AutoGaze \
+    --integration full \
     --sweep-ratio --ratio-step 0.25
 
 # V-JEPA2 + NVILA LLM
 python autogaze/infer_full.py assets/example_input.mp4 \
-    --mllm nvila_vjepa2 \
+    --mllm vjepa2_nvila \
     --model-path weights/NVILA-8B-HD-Video \
-    --vjepa2-path weights/vjepa2-vitl-fpc64-256
+    --vjepa2-path weights/vjepa2-vitl-fpc64-256 \
+    --autogaze-path weights/AutoGaze
 ```
 
 ---

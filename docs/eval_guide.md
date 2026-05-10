@@ -72,21 +72,24 @@ python -m autogaze.eval.run_benchmark \
 
 ### Manual — AutoGaze OFF (baseline)
 
+> **Note (NVILA native)**: the NVILA processor loads the AutoGaze config on `__init__`, so `--autogaze-path` is required even with `--no-autogaze`.  The flag forces `gazing_ratio=1.0` (all patches), which is equivalent to AutoGaze OFF.
+
 ```bash
 python -m autogaze.eval.run_benchmark \
     --task videomme \
     --mllm nvila \
     --model-path weights/NVILA-8B-HD-Video \
+    --autogaze-path weights/AutoGaze \
     --no-autogaze \
     --output results/videomme_nvila_baseline.json
 ```
 
-### Qwen2.5-VL zero-shot runner
+### Qwen2.5-VL hook runner (zero-shot)
 
 ```bash
 python -m autogaze.eval.run_benchmark \
     --task mvbench \
-    --mllm qwen25vl \
+    --mllm siglip_qwen25 \
     --model-path weights/Qwen2.5-VL-7B-Instruct \
     --autogaze-path weights/AutoGaze \
     --gazing-ratio 0.75
@@ -113,6 +116,7 @@ python -m autogaze.eval.run_benchmark \
     --model-path weights/NVILA-8B-HD-Video \
     --vjepa2-path weights/vjepa2-vitl-fpc64-256 \
     --autogaze-path weights/AutoGaze \
+    --integration full \
     --gazing-ratio 0.75
 ```
 
@@ -122,7 +126,8 @@ python -m autogaze.eval.run_benchmark \
 python -m autogaze.eval.run_benchmark \
     --task videomme \
     --mllm vjepa2_qwen25 \
-    --model-path weights/vjepa2-vitl-fpc64-256 \
+    --model-path weights/NVILA-8B-HD-Video \
+    --vjepa2-path weights/vjepa2-vitl-fpc64-256 \
     --lm-path weights/Qwen2.5-7B-Instruct \
     --autogaze-path weights/AutoGaze \
     --gazing-ratio 0.75

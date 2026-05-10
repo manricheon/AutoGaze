@@ -62,20 +62,22 @@ uv pip install -e .
 | `nvila` | `nvidia/NVILA-8B-HD-Video` | AutoGaze 통합 MLLM | ~16 GB |
 | `vjepa2` | `facebook/vjepa2-vitl-fpc64-256` | Video-native ViT-L | ~2 GB |
 | `qwen25vl` | `Qwen/Qwen2.5-VL-7B-Instruct` | VL MLLM | ~16 GB |
-| `qwen25` | `Qwen/Qwen2.5-7B-Instruct` | LM (`vjepa2_llm` 파이프라인용) | ~15 GB |
+| `qwen25` | `Qwen/Qwen2.5-7B-Instruct` | LM (`vjepa2_qwen25` 파이프라인용) | ~15 GB |
 | `siglip` | `google/siglip-base-patch16-224` | CV 태스크 | ~400 MB |
 | `siglip2` | `google/siglip2-base-patch16-224` | CV 태스크 | ~400 MB |
 | `dinov2` | `facebook/dinov2-base-imagenet1k-1-layer` | CV 태스크 | ~350 MB |
 | `yolos` | `hustvl/yolos-tiny` | CV 객체 탐지 | ~30 MB |
 | `segformer` | `nvidia/segformer-b2-finetuned-ade-512-512` | CV 세그멘테이션 | ~100 MB |
 | `depthanything` | `depth-anything/Depth-Anything-V2-Small-hf` | CV 깊이 추정 | ~100 MB |
+| `videomae_cls` | `MCG-NJU/videomae-base-finetuned-kinetics` | CV 동작 인식 (Kinetics-400) | ~350 MB |
+| `xclip` | `microsoft/xclip-base-patch32` | CV 동작 인식 (Zero-shot) | ~600 MB |
 
 ### 그룹 키워드
 
 | 키워드 | 포함 모델 | 용도 |
 | :--- | :--- | :--- |
 | `mllm` | nvila + vjepa2 + qwen25vl + qwen25 | MLLM 벤치마크 전체 |
-| `cv` | siglip + siglip2 + dinov2 + yolos + segformer + depthanything | CV 태스크 소형 모델 |
+| `cv` | siglip + siglip2 + dinov2 + yolos + segformer + depthanything + videomae_cls + xclip | CV 태스크 모델 |
 | `all` | 전체 | (~52 GB) |
 
 ### 다운로드 명령
@@ -87,7 +89,7 @@ bash scripts/download_models.sh
 # MLLM 벤치마크용 전체
 bash scripts/download_models.sh weights mllm
 
-# V-JEPA2 + NVILA 조합 (nvila_vjepa2 러너)
+# V-JEPA2 + NVILA 조합 (vjepa2_nvila 러너)
 bash scripts/download_models.sh weights vjepa2 nvila
 
 # CV 태스크용 소형 모델
@@ -155,13 +157,16 @@ python autogaze/infer_full.py assets/example_input.mp4 --mllm nvila_vjepa2 \
 
 **MLLM 러너 (`--mllm`)**
 
-| 러너 | 모델 | AutoGaze 통합 방식 |
-| :--- | :--- | :--- |
-| `nvila` | NVILA-8B-HD-Video | 프로세서 통합 (Full) |
-| `qwen25vl` | Qwen2.5-VL-7B | Zero-shot 토큰 선택기 |
-| `qwen25vl_full` | Qwen2.5-VL-7B | Zero-shot (전체 비디오) |
-| `vjepa2_llm` | V-JEPA2 ViT + Qwen2.5-7B | Zero-shot 토큰 선택기 |
-| `nvila_vjepa2` | V-JEPA2 ViT + NVILA LLM | Zero-shot 토큰 선택기 |
+`--integration` 옵션으로 기본 모드를 오버라이드할 수 있습니다.
+
+| 러너 | ViT | LLM | 기본 모드 | 특이사항 |
+| :--- | :--- | :--- | :--- | :--- |
+| `nvila` | SigLIP (custom) | NVILA | native | `--autogaze-path` 항상 필요 |
+| `siglip_qwen25` | SigLIP (HF) | Qwen2.5-VL-7B | hook | `--integration full`로 효율 최대화 |
+| `vjepa2_nvila` | V-JEPA2 | NVILA | full | `--vjepa2-path` 필요 |
+| `vjepa2_qwen25` | V-JEPA2 | Qwen2.5-7B | full | `--vjepa2-path` + `--lm-path` 필요 |
+| `vjepa2` | V-JEPA2 | — | hook | 특징 추출 전용 |
+| `siglip` | SigLIP (HF) | — | hook | 특징 추출 전용 |
 
 ### 5.2 데이터셋 준비
 
@@ -189,11 +194,13 @@ AutoGaze 없이 모든 패치를 처리하는 "풀 패치 기준선"을 먼저 �
 
 ```bash
 # ── NVILA 기준선 (전체 패치, AutoGaze 비활성) ──────────────────
+# NVILA native 모드는 --no-autogaze 시에도 --autogaze-path 필요
 python -m autogaze.eval.run_benchmark \
     --task videomme \
     --hf-data-dir data/eval/Video-MME \
     --mllm nvila \
     --model-path weights/NVILA-8B-HD-Video \
+    --autogaze-path weights/AutoGaze \
     --no-autogaze \
     --output results/videomme_nvila_baseline.json
 
@@ -201,10 +208,10 @@ python -m autogaze.eval.run_benchmark \
 python -m autogaze.eval.run_benchmark \
     --task mvbench \
     --hf-data-dir data/eval/MVBench \
-    --mllm qwen25vl \
+    --mllm siglip_qwen25 \
     --model-path weights/Qwen2.5-VL-7B-Instruct \
     --no-autogaze \
-    --output results/mvbench_qwen25vl_baseline.json
+    --output results/mvbench_siglip_qwen25_baseline.json
 
 # ── 여러 태스크 기준선 일괄 실행 ─────────────────────────────
 bash scripts/run_benchmarks.sh \
@@ -246,11 +253,11 @@ python -m autogaze.eval.run_benchmark \
     --gazing-ratio 0.75 \
     --output results/videomme_nvila_ag075.json
 
-# nvila_vjepa2 러너 (V-JEPA2 ViT + NVILA LLM)
+# vjepa2_nvila 러너 (V-JEPA2 ViT + NVILA LLM)
 python -m autogaze.eval.run_benchmark \
     --task videomme \
     --hf-data-dir data/eval/Video-MME \
-    --mllm nvila_vjepa2 \
+    --mllm vjepa2_nvila \
     --model-path weights/NVILA-8B-HD-Video \
     --vjepa2-path weights/vjepa2-vitl-fpc64-256 \
     --autogaze-path weights/AutoGaze \
@@ -281,19 +288,33 @@ python -m autogaze.eval.run_benchmark \
 | YOLOS-tiny | 객체 탐지 | `yolos` |
 | SegFormer-B2 | 시맨틱 세그멘테이션 | `segformer` |
 | Depth-Anything-V2-S | 단안 깊이 추정 | `depthanything` |
+| VideoMAE-base (Kinetics-400) | 동작 인식 (supervised) | `videomae_cls` |
+| X-CLIP-base/32 | 동작 인식 (zero-shot) | `xclip` |
 
 ```bash
-# CV 모델 다운로드
+# CV 모델 다운로드 (videomae_cls, xclip 포함)
 bash scripts/download_models.sh weights cv
 
-# 이미지 전체 태스크 실행
+# 이미지 전체 태스크 실행 (depth, yolos, dinov2, segformer, siglip, videomae_cls, xclip)
 python scripts/run_cv_tasks.py --input assets/sample.jpg --output-dir results/
 
-# 특정 태스크 + ratio 그리드
+# 특정 태스크만 + ratio 그리드
 python scripts/run_cv_tasks.py \
     --input assets/sample.jpg \
     --tasks depth dinov2 yolos \
     --ratios 0.25 0.5 0.75 1.0
+
+# 동작 인식 태스크 비교
+python scripts/run_cv_tasks.py \
+    --input assets/sample.jpg \
+    --tasks videomae_cls xclip \
+    --ratios 0.75 0.5 0.25
+
+# 비디오 모드 — 청크 단위 동작 인식 결과 오버레이
+python scripts/run_cv_tasks.py \
+    --input assets/example.mp4 \
+    --tasks videomae_cls xclip \
+    --ag-ratio 0.5
 
 # 결과 시각화
 python scripts/visualize_cv_results.py results/
@@ -354,11 +375,11 @@ A: HF 캐시가 불완전할 때 발생합니다. `bash scripts/download_data_ev
 A: `프레임 번호 × 프레임당 토큰 수 + 프레임 내 패치 번호`로 계산되는 전역 인덱스입니다.
 
 **Q: 속도 향상이 체감되지 않습니다.**  
-A: `Full Mode` (예: `nvila` 또는 `_full` 접미사 러너)를 사용 중인지 확인하세요. `Hook Mode`는 연산량은 동일하고 결과만 마스킹하므로 속도 향상이 없습니다.
+A: `full` 통합 모드 러너를 사용 중인지 확인하세요 (예: `nvila`의 native 모드, 또는 `--integration full` 옵션). `hook` 모드는 연산량은 동일하고 결과만 마스킹하므로 속도 향상이 없습니다.
 
-**Q: `nvila_vjepa2` 러너를 사용하려면 무엇이 필요한가요?**  
+**Q: `vjepa2_nvila` 러너를 사용하려면 무엇이 필요한가요?**  
 A: NVILA 가중치(`--model-path`)와 V-JEPA2 가중치(`--vjepa2-path`)가 모두 필요합니다. `bash scripts/download_models.sh weights nvila vjepa2`로 다운로드하세요.
 
 ---
 
-*문서 최종 갱신: 2026-05-08*
+*문서 최종 갱신: 2026-05-10*
