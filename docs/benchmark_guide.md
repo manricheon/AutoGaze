@@ -51,11 +51,18 @@
 | **X-CLIP-base/32** | `microsoft/xclip-base-patch32` | `model.vision_model.vision_model.embeddings` | 32 px | 7×7 |
 | **CLIP-ViT-B/32** | `openai/clip-vit-base-patch32` | `model.vision_model.embeddings` | 32 px | 7×7 |
 
-### 방식 B 구현 완료
+### 방식 A / 방식 B 구현 현황
 
-| 모델 | 상태 |
-| :--- | :--- |
-| NVILA-8B-HD-Video (SigLIP) | ✅ 프로덕션 |
+| 모델 | 방식 A (hook) | 방식 B (완전 통합) | 방식 B 미구현 이유 |
+| :--- | :---: | :---: | :--- |
+| NVILA-8B-HD-Video (SigLIP) | — | ✅ 프로덕션 | — |
+| VideoMAE-CLS (Kinetics-400) | ✅ `run_cv_tasks.py` | ❌ | tubelet 마스킹 수정 필요 (§4.2 참고) |
+| X-CLIP-base/32 | ✅ `run_cv_tasks.py` | ❌ | 프레임별 토큰 제거 후 temporal attn 수정 필요 (§4.3 참고) |
+| DINOv2 / YOLOS / ViT | ✅ `run_cv_tasks.py` | ❌ | block-causal attention mask 수정 필요 (§4.1 참고) |
+| SigLIP (HF) | ✅ `run_cv_tasks.py` | ❌ | block-causal attention mask 수정 필요 (§4.1 참고) |
+| SegFormer | ✅ `run_cv_tasks.py` | ❌ | Conv2d 기반 계층 구조 전면 수정 필요 |
+
+> **방식 A** 는 시퀀스 길이를 바꾸지 않고 비선택 토큰을 0으로 채우므로 속도 이득은 없습니다.  실제 지연 시간·VRAM 절감은 **방식 B** 에서만 달성됩니다.
 
 ---
 
@@ -139,19 +146,27 @@ for name, module in model.named_modules():
 
 일반적인 패턴:
 - HF ViT 계열: `vit.embeddings` 또는 `embeddings`
-- CLIP vision: `vision_model.embeddings`
-- VideoMAE: `patch_embed`
+- CLIP / SigLIP vision: `vision_model.embeddings`
+- VideoMAE (분류 · pre-training 공통): `videomae.embeddings` — 출력 shape `(B, 1568, D)` = 8 tubelet × 196 spatial
+- X-CLIP (CLIP 기반 video): `vision_model.vision_model.embeddings`
 - DINOv2 backbone 기반 모델: `backbone.embeddings`
 
 ---
 
-## 4. 방식 B: 완전 통합 (NVILA 방식)
+## 4. 방식 B: 완전 통합 — 모델별 구현 가이드
 
-방식 B는 패치 임베딩 이후 선택된 토큰만 트랜스포머 레이어에 전달하므로 실제 FLOPs와 지연 시간이 줄어듭니다.
+방식 B는 패치 임베딩 이후 **선택된 토큰만** 트랜스포머 레이어에 전달하므로 실제 FLOPs와 지연 시간이 줄어듭니다.
 
-### 4.1 핵심 수정 사항
+---
+
+### 4.1 Image ViT (SigLIP / DINOv2 / YOLOS) — NVILA 레퍼런스
+
+NVILA가 채택한 방식입니다. 공간적 패치만 다루며 temporal 차원이 없습니다.
+
+**핵심 수정 3단계**
 
 **① config 추가**
+
 ```python
 # vision encoder config에 추가
 scales = '224'                # 또는 '32+64+112+224'
@@ -159,31 +174,93 @@ attn_type = 'block_causal'   # 'block_causal' | 'causal' | 'bidirectional'
 frame_independent_encoding = False
 ```
 
-**② forward 시그니처 수정**
-```python
-def forward(
-    self,
-    pixel_values: torch.Tensor,
-    gazing_info: Optional[dict] = None,  # ← 추가
-    ...
-):
-    patch_embeds = self.patch_embedding(pixel_values)  # (B, N, D)
+**② forward에서 토큰 물리적 제거**
 
+```python
+def forward(self, pixel_values, gazing_info=None, ...):
+    patch_embeds = self.patch_embedding(pixel_values)  # (B, N, D)
     if gazing_info is not None:
         patch_embeds = mask_with_gazing(patch_embeds, gazing_info)
+        # mask_with_gazing: gather → (B, k, D)  k = n_selected
+    # 이후 transformer는 k-token 시퀀스로 동작
     ...
 ```
 
 **③ gazing_info 형식**
+
 ```python
 gazing_info = {
-    'gazing_pos':            (B, N),      # 선택된 패치 인덱스
-    'num_gazing_each_frame': (T,),        # 프레임별 선택 수
-    'if_padded_gazing':      (B, N),      # 패딩 마스크 bool
+    'gazing_pos':            (B, N),   # 선택된 패치 인덱스
+    'num_gazing_each_frame': (T,),     # 프레임별 선택 수
+    'if_padded_gazing':      (B, N),   # 패딩 마스크 bool
 }
 ```
 
-**레퍼런스**: `autogaze/vision_encoders/siglip/modeling_siglip.py` → `mask_with_gazing()`
+레퍼런스: `autogaze/vision_encoders/siglip/modeling_siglip.py` → `mask_with_gazing()`
+
+---
+
+### 4.2 Video ViT — VideoMAE-CLS (tubelet 기반)
+
+VideoMAE는 3D Conv patchify (tubelet_size=2) 로 `(16 frames) → 8×14×14 = 1568` 토큰을 생성합니다. 방식 A는 1568개를 모두 forward하고 비선택 토큰만 0으로 채웁니다.  방식 B는 **tubelet 단위로 물리적 제거**하여 시퀀스를 단축합니다.
+
+```text
+방식 A (현재, run_cv_tasks.py)
+  VideoMAEEmbeddings 출력: (B, 1568, D)
+  hook → non-gaze 토큰 = 0
+  transformer layers: 1568 토큰 그대로 처리 (no speedup)
+
+방식 B (미구현 — 아래 체크리스트 참고)
+  VideoMAEEmbeddings 출력: (B, 1568, D)
+  gather → (B, k, D)  k = ratio × 1568
+  transformer layers: k 토큰만 처리  ← real speedup
+```
+
+**방식 B 구현 체크리스트 (VideoMAE-CLS)**
+
+- [ ] `VideoMAEEmbeddings.forward()` 출력 직후 `torch.gather`로 k개 선택
+- [ ] `VideoMAESelfAttention`에 전달되는 `attention_mask` 제거 (가변 시퀀스 허용)
+- [ ] `mean_pool` head를 k-token 시퀀스에서도 올바르게 동작하도록 확인 (`use_mean_pooling=True`)
+- [ ] AutoGaze 공간 mask (196,) → 8 tubelet 위치 전체에 broadcast하여 `(1568,)` bool mask 생성
+- [ ] `VideoMAEForVideoClassification.forward()`에 `gazing_mask` kwarg 추가
+
+```python
+# 방식 B 핵심 패치 예시 (VideoMAEModel.forward 내부)
+def forward(self, pixel_values, gazing_mask=None, ...):
+    embeddings = self.embeddings(pixel_values)   # (B, 1568, D)
+    if gazing_mask is not None:
+        # gazing_mask: (B, 1568) bool
+        # gather → compact sequence
+        idx = gazing_mask[0].nonzero(as_tuple=True)[0]  # (k,)
+        embeddings = embeddings[:, idx]          # (B, k, D)
+    return self.encoder(embeddings, ...)
+```
+
+---
+
+### 4.3 Video ViT — X-CLIP (per-frame CLIP + temporal attention)
+
+X-CLIP 은 공간적 ViT(CLIP)를 각 프레임에 독립적으로 적용한 뒤 temporal transformer로 합칩니다.  방식 B 구현은 두 단계로 나뉩니다.
+
+```text
+방식 A (현재, run_cv_tasks.py)
+  CLIPVisionEmbeddings (B*T, 197, D) → hook으로 비선택 spatial 토큰 0 처리
+  CLIPEncoder: 197 토큰 그대로 처리 (no speedup)
+  temporal attn: B×T 프레임 모두 사용
+
+방식 B (미구현)
+  CLIPVisionEmbeddings (B*T, 197, D) → gather → (B*T, k+1, D)  (+CLS)
+  CLIPEncoder: k+1 토큰만 처리  ← spatial speedup
+  temporal attn: 변경 없음 (T 프레임 수는 유지)
+```
+
+**방식 B 구현 체크리스트 (X-CLIP)**
+
+- [ ] `CLIPVisionTransformer.forward()` 에서 `patch_embeds` gather 수행 (CLS 토큰은 항상 유지)
+- [ ] `CLIPEncoder` 내 `attention_mask` 제거 — k+1 가변 길이 허용
+- [ ] `XCLIPVisionModel.forward()` 에 `gazing_mask` kwarg 전달 경로 추가
+- [ ] `XCLIPModel.forward()` 에서 per-frame mask를 `(B*T, 196)` 형식으로 reshape하여 전달
+- [ ] temporal attention은 수정 불필요 (프레임별 CLS token은 항상 보존됨)
 
 ---
 
@@ -219,10 +296,20 @@ with selector.token_mask_context(embed_mod, mask, has_cls_token=True):
 
 ### 방식 B (완전 통합) 체크리스트
 
-- [ ] `config.json`에 `scales`, `attn_type` 필드 추가
-- [ ] `patch_embed` forward에서 `gazing_info`를 받아 `mask_with_gazing()` 호출
-- [ ] 어텐션 마스크를 `block_causal` 또는 `causal` 형식으로 생성
-- [ ] `AutoGaze.from_pretrained("weights/AutoGaze")` 로드 후 processor에 연결
+모델 유형에 따라 §4의 구현 가이드를 참고하세요.
+
+| 모델 유형 | 가이드 |
+| :--- | :--- |
+| Image ViT (SigLIP / CLIP / DINOv2) | §4.1 — NVILA 레퍼런스 |
+| Video ViT — tubelet (VideoMAE) | §4.2 — tubelet gather |
+| Video ViT — CLIP+temporal (X-CLIP) | §4.3 — per-frame gather |
+
+공통 절차:
+
+- [ ] 임베딩 출력 직후 `torch.gather`로 선택 토큰만 추출 → `(B, k, D)`
+- [ ] 이후 transformer 레이어에 k-token 시퀀스 전달
+- [ ] attention mask / position index 수정 (모델별 상이)
+- [ ] `AutoGaze.from_pretrained("weights/AutoGaze")` 로드 후 forward에 mask 전달
 
 ---
 

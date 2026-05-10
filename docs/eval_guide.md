@@ -23,6 +23,22 @@ This guide explains how to evaluate **AutoGaze + MLLM** pipelines on standard vi
 
 Tasks marked "HF bytes" embed video data directly in the dataset parquet — no `--video-dir` is needed unless the bytes cache is incomplete (see [Section 3](#3-dataset-preparation)).
 
+### CV Tasks (`scripts/run_cv_tasks.py`)
+
+These run independently of the VQA benchmark pipeline.  Each task demonstrates the AutoGaze effect on a specific vision model at the token level — no language model required.
+
+| Task key | Model | Type | Temporal |
+| :--- | :--- | :--- | :---: |
+| `depth` | Depth-Anything-V2-S | Depth estimation | per-frame |
+| `yolos` | YOLOS-tiny | Object detection | per-frame |
+| `dinov2` | DINOv2-base (ImageNet1k) | Image classification | per-frame |
+| `segformer` | SegFormer-B2 (ADE20K) | Semantic segmentation | per-frame |
+| `siglip` | SigLIP-base/16 | Zero-shot classification | per-frame |
+| `videomae_cls` | VideoMAE-base (Kinetics-400) | **Action recognition — supervised** | **per-clip** |
+| `xclip` | X-CLIP-base/32 | **Action recognition — zero-shot** | **per-clip** |
+
+Action recognition tasks (`videomae_cls`, `xclip`) process the full temporal clip in one pass; the result is shown on every frame of that clip.  See [Section 7](#7-video-action-recognition-cv-tasks-동작-인식-cv-태스크) for implementation details and usage examples.
+
 ### MLLM Runners (--mllm)
 
 Naming convention: **`{vit}_{lm}`** (ViT first).  Use `--integration` to select the mode.
