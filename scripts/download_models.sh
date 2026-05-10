@@ -9,30 +9,34 @@
 #   MODEL...    : 다운로드할 모델 목록 (기본: autogaze videomae)
 #
 # 개별 모델:
-#   autogaze    — nvidia/AutoGaze                        (~50 MB,  패치 선택 모델)
-#   videomae    — bfshi/VideoMAE_AutoGaze                (~2 GB,   학습용 보상 모델)
-#   nvila       — nvidia/NVILA-8B-HD-Video               (~16 GB,  AutoGaze 통합 MLLM)
-#   vjepa2      — facebook/vjepa2-vitl-fpc64-256         (~2 GB,   Video-native ViT-L)
-#   qwen25vl    — Qwen/Qwen2.5-VL-7B-Instruct            (~16 GB,  VL MLLM)
-#   qwen25      — Qwen/Qwen2.5-7B-Instruct               (~15 GB,  LM, vjepa2_llm용)
-#   siglip      — google/siglip-base-patch16-224         (~400 MB, CV tasks)
-#   siglip2     — google/siglip2-base-patch16-224        (~400 MB, CV tasks)
-#   dinov2      — facebook/dinov2-base-imagenet1k-1-layer (~350 MB, CV tasks)
-#   yolos       — hustvl/yolos-tiny                      (~30 MB,  CV object detection)
-#   segformer   — nvidia/segformer-b2-finetuned-ade-512-512 (~100 MB, CV segmentation)
-#   depthanything — depth-anything/Depth-Anything-V2-Small-hf (~100 MB, CV depth)
+#   autogaze      — nvidia/AutoGaze                              (~50 MB,  패치 선택 모델)
+#   videomae      — bfshi/VideoMAE_AutoGaze                      (~2 GB,   학습용 보상 모델)
+#   nvila         — nvidia/NVILA-8B-HD-Video                     (~16 GB,  AutoGaze 통합 MLLM)
+#   vjepa2        — facebook/vjepa2-vitl-fpc64-256               (~2 GB,   Video-native ViT-L)
+#   qwen25vl      — Qwen/Qwen2.5-VL-7B-Instruct                  (~16 GB,  VL MLLM, siglip_qwen25용)
+#   qwen25        — Qwen/Qwen2.5-7B-Instruct                     (~15 GB,  LM, vjepa2_qwen25용)
+#   siglip        — google/siglip-base-patch16-224               (~400 MB, CV tasks)
+#   siglip2       — google/siglip2-base-patch16-224              (~400 MB, CV tasks)
+#   dinov2        — facebook/dinov2-base-imagenet1k-1-layer      (~350 MB, CV tasks)
+#   yolos         — hustvl/yolos-tiny                            (~30 MB,  CV object detection)
+#   segformer     — nvidia/segformer-b2-finetuned-ade-512-512    (~100 MB, CV segmentation)
+#   depthanything — depth-anything/Depth-Anything-V2-Small-hf   (~100 MB, CV depth)
+#   videomae_cls  — MCG-NJU/videomae-base-finetuned-kinetics     (~350 MB, CV action recognition)
+#   xclip         — microsoft/xclip-base-patch32                 (~600 MB, CV zero-shot action)
 #
 # 그룹 키워드:
 #   mllm        — nvila + vjepa2 + qwen25vl + qwen25    (MLLM 벤치마크 전체)
 #   cv          — siglip + siglip2 + dinov2 + yolos + segformer + depthanything
-#   all         — autogaze + videomae + mllm + cv        (전부)
+#               + videomae_cls + xclip
+#   all         — autogaze + videomae + mllm + cv        (전부, ~53 GB)
 #
 # 예시:
-#   bash scripts/download_models.sh                         # 기본 (autogaze + videomae)
-#   bash scripts/download_models.sh weights mllm            # MLLM 벤치마크용 전체
-#   bash scripts/download_models.sh weights vjepa2 qwen25vl # V-JEPA2 + Qwen25VL만
-#   bash scripts/download_models.sh weights cv              # CV 태스크 소형 모델
-#   bash scripts/download_models.sh weights all             # 전부 (~52 GB)
+#   bash scripts/download_models.sh                          # 기본 (autogaze + videomae)
+#   bash scripts/download_models.sh weights mllm             # MLLM 벤치마크용 전체
+#   bash scripts/download_models.sh weights vjepa2 qwen25vl  # V-JEPA2 + Qwen2.5-VL만
+#   bash scripts/download_models.sh weights cv               # CV 태스크 소형 모델 (동작인식 포함)
+#   bash scripts/download_models.sh weights videomae_cls xclip  # 동작 인식 모델만
+#   bash scripts/download_models.sh weights all              # 전부 (~53 GB)
 #
 # 오프라인 실행 시 로컬 경로:
 #   nvila     → weights/NVILA-8B-HD-Video
@@ -65,9 +69,11 @@ EXPANDED=()
 for m in "${MODELS[@]}"; do
     case "$m" in
         mllm) EXPANDED+=("nvila" "vjepa2" "qwen25vl" "qwen25") ;;
-        cv)   EXPANDED+=("siglip" "siglip2" "dinov2" "yolos" "segformer" "depthanything") ;;
+        cv)   EXPANDED+=("siglip" "siglip2" "dinov2" "yolos" "segformer" "depthanything"
+                         "videomae_cls" "xclip") ;;
         all)  EXPANDED+=("autogaze" "videomae" "nvila" "vjepa2" "qwen25vl" "qwen25"
-                         "siglip" "siglip2" "dinov2" "yolos" "segformer" "depthanything") ;;
+                         "siglip" "siglip2" "dinov2" "yolos" "segformer" "depthanything"
+                         "videomae_cls" "xclip") ;;
         *)    EXPANDED+=("$m") ;;
     esac
 done
@@ -139,7 +145,7 @@ download_qwen25vl() {
 
 download_qwen25() {
     info "[Qwen2.5] Qwen/Qwen2.5-7B-Instruct (~15 GB)"
-    info "  용도: vjepa2_llm 파이프라인의 causal LM"
+    info "  용도: vjepa2_qwen25 파이프라인의 causal LM"
     huggingface-cli download Qwen/Qwen2.5-7B-Instruct \
         --resume-download \
         --local-dir "$TARGET_DIR/Qwen2.5-7B-Instruct"
@@ -180,6 +186,14 @@ download_depthanything() {
     download_cv_model "depth-anything/Depth-Anything-V2-Small-hf" "DepthAnything-V2-Small" "~100 MB"
 }
 
+download_videomae_cls() {
+    download_cv_model "MCG-NJU/videomae-base-finetuned-kinetics" "VideoMAE-CLS-Kinetics400" "~350 MB"
+}
+
+download_xclip() {
+    download_cv_model "microsoft/xclip-base-patch32" "X-CLIP-base-patch32" "~600 MB"
+}
+
 # ── 순서대로 실행 ───────────────────────────────────────────
 STEP=0
 TOTAL=${#MODELS[@]}
@@ -201,10 +215,13 @@ for model in "${MODELS[@]}"; do
         yolos)         download_yolos         ;;
         segformer)     download_segformer     ;;
         depthanything) download_depthanything ;;
+        videomae_cls)  download_videomae_cls  ;;
+        xclip)         download_xclip         ;;
         *)
             warn "알 수 없는 모델: '$model'"
             warn "  선택 가능: autogaze videomae nvila vjepa2 qwen25vl qwen25"
             warn "             siglip siglip2 dinov2 yolos segformer depthanything"
+            warn "             videomae_cls xclip"
             warn "  그룹 키워드: mllm cv all"
             ;;
     esac
@@ -243,7 +260,8 @@ for model in "${MODELS[@]}"; do
 done
 
 # CV 캐시 모델 확인
-CV_MODELS=("siglip" "siglip2" "dinov2" "yolos" "segformer" "depthanything")
+CV_MODELS=("siglip" "siglip2" "dinov2" "yolos" "segformer" "depthanything"
+           "videomae_cls" "xclip")
 declare -A CV_HF_IDS=(
     [siglip]="google/siglip-base-patch16-224"
     [siglip2]="google/siglip2-base-patch16-224"
@@ -251,6 +269,8 @@ declare -A CV_HF_IDS=(
     [yolos]="hustvl/yolos-tiny"
     [segformer]="nvidia/segformer-b2-finetuned-ade-512-512"
     [depthanything]="depth-anything/Depth-Anything-V2-Small-hf"
+    [videomae_cls]="MCG-NJU/videomae-base-finetuned-kinetics"
+    [xclip]="microsoft/xclip-base-patch32"
 )
 
 HAS_CV=false
@@ -276,25 +296,34 @@ fi
 echo ""
 echo "벤치마크 실행 예시 (로컬 경로 사용):"
 echo ""
-echo "  # NVILA"
+echo "  # NVILA (native 통합)"
 echo "  bash scripts/run_benchmarks.sh --mllm nvila \\"
-echo "      --model-path $TARGET_DIR/NVILA-8B-HD-Video"
+echo "      --model-path    $TARGET_DIR/NVILA-8B-HD-Video \\"
+echo "      --autogaze-path $TARGET_DIR/AutoGaze"
 echo ""
-echo "  # Qwen2.5-VL"
-echo "  bash scripts/run_benchmarks.sh --mllm qwen25vl \\"
-echo "      --model-path $TARGET_DIR/Qwen2.5-VL-7B-Instruct"
+echo "  # Qwen2.5-VL (siglip_qwen25)"
+echo "  bash scripts/run_benchmarks.sh --mllm siglip_qwen25 \\"
+echo "      --model-path    $TARGET_DIR/Qwen2.5-VL-7B-Instruct \\"
+echo "      --autogaze-path $TARGET_DIR/AutoGaze"
 echo ""
-echo "  # V-JEPA2 + Qwen2.5 LLM"
-echo "  bash scripts/run_benchmarks.sh --mllm vjepa2_llm \\"
-echo "      --model-path $TARGET_DIR/vjepa2-vitl-fpc64-256 \\"
-echo "      --lm-path    $TARGET_DIR/Qwen2.5-7B-Instruct \\"
-echo "      --projector-path $TARGET_DIR/vjepa2_projector"
+echo "  # V-JEPA2 + Qwen2.5 LLM (vjepa2_qwen25)"
+echo "  bash scripts/run_benchmarks.sh --mllm vjepa2_qwen25 \\"
+echo "      --model-path    $TARGET_DIR/NVILA-8B-HD-Video \\"
+echo "      --vjepa2-path   $TARGET_DIR/vjepa2-vitl-fpc64-256 \\"
+echo "      --lm-path       $TARGET_DIR/Qwen2.5-7B-Instruct \\"
+echo "      --autogaze-path $TARGET_DIR/AutoGaze"
 echo ""
-echo "  # V-JEPA2 ViT + NVILA LLM  (nvila_vjepa2)"
-echo "  bash scripts/run_benchmarks.sh --mllm nvila_vjepa2 \\"
-echo "      --model-path     $TARGET_DIR/NVILA-8B-HD-Video \\"
-echo "      --vjepa2-path    $TARGET_DIR/vjepa2-vitl-fpc64-256 \\"
-echo "      --projector-path $TARGET_DIR/nvila_vjepa2_projector"
+echo "  # V-JEPA2 ViT + NVILA LLM (vjepa2_nvila)"
+echo "  bash scripts/run_benchmarks.sh --mllm vjepa2_nvila \\"
+echo "      --model-path    $TARGET_DIR/NVILA-8B-HD-Video \\"
+echo "      --vjepa2-path   $TARGET_DIR/vjepa2-vitl-fpc64-256 \\"
+echo "      --autogaze-path $TARGET_DIR/AutoGaze"
+echo ""
+echo "  # CV 동작 인식 태스크"
+echo "  python scripts/run_cv_tasks.py \\"
+echo "      --input assets/example.mp4 \\"
+echo "      --ag-path $TARGET_DIR/AutoGaze \\"
+echo "      --tasks videomae_cls xclip"
 echo ""
 echo "학습 시작 명령:"
 echo "  NTP : bash scripts/train_ntp_single_gpu.sh <data_dir> $TARGET_DIR/VideoMAE_AutoGaze/videomae.pt"
