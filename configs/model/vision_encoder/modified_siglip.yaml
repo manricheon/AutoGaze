@@ -1,0 +1,6 @@
+type: modified_siglip
+family: siglip_vit
+variant: modified
+checkpoint: null
+revision: null
+status: canonical_modified_siglip_path

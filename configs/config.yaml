@@ -1,0 +1,25 @@
+defaults:
+  - model/autogaze: default
+  - model/vision_encoder: default
+  - model/mllm: default
+  - model/task_decoder: default
+  - model/adapter: default
+  - model/huggingface: default
+  - task/video_vqa: default
+  - task/action_recognition: default
+  - data/dummy_video: default
+  - data/huggingface: default
+  - runtime/device: default
+  - runtime/precision: default
+  - runtime/seed: default
+  - runtime/huggingface: default
+  - benchmark/profiling: default
+  - benchmark/visualizer: default
+  - benchmark/huggingface: default
+  - _self_
+
+experiment:
+  id: smoke_config
+
+task:
+  type: video_vqa

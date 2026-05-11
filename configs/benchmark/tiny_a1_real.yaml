@@ -1,0 +1,20 @@
+benchmark:
+  preset_id: tiny_a1_real
+  experiment: A1_real
+  modes:
+    - autogaze_only
+    - full_pipeline
+  batch_size: 1
+  num_frames: 2
+  resolution: 224
+  scale_resolution: null
+  query_text: "What is happening in this video?"
+  max_new_tokens: 1
+  warmup_iterations: 1
+  benchmark_iterations: 3
+  construction_level: 3
+  device: cpu
+  dtype: float32
+  allow_mllm_load: false
+  output_dir: outputs/tiny_real_benchmarks/A1_real
+  warning: "tiny real benchmark only; not a paper reproduction result"

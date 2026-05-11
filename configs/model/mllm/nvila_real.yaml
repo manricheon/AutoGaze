@@ -1,0 +1,32 @@
+type: nvila
+status: real_canonical_nvila_path_configured_externally
+module_path: transformers
+class_or_factory: AutoModelForCausalLM
+config_module_path: null
+config_class_or_factory: null
+checkpoint: weights/NVILA-8B-HD-Video
+checkpoint_root: weights/NVILA-8B-HD-Video
+config_path: weights/NVILA-8B-HD-Video/config.json
+model_config_path: weights/NVILA-8B-HD-Video
+tokenizer_or_processor_path: weights/NVILA-8B-HD-Video
+processor_path: weights/NVILA-8B-HD-Video
+device: cpu
+dtype: float32
+local_files_only: true
+trust_remote_code: true
+strict_checkpoint_loading: true
+input_resolution: 224
+max_resolution: null
+scale_resolution: null
+frame_count: 16
+inference_script_path: null
+query_text: null
+output_dir: outputs/A1_real/predictions
+visualization_dir: outputs/A1_real/visualizations/full_pipeline
+original_cli_args:
+  usage_type: not_described_in_quick_start
+  query_text_argument: not_present_in_quick_start
+  full_pipeline_command: not_present_in_quick_start
+extra_kwargs: {}
+config_kwargs: {}
+construction_kwargs: {}

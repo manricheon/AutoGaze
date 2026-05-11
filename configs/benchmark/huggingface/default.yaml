@@ -1,0 +1,6 @@
+enabled: false
+mode: disabled
+integration_mode: official_processor
+dry_run: true
+metric_name: exact_match
+manifest_output_dir: outputs/hf_benchmarks

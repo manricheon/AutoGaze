@@ -1,0 +1,72 @@
+type: vanilla_siglip
+family: siglip_vit
+variant: vanilla
+status: real_vanilla_siglip_feasibility_config
+
+# Feasibility-only Hugging Face loading path. This config describes how a
+# vanilla SigLIP checkpoint could be resolved without assuming compatibility
+# with the modified SigLIP AutoGaze hooks.
+module_path: transformers
+class_or_factory: AutoModel
+processor_module_path: transformers
+processor_class_or_factory: AutoImageProcessor
+checkpoint: weights/siglip2-base-patch16-224
+checkpoint_root: weights/siglip2-base-patch16-224
+config_path: weights/siglip2-base-patch16-224/config.json
+model_config_path: weights/siglip2-base-patch16-224
+tokenizer_or_processor_path: weights/siglip2-base-patch16-224
+processor_path: weights/siglip2-base-patch16-224
+device: cpu
+dtype: float32
+local_files_only: true
+trust_remote_code: false
+strict_checkpoint_loading: true
+
+input_resolution: 224
+max_resolution: null
+scale_resolution: null
+target_scales: null
+target_patch_size: null
+frame_count: 16
+patch_size: 16
+output_dim: 768
+output_dim_source: configured_siglip_base_hidden_size
+
+supports_gazing_info: false
+supports_direct_patch_selection: false
+supports_patch_embedding_hooks: false
+supports_post_encoder_token_pruning: true
+supports_video_input: false
+true_encoder_side_acceleration: false
+
+inference_script_path: null
+query_text: null
+output_dir: outputs/A0_real/vision_encoder
+visualization_dir: outputs/A0_real/visualizations/full_pipeline
+
+original_cli_args:
+  usage_type: huggingface_metadata_only
+  quick_start_has_vanilla_siglip_autogaze_command: false
+  quick_start_reference_model_id: google/siglip2-base-patch16-224
+  image_processor_from_pretrained: google/siglip2-base-patch16-224
+  default_input_resolution: 224
+  default_patch_size: 16
+  gazing_info_argument_supported: false
+  high_resolution_example:
+    model_id: google/siglip2-so400m-patch14-384
+    input_resolution: 392
+    target_scales:
+      - 56
+      - 112
+      - 196
+      - 392
+    target_patch_size: 14
+
+compatibility_notes:
+  direct_autogaze_gazing_info: unsupported_by_vanilla_hf_siglip
+  a3_status: experimental_compatibility_ablation_only
+  no_silent_feature_padding: true
+
+extra_kwargs: {}
+config_kwargs: {}
+construction_kwargs: {}

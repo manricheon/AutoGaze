@@ -1,0 +1,18 @@
+enabled: false
+dataset_id: null
+dataset_config: null
+dataset_split: validation
+revision: null
+token_env_var: HF_TOKEN
+cache_dir: null
+local_files_only: false
+offline: false
+streaming: false
+max_samples: null
+num_proc: 1
+field_mapping:
+  video: video
+  question: question
+  answer: answer
+  label: label
+  options: options

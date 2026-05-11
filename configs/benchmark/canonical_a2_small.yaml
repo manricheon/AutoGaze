@@ -1,0 +1,103 @@
+benchmark:
+  preset_id: canonical_a2_small
+  experiment: A2_real
+  scale_tier: small
+  status: config_template_only_not_paper_reproduction
+  modes:
+    - autogaze_only
+    - full_pipeline
+
+  # Configurable benchmark axes. Defaults follow QUICK_START.md's base
+  # assumption: 16 frames, 224x224 input, patch size 16.
+  batch_size: 1
+  num_frames: 16
+  resolution: 224
+  scale_resolution: null
+  target_scales: null
+  target_patch_size: null
+  token_budget: null
+  query_text: "What is happening in this video?"
+  max_new_tokens: 1
+  warmup_iterations: 1
+  benchmark_iterations: 5
+  construction_level: 3
+  device: cpu
+  dtype: float32
+  allow_mllm_load: false
+  auto_download_datasets: false
+  dataset_source: dummy_or_explicit_local_video_only
+  output_dir: outputs/canonical_benchmarks/A2_real/small
+  warning: "canonical small benchmark template only; not a paper reproduction result"
+
+  quick_start_alignment:
+    default_frame_count: 16
+    default_resolution: 224
+    default_patch_size: 16
+    gazing_ratio: 0.75
+    task_loss_requirement: 0.7
+    scaling_behavior: default_224x224_no_target_scaling
+    any_duration_chunking: stub_only
+    any_resolution_chunking: stub_only
+
+  safety_limits:
+    max_default_frames: 16
+    max_default_resolution: 224
+    max_default_batch_size: 1
+    max_default_new_tokens: 1
+    requires_explicit_mllm_load: true
+    no_4k_default: true
+    no_1k_frame_default: true
+
+  output_tables:
+    latency:
+      enabled: true
+      columns:
+        - experiment_id
+        - mode
+        - end_to_end_latency_ms
+        - autogaze_latency_ms
+        - vit_latency_ms
+        - mllm_prefill_latency_ms
+        - mllm_decode_latency_ms
+    vram:
+      enabled: true
+      columns:
+        - experiment_id
+        - mode
+        - device
+        - dtype
+        - peak_vram_mb
+    token_reduction:
+      enabled: true
+      columns:
+        - experiment_id
+        - mode
+        - visual_token_count_before_autogaze
+        - visual_token_count_after_autogaze
+        - token_reduction_ratio
+        - selected_patches_per_frame
+        - selected_patches_per_scale
+    throughput:
+      enabled: true
+      columns:
+        - experiment_id
+        - mode
+        - batch_size
+        - num_frames
+        - throughput_videos_per_sec
+        - fps
+    stage_level_timing:
+      enabled: true
+      columns:
+        - experiment_id
+        - mode
+        - stage
+        - status
+        - latency_ms
+    skipped_stages:
+      enabled: true
+      columns:
+        - experiment_id
+        - mode
+        - stage
+        - reason

@@ -1,0 +1,40 @@
+defaults:
+  - model/huggingface: default
+  - data/huggingface: default
+  - runtime/device: default
+  - runtime/precision: default
+  - runtime/huggingface: default
+  - benchmark/huggingface: default
+  - _self_
+
+experiment:
+  id: offline_hf_cache_smoke
+
+benchmark:
+  huggingface:
+    enabled: true
+    mode: offline_hf_cache
+    integration_mode: official_processor
+    dry_run: true
+
+model:
+  huggingface:
+    enabled: true
+    model_id: null
+    offline: true
+    local_files_only: true
+
+data:
+  huggingface:
+    enabled: true
+    dataset_id: null
+    offline: true
+    local_files_only: true
+    max_samples: 2
+
+runtime:
+  huggingface:
+    enabled: true
+    mode: offline_hf_cache
+    offline: true
+    local_files_only: true

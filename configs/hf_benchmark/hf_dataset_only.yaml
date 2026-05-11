@@ -1,0 +1,28 @@
+defaults:
+  - model/huggingface: default
+  - data/huggingface: default
+  - runtime/device: default
+  - runtime/precision: default
+  - runtime/huggingface: default
+  - benchmark/huggingface: default
+  - _self_
+
+experiment:
+  id: hf_dataset_only_smoke
+
+benchmark:
+  huggingface:
+    enabled: true
+    mode: hf_dataset_only
+    integration_mode: official_processor
+    dry_run: true
+
+model:
+  huggingface:
+    enabled: false
+
+data:
+  huggingface:
+    enabled: true
+    dataset_id: null
+    max_samples: 2

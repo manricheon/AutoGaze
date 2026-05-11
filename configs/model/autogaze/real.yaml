@@ -1,0 +1,43 @@
+enabled: true
+mode: selector
+token_budget: null
+status: real_canonical_autogaze_path_configured_externally
+module_path: autogaze.models.autogaze
+class_or_factory: AutoGaze
+config_module_path: autogaze.models.autogaze
+config_class_or_factory: AutoGazeConfig
+checkpoint: weights/AutoGaze
+checkpoint_root: weights/AutoGaze
+config_path: weights/AutoGaze/config.json
+model_config_path: weights/AutoGaze
+tokenizer_or_processor_path: weights/AutoGaze
+processor_path: weights/AutoGaze
+device: cpu
+dtype: float32
+local_files_only: true
+trust_remote_code: false
+strict_checkpoint_loading: true
+input_resolution: 224
+max_resolution: null
+scale_resolution: null
+frame_count: 16
+inference_script_path: null
+query_text: null
+output_dir: outputs/A2_real/autogaze
+visualization_dir: outputs/A2_real/visualizations/autogaze_only
+original_cli_args:
+  usage_type: python_api
+  model_id: bfshi/AutoGaze
+  image_processor_from_pretrained: bfshi/AutoGaze
+  max_num_frames: 16
+  default_input_resolution: 224
+  gazing_ratio: 0.75
+  task_loss_requirement: 0.7
+  target_scales: null
+  target_patch_size: null
+  streaming_args:
+    generate_only: true
+    use_cache: true
+extra_kwargs: {}
+config_kwargs: {}
+construction_kwargs: {}

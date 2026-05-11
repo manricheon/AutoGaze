@@ -1,0 +1,46 @@
+defaults:
+  - model/autogaze: default
+  - model/vision_encoder: default
+  - model/mllm: default
+  - model/task_decoder: default
+  - model/adapter: default
+  - model/huggingface: default
+  - task/video_vqa: default
+  - task/action_recognition: default
+  - data/dummy_video: default
+  - data/huggingface: default
+  - runtime/device: default
+  - runtime/precision: default
+  - runtime/seed: default
+  - runtime/huggingface: default
+  - benchmark/profiling: default
+  - benchmark/visualizer: default
+  - benchmark/huggingface: default
+  - _self_
+
+experiment:
+  id: dummy_video_vqa_smoke
+
+model:
+  autogaze:
+    enabled: false
+    mode: full
+  vision_encoder:
+    type: generic_vit
+    mode: dummy
+  mllm:
+    type: generic_mllm
+    mode: dummy
+
+task:
+  type: video_vqa
+
+data:
+  dummy_video:
+    enabled: true
+    task: video_vqa
+    num_samples: 2
+    frames: 8
+    sampler:
+      mode: fixed
+      num_frames: 4

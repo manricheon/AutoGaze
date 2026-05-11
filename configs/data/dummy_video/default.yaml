@@ -1,0 +1,5 @@
+enabled: true
+num_samples: 2
+frames: 8
+height: 224
+width: 224

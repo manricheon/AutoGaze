@@ -1,0 +1,55 @@
+defaults:
+  - model/autogaze: real
+  - model/vision_encoder: modified_siglip_real
+  - model/mllm: nvila_real
+  - model/task_decoder: default
+  - model/adapter: default
+  - model/huggingface: default
+  - task/video_vqa: default
+  - task/action_recognition: default
+  - data/dummy_video: default
+  - data/huggingface: default
+  - runtime/device: default
+  - runtime/precision: default
+  - runtime/seed: default
+  - runtime/huggingface: default
+  - benchmark/profiling: default
+  - benchmark/visualizer: default
+  - benchmark/huggingface: default
+  - _self_
+
+experiment:
+  id: A2_real
+  description: Real-path config for AutoGaze ON + modified SigLIP ViT + NVILA
+  integration_mode: original_autogaze_modified_siglip_nvila_real_config
+  compatibility_status: requires_real_autogaze_modified_siglip_and_nvila_modules_and_checkpoints
+
+task:
+  type: video_vqa
+
+inference:
+  status: smoke_inference_script_available_real_stages_guarded
+  quick_start_reference_path: QUICK_START.md
+  usage_type: autogaze_plus_full_pipeline_stub
+  inference_script_path: scripts/run_canonical_smoke_inference.py
+  checkpoint_root: null
+  model_config_path: null
+  input_resolution: 224
+  max_resolution: null
+  scale_resolution: null
+  target_scales: null
+  target_patch_size: null
+  frame_count: 16
+  query_text: null
+  output_dir: outputs/A2_real
+  visualization_dir: outputs/A2_real/visualizations/full_pipeline
+  original_cli_args:
+    quick_start_has_shell_command: false
+    quick_start_has_query_text: false
+    quick_start_has_full_pipeline_nvila_command: false
+    gazing_ratio: 0.75
+    task_loss_requirement: 0.7
+    target_scales: null
+    target_patch_size: null
+    streaming_generate_only: true
+    streaming_use_cache: true
