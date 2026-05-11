@@ -90,6 +90,8 @@ ViT / AutoGaze 통합 구조
 """
 
 import argparse
+import platform
+import resource
 import time
 import warnings
 from contextlib import contextmanager
@@ -286,14 +288,58 @@ def _sync():
         torch.mps.synchronize()
 
 
+def _process_rss_mb() -> float:
+    """Return current process RSS when psutil is available; otherwise max RSS."""
+    try:
+        import psutil
+
+        return psutil.Process().memory_info().rss / (1024 ** 2)
+    except Exception:
+        max_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        if platform.system() == "Darwin":
+            return max_rss / (1024 ** 2)
+        return max_rss / 1024
+
+
+def _device_memory_mb() -> dict[str, float]:
+    if torch.cuda.is_available():
+        return {
+            "cuda_allocated": torch.cuda.memory_allocated() / (1024 ** 2),
+            "cuda_reserved": torch.cuda.memory_reserved() / (1024 ** 2),
+            "cuda_peak_allocated": torch.cuda.max_memory_allocated() / (1024 ** 2),
+        }
+    if torch.backends.mps.is_available():
+        stats = {}
+        if hasattr(torch.mps, "current_allocated_memory"):
+            stats["mps_allocated"] = torch.mps.current_allocated_memory() / (1024 ** 2)
+        if hasattr(torch.mps, "driver_allocated_memory"):
+            stats["mps_driver"] = torch.mps.driver_allocated_memory() / (1024 ** 2)
+        return stats
+    return {}
+
+
+def _memory_snapshot() -> dict:
+    return {
+        "rss_mb": _process_rss_mb(),
+        "device": _device_memory_mb(),
+    }
+
+
+def _reset_device_peak() -> None:
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+
+
 def _timed_run(runner, frames: List[Image.Image], prompt: str,
                max_new_tokens: int) -> tuple:
-    """Run inference and return (answer, elapsed_s, gaze_s).
+    """Run inference and return (answer, elapsed_s, gaze_s, mem_before, mem_after).
 
     gaze_s is the AutoGaze-only time; 0.0 when AutoGaze is disabled.
     Instruments runner._run_autogaze() if present.
     """
     gaze_s = 0.0
+    _reset_device_peak()
+    mem_before = _memory_snapshot()
 
     if hasattr(runner, '_run_autogaze') and _runner_has_autogaze(runner):
         orig_ag = runner._run_autogaze
@@ -322,7 +368,8 @@ def _timed_run(runner, frames: List[Image.Image], prompt: str,
         _sync()
         elapsed = time.perf_counter() - t0
 
-    return answer, elapsed, gaze_s
+    mem_after = _memory_snapshot()
+    return answer, elapsed, gaze_s, mem_before, mem_after
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -401,8 +448,49 @@ def _print_header(label: str, w: int = 56):
     print("═" * w)
 
 
+def _format_memory_line(before: dict, after: dict) -> list[str]:
+    rss_delta = after["rss_mb"] - before["rss_mb"]
+    lines = [f"RSS={after['rss_mb']:.1f} MB (delta {rss_delta:+.1f} MB)"]
+    device = after.get("device") or {}
+    if "cuda_peak_allocated" in device:
+        lines.append(
+            "CUDA "
+            f"allocated={device['cuda_allocated']:.1f} MB, "
+            f"reserved={device['cuda_reserved']:.1f} MB, "
+            f"peak={device['cuda_peak_allocated']:.1f} MB"
+        )
+    elif "mps_allocated" in device or "mps_driver" in device:
+        parts = []
+        if "mps_allocated" in device:
+            parts.append(f"allocated={device['mps_allocated']:.1f} MB")
+        if "mps_driver" in device:
+            parts.append(f"driver={device['mps_driver']:.1f} MB")
+        lines.append(f"MPS {', '.join(parts)}")
+    return lines
+
+
+def _print_resource_lines(
+    *,
+    runner,
+    n_frames: int,
+    max_new_tokens: int,
+    mem_before: dict,
+    mem_after: dict,
+) -> None:
+    visual_tokens = None
+    if hasattr(runner, "n_visual_tokens"):
+        visual_tokens = runner.n_visual_tokens(n_frames)
+    token_note = f"visual={visual_tokens}" if visual_tokens is not None else "visual=unknown"
+    print(f"  {'Tokens':18}{token_note}, max_new={max_new_tokens}")
+    for line in _format_memory_line(mem_before, mem_after):
+        print(f"  {'Memory':18}{line}")
+
+
 def _print_timing_row(name: str, elapsed: float, gaze_s: float,
-                      ag_enabled: bool, ratio: float):
+                      ag_enabled: bool, ratio: float, *, runner=None,
+                      n_frames: int = 0, max_new_tokens: int = 0,
+                      mem_before: Optional[dict] = None,
+                      mem_after: Optional[dict] = None):
     mllm_s = elapsed - gaze_s
     ag_str = f"{gaze_s:.2f}s" if ag_enabled and gaze_s > 0 else "—"
     print()
@@ -412,13 +500,23 @@ def _print_timing_row(name: str, elapsed: float, gaze_s: float,
         print(f"  {'AutoGaze':18}{gaze_s:>7.2f}s   ratio={ratio:.2f}")
     print(f"  {'ViT + LLM':18}{mllm_s:>7.2f}s")
     print(f"  {'전체 (합계)':18}{elapsed:>7.2f}s   AG {'ON' if ag_enabled else 'OFF'}")
+    if runner is not None and mem_before is not None and mem_after is not None:
+        _print_resource_lines(
+            runner=runner,
+            n_frames=n_frames,
+            max_new_tokens=max_new_tokens,
+            mem_before=mem_before,
+            mem_after=mem_after,
+        )
     print("  " + "─" * 46)
 
 
-def _print_comparison(res_on: tuple, res_off: tuple, ratio: float):
-    """res_on / res_off: (answer, elapsed, gaze_s)"""
-    ans_on,  t_on,  g_on  = res_on
-    ans_off, t_off, g_off = res_off
+def _print_comparison(res_on: tuple, res_off: tuple, ratio: float, *,
+                      runner_on=None, runner_off=None, n_frames: int = 0,
+                      max_new_tokens: int = 0):
+    """res_on / res_off: (answer, elapsed, gaze_s, mem_before, mem_after)"""
+    ans_on,  t_on,  g_on,  mem_on_before,  mem_on_after  = res_on
+    ans_off, t_off, g_off, mem_off_before, mem_off_after = res_off
 
     print()
     print(f"  {'항목':<18} {'AutoGaze ON':>14} {'AutoGaze OFF':>14}")
@@ -429,6 +527,16 @@ def _print_comparison(res_on: tuple, res_off: tuple, ratio: float):
     if t_off > 0:
         saving = 100 * (t_off - t_on) / t_off
         print(f"  {'절감률':<18} {saving:>12.1f}%")
+    on_tokens = runner_on.n_visual_tokens(n_frames) if runner_on and hasattr(runner_on, "n_visual_tokens") else None
+    off_tokens = runner_off.n_visual_tokens(n_frames) if runner_off and hasattr(runner_off, "n_visual_tokens") else None
+    print(f"  {'Visual tokens':<18} {str(on_tokens or 'unknown'):>14} {str(off_tokens or 'unknown'):>14}")
+    print(f"  {'Max new tokens':<18} {max_new_tokens:>14} {max_new_tokens:>14}")
+    print(f"  {'RSS':<18} {mem_on_after['rss_mb']:>10.1f} MB {mem_off_after['rss_mb']:>10.1f} MB")
+    for label, key in (("CUDA peak", "cuda_peak_allocated"), ("MPS allocated", "mps_allocated")):
+        on_dev = (mem_on_after.get("device") or {}).get(key)
+        off_dev = (mem_off_after.get("device") or {}).get(key)
+        if on_dev is not None or off_dev is not None:
+            print(f"  {label:<18} {on_dev or 0:>10.1f} MB {off_dev or 0:>10.1f} MB")
     print("  " + "─" * 50)
     print()
     print(f"  [ON ]  {ans_on}")
@@ -436,12 +544,14 @@ def _print_comparison(res_on: tuple, res_off: tuple, ratio: float):
 
 
 def _print_sweep_table(sweep: list, ratio_w: int = 6):
-    """sweep: list of (ratio, answer, elapsed, gaze_s)"""
-    hdrs  = ["ratio", "AutoGaze", "ViT+LLM", "전체", "답변 (앞 60자)"]
+    """sweep: list of (ratio, answer, elapsed, gaze_s, mem_before, mem_after, visual_tokens)."""
+    hdrs  = ["ratio", "tokens", "RSS", "AutoGaze", "ViT+LLM", "전체", "답변 (앞 60자)"]
     rows  = []
-    for r, ans, t, g in sweep:
+    for r, ans, t, g, _mem_before, mem_after, visual_tokens in sweep:
         rows.append([
             f"{r:.2f}",
+            str(visual_tokens) if visual_tokens is not None else "unknown",
+            f"{mem_after['rss_mb']:.0f} MB",
             f"{g:.2f}s" if g > 0 else "—",
             f"{t-g:.2f}s",
             f"{t:.2f}s",
@@ -641,11 +751,23 @@ def main():
     if not runner.supports_mcq:
         print(f"\n[INFO] {args.mllm} 는 특징 추출 전용 러너입니다 (LLM 없음).")
         print("       encode_video() 로 특징 추출을 실행합니다.\n")
+        _reset_device_peak()
+        mem_before = _memory_snapshot()
+        _sync()
         t0 = time.perf_counter()
         feats = runner.encode_video(frames)
+        _sync()
         t_enc = time.perf_counter() - t0
+        mem_after = _memory_snapshot()
         print(f"  특징 텐서 shape : {feats.shape}")
         print(f"  인코딩 시간      : {t_enc*1000:.1f} ms")
+        _print_resource_lines(
+            runner=runner,
+            n_frames=len(frames),
+            max_new_tokens=0,
+            mem_before=mem_before,
+            mem_after=mem_after,
+        )
         if args.mllm == "siglip":
             T = len(frames)
             N = feats.shape[1] // T
@@ -688,12 +810,17 @@ def main():
                     _orig_sel = getattr(runner, "selector", None)
                     if hasattr(runner, "selector"):
                         runner.selector = None
-                    ans, t_total, g_s = _timed_run(runner, frames, question, args.max_new_tokens)
+                    ans, t_total, g_s, mem_before, mem_after = _timed_run(
+                        runner, frames, question, args.max_new_tokens
+                    )
                     if hasattr(runner, "selector"):
                         runner.selector = _orig_sel
                 else:
-                    ans, t_total, g_s = _timed_run(runner, frames, question, args.max_new_tokens)
-                sweep_results.append((r, ans, t_total, g_s))
+                    ans, t_total, g_s, mem_before, mem_after = _timed_run(
+                        runner, frames, question, args.max_new_tokens
+                    )
+                visual_tokens = runner.n_visual_tokens(len(frames)) if hasattr(runner, "n_visual_tokens") else None
+                sweep_results.append((r, ans, t_total, g_s, mem_before, mem_after, visual_tokens))
 
             print(" " * 40, end="\r")
             _print_sweep_table(sweep_results)
@@ -731,14 +858,22 @@ def main():
             print("  AutoGaze OFF 추론 중...")
             res_off = _timed_run(runner_base, frames, question, args.max_new_tokens)
 
-            _print_comparison(res_on, res_off, args.gazing_ratio)
+            _print_comparison(
+                res_on,
+                res_off,
+                args.gazing_ratio,
+                runner_on=runner,
+                runner_off=runner_base,
+                n_frames=len(frames),
+                max_new_tokens=args.max_new_tokens,
+            )
 
     else:
         # ── 단일 모드 ─────────────────────────────────────────────
         for qi, question in enumerate(questions):
             _print_header(f"[Q{qi+1}] {question[:70]}")
             print()
-            ans, t_total, g_s = _timed_run(
+            ans, t_total, g_s, mem_before, mem_after = _timed_run(
                 runner, frames, question, args.max_new_tokens
             )
             print(f"  {ans}")
@@ -746,6 +881,11 @@ def main():
                 "inference", t_total, g_s,
                 ag_enabled=_runner_has_autogaze(runner),
                 ratio=args.gazing_ratio,
+                runner=runner,
+                n_frames=len(frames),
+                max_new_tokens=args.max_new_tokens,
+                mem_before=mem_before,
+                mem_after=mem_after,
             )
 
     print()

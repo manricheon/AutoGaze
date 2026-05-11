@@ -38,6 +38,9 @@ Usage examples:
 
 import argparse
 import json
+import platform
+import resource
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -75,6 +78,80 @@ def get_device() -> torch.device:
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
+
+
+def _process_rss_mb() -> float:
+    """Return current RSS when psutil is available; otherwise max RSS."""
+    try:
+        import psutil
+
+        return psutil.Process().memory_info().rss / (1024 ** 2)
+    except Exception:
+        max_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        if platform.system() == "Darwin":
+            return max_rss / (1024 ** 2)
+        return max_rss / 1024
+
+
+def _device_memory_mb(device: torch.device) -> dict[str, float]:
+    if device.type == "cuda" and torch.cuda.is_available():
+        return {
+            "cuda_allocated": torch.cuda.memory_allocated() / (1024 ** 2),
+            "cuda_reserved": torch.cuda.memory_reserved() / (1024 ** 2),
+            "cuda_peak_allocated": torch.cuda.max_memory_allocated() / (1024 ** 2),
+        }
+    if device.type == "mps" and torch.backends.mps.is_available():
+        stats = {}
+        if hasattr(torch.mps, "current_allocated_memory"):
+            stats["mps_allocated"] = torch.mps.current_allocated_memory() / (1024 ** 2)
+        if hasattr(torch.mps, "driver_allocated_memory"):
+            stats["mps_driver"] = torch.mps.driver_allocated_memory() / (1024 ** 2)
+        return stats
+    return {}
+
+
+def _memory_snapshot(device: torch.device) -> dict:
+    return {
+        "rss_mb": _process_rss_mb(),
+        "device": _device_memory_mb(device),
+    }
+
+
+def _reset_device_peak(device: torch.device) -> None:
+    if device.type == "cuda" and torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+
+
+def _print_resource_report(
+    *,
+    elapsed_s: float,
+    selected_tokens: int,
+    total_tokens: int,
+    before: dict,
+    after: dict,
+) -> None:
+    token_pct = 100 * selected_tokens / total_tokens if total_tokens else 0.0
+    rss_delta = after["rss_mb"] - before["rss_mb"]
+    print(
+        f"  Report: time={elapsed_s:.2f}s | "
+        f"tokens={selected_tokens}/{total_tokens} ({token_pct:.1f}%) | "
+        f"RSS={after['rss_mb']:.1f} MB (delta {rss_delta:+.1f} MB)"
+    )
+    device = after.get("device") or {}
+    if "cuda_peak_allocated" in device:
+        print(
+            "          CUDA "
+            f"allocated={device['cuda_allocated']:.1f} MB, "
+            f"reserved={device['cuda_reserved']:.1f} MB, "
+            f"peak={device['cuda_peak_allocated']:.1f} MB"
+        )
+    elif "mps_allocated" in device or "mps_driver" in device:
+        parts = []
+        if "mps_allocated" in device:
+            parts.append(f"allocated={device['mps_allocated']:.1f} MB")
+        if "mps_driver" in device:
+            parts.append(f"driver={device['mps_driver']:.1f} MB")
+        print(f"          MPS {', '.join(parts)}")
 
 
 class FullPatchImageProcessor:
@@ -766,6 +843,9 @@ def main():
             print(f"  Processing ratio={r:.2f}...", end=" ", flush=True)
 
             try:
+                _reset_device_peak(device)
+                mem_before = _memory_snapshot(device)
+                t0 = time.perf_counter()
                 if args.no_autogaze:
                     gaze_outputs = full_patch_outputs(len(raw_video))
                 elif args.all_frames or args.stride is not None:
@@ -784,6 +864,12 @@ def main():
                             gazing_ratio=r,
                             task_loss_requirement=task_loss_req,
                         )
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+                elif device.type == "mps":
+                    torch.mps.synchronize()
+                elapsed_s = time.perf_counter() - t0
+                mem_after = _memory_snapshot(device)
             except Exception as e:
                 print(f"\n  WARNING: inference failed for ratio {r} — {e}")
                 continue
@@ -791,6 +877,13 @@ def main():
             n_real  = int((~gaze_outputs["if_padded_gazing"]).sum().item())
             n_total_tok = gaze_outputs["num_vision_tokens_each_frame"] * len(raw_video)
             print(f"Gazed: {n_real}/{n_total_tok} ({100*n_real/n_total_tok:.1f}%)")
+            _print_resource_report(
+                elapsed_s=elapsed_s,
+                selected_tokens=n_real,
+                total_tokens=n_total_tok,
+                before=mem_before,
+                after=mem_after,
+            )
 
             # ── Save outputs with ratio suffix if multiple ratios exist ─────
             suffix = f"_{r_label}" if len(ratios) > 1 else ""
