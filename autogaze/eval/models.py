@@ -488,6 +488,8 @@ class NVILARunner(BaseMLLMRunner):
 
         self.integration = integration
         self.gazing_ratio = gazing_ratio
+        self.autogaze_path = autogaze_path
+        self.ag_processor = None
         _lfo = _local(model_path)
 
         if integration == "native":
@@ -597,7 +599,15 @@ class NVILARunner(BaseMLLMRunner):
             if not hasattr(self.processor, "_autogaze_model") or self.processor._autogaze_model is None:
                 return torch.ones(1, len(frames), 14, 14)
             ag_model = self.processor._autogaze_model
-            ag_proc  = self.processor.autogaze_processor
+            ag_proc = getattr(self.processor, "autogaze_processor", None)
+            if ag_proc is None:
+                if self.ag_processor is None:
+                    if self.autogaze_path is None:
+                        return torch.ones(1, len(frames), 14, 14)
+                    from autogaze.models.autogaze import AutoGazeImageProcessor
+
+                    self.ag_processor = AutoGazeImageProcessor.from_pretrained(self.autogaze_path)
+                ag_proc = self.ag_processor
             ag_dev   = next(ag_model.parameters()).device
             batch = ag_proc(images=frames, return_tensors="pt")["pixel_values"]
             batch = batch.unsqueeze(0).to(ag_dev)

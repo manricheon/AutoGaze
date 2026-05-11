@@ -1,8 +1,12 @@
 import argparse
 import sys
 
+import numpy as np
 import pytest
+import torch
+from PIL import Image
 
+from autogaze.eval.models import NVILARunner
 import autogaze.infer_full as infer_full
 
 
@@ -190,3 +194,58 @@ def test_missing_generic_hook_with_autogaze_exits_before_model_load(monkeypatch)
 
     with pytest.raises(SystemExit):
         infer_full.main()
+
+
+def test_normalize_gaze_map_accepts_flat_token_map():
+    gaze = torch.ones(1, 2, 196)
+
+    normalized = infer_full._normalize_gaze_map(gaze)
+
+    assert normalized.shape == (2, 14, 14)
+
+
+def test_save_gaze_viz_writes_raw_map_for_baseline_runner(tmp_path):
+    class BaselineRunner:
+        gazing_ratio = 1.0
+        selector = None
+
+    frames = [Image.new("RGB", (8, 8), color="black") for _ in range(2)]
+
+    saved = infer_full.save_gaze_viz(BaselineRunner(), frames, tmp_path, "sample")
+
+    raw_path = tmp_path / "sample_gaze_map.npz"
+    assert raw_path in saved
+    data = np.load(raw_path)
+    assert data["gaze_map"].shape == (2, 14, 14)
+    assert data["gaze_map"].all()
+
+
+def test_nvila_native_gaze_uses_lazy_processor_fallback():
+    class FakeAutoGaze(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(()))
+
+        def forward(self, inputs, **_kwargs):
+            t = inputs["video"].shape[1]
+            return {"gazing_mask": [torch.ones(1, t, 196)]}
+
+    class FakeProcessor:
+        def __init__(self):
+            self._autogaze_model = FakeAutoGaze()
+
+    class FakeAGProcessor:
+        def __call__(self, images, return_tensors=None):
+            return {"pixel_values": torch.zeros(len(images), 3, 224, 224)}
+
+    runner = NVILARunner.__new__(NVILARunner)
+    runner.integration = "native"
+    runner.gazing_ratio = 0.75
+    runner.autogaze_path = "weights/AutoGaze"
+    runner.processor = FakeProcessor()
+    runner.ag_processor = FakeAGProcessor()
+    frames = [Image.new("RGB", (8, 8), color="black") for _ in range(3)]
+
+    gaze_map = runner._run_autogaze(frames)
+
+    assert gaze_map.shape == (1, 3, 14, 14)

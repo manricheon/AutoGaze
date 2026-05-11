@@ -376,12 +376,71 @@ def _timed_run(runner, frames: List[Image.Image], prompt: str,
 # Gaze visualisation
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _normalize_gaze_map(gaze_map) -> torch.Tensor:
+    """Normalize runner gaze output to ``(T, H, W)`` float tensor on CPU."""
+    if not isinstance(gaze_map, torch.Tensor):
+        gaze_map = torch.as_tensor(gaze_map)
+    gaze_map = gaze_map.detach().cpu().float()
+
+    if gaze_map.ndim == 4:
+        if gaze_map.shape[0] != 1:
+            raise ValueError(f"expected batch size 1 for gaze map, got {tuple(gaze_map.shape)}")
+        gaze_map = gaze_map[0]
+    elif gaze_map.ndim == 3:
+        # Already (T, H, W), or possibly (1, T, N).
+        if gaze_map.shape[0] == 1 and gaze_map.shape[-1] != gaze_map.shape[-2]:
+            gaze_map = gaze_map[0]
+    elif gaze_map.ndim == 2:
+        pass
+    else:
+        raise ValueError(f"unsupported gaze map shape: {tuple(gaze_map.shape)}")
+
+    if gaze_map.ndim == 2:
+        n_tokens = gaze_map.shape[-1]
+        side = int(round(n_tokens ** 0.5))
+        if side * side != n_tokens:
+            raise ValueError(f"cannot reshape flat gaze map with {n_tokens} tokens into a square grid")
+        gaze_map = gaze_map.reshape(gaze_map.shape[0], side, side)
+
+    if gaze_map.ndim != 3:
+        raise ValueError(f"expected normalized gaze map shape (T,H,W), got {tuple(gaze_map.shape)}")
+    return gaze_map
+
+
 def save_gaze_viz(runner, frames: List[Image.Image], out_dir: Path,
-                  video_stem: str) -> Optional[Path]:
-    """Save gaze overlay grid PNG if the runner supports it."""
-    if not hasattr(runner, '_run_autogaze') or not _runner_has_autogaze(runner):
-        print("  [viz] AutoGaze 비활성화 — gaze 시각화 건너뜀")
-        return None
+                  video_stem: str) -> List[Path]:
+    """Save raw gaze map NPZ and, when possible, an overlay PNG."""
+    ag_enabled = _runner_has_autogaze(runner)
+    if not ag_enabled:
+        print("  [gaze] AutoGaze 비활성 상태 — runner baseline gaze map 저장 시도")
+
+    print("  [gaze] Gaze map 계산 중...")
+    try:
+        if not hasattr(runner, '_run_autogaze'):
+            raise AttributeError("runner does not provide _run_autogaze")
+        with torch.no_grad():
+            raw_gaze_map = runner._run_autogaze(frames)
+    except Exception as exc:
+        if ag_enabled:
+            print(f"  [gaze] Gaze map 계산 실패 — {exc}")
+            return []
+        print(f"  [gaze] baseline full-patch map 사용 — {exc}")
+        raw_gaze_map = torch.ones(1, len(frames), 14, 14)
+    gaze_tensor = _normalize_gaze_map(raw_gaze_map)
+    gaze_map = gaze_tensor.numpy()
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    saved_paths: List[Path] = []
+    npz_path = out_dir / f"{video_stem}_gaze_map.npz"
+    np.savez_compressed(
+        npz_path,
+        gaze_map=gaze_map,
+        frame_count=np.array([gaze_map.shape[0]], dtype=np.int64),
+        patch_grid=np.array(gaze_map.shape[1:], dtype=np.int64),
+        gazing_ratio=np.array([float(getattr(runner, "gazing_ratio", 1.0))], dtype=np.float32),
+    )
+    saved_paths.append(npz_path)
+    print(f"  [gaze] raw 저장 → {npz_path}  shape={tuple(gaze_map.shape)}")
 
     try:
         import matplotlib
@@ -389,13 +448,8 @@ def save_gaze_viz(runner, frames: List[Image.Image], out_dir: Path,
         import matplotlib.pyplot as plt
         import torch.nn.functional as F
     except ImportError:
-        print("  [viz] matplotlib 없음 — pip install matplotlib")
-        return None
-
-    print("  [viz] Gaze map 계산 중...")
-    with torch.no_grad():
-        gaze_map = runner._run_autogaze(frames)    # (1, T, 14, 14)
-    gaze_map = gaze_map[0].cpu().float().numpy()   # (T, 14, 14)
+        print("  [gaze] matplotlib 없음 — PNG overlay 저장 건너뜀")
+        return saved_paths
 
     T = min(len(frames), gaze_map.shape[0], 16)
     fig, axes = plt.subplots(2, T, figsize=(T * 2.2, 5), squeeze=False)
@@ -408,7 +462,7 @@ def save_gaze_viz(runner, frames: List[Image.Image], out_dir: Path,
 
         # Gaze overlay
         frame_resized = np.array(frames[t].resize((224, 224)))
-        gm = gaze_map[t]                         # (14, 14)
+        gm = gaze_map[t]
         mask_up = F.interpolate(
             torch.tensor(gm).unsqueeze(0).unsqueeze(0).float(),
             size=(224, 224), mode="nearest",
@@ -428,13 +482,13 @@ def save_gaze_viz(runner, frames: List[Image.Image], out_dir: Path,
     axes[0, 0].set_ylabel("Original", fontsize=8)
     axes[1, 0].set_ylabel(f"Gaze (r={getattr(runner, 'gazing_ratio', 1.0):.2f})", fontsize=8)
 
-    out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{video_stem}_gaze_viz.png"
     plt.tight_layout(pad=0.3)
     fig.savefig(out_path, dpi=100, bbox_inches="tight")
     plt.close(fig)
-    print(f"  [viz] 저장 → {out_path}")
-    return out_path
+    saved_paths.append(out_path)
+    print(f"  [gaze] overlay 저장 → {out_path}")
+    return saved_paths
 
 
 # ─────────────────────────────────────────────────────────────────────────────
