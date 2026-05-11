@@ -64,6 +64,7 @@ Use `--integration` to override the default mode shown below.
 | `siglip_qwen25` | SigLIP (HF) | Qwen2.5-VL-7B | hook | `--integration full` for latency benchmarks |
 | `vjepa2_nvila` | V-JEPA2 | NVILA | full | `--vjepa2-path` required |
 | `vjepa2_qwen25` | V-JEPA2 | Qwen2.5-7B | full | `--vjepa2-path` + `--lm-path` required |
+| `generic_mllm` | user-configured | user-configured HF MLLM | hook | `--generic-vision-hook` required; PoC compatibility path |
 | `vjepa2` | V-JEPA2 | — | hook | Feature extraction only |
 | `siglip` | SigLIP (HF) | — | hook | Feature extraction only |
 
@@ -97,6 +98,15 @@ python autogaze/infer_full.py assets/example_input.mp4 \
     --vjepa2-path weights/vjepa2-vitl-fpc64-256 \
     --autogaze-path weights/AutoGaze
 
+# Generic HF MLLM hook PoC
+python autogaze/infer_full.py assets/example_input.mp4 \
+    --mllm generic_mllm \
+    --model-path <hf-or-local-mllm> \
+    --autogaze-path weights/AutoGaze \
+    --generic-vision-hook vision_model.embeddings \
+    --generic-patch-grid 14 \
+    --compare-autogaze
+
 # V-JEPA2 + Qwen2.5 LLM
 python autogaze/infer_full.py assets/example_input.mp4 \
     --mllm vjepa2_qwen25 \
@@ -106,6 +116,8 @@ python autogaze/infer_full.py assets/example_input.mp4 \
 ```
 
 Deprecated runner aliases such as `qwen25vl`, `qwen25vl_full`, `vjepa2_llm`, and `nvila_vjepa2` remain accepted for compatibility, but new commands should use the `{vit}_{lm}` keys above. Use `--integration hook` for compatibility/accuracy checks and `--integration full` or `native` for efficiency checks.
+
+For arbitrary MLLMs, start with `generic_mllm` and see `docs/generic_mllm_autogaze_guide.md`. Move to a model-specific full/native runner only after hook-mode AutoGaze ON/OFF quality is promising.
 
 ---
 

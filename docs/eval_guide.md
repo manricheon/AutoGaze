@@ -51,12 +51,14 @@ Naming convention: **`{vit}_{lm}`** (ViT first).  Use `--integration` to select 
 | `siglip_qwen25` | SigLIP | Qwen2.5-VL | — | ✅ default | ✅ | |
 | `vjepa2_nvila` | V-JEPA2 | NVILA | — | ✅ | ✅ default | `--vjepa2-path` required |
 | `vjepa2_qwen25` | V-JEPA2 | Qwen2.5-7B | — | ✅ | ✅ default | `--vjepa2-path`, `--lm-path` |
+| `generic_mllm` | user-configured ViT | user-configured HF MLLM | — | ✅ default | — | `--generic-vision-hook` required |
 | `vjepa2` | V-JEPA2 | — | — | ✅ default | ✅ | feature extraction only |
 | `siglip` | SigLIP (HF) | — | — | ✅ | — | feature extraction only |
 
 - **native**: AutoGaze fully baked into the model processor — deepest integration, best efficiency, NVILA-specific.
 - **hook**: Gaze mask zeroes non-selected tokens via a forward hook/method patch — zero-shot, easy to add to any model, no latency benefit (sequence length unchanged).
 - **full**: Tokens physically removed inside the ViT forward pass — real latency/VRAM reduction, requires ViT modification.
+- **generic hook**: `generic_mllm` applies AutoGaze to a user-specified vision module path. Use it for first-mile compatibility/quality checks before writing a model-specific full/native runner.
 
 **Deprecated aliases** (still work, emit warning): `nvila_vjepa2` → `vjepa2_nvila`, `qwen25vl` → `siglip_qwen25`, `qwen25vl_full` → `siglip_qwen25 --integration full`, `vjepa2_llm` → `vjepa2_qwen25`.
 
@@ -247,6 +249,33 @@ python -m autogaze.eval.run_benchmark \
 | `--max-samples` | `None` | Cap dataset size (for smoke tests) |
 | `--resume` | off | Skip samples already written in `--output` |
 | `--log-level` | `INFO` | Logging verbosity |
+
+### Generic MLLM Hook Flags
+
+These flags are used only with `--mllm generic_mllm`.
+
+| Flag | Default | Description |
+| :--- | :--- | :--- |
+| `--generic-vision-hook` | required | Dotted module path whose forward output contains visual patch tokens, e.g. `model.visual.patch_embed` or `vision_model.embeddings` |
+| `--generic-processor-path` | `--model-path` | Separate processor path/HF ID if different from model weights |
+| `--generic-patch-grid` | `14` | Spatial patch grid side length for one frame/tile |
+| `--generic-has-cls-token` | off | Preserve a leading CLS token when applying the mask |
+| `--generic-media-key` | `images` | Processor media argument: `images` or `videos` |
+| `--generic-prompt-template` | `{prompt}` | Prompt wrapper; must contain `{prompt}` |
+
+Example:
+
+```bash
+python -m autogaze.eval.run_benchmark \
+    --task videomme \
+    --mllm generic_mllm \
+    --model-path <hf-or-local-mllm> \
+    --autogaze-path weights/AutoGaze \
+    --generic-vision-hook vision_model.embeddings \
+    --generic-patch-grid 14 \
+    --generic-media-key images \
+    --max-samples 5
+```
 
 ---
 

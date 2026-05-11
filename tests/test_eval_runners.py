@@ -25,6 +25,7 @@ def test_primary_runner_keys_are_registered():
         "vjepa2_nvila",
         "siglip_qwen25",
         "vjepa2_qwen25",
+        "generic_mllm",
         "vjepa2",
         "siglip",
     }
@@ -128,3 +129,49 @@ def test_unknown_runner_error_lists_primary_and_deprecated_keys():
     assert "Primary keys" in message
     assert "Deprecated aliases" in message
     assert "siglip_qwen25" in message
+
+
+def test_generic_mllm_default_integration_and_required_hook(monkeypatch):
+    monkeypatch.setitem(models.RUNNERS, "generic_mllm", DummyRunner)
+
+    runner = models.load_runner(
+        mllm="generic_mllm",
+        model_path="model",
+        autogaze_path="ag",
+        gazing_ratio=0.5,
+        vision_hook="vision_model.embeddings",
+    )
+
+    assert runner.kwargs["integration"] == "hook"
+    assert runner.kwargs["vision_hook"] == "vision_model.embeddings"
+
+
+def test_generic_mask_preserves_cls_token():
+    runner = models.GenericHookMLLMRunner.__new__(models.GenericHookMLLMRunner)
+    runner.has_cls_token = True
+
+    tensor = torch.ones(1, 5, 2)
+    spatial_mask = torch.tensor([0.0, 1.0])
+
+    masked = runner._apply_mask_to_tensor(tensor, spatial_mask)
+
+    assert masked[0, 0].tolist() == [1.0, 1.0]  # CLS preserved
+    assert masked[0, 1].tolist() == [0.0, 0.0]
+    assert masked[0, 2].tolist() == [1.0, 1.0]
+    assert masked[0, 3].tolist() == [0.0, 0.0]
+    assert masked[0, 4].tolist() == [1.0, 1.0]
+
+
+def test_resolve_module_accepts_optional_model_prefix():
+    class Leaf:
+        pass
+
+    class Root:
+        pass
+
+    root = Root()
+    root.visual = Root()
+    root.visual.patch_embed = Leaf()
+
+    assert models._resolve_module(root, "visual.patch_embed") is root.visual.patch_embed
+    assert models._resolve_module(root, "model.visual.patch_embed") is root.visual.patch_embed

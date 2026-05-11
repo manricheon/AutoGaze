@@ -529,7 +529,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--mllm", default="nvila", choices=sorted(RUNNERS.keys()),
         help=(
             "Runner key ({vit}_{lm} convention). "
-            "Primary: nvila, vjepa2_nvila, siglip_qwen25, vjepa2_qwen25, vjepa2, siglip. "
+            "Primary: nvila, vjepa2_nvila, siglip_qwen25, vjepa2_qwen25, "
+            "generic_mllm, vjepa2, siglip. "
             "Deprecated aliases: nvila_vjepa2, qwen25vl, qwen25vl_full, vjepa2_llm, vjepa2_full."
         ),
     )
@@ -614,6 +615,33 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to a trained ViT→LLM projector (optional for LLM runners)",
     )
     p.add_argument(
+        "--generic-processor-path", default=None,
+        help="Processor path/HF ID for --mllm generic_mllm (defaults to --model-path)",
+    )
+    p.add_argument(
+        "--generic-vision-hook", default=None,
+        help=(
+            "Dotted module path to hook for --mllm generic_mllm, e.g. "
+            "model.visual.patch_embed or vision_model.embeddings"
+        ),
+    )
+    p.add_argument(
+        "--generic-patch-grid", type=int, default=14,
+        help="Patch grid side length for one generic_mllm frame/tile",
+    )
+    p.add_argument(
+        "--generic-has-cls-token", action="store_true",
+        help="Preserve a leading CLS token when applying generic_mllm hook masks",
+    )
+    p.add_argument(
+        "--generic-media-key", default="images", choices=["images", "videos"],
+        help="Processor media input key for generic_mllm",
+    )
+    p.add_argument(
+        "--generic-prompt-template", default="{prompt}",
+        help="Prompt template for generic_mllm; must contain {prompt}",
+    )
+    p.add_argument(
         "--log-level", default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
@@ -672,6 +700,15 @@ def main() -> None:
         extra["lm_path"] = args.lm_path
     if args.projector_path is not None:
         extra["projector_path"] = args.projector_path
+    if args.mllm == "generic_mllm":
+        extra.update({
+            "processor_path": args.generic_processor_path,
+            "vision_hook": args.generic_vision_hook,
+            "patch_grid": args.generic_patch_grid,
+            "has_cls_token": args.generic_has_cls_token,
+            "media_key": args.generic_media_key,
+            "prompt_template": args.generic_prompt_template,
+        })
 
     evaluate(
         task_name     = args.task,

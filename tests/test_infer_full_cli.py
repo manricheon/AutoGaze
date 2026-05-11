@@ -17,6 +17,12 @@ def _args(**overrides):
         vjepa2_path=None,
         lm_path=None,
         projector_path=None,
+        generic_processor_path=None,
+        generic_vision_hook=None,
+        generic_patch_grid=14,
+        generic_has_cls_token=False,
+        generic_media_key="images",
+        generic_prompt_template="{prompt}",
     )
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -30,6 +36,7 @@ def test_parse_args_exposes_current_runner_keys(monkeypatch):
     assert parser_args.mllm == "nvila"
     assert hasattr(parser_args, "integration")
     assert hasattr(parser_args, "vjepa2_path")
+    assert hasattr(parser_args, "generic_vision_hook")
 
 
 def test_vjepa2_qwen25_uses_vjepa2_path_as_model_path():
@@ -123,6 +130,45 @@ def test_missing_vjepa2_path_exits_before_model_load(monkeypatch):
         sys,
         "argv",
         ["infer_full.py", "assets/example_input.mp4", "--mllm", "vjepa2_qwen25", "--lm-path", "lm"],
+    )
+    monkeypatch.setattr(infer_full, "get_video_info", lambda _: (16, 8.0))
+
+    with pytest.raises(SystemExit):
+        infer_full.main()
+
+
+def test_generic_mllm_forwards_generic_options():
+    args = _args(
+        mllm="generic_mllm",
+        model_path="some/model",
+        generic_processor_path="some/processor",
+        generic_vision_hook="vision_model.embeddings",
+        generic_patch_grid=16,
+        generic_has_cls_token=True,
+        generic_media_key="videos",
+        generic_prompt_template="<video>\n{prompt}",
+    )
+
+    model_path, autogaze_path, ratio, kwargs = infer_full._runner_model_path_and_kwargs(args)
+
+    assert model_path == "some/model"
+    assert autogaze_path == "weights/AutoGaze"
+    assert ratio == 0.75
+    assert kwargs == {
+        "processor_path": "some/processor",
+        "vision_hook": "vision_model.embeddings",
+        "patch_grid": 16,
+        "has_cls_token": True,
+        "media_key": "videos",
+        "prompt_template": "<video>\n{prompt}",
+    }
+
+
+def test_missing_generic_hook_exits_before_model_load(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["infer_full.py", "assets/example_input.mp4", "--mllm", "generic_mllm"],
     )
     monkeypatch.setattr(infer_full, "get_video_info", lambda _: (16, 8.0))
 

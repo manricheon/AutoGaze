@@ -13,6 +13,7 @@ Built-in runners (primary keys)    native  hook  full
   siglip_qwen25     SigLIP+Qwen2.5-VL    —      ✓     ✓
   vjepa2_nvila      V-JEPA2+NVILA        —      ✓     ✓   (needs vjepa2_path=)
   vjepa2_qwen25     V-JEPA2+Qwen2.5-7B  —      ✓     ✓   (needs lm_path=)
+  generic_mllm      configurable HF MLLM —      ✓     —   (needs vision_hook=)
   vjepa2            V-JEPA2 encoder      —      ✓     ✓   (feature extraction)
   siglip            SigLIP encoder       —      ✓     —   (feature extraction)
 
@@ -103,6 +104,22 @@ def _local(path: str) -> bool:
     return os.path.isdir(path)
 
 
+def _resolve_module(root: Any, dotted_path: str) -> Any:
+    """Resolve ``foo.bar.0.baz`` against an object/module tree."""
+    obj = root
+    parts = [part for part in dotted_path.split(".") if part]
+    if parts and parts[0] in {"model", "root", "self"}:
+        parts = parts[1:]
+    for part in parts:
+        if not part:
+            continue
+        if part.isdigit() and hasattr(obj, "__getitem__"):
+            obj = obj[int(part)]
+        else:
+            obj = getattr(obj, part)
+    return obj
+
+
 def register_runner(
     key: str,
     cls: type,
@@ -187,6 +204,234 @@ class BaseMLLMRunner:
         Used by the benchmark loop to record per-sample token efficiency.
         """
         return None
+
+
+class GenericHookMLLMRunner(BaseMLLMRunner):
+    """Configurable hook-mode AutoGaze runner for Hugging Face MLLMs.
+
+    This is the first-mile PoC path for applying AutoGaze to an arbitrary MLLM
+    that has a ViT-like visual embedding/module.  It does not physically remove
+    tokens, so it is for compatibility and AutoGaze ON/OFF quality comparison.
+
+    Required user input:
+      - ``vision_hook``: dotted module path whose forward output contains patch
+        tokens, e.g. ``model.visual.patch_embed`` or
+        ``vision_model.embeddings``.
+
+    Optional shape hints:
+      - ``patch_grid``: spatial grid side length for one frame/tile.
+      - ``has_cls_token``: preserve a leading CLS token when present.
+      - ``media_key``: processor input key, usually ``images`` or ``videos``.
+    """
+
+    name = "generic_mllm"
+
+    def __init__(
+        self,
+        model_path: str,
+        autogaze_path: Optional[str],
+        gazing_ratio: float,
+        dtype: torch.dtype = torch.bfloat16,
+        integration: str = "hook",
+        processor_path: Optional[str] = None,
+        vision_hook: Optional[str] = None,
+        patch_grid: int = 14,
+        has_cls_token: bool = False,
+        media_key: str = "images",
+        prompt_template: str = "{prompt}",
+        trust_remote_code: bool = True,
+    ):
+        if integration != "hook":
+            raise ValueError(
+                "generic_mllm currently supports only integration='hook'. "
+                "Use a model-specific runner for full/native token removal."
+            )
+        if not vision_hook:
+            raise ValueError(
+                "generic_mllm requires vision_hook=<dotted module path>, e.g. "
+                "'model.visual.patch_embed' or 'vision_model.embeddings'."
+            )
+        if media_key not in ("images", "videos"):
+            raise ValueError("media_key must be 'images' or 'videos'")
+
+        from transformers import AutoProcessor
+
+        self.integration = integration
+        self.gazing_ratio = gazing_ratio
+        self.vision_hook = vision_hook
+        self.patch_grid = patch_grid
+        self.has_cls_token = has_cls_token
+        self.media_key = media_key
+        self.prompt_template = prompt_template
+        self.selector = None
+
+        processor_id = processor_path or model_path
+        self.processor = AutoProcessor.from_pretrained(
+            processor_id,
+            trust_remote_code=trust_remote_code,
+            local_files_only=_local(processor_id),
+        )
+        self.model = self._load_model(model_path, dtype, trust_remote_code)
+        self.model.eval()
+        self.hook_module = _resolve_module(self.model, vision_hook)
+
+        if autogaze_path is not None:
+            self._load_autogaze(autogaze_path, gazing_ratio)
+
+    def _load_model(self, model_path: str, dtype: torch.dtype, trust_remote_code: bool):
+        from transformers import AutoModel
+
+        model_kwargs = dict(
+            torch_dtype=dtype,
+            device_map="auto",
+            trust_remote_code=trust_remote_code,
+            local_files_only=_local(model_path),
+        )
+
+        # Prefer generation-capable auto classes when available in the installed
+        # transformers version, then fall back to AutoModel for custom repos.
+        for class_name in ("AutoModelForImageTextToText", "AutoModelForVision2Seq"):
+            try:
+                import transformers
+                cls = getattr(transformers, class_name)
+            except AttributeError:
+                continue
+            try:
+                return cls.from_pretrained(model_path, **model_kwargs)
+            except Exception as exc:
+                log.debug("generic_mllm: %s load failed: %s", class_name, exc)
+
+        return AutoModel.from_pretrained(model_path, **model_kwargs)
+
+    def _load_autogaze(self, autogaze_path: str, gazing_ratio: float) -> None:
+        from autogaze.models.autogaze import AutoGaze, AutoGazeImageProcessor
+        from autogaze.models.autogaze.autogaze_cv import AutoGazeTokenSelector
+
+        ag_model = AutoGaze.from_pretrained(autogaze_path).eval()
+        ag_model = ag_model.to(next(self.model.parameters()).device)
+        self.selector = AutoGazeTokenSelector(ag_model, gazing_ratio=gazing_ratio)
+        self.ag_processor = AutoGazeImageProcessor.from_pretrained(autogaze_path)
+
+    def _frames_to_ag_tensor(self, frames: List[Image.Image]) -> torch.Tensor:
+        processed = self.ag_processor(images=frames, return_tensors="pt")
+        return processed["pixel_values"].to(next(self.model.parameters()).device)
+
+    @torch.no_grad()
+    def _run_autogaze(self, frames: List[Image.Image]) -> torch.Tensor:
+        ag_video = self._frames_to_ag_tensor(frames)
+        gaze_out = self.selector.ag(
+            {"video": ag_video},
+            gazing_ratio=self.selector.gazing_ratio,
+            generate_only=True,
+        )
+        raw = gaze_out["gazing_mask"][-1].float()
+        T = raw.shape[1]
+        return raw.reshape(1, T, 14, 14)
+
+    def _spatial_mask(self, frames: List[Image.Image]) -> torch.Tensor:
+        gaze_map = self._run_autogaze(frames).mean(dim=1)  # (1, 14, 14)
+        if self.patch_grid != 14:
+            gaze_map = F.interpolate(
+                gaze_map.unsqueeze(1),
+                size=(self.patch_grid, self.patch_grid),
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(1)
+        return (gaze_map.reshape(-1) > _AG_THRESHOLD).float()
+
+    def _apply_mask_to_tensor(self, tensor: torch.Tensor, spatial_mask: torch.Tensor) -> torch.Tensor:
+        if tensor.ndim < 2:
+            return tensor
+
+        n_tokens = tensor.shape[-2]
+        prefix = 1 if self.has_cls_token and n_tokens > 1 else 0
+        patch_tokens = max(0, n_tokens - prefix)
+        if patch_tokens == 0:
+            return tensor
+
+        repeats = max(1, (patch_tokens + spatial_mask.numel() - 1) // spatial_mask.numel())
+        patch_mask = spatial_mask.repeat(repeats)[:patch_tokens].to(tensor.device, tensor.dtype)
+        if prefix:
+            mask = torch.cat([torch.ones(prefix, device=tensor.device, dtype=tensor.dtype), patch_mask])
+        else:
+            mask = patch_mask
+
+        return tensor * mask.reshape(*([1] * (tensor.ndim - 2)), n_tokens, 1)
+
+    @contextmanager
+    def _hook_context(self, frames: List[Image.Image]):
+        if self.selector is None:
+            yield
+            return
+
+        spatial_mask = self._spatial_mask(frames)
+
+        def hook(_module, _inputs, output):
+            if isinstance(output, torch.Tensor):
+                return self._apply_mask_to_tensor(output, spatial_mask)
+            if isinstance(output, tuple) and output and isinstance(output[0], torch.Tensor):
+                return (self._apply_mask_to_tensor(output[0], spatial_mask), *output[1:])
+            if isinstance(output, list) and output and isinstance(output[0], torch.Tensor):
+                return [self._apply_mask_to_tensor(output[0], spatial_mask), *output[1:]]
+            return output
+
+        handle = self.hook_module.register_forward_hook(hook)
+        try:
+            yield
+        finally:
+            handle.remove()
+
+    def _processor_inputs(self, frames: List[Image.Image], prompt: str) -> Dict[str, Any]:
+        text = self.prompt_template.format(prompt=prompt)
+        kwargs = {"text": text, "return_tensors": "pt", "padding": True}
+        if self.media_key == "videos":
+            kwargs["videos"] = [frames]
+        else:
+            kwargs["images"] = frames
+        try:
+            return self.processor(**kwargs)
+        except TypeError:
+            kwargs.pop("padding", None)
+            return self.processor(**kwargs)
+
+    def n_visual_tokens(self, n_frames: int) -> Optional[int]:
+        total = self.patch_grid * self.patch_grid * max(1, n_frames)
+        ratio = self.gazing_ratio if self.selector is not None else 1.0
+        return max(1, round(total * ratio))
+
+    def run(
+        self,
+        frames: List[Image.Image],
+        prompt: str,
+        max_new_tokens: int = 16,
+    ) -> str:
+        inputs = self._processor_inputs(frames, prompt)
+        device = next(self.model.parameters()).device
+        inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
+
+        if not hasattr(self.model, "generate"):
+            raise NotImplementedError(
+                "generic_mllm loaded a model without generate(). "
+                "Use a generation-capable HF MLLM or implement a model-specific runner."
+            )
+
+        with self._hook_context(frames):
+            with torch.inference_mode():
+                gen_ids = self.model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False,
+                )
+
+        input_ids = inputs.get("input_ids")
+        if input_ids is not None and gen_ids.ndim == 2:
+            gen_ids = gen_ids[:, input_ids.shape[1]:]
+
+        if hasattr(self.processor, "batch_decode"):
+            return self.processor.batch_decode(gen_ids, skip_special_tokens=True)[0]
+        if hasattr(self.processor, "tokenizer"):
+            return self.processor.tokenizer.decode(gen_ids[0], skip_special_tokens=True)
+        return str(gen_ids)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1784,6 +2029,7 @@ RUNNERS: Dict[str, type] = {
     "vjepa2_nvila"   : NVILAVjepa2Runner,  # V-JEPA2 ViT + NVILA LLM (full; needs vjepa2_path=)
     "siglip_qwen25"  : Qwen25VLRunner,     # SigLIP ViT + Qwen2.5-VL LLM (hook default)
     "vjepa2_qwen25"  : VJEPA2LLMRunner,    # V-JEPA2 ViT + Qwen2.5-7B LLM (full; needs lm_path=)
+    "generic_mllm"   : GenericHookMLLMRunner,  # Configurable HF MLLM hook integration
     "vjepa2"         : VJEPA2Runner,       # V-JEPA2 encoder only (feature extraction)
     "siglip"         : SigLIPRunner,       # SigLIP encoder only (feature extraction)
     # ── deprecated aliases — emit DeprecationWarning ───────────────────────
@@ -1809,6 +2055,7 @@ _RUNNER_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "vjepa2_nvila"   : {"integration": "full"},
     "siglip_qwen25"  : {"integration": "hook"},
     "vjepa2_qwen25"  : {"integration": "full"},
+    "generic_mllm"   : {"integration": "hook"},
     "vjepa2"         : {"integration": "hook"},
 }
 
@@ -1832,6 +2079,7 @@ def load_runner(
                          ``'vjepa2_nvila'``   V-JEPA2 ViT + NVILA LLM; needs vjepa2_path=
                          ``'siglip_qwen25'``  SigLIP ViT + Qwen2.5-VL LLM
                          ``'vjepa2_qwen25'``  V-JEPA2 ViT + Qwen2.5-7B LLM; needs lm_path=
+                         ``'generic_mllm'``   Configurable HF MLLM hook runner
                          ``'vjepa2'``         V-JEPA2 encoder only (feature extraction)
                          ``'siglip'``         SigLIP encoder only (feature extraction)
 
@@ -1849,6 +2097,7 @@ def load_runner(
                        ``lm_path``        (str, required for vjepa2_qwen25)
                        ``projector_path`` (str, optional for LLM runners)
                        ``integration``    (str, ``'native'``, ``'full'``, or ``'hook'``)
+                       ``vision_hook``    (str, required for generic_mllm)
     """
     import warnings
 

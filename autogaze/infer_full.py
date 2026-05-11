@@ -16,6 +16,7 @@ Full pipeline video QA inference: AutoGaze + ViT + MLLM.
   siglip_qwen25   Qwen2.5-VL-7B      (SigLIP/Qwen visual path, hook 기본)
   vjepa2_nvila    V-JEPA2 + NVILA    (full 기본)
   vjepa2_qwen25   V-JEPA2 + Qwen2.5  (full 기본)
+  generic_mllm    임의 HF MLLM       (configurable hook; PoC용)
   vjepa2          V-JEPA2 인코더     (zero-shot hook, 특징 추출 전용)
   siglip          순수 HF SigLIP     (zero-shot hook, 특징 추출 전용)
                   → NVILA 수정 버전과의 비교용
@@ -28,6 +29,7 @@ ViT / AutoGaze 통합 구조
   siglip_qwen25 Qwen2.5-VL ViT   hook 또는 full (--integration)       ✓
   vjepa2_nvila  V-JEPA2 ViT-L    hook 또는 full (--integration)       ✓
   vjepa2_qwen25 V-JEPA2 ViT-L    hook 또는 full (--integration)       ✓
+  generic_mllm  사용자 지정 ViT    configurable hook only             ✓
   vjepa2        V-JEPA2 ViT-L    zero-shot forward hook              특징만
   siglip        SigLIP (원본HF)  zero-shot forward hook (per-frame)  특징만
 
@@ -117,6 +119,7 @@ PRIMARY_RUNNERS = {
     "siglip_qwen25",
     "vjepa2_nvila",
     "vjepa2_qwen25",
+    "generic_mllm",
     "vjepa2",
     "siglip",
 }
@@ -245,6 +248,15 @@ def _runner_model_path_and_kwargs(args, *, baseline: bool = False) -> tuple[str,
         kwargs["lm_path"] = args.lm_path
     if args.projector_path:
         kwargs["projector_path"] = args.projector_path
+    if args.mllm == "generic_mllm":
+        kwargs.update({
+            "processor_path": args.generic_processor_path,
+            "vision_hook": args.generic_vision_hook,
+            "patch_grid": args.generic_patch_grid,
+            "has_cls_token": args.generic_has_cls_token,
+            "media_key": args.generic_media_key,
+            "prompt_template": args.generic_prompt_template,
+        })
 
     if args.mllm == "nvila" and (integration is None or integration == "native") and (baseline or args.no_autogaze):
         autogaze_path = args.autogaze_path
@@ -462,7 +474,7 @@ def parse_args():
                    choices=sorted(PRIMARY_RUNNERS | DEPRECATED_RUNNERS),
                    help=(
                        "MLLM 백엔드. 권장 키: nvila, siglip_qwen25, "
-                       "vjepa2_nvila, vjepa2_qwen25, vjepa2, siglip. "
+                       "vjepa2_nvila, vjepa2_qwen25, generic_mllm, vjepa2, siglip. "
                        "기존 qwen25vl/qwen25vl_full/vjepa2_llm 등은 호환용 alias."
                    ))
     p.add_argument("--integration", default=None, choices=["native", "hook", "full"],
@@ -501,6 +513,18 @@ def parse_args():
     p.add_argument("--projector-path", default=None,
                    help="[V-JEPA2+LLM 전용] VJEPA2Projector 체크포인트 경로 "
                         "(없으면 랜덤 초기화 — 학습 전 실행용)")
+    p.add_argument("--generic-processor-path", default=None,
+                   help="[generic_mllm] Processor 경로/HF ID (기본: --model-path)")
+    p.add_argument("--generic-vision-hook", default=None,
+                   help="[generic_mllm] AutoGaze mask를 적용할 dotted module path")
+    p.add_argument("--generic-patch-grid", type=int, default=14,
+                   help="[generic_mllm] 한 프레임/타일의 patch grid side length")
+    p.add_argument("--generic-has-cls-token", action="store_true",
+                   help="[generic_mllm] 첫 CLS 토큰은 보존")
+    p.add_argument("--generic-media-key", default="images", choices=["images", "videos"],
+                   help="[generic_mllm] processor media input key")
+    p.add_argument("--generic-prompt-template", default="{prompt}",
+                   help="[generic_mllm] prompt template; {prompt} 포함")
 
     # ── 생성 / 출력 ────────────────────────────────────────────────
     p.add_argument("--max-new-tokens", type=int, default=256,
@@ -581,6 +605,10 @@ def main():
             print(f"[ERROR] --mllm {args.mllm} 에는 --lm-path 가 필요합니다.")
             print("  예: --lm-path Qwen/Qwen2.5-7B-Instruct")
             raise SystemExit(1)
+    if args.mllm == "generic_mllm" and not args.generic_vision_hook:
+        print("[ERROR] --mllm generic_mllm 에는 --generic-vision-hook 이 필요합니다.")
+        print("  예: --generic-vision-hook model.visual.patch_embed")
+        raise SystemExit(1)
 
     print()
     print(f"[1/2] {args.mllm.upper()} 로드 중...")

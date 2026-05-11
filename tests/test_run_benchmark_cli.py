@@ -26,6 +26,7 @@ def test_parser_exposes_current_branch_runner_keys():
     assert "siglip_qwen25" in help_text
     assert "vjepa2_nvila" in help_text
     assert "vjepa2_qwen25" in help_text
+    assert "generic_mllm" in help_text
     assert "qwen25vl_full" in help_text
 
 
@@ -149,3 +150,39 @@ def test_invalid_runner_exits_before_evaluation(monkeypatch):
         run_benchmark.main()
 
     assert called is False
+
+
+def test_generic_mllm_cli_forwards_generic_options(monkeypatch):
+    captured = _run_main_and_capture(
+        monkeypatch,
+        [
+            "--task",
+            "videomme",
+            "--mllm",
+            "generic_mllm",
+            "--model-path",
+            "some/model",
+            "--autogaze-path",
+            "weights/AutoGaze",
+            "--generic-vision-hook",
+            "vision_model.embeddings",
+            "--generic-patch-grid",
+            "16",
+            "--generic-has-cls-token",
+            "--generic-media-key",
+            "videos",
+            "--generic-prompt-template",
+            "<video>\n{prompt}",
+        ],
+    )
+
+    assert captured["mllm"] == "generic_mllm"
+    assert captured["model_path"] == "some/model"
+    assert captured["runner_kwargs"] == {
+        "processor_path": None,
+        "vision_hook": "vision_model.embeddings",
+        "patch_grid": 16,
+        "has_cls_token": True,
+        "media_key": "videos",
+        "prompt_template": "<video>\n{prompt}",
+    }
