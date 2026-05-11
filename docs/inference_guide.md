@@ -96,7 +96,16 @@ python autogaze/infer_full.py assets/example_input.mp4 \
     --model-path weights/NVILA-8B-HD-Video \
     --vjepa2-path weights/vjepa2-vitl-fpc64-256 \
     --autogaze-path weights/AutoGaze
+
+# V-JEPA2 + Qwen2.5 LLM
+python autogaze/infer_full.py assets/example_input.mp4 \
+    --mllm vjepa2_qwen25 \
+    --vjepa2-path weights/vjepa2-vitl-fpc64-256 \
+    --lm-path weights/Qwen2.5-7B-Instruct \
+    --autogaze-path weights/AutoGaze
 ```
+
+Deprecated runner aliases such as `qwen25vl`, `qwen25vl_full`, `vjepa2_llm`, and `nvila_vjepa2` remain accepted for compatibility, but new commands should use the `{vit}_{lm}` keys above. Use `--integration hook` for compatibility/accuracy checks and `--integration full` or `native` for efficiency checks.
 
 ---
 

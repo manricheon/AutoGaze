@@ -57,12 +57,20 @@ from autogaze.datasets.video_utils import (
     transform_video_for_pytorch,
 )
 from autogaze.models.autogaze import AutoGaze, AutoGazeImageProcessor
-from autogaze.utils import UnNormalize, get_device
+from autogaze.utils import UnNormalize
 
 
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv"}
 
 VALID_FORMATS = {"json", "viz", "frames", "video", "npy"}
+
+
+def get_device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 # ---------------------------------------------------------------------------

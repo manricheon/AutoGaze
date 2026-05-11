@@ -13,11 +13,10 @@ Full pipeline video QA inference: AutoGaze + ViT + MLLM.
 지원 MLLM (--mllm)
 -------------------
   nvila           NVILA-8B-HD-Video  (SigLIP ViT, native AutoGaze 통합)
-  qwen25vl        Qwen2.5-VL-7B      (zero-shot hook 방식)
-  qwen25vl_full   Qwen2.5-VL-7B      (full ViT 통합, 시간별 gaze map)
+  siglip_qwen25   Qwen2.5-VL-7B      (SigLIP/Qwen visual path, hook 기본)
+  vjepa2_nvila    V-JEPA2 + NVILA    (full 기본)
+  vjepa2_qwen25   V-JEPA2 + Qwen2.5  (full 기본)
   vjepa2          V-JEPA2 인코더     (zero-shot hook, 특징 추출 전용)
-  vjepa2_full     V-JEPA2 인코더     (full 통합, 특징 추출 전용)
-  vjepa2_llm      V-JEPA2 ViT + projector + LLM  (MCQ video QA 가능)
   siglip          순수 HF SigLIP     (zero-shot hook, 특징 추출 전용)
                   → NVILA 수정 버전과의 비교용
 
@@ -26,10 +25,10 @@ ViT / AutoGaze 통합 구조
   MLLM          ViT 백본         AutoGaze 통합 방식                  MCQ
   ─────────     ───────────────  ──────────────────────────────────  ────
   nvila         SigLIP (수정)    NVILAProcessor 내장 (mask_with_gazing)  ✓
-  qwen25vl      Qwen2.5-VL ViT   zero-shot forward hook              ✓
-  qwen25vl_full Qwen2.5-VL ViT   class monkey-patch                  ✓
+  siglip_qwen25 Qwen2.5-VL ViT   hook 또는 full (--integration)       ✓
+  vjepa2_nvila  V-JEPA2 ViT-L    hook 또는 full (--integration)       ✓
+  vjepa2_qwen25 V-JEPA2 ViT-L    hook 또는 full (--integration)       ✓
   vjepa2        V-JEPA2 ViT-L    zero-shot forward hook              특징만
-  vjepa2_full   V-JEPA2 ViT-L    class monkey-patch                  특징만
   siglip        SigLIP (원본HF)  zero-shot forward hook (per-frame)  특징만
 
 사용 예시
@@ -45,7 +44,7 @@ ViT / AutoGaze 통합 구조
 
   # Qwen2.5-VL, full ViT 통합
   python autogaze/infer_full.py assets/example_input.mp4 \\
-      --mllm qwen25vl_full \\
+      --mllm siglip_qwen25 --integration full \\
       --model-path Qwen/Qwen2.5-VL-7B-Instruct \\
       --autogaze-path weights/AutoGaze
 
@@ -55,8 +54,8 @@ ViT / AutoGaze 통합 구조
 
   # V-JEPA2 ViT + LLM (projector 필요)
   python autogaze/infer_full.py assets/example_input.mp4 \\
-      --mllm vjepa2_llm \\
-      --model-path facebook/vjepa2-vitl-fpc64-256 \\
+      --mllm vjepa2_qwen25 \\
+      --vjepa2-path facebook/vjepa2-vitl-fpc64-256 \\
       --lm-path Qwen/Qwen2.5-7B-Instruct \\
       --projector-path weights/vjepa2_projector \\
       --autogaze-path weights/AutoGaze
@@ -75,7 +74,7 @@ ViT / AutoGaze 통합 구조
 
   # AutoGaze OFF (기준선)
   python autogaze/infer_full.py assets/example_input.mp4 \\
-      --mllm qwen25vl --model-path Qwen/Qwen2.5-VL-7B-Instruct \\
+      --mllm siglip_qwen25 --model-path Qwen/Qwen2.5-VL-7B-Instruct \\
       --no-autogaze
 
   # 질문 직접 지정 + stride 샘플링
@@ -112,6 +111,23 @@ DEFAULT_QUESTIONS = [
     "비디오에서 주요 피사체나 활동은 무엇인가요?",
     "어떤 환경(장소, 조명 등)에서 촬영된 영상인가요?",
 ]
+
+PRIMARY_RUNNERS = {
+    "nvila",
+    "siglip_qwen25",
+    "vjepa2_nvila",
+    "vjepa2_qwen25",
+    "vjepa2",
+    "siglip",
+}
+
+DEPRECATED_RUNNERS = {
+    "qwen25vl",
+    "qwen25vl_full",
+    "vjepa2_full",
+    "vjepa2_llm",
+    "nvila_vjepa2",
+}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -197,6 +213,52 @@ def build_runner(
     )
 
 
+def _runner_model_path_and_kwargs(args, *, baseline: bool = False) -> tuple[str, Optional[str], float, dict]:
+    """Resolve CLI args into load_runner arguments.
+
+    V-JEPA2-based runners use the V-JEPA2 encoder as ``model_path`` except
+    ``vjepa2_nvila``, which needs NVILA as ``model_path`` and receives
+    ``vjepa2_path`` separately.  Native NVILA needs an AutoGaze config even for
+    the all-patch baseline, so baseline mode keeps the path and uses ratio=1.0.
+    """
+    model_path = args.model_path
+    ratio = 1.0 if baseline else args.gazing_ratio
+    autogaze_path = None if (baseline or args.no_autogaze) else args.autogaze_path
+
+    integration = args.integration
+    if integration is None:
+        if args.mllm == "qwen25vl_full":
+            integration = "full"
+        elif args.mllm == "vjepa2_full":
+            integration = "full"
+
+    kwargs = {}
+    if integration is not None:
+        kwargs["integration"] = integration
+
+    if args.mllm in {"vjepa2_nvila", "nvila_vjepa2"}:
+        kwargs["vjepa2_path"] = args.vjepa2_path
+    elif args.vjepa2_path and args.mllm in {"vjepa2", "vjepa2_qwen25", "vjepa2_full", "vjepa2_llm"}:
+        model_path = args.vjepa2_path
+
+    if args.lm_path:
+        kwargs["lm_path"] = args.lm_path
+    if args.projector_path:
+        kwargs["projector_path"] = args.projector_path
+
+    if args.mllm == "nvila" and (integration is None or integration == "native") and (baseline or args.no_autogaze):
+        autogaze_path = args.autogaze_path
+        ratio = 1.0
+
+    return model_path, autogaze_path, ratio, kwargs
+
+
+def _runner_has_autogaze(runner) -> bool:
+    if getattr(runner, "integration", None) == "native" and getattr(runner, "gazing_ratio", 1.0) < 1.0:
+        return True
+    return getattr(runner, "selector", None) is not None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Timing helpers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -217,7 +279,7 @@ def _timed_run(runner, frames: List[Image.Image], prompt: str,
     """
     gaze_s = 0.0
 
-    if hasattr(runner, '_run_autogaze') and runner.selector is not None:
+    if hasattr(runner, '_run_autogaze') and _runner_has_autogaze(runner):
         orig_ag = runner._run_autogaze
         _gaze_time = [0.0]
 
@@ -254,7 +316,7 @@ def _timed_run(runner, frames: List[Image.Image], prompt: str,
 def save_gaze_viz(runner, frames: List[Image.Image], out_dir: Path,
                   video_stem: str) -> Optional[Path]:
     """Save gaze overlay grid PNG if the runner supports it."""
-    if not hasattr(runner, '_run_autogaze') or runner.selector is None:
+    if not hasattr(runner, '_run_autogaze') or not _runner_has_autogaze(runner):
         print("  [viz] AutoGaze 비활성화 — gaze 시각화 건너뜀")
         return None
 
@@ -301,7 +363,7 @@ def save_gaze_viz(runner, frames: List[Image.Image], out_dir: Path,
         axes[1, t].axis("off")
 
     axes[0, 0].set_ylabel("Original", fontsize=8)
-    axes[1, 0].set_ylabel(f"Gaze (r={runner.gazing_ratio:.2f})", fontsize=8)
+    axes[1, 0].set_ylabel(f"Gaze (r={getattr(runner, 'gazing_ratio', 1.0):.2f})", fontsize=8)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{video_stem}_gaze_viz.png"
@@ -397,10 +459,14 @@ def parse_args():
 
     # ── MLLM 선택 ──────────────────────────────────────────────────
     p.add_argument("--mllm", default="nvila",
-                   choices=["nvila", "qwen25vl", "qwen25vl_full",
-                            "vjepa2", "vjepa2_full", "vjepa2_llm",
-                            "siglip"],
-                   help="MLLM 백엔드 (기본: nvila)")
+                   choices=sorted(PRIMARY_RUNNERS | DEPRECATED_RUNNERS),
+                   help=(
+                       "MLLM 백엔드. 권장 키: nvila, siglip_qwen25, "
+                       "vjepa2_nvila, vjepa2_qwen25, vjepa2, siglip. "
+                       "기존 qwen25vl/qwen25vl_full/vjepa2_llm 등은 호환용 alias."
+                   ))
+    p.add_argument("--integration", default=None, choices=["native", "hook", "full"],
+                   help="AutoGaze 통합 방식 override: native, hook, full")
     p.add_argument("--model-path", default=str(DEFAULT_MODEL),
                    help="MLLM 가중치 경로 또는 HuggingFace ID")
     p.add_argument("--autogaze-path", default=str(DEFAULT_AG),
@@ -426,12 +492,14 @@ def parse_args():
     p.add_argument("--stride", type=int, default=None,
                    help="매 N번째 프레임 추출 (stride 샘플링). 지정 시 --frames 무시.")
 
-    # ── vjepa2_llm 전용 ────────────────────────────────────────────
+    # ── V-JEPA2 / LLM 조합 ─────────────────────────────────────────
+    p.add_argument("--vjepa2-path", default=None,
+                   help="[V-JEPA2 러너] V-JEPA2 encoder 경로 또는 HF ID")
     p.add_argument("--lm-path", default=None,
-                   help="[vjepa2_llm 전용] LLM 경로 또는 HF ID "
+                   help="[vjepa2_qwen25/vjepa2_llm 전용] LLM 경로 또는 HF ID "
                         "(예: Qwen/Qwen2.5-7B-Instruct)")
     p.add_argument("--projector-path", default=None,
-                   help="[vjepa2_llm 전용] VJEPA2Projector 체크포인트 경로 "
+                   help="[V-JEPA2+LLM 전용] VJEPA2Projector 체크포인트 경로 "
                         "(없으면 랜덤 초기화 — 학습 전 실행용)")
 
     # ── 생성 / 출력 ────────────────────────────────────────────────
@@ -456,6 +524,10 @@ def main():
     video_path = args.video
     assert Path(video_path).exists(), f"비디오 파일 없음: {video_path}"
 
+    if args.mllm in DEPRECATED_RUNNERS:
+        print(f"[WARN] Deprecated --mllm alias 사용 중: {args.mllm}")
+        print("  권장 키는 docs/eval_guide.md 의 {vit}_{lm} 형식입니다.")
+
     if not args.no_autogaze:
         ag_path = args.autogaze_path
         if not Path(ag_path).exists():
@@ -464,10 +536,11 @@ def main():
             print("  → AutoGaze OFF 모드로 계속합니다.")
             args.no_autogaze = True
 
-    if not Path(args.model_path).exists():
+    model_path_for_check = args.vjepa2_path if args.mllm in {"vjepa2", "vjepa2_qwen25", "vjepa2_full", "vjepa2_llm"} and args.vjepa2_path else args.model_path
+    if not Path(model_path_for_check).exists():
         # HuggingFace ID 형식이면 통과 (e.g. "Qwen/Qwen2.5-VL-7B-Instruct")
-        if "/" not in args.model_path:
-            print(f"[WARN] 모델 가중치 없음: {args.model_path}")
+        if "/" not in model_path_for_check:
+            print(f"[WARN] 모델 가중치 없음: {model_path_for_check}")
             print("  → bash scripts/download_models.sh weights nvila")
 
     # ── 비디오 정보 ────────────────────────────────────────────────
@@ -499,24 +572,25 @@ def main():
     # ── 모델 로드 ──────────────────────────────────────────────────
     autogaze_path = None if args.no_autogaze else args.autogaze_path
 
-    # vjepa2_llm 전용 인수 검증
-    extra_kwargs: dict = {}
-    if args.mllm == "vjepa2_llm":
+    # V-JEPA2 조합 인수 검증
+    if args.mllm in {"vjepa2_nvila", "nvila_vjepa2", "vjepa2_qwen25", "vjepa2", "vjepa2_full", "vjepa2_llm"} and not args.vjepa2_path:
+        print("[ERROR] V-JEPA2 기반 runner에는 --vjepa2-path 가 필요합니다.")
+        raise SystemExit(1)
+    if args.mllm in {"vjepa2_qwen25", "vjepa2_llm"}:
         if not args.lm_path:
-            print("[ERROR] --mllm vjepa2_llm 에는 --lm-path 가 필요합니다.")
+            print(f"[ERROR] --mllm {args.mllm} 에는 --lm-path 가 필요합니다.")
             print("  예: --lm-path Qwen/Qwen2.5-7B-Instruct")
             raise SystemExit(1)
-        extra_kwargs["lm_path"]        = args.lm_path
-        extra_kwargs["projector_path"] = args.projector_path  # None 허용
 
     print()
     print(f"[1/2] {args.mllm.upper()} 로드 중...")
     t0 = time.perf_counter()
+    model_path, runner_ag_path, runner_ratio, extra_kwargs = _runner_model_path_and_kwargs(args)
     runner = build_runner(
         mllm         = args.mllm,
-        model_path   = args.model_path,
-        autogaze_path= autogaze_path,
-        gazing_ratio = args.gazing_ratio,
+        model_path   = model_path,
+        autogaze_path= runner_ag_path,
+        gazing_ratio = runner_ratio,
         **extra_kwargs,
     )
     t_load = time.perf_counter() - t0
@@ -569,16 +643,22 @@ def main():
             for r in ratios:
                 print(f"  ratio={r:.2f} 추론 중...", end="\r", flush=True)
                 # Adjust runner's gazing_ratio in-place
-                if runner.selector is not None:
+                if hasattr(runner, "set_gazing_ratio"):
+                    runner.set_gazing_ratio(r)
+                elif getattr(runner, "selector", None) is not None:
                     runner.selector.gazing_ratio = r
-                    runner.gazing_ratio           = r
+                    runner.gazing_ratio = r
+                else:
+                    runner.gazing_ratio = r
                 _ag_path = None if r >= 1.0 else autogaze_path
-                if r >= 1.0 and runner.selector is not None:
+                if r >= 1.0 and _runner_has_autogaze(runner):
                     # run without AutoGaze for the r=1.0 baseline
-                    _orig_sel = runner.selector
-                    runner.selector = None
+                    _orig_sel = getattr(runner, "selector", None)
+                    if hasattr(runner, "selector"):
+                        runner.selector = None
                     ans, t_total, g_s = _timed_run(runner, frames, question, args.max_new_tokens)
-                    runner.selector = _orig_sel
+                    if hasattr(runner, "selector"):
+                        runner.selector = _orig_sel
                 else:
                     ans, t_total, g_s = _timed_run(runner, frames, question, args.max_new_tokens)
                 sweep_results.append((r, ans, t_total, g_s))
@@ -587,20 +667,24 @@ def main():
             _print_sweep_table(sweep_results)
 
         # Restore ratio
-        if runner.selector is not None:
+        if hasattr(runner, "set_gazing_ratio"):
+            runner.set_gazing_ratio(args.gazing_ratio)
+        elif getattr(runner, "selector", None) is not None:
             runner.selector.gazing_ratio = args.gazing_ratio
-            runner.gazing_ratio           = args.gazing_ratio
+            runner.gazing_ratio = args.gazing_ratio
 
     elif args.compare_autogaze:
         # ── AutoGaze ON/OFF 비교 모드 ─────────────────────────────
         # Build baseline runner (same mllm, no AutoGaze)
         print("  AutoGaze OFF 러너 로드 중...")
         t0 = time.perf_counter()
+        base_model_path, base_ag_path, base_ratio, base_kwargs = _runner_model_path_and_kwargs(args, baseline=True)
         runner_base = build_runner(
             mllm         = args.mllm,
-            model_path   = args.model_path,
-            autogaze_path= None,           # OFF
-            gazing_ratio = 1.0,
+            model_path   = base_model_path,
+            autogaze_path= base_ag_path,
+            gazing_ratio = base_ratio,
+            **base_kwargs,
         )
         print(f"  완료 ({time.perf_counter()-t0:.1f}s)\n")
 
@@ -628,7 +712,7 @@ def main():
             print(f"  {ans}")
             _print_timing_row(
                 "inference", t_total, g_s,
-                ag_enabled=runner.selector is not None,
+                ag_enabled=_runner_has_autogaze(runner),
                 ratio=args.gazing_ratio,
             )
 
