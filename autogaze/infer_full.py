@@ -221,8 +221,10 @@ def _runner_model_path_and_kwargs(args, *, baseline: bool = False) -> tuple[str,
 
     V-JEPA2-based runners use the V-JEPA2 encoder as ``model_path`` except
     ``vjepa2_nvila``, which needs NVILA as ``model_path`` and receives
-    ``vjepa2_path`` separately.  Native NVILA needs an AutoGaze config even for
-    the all-patch baseline, so baseline mode keeps the path and uses ratio=1.0.
+    ``vjepa2_path`` separately.  AutoGaze OFF/baseline never forwards an
+    AutoGaze path.  For NVILA default/native mode, OFF is resolved to hook mode
+    so the processor can run as an all-patch baseline without initializing
+    AutoGaze.
     """
     model_path = args.model_path
     ratio = 1.0 if baseline else args.gazing_ratio
@@ -258,9 +260,11 @@ def _runner_model_path_and_kwargs(args, *, baseline: bool = False) -> tuple[str,
             "prompt_template": args.generic_prompt_template,
         })
 
-    if args.mllm == "nvila" and (integration is None or integration == "native") and (baseline or args.no_autogaze):
-        autogaze_path = args.autogaze_path
+    if args.mllm == "nvila" and (baseline or args.no_autogaze):
+        autogaze_path = None
         ratio = 1.0
+        if kwargs.get("integration") in (None, "native") or "integration" not in kwargs:
+            kwargs["integration"] = "hook"
 
     return model_path, autogaze_path, ratio, kwargs
 
@@ -605,8 +609,8 @@ def main():
             print(f"[ERROR] --mllm {args.mllm} 에는 --lm-path 가 필요합니다.")
             print("  예: --lm-path Qwen/Qwen2.5-7B-Instruct")
             raise SystemExit(1)
-    if args.mllm == "generic_mllm" and not args.generic_vision_hook:
-        print("[ERROR] --mllm generic_mllm 에는 --generic-vision-hook 이 필요합니다.")
+    if args.mllm == "generic_mllm" and not args.generic_vision_hook and not args.no_autogaze:
+        print("[ERROR] AutoGaze ON 상태의 --mllm generic_mllm 에는 --generic-vision-hook 이 필요합니다.")
         print("  예: --generic-vision-hook model.visual.patch_embed")
         raise SystemExit(1)
 

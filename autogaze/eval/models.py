@@ -246,10 +246,11 @@ class GenericHookMLLMRunner(BaseMLLMRunner):
                 "generic_mllm currently supports only integration='hook'. "
                 "Use a model-specific runner for full/native token removal."
             )
-        if not vision_hook:
+        if autogaze_path is not None and not vision_hook:
             raise ValueError(
-                "generic_mllm requires vision_hook=<dotted module path>, e.g. "
-                "'model.visual.patch_embed' or 'vision_model.embeddings'."
+                "generic_mllm with AutoGaze enabled requires "
+                "vision_hook=<dotted module path>, e.g. 'model.visual.patch_embed' "
+                "or 'vision_model.embeddings'."
             )
         if media_key not in ("images", "videos"):
             raise ValueError("media_key must be 'images' or 'videos'")
@@ -273,7 +274,7 @@ class GenericHookMLLMRunner(BaseMLLMRunner):
         )
         self.model = self._load_model(model_path, dtype, trust_remote_code)
         self.model.eval()
-        self.hook_module = _resolve_module(self.model, vision_hook)
+        self.hook_module = _resolve_module(self.model, vision_hook) if vision_hook else None
 
         if autogaze_path is not None:
             self._load_autogaze(autogaze_path, gazing_ratio)
@@ -360,7 +361,7 @@ class GenericHookMLLMRunner(BaseMLLMRunner):
 
     @contextmanager
     def _hook_context(self, frames: List[Image.Image]):
-        if self.selector is None:
+        if self.selector is None or self.hook_module is None:
             yield
             return
 
@@ -514,10 +515,11 @@ class NVILARunner(BaseMLLMRunner):
             proc_kwargs = dict(
                 trust_remote_code=True,
                 local_files_only=_lfo,
-                autogaze_model_id=autogaze_path,   # still required to avoid HF lookup
                 gazing_ratio_tile=1.0,
                 gazing_ratio_thumbnail=1.0,
             )
+            if autogaze_path is not None:
+                proc_kwargs["autogaze_model_id"] = autogaze_path
             log.info("NVILARunner[hook]: loading processor from %s (all-patch, hook applies mask)", model_path)
             self.processor = AutoProcessor.from_pretrained(model_path, **proc_kwargs)
 

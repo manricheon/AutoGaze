@@ -74,7 +74,7 @@ def test_vjepa2_nvila_keeps_nvila_model_and_forwards_vjepa2_path():
     assert kwargs == {"vjepa2_path": "weights/vjepa2-vitl-fpc64-256"}
 
 
-def test_nvila_native_baseline_keeps_autogaze_path_and_forces_ratio_one():
+def test_nvila_default_baseline_uses_hook_without_autogaze_path():
     args = _args(mllm="nvila", no_autogaze=True)
 
     model_path, autogaze_path, ratio, kwargs = infer_full._runner_model_path_and_kwargs(
@@ -83,9 +83,9 @@ def test_nvila_native_baseline_keeps_autogaze_path_and_forces_ratio_one():
     )
 
     assert model_path == "weights/NVILA-8B-HD-Video"
-    assert autogaze_path == "weights/AutoGaze"
+    assert autogaze_path is None
     assert ratio == 1.0
-    assert kwargs == {}
+    assert kwargs == {"integration": "hook"}
 
 
 def test_non_native_baseline_disables_autogaze_path():
@@ -164,7 +164,23 @@ def test_generic_mllm_forwards_generic_options():
     }
 
 
-def test_missing_generic_hook_exits_before_model_load(monkeypatch):
+def test_generic_mllm_no_autogaze_does_not_require_hook():
+    args = _args(
+        mllm="generic_mllm",
+        model_path="some/model",
+        no_autogaze=True,
+        generic_vision_hook=None,
+    )
+
+    model_path, autogaze_path, ratio, kwargs = infer_full._runner_model_path_and_kwargs(args)
+
+    assert model_path == "some/model"
+    assert autogaze_path is None
+    assert ratio == 0.75
+    assert kwargs["vision_hook"] is None
+
+
+def test_missing_generic_hook_with_autogaze_exits_before_model_load(monkeypatch):
     monkeypatch.setattr(
         sys,
         "argv",

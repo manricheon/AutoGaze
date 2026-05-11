@@ -39,6 +39,7 @@ Usage examples:
 import argparse
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import av
 import numpy as np
@@ -64,6 +65,9 @@ VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv"}
 
 VALID_FORMATS = {"json", "viz", "frames", "video", "npy"}
 
+DEFAULT_FULL_PATCH_SCALES = [32, 64, 112, 224]
+DEFAULT_FULL_PATCH_SIZE = 16
+
 
 def get_device() -> torch.device:
     if torch.cuda.is_available():
@@ -71,6 +75,56 @@ def get_device() -> torch.device:
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
+
+
+class FullPatchImageProcessor:
+    """Small processor used when --no-autogaze is requested.
+
+    It avoids loading AutoGaze weights and only provides the image transform
+    contract needed by the visualization writers.
+    """
+
+    image_mean = [0.0, 0.0, 0.0]
+    image_std = [1.0, 1.0, 1.0]
+    rescale_factor = None
+
+    def __call__(self, images):
+        frames = []
+        for image in images:
+            arr = np.asarray(image).astype(np.float32) / 255.0
+            frames.append(np.transpose(arr, (2, 0, 1)))
+        return SimpleNamespace(pixel_values=frames)
+
+
+def full_patch_outputs(num_frames: int, scales: list[int] | None = None) -> dict:
+    """Create all-patch baseline outputs without running AutoGaze."""
+    scales = list(scales or DEFAULT_FULL_PATCH_SCALES)
+    tokens_each_scale = [(scale // DEFAULT_FULL_PATCH_SIZE) ** 2 for scale in scales]
+    num_tokens_per_frame = sum(tokens_each_scale)
+
+    gazing_mask = [
+        torch.ones(1, num_frames, n_tokens, dtype=torch.bool)
+        for n_tokens in tokens_each_scale
+    ]
+    num_gazing_each_frame = torch.full(
+        (num_frames,),
+        num_tokens_per_frame,
+        dtype=torch.long,
+    )
+    gazing_pos = torch.cat([
+        torch.arange(t * num_tokens_per_frame, (t + 1) * num_tokens_per_frame)
+        for t in range(num_frames)
+    ]).unsqueeze(0)
+    if_padded_gazing = torch.zeros_like(gazing_pos, dtype=torch.bool)
+
+    return {
+        "gazing_mask": gazing_mask,
+        "gazing_pos": gazing_pos,
+        "if_padded_gazing": if_padded_gazing,
+        "num_gazing_each_frame": num_gazing_each_frame,
+        "num_vision_tokens_each_frame": num_tokens_per_frame,
+        "scales": scales,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -595,6 +649,8 @@ def parse_args():
                    ))
     p.add_argument("--gazing-ratio", type=float, default=0.75,
                    help="Max fraction of patches to gaze at (default: 0.75)")
+    p.add_argument("--no-autogaze", action="store_true",
+                   help="Do not load AutoGaze; emit full-patch baseline outputs")
     p.add_argument("--compare-autogaze", action="store_true",
                    help="Compare current ratio against 1.0 (all patches)")
     p.add_argument("--sweep-ratio", action="store_true",
@@ -637,11 +693,17 @@ def main():
     # -----------------------------------------------------------------------
     # Load model
     # -----------------------------------------------------------------------
-    print(f"Loading AutoGaze from '{args.model_path}'...")
-    transform = AutoGazeImageProcessor.from_pretrained(args.model_path)
-    model = AutoGaze.from_pretrained(args.model_path).to(device)
-    model.eval()
-    num_frames = getattr(model.config, "max_num_frames", args.num_frames)
+    if args.no_autogaze:
+        print("AutoGaze OFF: using synthetic full-patch baseline outputs.")
+        transform = FullPatchImageProcessor()
+        model = None
+        num_frames = args.num_frames
+    else:
+        print(f"Loading AutoGaze from '{args.model_path}'...")
+        transform = AutoGazeImageProcessor.from_pretrained(args.model_path)
+        model = AutoGaze.from_pretrained(args.model_path).to(device)
+        model.eval()
+        num_frames = getattr(model.config, "max_num_frames", args.num_frames)
     print(f"  Device: {device}  |  max_num_frames: {num_frames}  |  formats: {sorted(fmts)}")
 
     normalize_mean    = transform.image_mean
@@ -662,13 +724,15 @@ def main():
     # Per-video inference
     # -----------------------------------------------------------------------
     # Determine ratios to process
-    base_ratios = [args.gazing_ratio]
+    base_ratios = [1.0] if args.no_autogaze else [args.gazing_ratio]
     if args.compare_autogaze:
         base_ratios = [args.gazing_ratio, 1.0]
     if args.sweep_ratio:
         base_ratios = [round(i * args.ratio_step, 10) for i in range(1, int(1.0 / args.ratio_step) + 1)]
         if base_ratios[-1] < 1.0:
             base_ratios.append(1.0)
+    if args.no_autogaze:
+        base_ratios = [1.0]
     
     ratios = sorted(list(set(base_ratios)))
     ratio_aggregated_json = {r: {} for r in ratios}
@@ -702,7 +766,9 @@ def main():
             print(f"  Processing ratio={r:.2f}...", end=" ", flush=True)
 
             try:
-                if args.all_frames or args.stride is not None:
+                if args.no_autogaze:
+                    gaze_outputs = full_patch_outputs(len(raw_video))
+                elif args.all_frames or args.stride is not None:
                     gaze_outputs = run_inference_chunked(
                         model, raw_video, transform, device,
                         chunk_size=args.chunk_size,
