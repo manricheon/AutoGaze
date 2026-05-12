@@ -44,7 +44,7 @@ def _install_mock_real_modules(monkeypatch: pytest.MonkeyPatch) -> None:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
 
-    class AutoModelForCausalLM:
+    class AutoModel:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
 
@@ -57,7 +57,7 @@ def _install_mock_real_modules(monkeypatch: pytest.MonkeyPatch) -> None:
     siglip_config_module.SiglipVisionConfig = SiglipVisionConfig
     siglip_model_module.SiglipVisionModel = SiglipVisionModel
     nvila_module.NVILA = NVILA
-    transformers_module.AutoModelForCausalLM = AutoModelForCausalLM
+    transformers_module.AutoModel = AutoModel
 
     monkeypatch.setitem(sys.modules, "autogaze.models.autogaze", autogaze_module)
     monkeypatch.setitem(sys.modules, "autogaze.vision_encoders.siglip.configuration_siglip", siglip_config_module)
@@ -155,6 +155,6 @@ def test_model_construction_reports_local_mllm_factory() -> None:
     assert result.component == "mllm"
     assert result.status == "passed"
     assert result.module_path == "transformers"
-    assert result.class_or_factory == "AutoModelForCausalLM"
+    assert result.class_or_factory == "AutoModel"
     assert result.module_available is True
     assert result.class_or_factory_exists is True

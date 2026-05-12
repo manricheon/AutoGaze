@@ -13,6 +13,9 @@ benchmark:
   num_frames: 16
   resolution: 224
   scale_resolution: null
+  scaling_mode: resize
+  temporal_chunk_size: 16
+  spatial_tile_size: 224
   target_scales: null
   target_patch_size: null
   token_budget: null
@@ -36,8 +39,8 @@ benchmark:
     gazing_ratio: 0.75
     task_loss_requirement: 0.7
     scaling_behavior: default_224x224_no_target_scaling
-    any_duration_chunking: stub_only
-    any_resolution_chunking: stub_only
+    any_duration_chunking: utility_supported_not_used_by_this_resize_preset
+    any_resolution_chunking: utility_supported_not_used_by_this_resize_preset
 
   safety_limits:
     max_default_frames: 16

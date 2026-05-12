@@ -1,7 +1,7 @@
 type: nvila
 status: real_canonical_nvila_path_configured_externally
 module_path: transformers
-class_or_factory: AutoModelForCausalLM
+class_or_factory: AutoModel
 config_module_path: null
 config_class_or_factory: null
 checkpoint: weights/NVILA-8B-HD-Video
@@ -10,6 +10,7 @@ config_path: weights/NVILA-8B-HD-Video/config.json
 model_config_path: weights/NVILA-8B-HD-Video
 tokenizer_or_processor_path: weights/NVILA-8B-HD-Video
 processor_path: weights/NVILA-8B-HD-Video
+tokenizer_path: weights/NVILA-8B-HD-Video
 device: cpu
 dtype: float32
 local_files_only: true
@@ -23,10 +24,90 @@ inference_script_path: null
 query_text: null
 output_dir: outputs/A1_real/predictions
 visualization_dir: outputs/A1_real/visualizations/full_pipeline
+nvila_hd_video_model_id: nvidia/NVILA-8B-HD-Video
+nvila_hd_video_module_path: transformers
+nvila_hd_video_class_name: AutoModel
+nvila_hd_video_factory_name: from_pretrained
+nvila_hd_video_processor_module_path: transformers
+nvila_hd_video_processor_class_name: AutoProcessor
+nvila_hd_video_processor_factory_name: from_pretrained
+nvila_hd_video_checkpoint_path: weights/NVILA-8B-HD-Video
+nvila_hd_video_config_path: weights/NVILA-8B-HD-Video/config.json
+video_preprocess_mode: official_processor
+prompt_template: "{video_token}\n\n{prompt}"
+generation_config:
+  max_new_tokens: null
+  decode_skip_special_tokens: true
+autogaze_enabled: null
+siglip_variant: modified
+resolution: 392
+num_frames: 128
+num_video_frames: 128
+num_video_frames_thumbnail: 64
+max_tiles_video: 48
+max_batch_size_autogaze: 16
+max_batch_size_siglip: 32
+gazing_ratio_tile:
+  - 0.2
+  - 0.06
+  - 0.06
+  - 0.06
+  - 0.06
+  - 0.06
+  - 0.06
+  - 0.06
+  - 0.06
+  - 0.06
+  - 0.06
+  - 0.06
+  - 0.06
+  - 0.06
+  - 0.06
+  - 0.06
+task_loss_requirement_tile: 0.6
+gazing_ratio_thumbnail: 1
+task_loss_requirement_thumbnail: null
+device_map: auto
 original_cli_args:
-  usage_type: not_described_in_quick_start
-  query_text_argument: not_present_in_quick_start
-  full_pipeline_command: not_present_in_quick_start
+  usage_type: official_huggingface_processor_api
+  model_path: nvidia/NVILA-8B-HD-Video
+  processor_from_pretrained: AutoProcessor.from_pretrained
+  model_from_pretrained: AutoModel.from_pretrained
+  query_text_argument: prompt
+  prompt_template: "{video_token}\n\n{prompt}"
+  video_argument: videos
+  return_tensors: pt
+  generation_call: model.generate
+  output_decode: processor.batch_decode
+  full_pipeline_command: python_api_snippet_in_docs_nvila_hd_video_readme
+  num_video_frames: 128
+  num_video_frames_thumbnail: 64
+  max_tiles_video: 48
+  gazing_ratio_tile:
+    - 0.2
+    - 0.06
+    - 0.06
+    - 0.06
+    - 0.06
+    - 0.06
+    - 0.06
+    - 0.06
+    - 0.06
+    - 0.06
+    - 0.06
+    - 0.06
+    - 0.06
+    - 0.06
+    - 0.06
+    - 0.06
+  task_loss_requirement_tile: 0.6
+  gazing_ratio_thumbnail: 1
+  task_loss_requirement_thumbnail: null
+  max_batch_size_autogaze: 16
+  max_batch_size_siglip: 32
+  device_map: auto
 extra_kwargs: {}
 config_kwargs: {}
-construction_kwargs: {}
+construction_kwargs:
+  device_map: auto
+  max_batch_size_siglip: 32

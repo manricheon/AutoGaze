@@ -280,9 +280,133 @@ A3 is experimental and should not be assumed compatible until tested.
 
 ---
 
-## 5. AutoGaze-Only Commands
+## 5. NVILA-HD-Video Canonical Path
 
-### 5.1 A2 AutoGaze-Only Dummy Video
+`docs/nvila-hd-video-readme.md` is the concrete reference for the canonical AutoGaze + SigLIP ViT + NVILA-HD-Video usage path.
+
+Official model and processor loading:
+
+```python
+from transformers import AutoModel, AutoProcessor
+
+model_path = "nvidia/NVILA-8B-HD-Video"
+processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True, ...)
+model = AutoModel.from_pretrained(model_path, trust_remote_code=True, device_map="auto", ...)
+```
+
+Official prompt and video processor path:
+
+```python
+video_token = processor.tokenizer.video_token
+inputs = processor(text=f"{video_token}\n\n{prompt}", videos=video_path, return_tensors="pt")
+outputs = model.generate(**inputs)
+response = processor.batch_decode(outputs[:, inputs["input_ids"].shape[1]:], skip_special_tokens=True)[0].strip()
+```
+
+Important alignment points:
+
+- The NVILA-HD-Video guide uses `AutoProcessor` and `AutoModel`, not `AutoModelForCausalLM`.
+- The model ID is `nvidia/NVILA-8B-HD-Video`.
+- The PoC local path convention is `weights/NVILA-8B-HD-Video`.
+- The official processor path accepts `videos=video_path` and prepends `processor.tokenizer.video_token` to the prompt.
+- `A1_real` is a PoC AutoGaze OFF ablation; it is not an official NVILA-HD-Video guide command.
+- `A2_real` is the closest canonical AutoGaze ON path.
+
+### 5.1 AutoGaze-Only Canonical Check
+
+Status: `runnable smoke script with guarded real model loading`.
+
+This checks AutoGaze behavior for the A2 path without attempting NVILA generation.
+It is not the official NVILA-HD-Video processor command, but it uses the lower-level AutoGaze and modified SigLIP references from `QUICK_START.md`.
+
+```bash
+python scripts/run_canonical_smoke_inference.py \
+  --experiment A2_real \
+  --mode autogaze_only \
+  --video dummy \
+  --num-frames 2 \
+  --resolution 224 \
+  --device cpu \
+  --output-dir outputs/a2_autogaze_only_dummy
+```
+
+### 5.2 Full Pipeline Canonical Inference with Query Text
+
+Status: `runnable partial smoke script with guarded stages`.
+
+The current PoC accepts query text and logs it. NVILA generation is skipped unless explicit checkpoint/model loading is enabled.
+The official NVILA-HD-Video processor-first inference behavior is documented in `docs/NVILA_HD_VIDEO_REFERENCE.md` and represented by the guarded isolated PoC script `scripts/poc_nvila_hd_video.py`.
+
+```bash
+python scripts/run_canonical_smoke_inference.py \
+  --experiment A2_real \
+  --mode full_pipeline \
+  --video dummy \
+  --query-text "Question: What is happening in this video? Please answer directly." \
+  --num-frames 2 \
+  --resolution 224 \
+  --max-new-tokens 1 \
+  --device cpu \
+  --output-dir outputs/a2_full_pipeline_dummy
+```
+
+### 5.3 Current Runnable/Stub Status
+
+| Path | Status | Notes |
+|---|---|---|
+| Isolated NVILA-HD-Video check | runnable | `scripts/poc_nvila_hd_video.py --mode check`; does not load heavy checkpoints by default |
+| Isolated NVILA-HD-Video AutoGaze-only | guarded/stub by default | Runs preprocessing and reports AutoGaze stage; real execution requires explicit checkpoint loading |
+| Isolated NVILA-HD-Video full pipeline | guarded/stub by default | Accepts query text and reports skipped generation unless checkpoint loading is explicitly enabled |
+| A2 AutoGaze-only smoke | runnable | Requires local/cached AutoGaze for real stage execution |
+| A1/A2 modified SigLIP smoke | runnable when local SigLIP assets are present | Uses lower-level `gazing_info` path from `QUICK_START.md` |
+| NVILA-HD-Video official processor path | guarded PoC | Implemented in `scripts/poc_nvila_hd_video.py`; real generation requires explicit checkpoint loading and enough memory |
+| NVILA generation in current smoke script | guarded/stub by default | Requires `--allow-mllm-load` and enough memory |
+| 4K / 1K-frame execution | future work | Not part of smoke or small benchmark defaults |
+
+### 5.4 Isolated PoC Script
+
+Status: `runnable check mode`; no checkpoint tensors are loaded by default.
+
+```bash
+python scripts/poc_nvila_hd_video.py \
+  --mode check \
+  --config configs/experiment/A2_real.yaml \
+  --output-dir outputs/nvila_hd_video_poc/check
+```
+
+Status: `guarded/stub by default`; AutoGaze execution is skipped unless `--allow-checkpoint-load` is passed.
+
+```bash
+python scripts/poc_nvila_hd_video.py \
+  --mode autogaze_only \
+  --video dummy \
+  --num-frames 2 \
+  --resolution 224 \
+  --device cpu \
+  --config configs/experiment/A2_real.yaml \
+  --output-dir outputs/nvila_hd_video_poc/autogaze_only
+```
+
+Status: `guarded/stub by default`; query text is accepted and logged, but NVILA generation is skipped unless checkpoint loading is explicitly enabled.
+
+```bash
+python scripts/poc_nvila_hd_video.py \
+  --mode full_pipeline \
+  --video dummy \
+  --query-text "Question: What is happening in this video? Please answer directly." \
+  --num-frames 2 \
+  --resolution 224 \
+  --max-new-tokens 1 \
+  --device cpu \
+  --config configs/experiment/A2_real.yaml \
+  --output-dir outputs/nvila_hd_video_poc/full_pipeline
+```
+
+---
+
+## 6. AutoGaze-Only Commands
+
+### 6.1 A2 AutoGaze-Only Dummy Video
 
 Status: `runnable smoke script with guarded real model loading`. This command is not present in original `QUICK_START.md`.
 It does not download models automatically. If `bfshi/AutoGaze` is not cached locally, the AutoGaze stage is marked skipped.
@@ -311,7 +435,7 @@ Expected output:
 
 ---
 
-### 5.2 A2 AutoGaze-Only Local Video
+### 6.2 A2 AutoGaze-Only Local Video
 
 Status: `runnable smoke script with guarded real model loading`. Original `QUICK_START.md` provides a Python API example instead of this script.
 Replace /path/to/video.mp4 with a real local video path.
@@ -339,9 +463,9 @@ outputs/a2_autogaze_only_local/
 
 ---
 
-## 6. Full Pipeline Commands
+## 7. Full Pipeline Commands
 
-### 6.1 A1 Full Pipeline without AutoGaze
+### 7.1 A1 Full Pipeline without AutoGaze
 
 A1 is the modified SigLIP + NVILA baseline with AutoGaze OFF.
 
@@ -376,7 +500,7 @@ If NVILA generation is unavailable, the script should stop at the last available
 
 ---
 
-### 6.2 A2 Full Pipeline with AutoGaze
+### 7.2 A2 Full Pipeline with AutoGaze
 
 A2 is the canonical AutoGaze ON path.
 
@@ -426,7 +550,7 @@ Expected logs:
 
 ---
 
-## 7. Query Text Handling
+## 8. Query Text Handling
 
 Full pipeline mode should accept query text.
 
@@ -451,7 +575,7 @@ Rules:
 
 ---
 
-## 8. Resolution Scaling
+## 9. Resolution Scaling
 
 Resolution scaling should follow the original `QUICK_START.md` whenever possible.
 
@@ -488,9 +612,16 @@ Rules:
 
 Example:
 
-Status: `runnable smoke script, partial scaling support`. `--scale-resolution` is a PoC flag, not an original quick start flag.
+Status: `runnable smoke script, partial full-pipeline scaling support`. `--scale-resolution` is a PoC flag, not an original quick start flag.
 The script reflects the original Python API by passing `target_scales` and `target_patch_size` when those fields are configured.
-Any-resolution spatial/temporal chunking remains stub-only.
+See `docs/SCALING_GUIDE.md` for the current policy.
+
+Current support:
+
+- `resize_224`: runnable default path.
+- `resize_392_patch14`: runnable guarded high-resolution path; raw `384` should be represented as documented `392`.
+- `spatio_temporal_224`: preprocessing utility-supported; full benchmark aggregation remains guarded/stubbed.
+- `spatio_temporal_392_patch14`: preprocessing utility-supported; full benchmark aggregation remains guarded/stubbed.
 
 ```bash
 python scripts/run_canonical_smoke_inference.py \
@@ -511,7 +642,7 @@ The command should fail with a clear NotImplementedError or mark scaling as stub
 
 ---
 
-## 9. Frame Sampling
+## 10. Frame Sampling
 
 All video tensors should follow:
 
@@ -545,7 +676,7 @@ Expected log:
 
 ---
 
-## 10. Device and Precision
+## 11. Device and Precision
 
 Supported devices:
 
@@ -593,7 +724,7 @@ MPS notes:
 
 ---
 
-## 11. Output Directory Structure
+## 12. Output Directory Structure
 
 Recommended output structure:
 
@@ -644,9 +775,9 @@ Required summary fields:
 
 ---
 
-## 12. Visualization Outputs
+## 13. Visualization Outputs
 
-### 12.1 AutoGaze-Only Visualization
+### 13.1 AutoGaze-Only Visualization
 
 Should show:
 
@@ -661,7 +792,7 @@ Output:
 outputs/<exp_name>/visualizations/autogaze_only/
 ```
 
-### 12.2 Full Pipeline Visualization
+### 13.2 Full Pipeline Visualization
 
 Should show:
 
@@ -678,7 +809,7 @@ outputs/<exp_name>/visualizations/full_pipeline/
 
 ---
 
-## 13. Hugging Face-Based Inference
+## 14. Hugging Face-Based Inference
 
 Hugging Face inference is optional and should be implemented only when supported.
 
@@ -707,7 +838,7 @@ python scripts/run_hf_inference.py \
 
 ---
 
-## 14. Tiny Real Benchmark
+## 15. Tiny Real Benchmark
 
 Status: `runnable tiny benchmark`; this is a smoke benchmark only, not a paper reproduction result.
 It uses local real-path configs and the guarded canonical smoke inference runner.
@@ -783,13 +914,13 @@ Notes:
 - The benchmark logs executed stages and skipped stages.
 - NVILA loading/generation is skipped by default; pass `--allow-mllm-load` only when the machine has enough memory.
 - QUICK_START scaling behavior is represented through the same smoke inference scaling fields: default `224x224`, or `target_scales` / `target_patch_size` when `--scale-resolution` is used by the underlying smoke path.
-- Any-resolution / any-duration chunking remains stub-only.
+- Any-resolution / any-duration chunking is available as a preprocessing utility under `autogaze_ext.scaling`; full benchmark aggregation is still guarded/stubbed.
 
 ---
 
-## 15. Troubleshooting
+## 16. Troubleshooting
 
-### 15.1 Modified SigLIP import is not detected
+### 16.1 Modified SigLIP import is not detected
 
 Check:
 
@@ -808,7 +939,7 @@ Possible causes:
 
 ---
 
-### 15.2 NVILA import is not detected
+### 16.2 NVILA import is not detected
 
 Check:
 
@@ -827,7 +958,7 @@ Possible causes:
 
 ---
 
-### 15.3 Checkpoint path is missing
+### 16.3 Checkpoint path is missing
 
 Check real config files:
 
@@ -850,7 +981,7 @@ tokenizer/processor path, if required
 
 ---
 
-### 15.4 Query text is ignored
+### 16.4 Query text is ignored
 
 This should not happen.
 
@@ -862,7 +993,7 @@ Query text was provided, but MLLM generation was skipped because <reason>.
 
 ---
 
-### 15.5 Resolution scaling does not match QUICK_START.md
+### 16.5 Resolution scaling does not match QUICK_START.md
 
 Check:
 
@@ -880,21 +1011,22 @@ If scaling behavior differs, document:
 
 ---
 
-## 16. Current Limitations
+## 17. Current Limitations
 
 Current expected limitations:
 
 - Local real-path configs currently point to `weights/AutoGaze`, `weights/siglip2-base-patch16-224`, and `weights/NVILA-8B-HD-Video`.
+- NVILA-HD-Video reference alignment uses `AutoProcessor` and `AutoModel`; the current generic smoke script is still a lower-level guarded path, not the official processor-first implementation.
 - A1/A2 smoke paths can execute real AutoGaze and/or modified SigLIP stages when those local assets are present.
 - Full NVILA loading and generation are skipped by default; use `--allow-mllm-load` only when the machine has enough memory.
 - Full MLLM generation remains unverified in the tiny smoke path.
 - Hugging Face direct visual token injection is not assumed.
-- High-resolution and long-video benchmark is not part of smoke inference.
+- High-resolution target-scale smoke inference is supported for the documented `392` policy; long-video spatio-temporal chunking is currently a preprocessing utility and not yet an official full benchmark path.
 - 4K / 1K-frame settings should not be attempted until tiny benchmarks pass.
 
 ---
 
-## 17. Recommended Validation Order
+## 18. Recommended Validation Order
 
 Use the following order:
 
@@ -969,7 +1101,7 @@ By default the script also skips MLLM loading to avoid accidentally loading larg
 
 ---
 
-## 18. Status Labels
+## 19. Status Labels
 
 Every command in this guide should be labeled internally as one of:
 

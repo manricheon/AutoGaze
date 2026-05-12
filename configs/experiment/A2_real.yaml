@@ -27,20 +27,36 @@ experiment:
 task:
   type: video_vqa
 
+model:
+  mllm:
+    autogaze_enabled: true
+
 inference:
   status: smoke_inference_script_available_real_stages_guarded
   quick_start_reference_path: QUICK_START.md
+  nvila_hd_video_reference_path: docs/NVILA_HD_VIDEO_REFERENCE.md
+  nvila_hd_video_source_path: docs/nvila-hd-video-readme.md
   usage_type: autogaze_plus_full_pipeline_stub
   inference_script_path: scripts/run_canonical_smoke_inference.py
   checkpoint_root: null
   model_config_path: null
   input_resolution: 224
+  resolution: 224
   max_resolution: null
   scale_resolution: null
   target_scales: null
   target_patch_size: null
   frame_count: 16
-  query_text: null
+  num_frames: 16
+  query_text: "Question: What is happening in this video?\nPlease answer directly."
+  prompt_template: "{video_token}\n\n{prompt}"
+  video_preprocess_mode: official_processor
+  nvila_hd_video_model_id: nvidia/NVILA-8B-HD-Video
+  processor_path: weights/NVILA-8B-HD-Video
+  tokenizer_path: weights/NVILA-8B-HD-Video
+  generation_config:
+    max_new_tokens: 1
+    decode_skip_special_tokens: true
   output_dir: outputs/A2_real
   visualization_dir: outputs/A2_real/visualizations/full_pipeline
   original_cli_args:

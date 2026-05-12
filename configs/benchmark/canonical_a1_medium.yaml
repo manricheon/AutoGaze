@@ -14,6 +14,9 @@ benchmark:
   num_frames: 16
   resolution: 392
   scale_resolution: quick_start_target_scales
+  scaling_mode: resize
+  temporal_chunk_size: 16
+  spatial_tile_size: 392
   target_scales:
     - 56
     - 112
@@ -45,8 +48,8 @@ benchmark:
       - 392
     medium_target_patch_size: 14
     scaling_behavior: quick_start_target_scales
-    any_duration_chunking: stub_only
-    any_resolution_chunking: stub_only
+    any_duration_chunking: utility_supported_not_used_by_this_resize_preset
+    any_resolution_chunking: utility_supported_not_used_by_this_resize_preset
 
   safety_limits:
     max_default_frames: 16

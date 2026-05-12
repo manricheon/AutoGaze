@@ -41,6 +41,21 @@ class PatchGridCheck:
 
 
 @dataclass(frozen=True)
+class ResolutionPolicyCheck:
+    requested_resolution: tuple[int, int] | None
+    patch_size: int | None
+    configured_target_scales: list[int] | None
+    configured_target_patch_size: int | None
+    status: str
+    benchmark_safe: bool
+    quick_start_default_resolution: int
+    quick_start_high_res_resolution: int
+    nvila_tile_resolution: int
+    issues: list[str]
+    notes: list[str]
+
+
+@dataclass(frozen=True)
 class NVILAVisualInputCheck:
     expected_visual_dim: int | None
     expected_tokens_per_frame: int | None
@@ -95,6 +110,7 @@ class VanillaSigLIPFeasibilityReport:
     processor_path: str | None
     processor_path_exists: bool
     patch_grid: PatchGridCheck
+    resolution_policy: ResolutionPolicyCheck
     output_dim: int | None
     output_dim_source: str
     nvila_visual_input: NVILAVisualInputCheck
@@ -208,6 +224,104 @@ def _patch_grid_check(vision_cfg: Mapping[str, Any], experiment_cfg: Mapping[str
         patch_grid=patch_grid,
         visual_tokens_per_frame=patch_grid[0] * patch_grid[1],
         error=None,
+    )
+
+
+def _target_scales(value: Any) -> list[int] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if not value:
+            return None
+        parts = value.split("+")
+    elif isinstance(value, (list, tuple)):
+        parts = value
+    else:
+        return None
+    try:
+        return [int(part) for part in parts]
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolution_policy_check(
+    vision_cfg: Mapping[str, Any],
+    experiment_cfg: Mapping[str, Any],
+    patch_grid: PatchGridCheck,
+) -> ResolutionPolicyCheck:
+    requested_resolution = patch_grid.input_resolution
+    patch_size = patch_grid.patch_size
+    target_scales = _target_scales(
+        vision_cfg.get("target_scales")
+        or _get_nested(experiment_cfg, "inference", "target_scales")
+        or _get_nested(vision_cfg, "original_cli_args", "high_resolution_example", "target_scales")
+    )
+    target_patch_size = vision_cfg.get("target_patch_size") or _get_nested(
+        experiment_cfg,
+        "inference",
+        "target_patch_size",
+    )
+    if target_patch_size is None:
+        target_patch_size = _get_nested(vision_cfg, "original_cli_args", "high_resolution_example", "target_patch_size")
+    try:
+        configured_target_patch_size = int(target_patch_size) if target_patch_size is not None else None
+    except (TypeError, ValueError):
+        configured_target_patch_size = None
+
+    default_resolution = 224
+    high_res_resolution = 392
+    nvila_tile_resolution = 392
+    issues: list[str] = []
+    notes: list[str] = []
+    status = "unknown"
+    benchmark_safe = False
+
+    if patch_grid.error:
+        issues.append(patch_grid.error)
+        status = "invalid_patch_grid"
+    elif requested_resolution == (224, 224) and patch_size == 16:
+        status = "quick_start_default_224_patch16"
+        benchmark_safe = True
+        notes.append("224x224 with patch size 16 is the QUICK_START default path.")
+    elif requested_resolution == (384, 384):
+        status = "raw_384_not_doc_aligned"
+        issues.append(
+            "QUICK_START does not use raw 384 for the patch14 high-resolution path; it uses 392 because 384 is not divisible by 14."
+        )
+    elif requested_resolution == (392, 392):
+        if configured_target_patch_size == 14 and target_scales == [56, 112, 196, 392]:
+            status = "quick_start_high_res_392_patch14"
+            benchmark_safe = True
+            notes.append("392x392 with target scales [56,112,196,392] and patch size 14 matches QUICK_START.")
+        else:
+            status = "392_missing_target_scale_policy"
+            issues.append("392 requires target_scales=[56,112,196,392] and target_patch_size=14.")
+    elif requested_resolution == (448, 448):
+        status = "unsupported_448_for_current_vanilla_path"
+        issues.append(
+            "448 is not documented for the current vanilla SigLIP + NVILA canonical path; NVILA-HD-Video documents 392 tiles."
+        )
+    else:
+        status = "unsupported_resolution_for_current_policy"
+        issues.append(
+            "Only 224 patch16 and the documented 392 patch14 target-scale path are benchmark-safe in the current policy."
+        )
+
+    if requested_resolution and requested_resolution != (224, 224):
+        notes.append("Non-default resolutions must carry explicit target_scales and target_patch_size through AutoGaze.")
+
+    return ResolutionPolicyCheck(
+        requested_resolution=requested_resolution,
+        patch_size=patch_size,
+        configured_target_scales=target_scales,
+        configured_target_patch_size=configured_target_patch_size,
+        status=status,
+        benchmark_safe=benchmark_safe,
+        quick_start_default_resolution=default_resolution,
+        quick_start_high_res_resolution=high_res_resolution,
+        nvila_tile_resolution=nvila_tile_resolution,
+        issues=issues,
+        notes=notes,
     )
 
 
@@ -443,6 +557,7 @@ def check_vanilla_siglip_feasibility(
     processor_path_exists = _path_exists(processor_path)
 
     patch_grid = _patch_grid_check(vision_cfg, cfg)
+    resolution_policy = _resolution_policy_check(vision_cfg, cfg, patch_grid)
     vision_config_json = _read_json(config_path)
     output_dim, output_dim_source = _infer_output_dim(vision_cfg, vision_config_json)
     nvila_check = _nvila_visual_input_check(
@@ -483,6 +598,7 @@ def check_vanilla_siglip_feasibility(
         blockers.append(f"vanilla SigLIP processor path does not exist: {processor_path}")
     if not patch_grid.ready:
         blockers.append(patch_grid.error or "patch grid extraction failed")
+    blockers.extend(resolution_policy.issues)
     blockers.extend(nvila_check.issues)
     if autogaze_enabled and patch_index_check.requires_adapter:
         blockers.append("A3 requires an explicit AutoGaze patch-index adapter for vanilla SigLIP")
@@ -520,6 +636,7 @@ def check_vanilla_siglip_feasibility(
         processor_path=processor_path,
         processor_path_exists=processor_path_exists,
         patch_grid=patch_grid,
+        resolution_policy=resolution_policy,
         output_dim=output_dim,
         output_dim_source=output_dim_source,
         nvila_visual_input=nvila_check,
@@ -559,6 +676,10 @@ def _print_report(report: VanillaSigLIPFeasibilityReport) -> None:
     print(f"- patch_size: {report.patch_grid.patch_size or 'N/A'}")
     print(f"- patch_grid: {report.patch_grid.patch_grid or 'N/A'}")
     print(f"- visual_tokens_per_frame: {report.patch_grid.visual_tokens_per_frame or 'N/A'}")
+    print(f"- resolution_policy: {report.resolution_policy.status}")
+    print(f"- resolution_benchmark_safe: {report.resolution_policy.benchmark_safe}")
+    if report.resolution_policy.issues:
+        print(f"- resolution issues: {'; '.join(report.resolution_policy.issues)}")
     print(f"- output_dim: {report.output_dim or 'N/A'} ({report.output_dim_source})")
     print(f"- NVILA expected visual dim: {report.nvila_visual_input.expected_visual_dim or 'N/A'}")
     print(f"- NVILA expected tokens/frame: {report.nvila_visual_input.expected_tokens_per_frame or 'N/A'}")

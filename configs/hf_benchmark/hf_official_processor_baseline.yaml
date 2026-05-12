@@ -1,0 +1,36 @@
+defaults:
+  - model/huggingface: default
+  - runtime/device: default
+  - runtime/precision: default
+  - runtime/huggingface: default
+  - benchmark/huggingface: default
+  - _self_
+
+experiment:
+  id: hf_official_processor_baseline
+
+benchmark:
+  huggingface:
+    enabled: true
+    mode: hf_model_only
+    integration_mode: official_processor
+    dry_run: true
+    input_source: dummy
+    video_path: null
+    processor_id: null
+    query_text: "Describe the video."
+    prompt_template: "{video_token}\n{prompt}"
+    num_frames: 2
+    resolution: 224
+    max_new_tokens: 1
+    output_dir: outputs/hf_official_processor_baseline
+    autogaze_token_injection: false
+
+model:
+  huggingface:
+    enabled: true
+    model_id: null
+    model_class: AutoModelForVision2Seq
+    local_files_only: true
+    offline: true
+    trust_remote_code: false

@@ -1,0 +1,17 @@
+mode: resize
+policy: quick_start_high_res_392_patch14
+status: supported
+description: QUICK_START high-resolution adaptation for patch14 encoders; raw 384 requests should use 392.
+resolution: 392
+effective_resolution: 392
+patch_size: 14
+target_scales:
+  - 56
+  - 112
+  - 196
+  - 392
+target_patch_size: 14
+siglip_scales: 56+112+196+392
+temporal_chunk_size: 16
+spatial_tile_size: 392
+encoder_side_acceleration_note: requires modified SigLIP constructed with matching scales and gazing_info

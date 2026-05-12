@@ -1,0 +1,16 @@
+mode: spatio_temporal
+policy: quick_start_anyres_224_patch16
+status: utility_supported
+description: QUICK_START AnyRes-style temporal and spatial chunking into 16-frame 224x224 tiles.
+resolution: 224
+effective_resolution: 224
+patch_size: 16
+target_scales: null
+target_patch_size: null
+siglip_scales: 32+64+112+224
+temporal_chunk_size: 16
+spatial_tile_size: 224
+pad_temporal: true
+pad_spatial: true
+full_pipeline_status: chunk preprocessing utility is available; benchmark aggregation is still guarded/stubbed
+encoder_side_acceleration_note: encoder-side acceleration only applies after chunks are passed to modified SigLIP with gazing_info

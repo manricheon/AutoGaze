@@ -46,11 +46,18 @@ def test_real_canonical_a1_a2_configs_load() -> None:
     assert a1.model.vision_encoder.module_path == "autogaze.vision_encoders.siglip.modeling_siglip"
     assert a1.model.vision_encoder.class_or_factory == "SiglipVisionModel"
     assert a1.model.mllm.module_path == "transformers"
-    assert a1.model.mllm.class_or_factory == "AutoModelForCausalLM"
+    assert a1.model.mllm.class_or_factory == "AutoModel"
     assert a1.model.mllm.checkpoint == "weights/NVILA-8B-HD-Video"
     assert a1.model.mllm.local_files_only is True
     assert a1.model.mllm.trust_remote_code is True
     assert a1.model.mllm.strict_checkpoint_loading is True
+    assert a1.model.mllm.nvila_hd_video_model_id == "nvidia/NVILA-8B-HD-Video"
+    assert a1.model.mllm.nvila_hd_video_processor_class_name == "AutoProcessor"
+    assert a1.model.mllm.processor_path == "weights/NVILA-8B-HD-Video"
+    assert a1.model.mllm.tokenizer_path == "weights/NVILA-8B-HD-Video"
+    assert a1.model.mllm.video_preprocess_mode == "official_processor"
+    assert a1.model.mllm.prompt_template == "{video_token}\n\n{prompt}"
+    assert a1.model.mllm.autogaze_enabled is False
 
     assert a2.experiment.id == "A2_real"
     assert a2.model.autogaze.enabled is True
@@ -59,3 +66,4 @@ def test_real_canonical_a1_a2_configs_load() -> None:
     assert a2.model.autogaze.checkpoint == "weights/AutoGaze"
     assert a2.model.autogaze.local_files_only is True
     assert a2.model.autogaze.strict_checkpoint_loading is True
+    assert a2.model.mllm.autogaze_enabled is True

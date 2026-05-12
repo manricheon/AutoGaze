@@ -115,12 +115,12 @@ def test_real_canonical_configs_validate_mocked_modules_and_fake_checkpoints(mon
     class SiglipVisionModel:
         pass
 
-    class AutoModelForCausalLM:
+    class AutoModel:
         pass
 
     autogaze_module.AutoGaze = AutoGaze
     siglip_module.SiglipVisionModel = SiglipVisionModel
-    transformers_module.AutoModelForCausalLM = AutoModelForCausalLM
+    transformers_module.AutoModel = AutoModel
     monkeypatch.setitem(sys.modules, "autogaze.models.autogaze", autogaze_module)
     monkeypatch.setitem(sys.modules, "autogaze.vision_encoders.siglip.modeling_siglip", siglip_module)
     monkeypatch.setitem(sys.modules, "transformers", transformers_module)
@@ -146,7 +146,7 @@ def test_real_canonical_configs_validate_mocked_modules_and_fake_checkpoints(mon
     assert report.components["modified_siglip"].configured_module_path == "autogaze.vision_encoders.siglip.modeling_siglip"
     assert report.components["modified_siglip"].class_or_factory_exists is True
     assert report.components["nvila"].configured_module_path == "transformers"
-    assert report.components["nvila"].configured_class_or_factory == "AutoModelForCausalLM"
+    assert report.components["nvila"].configured_class_or_factory == "AutoModel"
     assert report.components["nvila"].class_or_factory_exists is True
     assert report.components["nvila"].ready_for_model_construction is True
     assert report.experiments["A1_real"].can_run_real is True

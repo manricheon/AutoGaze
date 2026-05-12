@@ -123,6 +123,7 @@ def _cfg(tmp_path: Path, *, experiment: str = "A2_real", autogaze_enabled: bool 
                 "local_files_only": True,
                 "construction_kwargs": {"attn_implementation": "sdpa"},
                 "original_cli_args": {
+                    "scales_from_autogaze_config": True,
                     "gazing_info_argument": "gazing_info",
                     "high_resolution_example": {
                         "target_scales": [56, 112, 196, 392],
@@ -227,6 +228,26 @@ def test_quick_start_scaling_fields_are_reflected(tmp_path: Path) -> None:
     assert report.scaling["target_scales"] == [56, 112, 196, 392]
     autogaze_stage = next(stage for stage in report.stages if stage.name == "autogaze")
     assert autogaze_stage.details["call_kwargs"]["target_patch_size"] == 14
+
+
+def test_quick_start_scaling_updates_modified_siglip_scales(tmp_path: Path) -> None:
+    config_dir = _write_reference_files(tmp_path)
+
+    report = run_canonical_smoke_inference(
+        experiment="A2_real",
+        mode="full_pipeline",
+        num_frames=2,
+        resolution=392,
+        scale_resolution="quick_start_target_scales",
+        output_dir=tmp_path / "out",
+        config_dir=config_dir,
+        cfg=_cfg(tmp_path),
+        import_module_fn=_fake_import,
+    )
+
+    vision_stage = next(stage for stage in report.stages if stage.name == "vision_encoder")
+    assert vision_stage.status == "passed"
+    assert vision_stage.details["scaling_applied_to_construction"]["scales"] == "56+112+196+392"
 
 
 def test_invalid_video_mode_errors(tmp_path: Path) -> None:

@@ -15,6 +15,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from autogaze_ext.investigation.quick_start_reference import QuickStartLocation, locate_quick_start
 from autogaze_ext.pipeline.runner import DEFAULT_CONFIG_DIR, load_config
+from autogaze_ext.scaling import resolve_autogaze_scaling_policy
 from autogaze_ext.utils.imports import ImportModuleFn, resolve_import
 from autogaze_ext.visualization.autogaze_visualizer import AutoGazeVisualizer
 
@@ -338,18 +339,69 @@ def _scaling_report(
         target_patch_size = high_res.get("target_patch_size")
 
     status = "not_requested"
+    siglip_scales = None
+    policy_details: dict[str, Any] | None = None
+    scaling_mode = "resize"
+    spatio_temporal_modes = {
+        "spatio_temporal_224",
+        "spatio_temporal_392",
+        "quick_start_spatio_temporal_224",
+        "quick_start_spatio_temporal_392",
+    }
+    if scale_resolution in spatio_temporal_modes:
+        scaling_mode = "spatio_temporal"
     if scale_resolution:
         status = "quick_start_target_scales_applied" if target_scales and target_patch_size else "stub_missing_target_scales"
+    if scale_resolution in {"spatio_temporal_224", "quick_start_spatio_temporal_224"}:
+        target_scales = None
+        target_patch_size = None
+        status = "spatio_temporal_chunking_utility_supported"
+    if scale_resolution in {"spatio_temporal_392", "quick_start_spatio_temporal_392"} and high_res:
+        target_scales = high_res.get("target_scales")
+        target_patch_size = high_res.get("target_patch_size")
+        status = "spatio_temporal_chunking_utility_supported"
+
+    try:
+        policy_resolution = resolution
+        if scale_resolution in {"spatio_temporal_224", "quick_start_spatio_temporal_224"}:
+            policy_resolution = 224
+        elif scale_resolution in {"spatio_temporal_392", "quick_start_spatio_temporal_392"}:
+            policy_resolution = 392
+        patch_size = int(target_patch_size or v_args.get("default_patch_size") or a_args.get("default_patch_size") or 16)
+        if target_patch_size:
+            patch_size = int(target_patch_size)
+        policy = resolve_autogaze_scaling_policy(
+            mode=scaling_mode,  # type: ignore[arg-type]
+            resolution=policy_resolution,
+            patch_size=patch_size,
+            target_scales=target_scales,
+            target_patch_size=target_patch_size,
+            spatial_tile_size=policy_resolution,
+        )
+        siglip_scales = policy.siglip_scales
+        policy_details = policy.to_dict()
+    except ValueError as exc:
+        if scale_resolution:
+            status = "unsupported_scaling_policy"
+        policy_details = {"error": str(exc)}
 
     return {
         "requested": bool(scale_resolution),
         "mode": scale_resolution,
+        "preprocess_mode": scaling_mode,
         "status": status,
         "quick_start_behavior": "target_scales_and_target_patch_size" if scale_resolution else "default_224x224_or_requested_resolution",
         "target_scales": _json_safe(target_scales),
         "target_patch_size": _json_safe(target_patch_size),
-        "any_resolution_chunking": "stub_not_implemented",
+        "siglip_scales": siglip_scales,
+        "any_resolution_chunking": (
+            "utility_supported_not_full_pipeline_aggregated" if scaling_mode == "spatio_temporal" else "not_requested"
+        ),
+        "any_duration_chunking": (
+            "utility_supported_not_full_pipeline_aggregated" if scaling_mode == "spatio_temporal" else "not_requested"
+        ),
         "target_resolution": resolution,
+        "policy": policy_details,
     }
 
 
@@ -364,6 +416,26 @@ def _autogaze_call_kwargs(node: Mapping[str, Any], scaling: Mapping[str, Any]) -
         kwargs["target_scales"] = scaling["target_scales"]
         kwargs["target_patch_size"] = scaling["target_patch_size"]
     return kwargs
+
+
+def _vision_node_with_scaling(node: Mapping[str, Any], scaling: Mapping[str, Any]) -> dict[str, Any]:
+    adjusted = dict(node)
+    original_args = node.get("original_cli_args") if isinstance(node.get("original_cli_args"), Mapping) else {}
+    should_pass_scales = bool(original_args.get("scales_from_autogaze_config")) or str(node.get("variant")) == "modified"
+    siglip_scales = scaling.get("siglip_scales")
+    if siglip_scales and should_pass_scales:
+        construction_kwargs = (
+            dict(adjusted.get("construction_kwargs", {}))
+            if isinstance(adjusted.get("construction_kwargs"), Mapping)
+            else {}
+        )
+        construction_kwargs["scales"] = str(siglip_scales)
+        adjusted["construction_kwargs"] = construction_kwargs
+        adjusted["scaling_applied_to_construction"] = {
+            "scales": str(siglip_scales),
+            "source": "QUICK_START.md AutoGaze/SigLIP scale alignment",
+        }
+    return adjusted
 
 
 def _shape_of(value: Any) -> list[int] | None:
@@ -575,6 +647,7 @@ def run_canonical_smoke_inference(
     autogaze_node = _component_node(plain_cfg, "autogaze")
     vision_node = _component_node(plain_cfg, "vision_encoder")
     mllm_node = _component_node(plain_cfg, "mllm")
+    vision_node = _vision_node_with_scaling(vision_node, scaling)
     autogaze_enabled = bool(autogaze_node.get("enabled", False))
 
     if device != effective_device_name:
@@ -701,6 +774,7 @@ def run_canonical_smoke_inference(
                                 details={
                                     "gazing_info_used": bool(autogaze_outputs is not None),
                                     "autogaze_enabled": autogaze_enabled,
+                                    "scaling_applied_to_construction": vision_node.get("scaling_applied_to_construction"),
                                 },
                             )
                         )

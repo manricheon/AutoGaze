@@ -40,6 +40,7 @@ def test_a0_a3_real_configs_include_vanilla_siglip_feasibility_fields() -> None:
         assert cfg.model.vision_encoder.output_dim == 768
         assert "scale_resolution" in cfg.model.vision_encoder
         assert "target_scales" in cfg.model.vision_encoder
+        assert cfg.model.vision_encoder.original_cli_args.high_resolution_example.input_resolution == 392
         assert cfg.inference.inference_script_path == "scripts/check_vanilla_siglip_feasibility.py"
 
     a0 = load_config(ROOT / "configs", "experiment/A0_real")
@@ -59,6 +60,10 @@ def test_a0_feasibility_reports_vision_ready_but_nvila_shape_mismatch() -> None:
     assert report.processor_import.ready is True
     assert report.patch_grid.patch_grid == (14, 14)
     assert report.patch_grid.visual_tokens_per_frame == 196
+    assert report.resolution_policy.status == "quick_start_default_224_patch16"
+    assert report.resolution_policy.benchmark_safe is True
+    assert report.resolution_policy.quick_start_high_res_resolution == 392
+    assert report.resolution_policy.nvila_tile_resolution == 392
     assert report.output_dim == 768
     assert report.nvila_visual_input.expected_visual_dim == 1152
     assert report.nvila_visual_input.expected_tokens_per_frame == 256

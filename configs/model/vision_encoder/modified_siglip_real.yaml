@@ -48,3 +48,6 @@ extra_kwargs: {}
 config_kwargs: {}
 construction_kwargs:
   attn_implementation: sdpa
+  # QUICK_START.md loads the modified SigLIP with scales=autogaze_model.config.scales.
+  # The local AutoGaze config uses 32+64+112+224 for the default 224/patch16 path.
+  scales: 32+64+112+224
