@@ -195,3 +195,65 @@ Latency breakdown:
 |---|---|---|---|---|
 | A0 dummy | `outputs/dummy_benchmarks/A0.json` | dummy_full_token_baseline | No | wiring smoke |
 | A2 dummy | `outputs/dummy_benchmarks/A2.json` | stubbed_autogaze_on_no_real_selector_no_token_reduction | No | wiring smoke |
+
+## 7. PoC Visualization Smoke Configs
+
+These configs exercise Priority 2 visualization and metadata wiring only. They use dummy or tiny local inputs by default and must not be interpreted as benchmark-scale results.
+
+| Config | Mode | Purpose | Result Label |
+|---|---|---|---|
+| `configs/benchmark/poc_default.yaml` | `check` | Default PoC reference preset with canonical `num_frames=16` and full-pipeline plug-in metadata | default config |
+| `configs/benchmark/poc_feature_matrix_smoke.yaml` | `autogaze_only` | General feature-matrix smoke path | dummy/stub smoke |
+| `configs/benchmark/poc_autogaze_only_visualization.yaml` | `autogaze_only` | Overlay, side-by-side, and scale-panel video export | dummy/stub smoke |
+| `configs/benchmark/poc_full_pipeline_visualization.yaml` | `full_pipeline` | Query-text path plus AutoGaze visualization outputs | guarded/stub by default |
+| `configs/benchmark/poc_chop_mode_smoke.yaml` | `autogaze_only` | Chop metadata and chop-local visualization | partial chop smoke |
+| `configs/benchmark/poc_multiscale_visualization.yaml` | `autogaze_only` | Multi-scale gradient overlay and scale labels | dummy/stub smoke |
+| `configs/benchmark/poc_scale_panel_video.yaml` | `autogaze_only` | 2x2 scale-panel video export | dummy/stub smoke |
+
+Supported Priority 2 options include `overlay_style=mask|box|both`, `multi_scale_overlay`, `scale_color_mode=gradient|categorical`, `show_patch_index`, `show_scale_label`, `save_scale_panel_video`, and `comparison_layout=processed_overlay`.
+
+All PoC benchmark presets include:
+
+```yaml
+full_pipeline_plugin_mode: experiment_config
+component_plugins:
+  autogaze:
+    config_section: model.autogaze
+  vision_encoder:
+    config_section: model.vision_encoder
+  mllm:
+    config_section: model.mllm
+```
+
+This records the current config-driven plug-in contract for `scripts/poc_nvila_hd_video.py --mode full_pipeline`.
+Actual model construction is still controlled by the experiment config passed through `benchmark.config`, for example `configs/experiment/A2_real.yaml`.
+These fields are audit metadata for benchmark presets; they are not separate CLI module overrides.
+
+Full-pipeline plug-in benchmark options currently represented in the presets:
+
+| Option group | Fields |
+|---|---|
+| ViT plug-in | `module_path_field`, `class_or_factory_field`, `checkpoint_field`, `processor_path_field`, `construction_kwargs_field`, `input_contract`, `output_contract` |
+| MLLM plug-in | `module_path_field`, `class_or_factory_field`, `processor_module_path_field`, `processor_class_field`, `processor_path_field`, `tokenizer_path_field`, `prompt_template_field`, `generation_method`, `official_processor_path` |
+| Runtime guards | `checkpoint_loading`, `heavy_benchmark`, `run_by_default`, `max_new_tokens`, `device`, `dtype` when applicable |
+| AutoGaze controls | `gaze_ratio`, `task_loss_requirement`, frame selection, scaling/chop, and visualization export flags |
+
+Stub-only options remain hold-last video export, non-zero chop overlap/stride, `chop_overlay` as a side-by-side comparison layout, and original decoded-frame chop overlays beyond the non-overlap `overlay_union` path.
+
+## 8. Priority 3 High-Resolution Preparation Configs
+
+These configs prepare high-resolution/chop and full-length visualization checks. They are config templates only and must not be run as paper-scale benchmarks.
+
+| Config | Purpose | Safety Defaults |
+|---|---|---|
+| `configs/benchmark/poc_high_resolution_chop_smoke.yaml` | Tiny chop + `overlay_union` smoke | `batch_size=1`, `num_frames=4`, `max_chops=4`, `benchmark_iterations=1` |
+| `configs/benchmark/poc_high_resolution_chop_medium.yaml` | Medium preparation for chop visualization | `batch_size=1`, `num_frames=16`, `max_chops=16`, `benchmark_iterations=3` |
+| `configs/benchmark/poc_full_length_video_export_smoke.yaml` | Full-length export smoke | `batch_size=1`, `num_frames=2`, `video_export_mode=full_length` |
+
+Priority 3 support status:
+
+- `quickstart` exact scaling is implemented only for documented QUICK_START policies: `224/patch16` and `392/patch14` target-scale mode.
+- `full_length` video export preserves original frame count and original FPS when available; unprocessed frames are explicitly marked.
+- `overlay_union` maps non-overlapping chop-local patch masks back to full processed-frame coordinates.
+- `original_overlay` and `original_processed_overlay` are implemented only for exact affine mappings from processed to original frames.
+- Non-zero chop overlap/custom stride, hold-last video, 4K runs, 1024-frame runs, and public benchmark-scale jobs remain out of default scope.

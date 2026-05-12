@@ -8,7 +8,15 @@ import torch
 import torch.nn.functional as F
 
 
-ScalingMode = Literal["resize", "spatio_temporal"]
+ScalingMode = Literal[
+    "none",
+    "resize",
+    "fit_short_side",
+    "fit_long_side",
+    "quickstart",
+    "chop",
+    "spatio_temporal",
+]
 
 DEFAULT_AUTOGAZE_SCALES = (32, 64, 112, 224)
 QUICK_START_HIGH_RES_TARGET_SCALES = (56, 112, 196, 392)
@@ -45,6 +53,12 @@ class ScalingPolicy:
 @dataclass(frozen=True)
 class SpatioTemporalChunks:
     chunks: torch.Tensor
+    metadata: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ScaledVideo:
+    video: torch.Tensor
     metadata: dict[str, Any]
 
 
@@ -184,6 +198,174 @@ def resize_video(video: torch.Tensor, resolution: int) -> torch.Tensor:
     flattened = video.reshape(batch * frames, channels, height, width)
     resized = F.interpolate(flattened, size=(resolution, resolution), mode="bilinear", align_corners=False)
     return resized.reshape(batch, frames, channels, resolution, resolution)
+
+
+def scale_video_for_autogaze(
+    video: torch.Tensor,
+    *,
+    scaling_mode: ScalingMode = "resize",
+    resolution: int = 224,
+    patch_size: int = 16,
+    target_scales: Sequence[int] | str | None = None,
+    target_patch_size: int | None = None,
+    temporal_chunk_size: int | None = None,
+    spatial_tile_size: int | None = None,
+) -> ScaledVideo:
+    """Scale or chop [B,T,C,H,W] video before AutoGaze.
+
+    `chop` follows the QUICK_START any-resolution/any-duration pattern by
+    converting the selected window into non-overlapping temporal/spatial tiles.
+    It is a PoC utility path: metadata records the chop layout so callers can
+    avoid presenting it as a validated full benchmark path.
+    """
+    if video.ndim != 5:
+        raise ValueError(f"Expected video shape [B, T, C, H, W], got {tuple(video.shape)}")
+    if resolution <= 0:
+        raise ValueError("resolution must be > 0")
+
+    batch, frames, channels, height, width = [int(dim) for dim in video.shape]
+    records = [
+        {
+            "batch_index": batch_index,
+            "frame_index_within_window": frame_index,
+            "original_width": width,
+            "original_height": height,
+        }
+        for batch_index in range(batch)
+        for frame_index in range(frames)
+    ]
+
+    mode = str(scaling_mode)
+    if mode == "none":
+        output = video
+        aspect_preserved = True
+        status = "ready"
+        notes = ["No resizing was applied."]
+    elif mode == "resize":
+        output = resize_video(video, resolution)
+        aspect_preserved = height == width
+        status = "ready"
+        notes = ["Frames were resized to a fixed square; aspect ratio may be distorted."]
+    elif mode == "fit_short_side":
+        scale = resolution / float(min(height, width))
+        new_h = max(1, int(round(height * scale)))
+        new_w = max(1, int(round(width * scale)))
+        output = _resize_video_hw(video, new_h, new_w)
+        aspect_preserved = True
+        status = "ready"
+        notes = ["Aspect ratio preserved; shorter side equals requested resolution."]
+    elif mode == "fit_long_side":
+        scale = resolution / float(max(height, width))
+        new_h = max(1, int(round(height * scale)))
+        new_w = max(1, int(round(width * scale)))
+        output = _resize_video_hw(video, new_h, new_w)
+        aspect_preserved = True
+        status = "ready"
+        notes = ["Aspect ratio preserved; longer side equals requested resolution."]
+    elif mode == "quickstart":
+        try:
+            policy = resolve_autogaze_scaling_policy(
+                mode="resize",
+                resolution=resolution,
+                patch_size=patch_size,
+                target_scales=target_scales,
+                target_patch_size=target_patch_size,
+            )
+        except ValueError as exc:
+            raise NotImplementedError(
+                "scaling_mode='quickstart' is only implemented for the exact QUICK_START.md "
+                "policies currently documented in docs/QUICK_START_reference.md: "
+                "224/patch16 and 392/patch14 target-scale mode. "
+                f"Unsupported request: resolution={resolution}, patch_size={patch_size}, "
+                f"target_scales={target_scales}, target_patch_size={target_patch_size}. "
+                f"Reason: {exc}"
+            ) from exc
+        output = resize_video(video, policy.effective_resolution)
+        aspect_preserved = height == width
+        status = policy.status
+        notes = list(policy.notes) + ["QUICK_START target-scale policy was applied."]
+    elif mode in {"chop", "spatio_temporal"}:
+        tile_size = int(spatial_tile_size or resolution)
+        t_chunk = int(temporal_chunk_size or frames)
+        chopped = chunk_video_spatio_temporal(
+            video,
+            temporal_chunk_size=t_chunk,
+            spatial_tile_size=tile_size,
+            pad=True,
+        )
+        output = chopped.chunks
+        aspect_preserved = True
+        status = "partial_quick_start_chop"
+        notes = [
+            "Video was chopped into non-overlapping temporal/spatial tiles following QUICK_START.",
+            "This PoC preserves tile metadata; full benchmark aggregation remains separate.",
+        ]
+    else:
+        raise ValueError(
+            "scaling_mode must be one of none, resize, fit_short_side, fit_long_side, quickstart, chop"
+        )
+
+    processed_h, processed_w = int(output.shape[-2]), int(output.shape[-1])
+    per_frame = []
+    for record in records:
+        item = dict(record)
+        item.update(
+            {
+                "processed_width": processed_w,
+                "processed_height": processed_h,
+                "scaling_mode": mode,
+                "resolution": resolution,
+                "aspect_ratio_preserved": aspect_preserved,
+            }
+        )
+        per_frame.append(item)
+
+    metadata: dict[str, Any] = {
+        "scaling_mode": mode,
+        "resolution": resolution,
+        "status": status,
+        "aspect_ratio_preserved": aspect_preserved,
+        "original_shape": [batch, frames, channels, height, width],
+        "processed_shape": [int(dim) for dim in output.shape],
+        "original_resolution": [height, width],
+        "processed_resolution": [processed_h, processed_w],
+        "frame_records": per_frame,
+        "notes": notes,
+        "coordinate_mapping": {
+            "processed_from_original": "affine_resize" if mode in {"resize", "fit_short_side", "fit_long_side", "quickstart"} else mode,
+            "scale_x": processed_w / float(width),
+            "scale_y": processed_h / float(height),
+            "inverse_scale_x": width / float(processed_w),
+            "inverse_scale_y": height / float(processed_h),
+            "padding": {"left": 0, "top": 0, "right": 0, "bottom": 0},
+            "crop_offsets": {"x": 0, "y": 0},
+            "mapping_exact": mode in {"none", "resize", "fit_short_side", "fit_long_side", "quickstart"},
+        },
+    }
+    if mode == "quickstart":
+        metadata["quick_start_policy"] = policy.to_dict()
+        metadata["quickstart_reference_used"] = "docs/QUICK_START_reference.md"
+        metadata["quickstart_exact_match"] = policy.source in {
+            "quick_start_default_224_patch16",
+            "quick_start_high_res_392_patch14",
+            "quick_start_high_res_392_patch14_from_384_request",
+        }
+        metadata["quickstart_differences"] = list(policy.notes)
+        metadata["unsupported_reason"] = None
+    if mode in {"chop", "spatio_temporal"}:
+        metadata["chop"] = chopped.metadata
+    return ScaledVideo(video=output, metadata=metadata)
+
+
+def _resize_video_hw(video: torch.Tensor, height: int, width: int) -> torch.Tensor:
+    if video.ndim != 5:
+        raise ValueError(f"Expected video shape [B, T, C, H, W], got {tuple(video.shape)}")
+    batch, frames, channels, old_h, old_w = video.shape
+    if old_h == height and old_w == width:
+        return video
+    flattened = video.reshape(batch * frames, channels, old_h, old_w)
+    resized = F.interpolate(flattened, size=(height, width), mode="bilinear", align_corners=False)
+    return resized.reshape(batch, frames, channels, height, width)
 
 
 def chunk_video_spatio_temporal(

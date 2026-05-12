@@ -41,13 +41,23 @@ inference:
   checkpoint_root: null
   model_config_path: null
   input_resolution: 224
+  scaling_mode: resize
   resolution: 224
+  patch_size: 16
+  spatial_tile_size: null
   max_resolution: null
   scale_resolution: null
   target_scales: null
   target_patch_size: null
   frame_count: 16
   num_frames: 16
+  frame_selection_mode: sample
+  frame_interval: 1
+  max_windows: null
+  drop_last: false
+  pad_last: false
+  gaze_ratio: null
+  task_loss_requirement: null
   query_text: "Question: What is happening in this video?\nPlease answer directly."
   prompt_template: "{video_token}\n\n{prompt}"
   video_preprocess_mode: official_processor

@@ -40,6 +40,7 @@ original INTEGRATION.md
 |---|---|
 | `INTEGRATION.md` | architecture, integration mode, temporal/video handling |
 | `QUICK_START.md` | inference command, checkpoint layout, runtime arguments, resolution scaling |
+| `docs/POC_NVILA_HD_VIDEO_GUIDE.md` | focused guide for `scripts/poc_nvila_hd_video.py` functionality, examples, and output paths |
 
 주의사항:
 
@@ -435,7 +436,108 @@ Expected output:
 
 ---
 
-### 6.2 A2 AutoGaze-Only Local Video
+### 6.2 A2 AutoGaze-Only Image Visualization
+
+Status: `runnable smoke script with guarded real model loading`.
+
+This command saves sampled-frame AutoGaze overlay images under `visualizations/autogaze_only/frames/`.
+It does not run SigLIP or NVILA generation.
+
+```bash
+python scripts/poc_nvila_hd_video.py \
+  --mode autogaze_only \
+  --video dummy \
+  --num-frames 2 \
+  --resolution 224 \
+  --device cpu \
+  --config configs/experiment/A2_real.yaml \
+  --allow-checkpoint-load \
+  --output-dir outputs/nvila_hd_video_poc/autogaze_images
+```
+
+Expected output:
+
+```text
+outputs/nvila_hd_video_poc/autogaze_images/
+  visualizations/autogaze_only/frames/
+```
+
+---
+
+### 6.3 A2 AutoGaze-Only Overlay Video
+
+Status: `runnable sampled_only video export when AutoGaze execution succeeds`.
+
+This exports an MP4 using only frames actually processed by AutoGaze.
+`full_length` export is implemented for non-overlapping `sample`, `chunk`, `all`, and `interval` selections by inserting overlays back into the original frame timeline. Unprocessed frames use the documented `original_frame_if_available_else_black_frame` policy. `hold_last` remains stub-only and raises `NotImplementedError`.
+
+```bash
+python scripts/poc_nvila_hd_video.py \
+  --mode autogaze_only \
+  --video dummy \
+  --num-frames 2 \
+  --resolution 224 \
+  --device cpu \
+  --config configs/experiment/A2_real.yaml \
+  --allow-checkpoint-load \
+  --save-overlay-video \
+  --video-fps 4 \
+  --video-export-mode sampled_only \
+  --overlay-alpha 0.35 \
+  --overlay-line-width 2 \
+  --output-dir outputs/nvila_hd_video_poc/autogaze_overlay_video
+```
+
+Expected output:
+
+```text
+outputs/nvila_hd_video_poc/autogaze_overlay_video/
+  visualizations/autogaze_only/frames/
+  visualizations/autogaze_only/videos/autogaze_overlay_sampled_only.mp4
+  visualizations/autogaze_only/metadata/visualization_video_metadata.json
+```
+
+---
+
+### 6.4 A2 AutoGaze-Only Side-by-Side Video
+
+Status: `runnable sampled_only video export when AutoGaze execution succeeds`.
+
+The left side shows the original/processed sampled frame. The right side shows the AutoGaze patch overlay.
+
+```bash
+python scripts/poc_nvila_hd_video.py \
+  --mode autogaze_only \
+  --video dummy \
+  --num-frames 2 \
+  --resolution 224 \
+  --device cpu \
+  --config configs/experiment/A2_real.yaml \
+  --allow-checkpoint-load \
+  --save-overlay-video \
+  --save-side-by-side-video \
+  --video-fps 4 \
+  --video-export-mode sampled_only \
+  --overlay-alpha 0.35 \
+  --overlay-line-width 2 \
+  --output-dir outputs/nvila_hd_video_poc/autogaze_side_by_side_video
+```
+
+Expected output:
+
+```text
+outputs/nvila_hd_video_poc/autogaze_side_by_side_video/
+  visualizations/autogaze_only/frames/
+  visualizations/autogaze_only/videos/autogaze_overlay_sampled_only.mp4
+  visualizations/autogaze_only/videos/autogaze_side_by_side_sampled_only.mp4
+  visualizations/autogaze_only/metadata/visualization_video_metadata.json
+```
+
+Visualization video metadata includes sampled frame indices, FPS, processed frame count, resolution, patch grid, patch size, token counts, token reduction ratio, and output video paths.
+
+---
+
+### 6.5 A2 AutoGaze-Only Local Video
 
 Status: `runnable smoke script with guarded real model loading`. Original `QUICK_START.md` provides a Python API example instead of this script.
 Replace /path/to/video.mp4 with a real local video path.
@@ -1112,3 +1214,332 @@ future work
 ```
 
 Do not present a command as runnable unless it has been tested.
+
+
+## Frame Selection Modes
+
+`--num-frames` means the number of frames per model forward pass, not necessarily the total number of frames in the video.
+For `scripts/poc_nvila_hd_video.py`, the default is `16`, matching the canonical AutoGaze/NVILA setting used by the paper-style path.
+The default reference preset is `configs/benchmark/poc_default.yaml`.
+
+Use `--frame-selection-mode` to control how frames are selected.
+
+| Mode | Meaning | Number of Inference Runs |
+
+|---|---|---:|
+
+| sample | Uniformly sample N frames from the whole video | 1 |
+
+| chunk | Split video into non-overlapping N-frame windows | multiple |
+
+| interval | Select N frames at fixed frame_interval | 1 |
+
+| all | Process whole video, internally chunked if needed | multiple |
+
+Supported CLI flags:
+
+```text
+--frame-selection-mode sample|chunk|interval|all
+--num-frames <int>
+--frame-interval <int>
+--max-windows <int>
+--drop-last
+--pad-last
+```
+
+No sliding-window stride mode is implemented. `chunk` and `all` use non-overlapping windows only.
+
+Examples:
+
+```bash
+python scripts/poc_nvila_hd_video.py \
+  --mode autogaze_only \
+  --video dummy \
+  --frame-selection-mode sample \
+  --num-frames 4 \
+  --config configs/experiment/A2_real.yaml \
+  --allow-checkpoint-load
+```
+
+```bash
+python scripts/poc_nvila_hd_video.py \
+  --mode autogaze_only \
+  --video dummy \
+  --frame-selection-mode chunk \
+  --num-frames 4 \
+  --max-windows 2 \
+  --config configs/experiment/A2_real.yaml \
+  --allow-checkpoint-load
+```
+
+```bash
+python scripts/poc_nvila_hd_video.py \
+  --mode autogaze_only \
+  --video dummy \
+  --frame-selection-mode interval \
+  --num-frames 4 \
+  --frame-interval 2 \
+  --config configs/experiment/A2_real.yaml \
+  --allow-checkpoint-load
+```
+
+```bash
+python scripts/poc_nvila_hd_video.py \
+  --mode autogaze_only \
+  --video dummy \
+  --frame-selection-mode all \
+  --num-frames 4 \
+  --config configs/experiment/A2_real.yaml \
+  --allow-checkpoint-load
+```
+
+Per-window AutoGaze outputs are saved under:
+
+```text
+outputs/<run_name>/
+  autogaze/frame_selection_metadata.json
+  autogaze/windows/window_000/selected_patch_indices.json
+  autogaze/windows/window_000/selected_scales.json
+  autogaze/windows/window_000/token_counts.json
+  visualizations/autogaze_only/windows/window_000/frames/
+  visualizations/autogaze_only/windows/window_000/videos/
+  visualizations/autogaze_only/videos/autogaze_overlay_sampled_only.mp4
+  visualizations/autogaze_only/videos/autogaze_side_by_side_sampled_only.mp4
+```
+
+`full_length` visualization export is implemented for non-overlapping frame selections. `hold_last` remains stub-only and raises `NotImplementedError`.
+
+
+## Scaling Modes
+
+Frame selection and scaling are separate.
+
+`--frame-selection-mode` controls which frames are selected from the video.
+
+`--scaling-mode` controls how selected frames are resized before AutoGaze or full pipeline inference.
+
+| Scaling Mode | Aspect Ratio | Meaning |
+
+|---|---|---|
+
+| none | preserved | Use decoded frame resolution as-is |
+
+| resize | not preserved | Resize to square resolution x resolution |
+
+| fit_short_side | preserved | Resize so the shorter side equals resolution |
+
+| fit_long_side | preserved | Resize so the longer side equals resolution |
+
+| quickstart | depends on reference | Follow QUICK_START / NVILA-HD-Video reference behavior |
+
+| chop | preserved per tile | QUICK_START-style high-resolution frame chopping into temporal/spatial tiles |
+
+Rules:
+
+- AutoGaze runs on processed/scaled frames.
+
+- AutoGaze overlay boxes are drawn in processed-frame coordinates.
+
+- Original-space overlay is implemented only where the processed-to-original affine mapping is exact: `none`, `resize`, `fit_short_side`, `fit_long_side`, and supported `quickstart` policies. Chop original-space overlay must use `--chop-merge-mode overlay_union`; otherwise it fails clearly.
+
+- `scaling_mode=none` must not silently resize.
+
+- `quickstart` mode currently matches the documented `224/patch16` default and `392/patch14` target-scale policy. Unsupported quickstart requests raise clearly and write `unsupported_reason` to scaling metadata.
+
+- `chop` follows the QUICK_START AnyRes-style policy: selected windows are split into non-overlapping temporal/spatial chunks such as 16-frame, 224x224 tiles. Current PoC output is labeled `partial_quick_start_chop`; it preserves tile metadata but is not a validated paper-scale benchmark path.
+
+
+## AutoGaze Runtime and Visualization Controls
+
+The isolated PoC applies these controls in both `--mode autogaze_only` and `--mode full_pipeline`:
+
+```text
+--gaze-ratio <float>
+--task-loss-requirement <float>
+--scaling-mode none|resize|fit_short_side|fit_long_side|quickstart|chop
+--patch-size <int>
+--target-scales 56,112,196,392
+--target-patch-size <int>
+--spatial-tile-size <int>
+--save-overlay-video
+--save-side-by-side-video
+--save-scale-panel-video
+--overlay-alpha <float>
+--overlay-line-width <int>
+--overlay-style mask|box|both
+--multi-scale-overlay / --no-multi-scale-overlay
+--scale-color-mode gradient|categorical
+--show-patch-index
+--show-scale-label
+--scale-panel-layout 2x2
+--save-chop-frames
+--save-chop-overlay-video
+--chop-merge-mode metadata_only|overlay_union
+--comparison-layout processed_overlay|original_overlay|original_processed_overlay
+--video-export-mode sampled_only|full_length
+--metadata-placement outside|inside|none
+--info-panel-position bottom
+--info-panel-mode external|inline|none
+```
+
+By default, visualization metadata is rendered in an external panel outside the image area so patch overlays do not hide the sampled frame content.
+Patch index labels are disabled by default. Enable them only when visual inspection of patch IDs is needed.
+
+Priority 2 support status:
+
+| Feature | Status | Notes |
+|---|---|---|
+| Multi-scale overlay | implemented | Uses scale metadata when present; otherwise falls back to a single-color mask and records `missing_scale_metadata=true`. |
+| Gradient scale colors | implemented | Default palette: light yellow, orange, pink, purple. |
+| Patch index labels | implemented | Controlled by `--show-patch-index`; labels are inside selected patch regions. |
+| Scale labels | implemented | Controlled by `--show-scale-label`. |
+| Scale panel video | implemented | `2x2` layout is supported for the common four-scale view; non-2x2 layouts are future work. |
+| Side-by-side video | implemented | `processed_overlay` layout is supported. |
+| Original-space overlay | implemented | `original_overlay` and `original_processed_overlay` are supported for exact affine resize/fit mappings. |
+| Chop metadata | partially implemented | Metadata and chop-local visualizations are saved. |
+| Merged chop overlay | implemented for non-overlap | `overlay_union` maps chop-local patches back to full processed-frame coordinates. Non-zero overlap/custom stride remains unsupported. |
+| Full-length video | implemented | Preserves original frame count and FPS when metadata is available; unprocessed frames are explicitly marked. |
+| Hold-last videos | stub-only | `hold_last` raises `NotImplementedError`. |
+
+Full pipeline AutoGaze inspection example:
+
+```bash
+python scripts/poc_nvila_hd_video.py \
+  --mode full_pipeline \
+  --video dummy \
+  --query-text "Question: What is happening in this video? Please answer directly." \
+  --frame-selection-mode chunk \
+  --num-frames 4 \
+  --max-windows 2 \
+  --scaling-mode resize \
+  --resolution 224 \
+  --gaze-ratio 0.75 \
+  --task-loss-requirement 0.7 \
+  --overlay-style both \
+  --multi-scale-overlay \
+  --scale-color-mode gradient \
+  --show-scale-label \
+  --save-overlay-video \
+  --save-side-by-side-video \
+  --save-scale-panel-video \
+  --comparison-layout processed_overlay \
+  --video-export-mode sampled_only \
+  --config configs/experiment/A2_real.yaml \
+  --allow-checkpoint-load \
+  --output-dir outputs/nvila_hd_video_poc/full_pipeline_autogaze_visuals
+```
+
+Patch-index inspection example:
+
+```bash
+python scripts/poc_nvila_hd_video.py \
+  --mode autogaze_only \
+  --video dummy \
+  --num-frames 2 \
+  --scaling-mode resize \
+  --resolution 224 \
+  --overlay-style both \
+  --show-patch-index \
+  --show-scale-label \
+  --save-overlay-video \
+  --config configs/experiment/A2_real.yaml \
+  --allow-checkpoint-load \
+  --output-dir outputs/nvila_hd_video_poc/patch_index_visuals
+```
+
+Chop-mode AutoGaze inspection example:
+
+```bash
+python scripts/poc_nvila_hd_video.py \
+  --mode autogaze_only \
+  --video dummy \
+  --frame-selection-mode chunk \
+  --num-frames 16 \
+  --scaling-mode chop \
+  --resolution 224 \
+  --spatial-tile-size 224 \
+  --chop-overlap 0 \
+  --chop-merge-mode metadata_only \
+  --save-chop-frames \
+  --save-overlay-video \
+  --save-side-by-side-video \
+  --save-scale-panel-video \
+  --config configs/experiment/A2_real.yaml \
+  --allow-checkpoint-load \
+  --output-dir outputs/nvila_hd_video_poc/autogaze_chop_visuals
+```
+
+Full-length export example:
+
+```bash
+python scripts/poc_nvila_hd_video.py \
+  --mode autogaze_only \
+  --video dummy \
+  --frame-selection-mode sample \
+  --num-frames 2 \
+  --scaling-mode resize \
+  --resolution 224 \
+  --save-overlay-video \
+  --save-side-by-side-video \
+  --video-export-mode full_length \
+  --config configs/experiment/A2_real.yaml \
+  --allow-checkpoint-load \
+  --output-dir outputs/nvila_hd_video_poc/full_length_export
+```
+
+Original-space overlay example:
+
+```bash
+python scripts/poc_nvila_hd_video.py \
+  --mode autogaze_only \
+  --video dummy \
+  --num-frames 2 \
+  --scaling-mode fit_short_side \
+  --resolution 224 \
+  --save-side-by-side-video \
+  --comparison-layout original_processed_overlay \
+  --config configs/experiment/A2_real.yaml \
+  --allow-checkpoint-load \
+  --output-dir outputs/nvila_hd_video_poc/original_space_overlay
+```
+
+Merged chop overlay example:
+
+```bash
+python scripts/poc_nvila_hd_video.py \
+  --mode autogaze_only \
+  --video dummy \
+  --num-frames 4 \
+  --scaling-mode chop \
+  --resolution 392 \
+  --spatial-tile-size 224 \
+  --chop-overlap 0 \
+  --chop-merge-mode overlay_union \
+  --save-chop-overlay-video \
+  --config configs/experiment/A2_real.yaml \
+  --allow-checkpoint-load \
+  --output-dir outputs/nvila_hd_video_poc/chop_overlay_union
+```
+
+Additional outputs:
+
+```text
+outputs/<run_name>/
+  scaling/scaling_metadata.json
+  autogaze/windows/window_000/selected_patch_mask.json
+  chops/chop_metadata.json
+  chops/windows/window_000/frame_000/chop_000/token_counts.json
+  visualizations/autogaze/chops/window_000/frame_000/chop_000/frames/
+  visualizations/full_pipeline/videos/autogaze_overlay_sampled_only.mp4
+  visualizations/full_pipeline/videos/autogaze_side_by_side_sampled_only.mp4
+  visualizations/full_pipeline/videos/autogaze_scale_panels_sampled_only.mp4
+  visualizations/autogaze/videos/autogaze_overlay.mp4
+  visualizations/autogaze/videos/autogaze_side_by_side.mp4
+  visualizations/autogaze/videos/autogaze_scale_panels.mp4
+  visualizations/autogaze/videos/autogaze_overlay_full_length.mp4
+  visualizations/autogaze/videos/autogaze_side_by_side_full_length.mp4
+  visualizations/autogaze/videos/autogaze_original_overlay.mp4
+  visualizations/autogaze/videos/autogaze_original_processed_overlay.mp4
+  visualizations/autogaze/videos/autogaze_chop_overlay.mp4
+  visualizations/autogaze/metadata/chop_overlay_metadata.json
+```

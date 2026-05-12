@@ -133,3 +133,33 @@
 - encoder-side acceleration과 downstream token reduction을 구분했는가?
 - MPS/CPU metric 한계를 `N/A`로 표시했는가?
 - checkpoint, revision, cache mode, trust_remote_code를 기록했는가?
+
+## 14. PoC Visualization Analysis Checklist
+
+Priority 2 visualization outputs are inspection artifacts, not public benchmark results.
+
+| Output | Check | Status Meaning |
+|---|---|---|
+| Multi-scale overlay | `scale_color_map`, `available_scale_ids`, `missing_scale_metadata` are present | Missing scale metadata means single-color fallback, not failed AutoGaze |
+| Patch index labels | `show_patch_indices` is recorded | Labels are optional and disabled by default |
+| Scale panel video | `autogaze_scale_panels.mp4` exists | 2x2 layout only; other layouts are future work |
+| Side-by-side video | `comparison_layout=processed_overlay` | Processed input vs processed overlay, not original-space overlay |
+| Chop metadata | `chops/chop_metadata.json` exists | Chop-local coordinates only; no merged full-frame overlay claim |
+| Full pipeline query text | `query_text_used=true` or skipped reason is present | Query text must not be silently ignored |
+
+Priority 3 correctness checks:
+
+| Feature | Required Sanity Check | Invalid Interpretation |
+|---|---|---|
+| Quickstart scaling | `quickstart_exact_match=true` or `unsupported_reason` is present | Treating `quickstart` as ordinary resize without metadata |
+| Full-length export | `output_frame_count == original_frame_count` and processed indices are recorded | Calling sampled-only output full-length |
+| Original-space overlay | `coordinate_mapping.mapping_exact=true` and scale factors are recorded | Drawing processed-frame coordinates on original frames |
+| Chop overlay union | `coordinate_space=full_processed_frame` and merge/conflict policy is recorded | Drawing chop-local patch IDs as full-frame patch IDs |
+| High-resolution configs | `run_by_default=false`, bounded frames/chops/iterations | Treating smoke configs as public benchmark reproduction |
+
+When comparing visualization smoke outputs, keep these labels separate:
+
+- `dummy/stub smoke`: no real checkpoint inference.
+- `guarded/stub by default`: real model path is skipped unless explicit load flags and assets are present.
+- `partial chop smoke`: chop-local metadata/visualization exists; non-overlap `overlay_union` can create a full processed-frame overlay, while overlap/custom-stride merge remains unsupported.
+- `real result`: only valid when real model construction/inference was actually run and reported as such.
