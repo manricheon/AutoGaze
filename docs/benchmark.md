@@ -229,6 +229,28 @@ This records the current config-driven plug-in contract for `scripts/poc_nvila_h
 Actual model construction is still controlled by the experiment config passed through `benchmark.config`, for example `configs/experiment/A2_real.yaml`.
 These fields are audit metadata for benchmark presets; they are not separate CLI module overrides.
 
+Use the experiment config to choose the canonical real path:
+
+| Experiment config | Use in PoC benchmarks | AutoGaze interpretation |
+|---|---|---|
+| `configs/experiment/A1_real.yaml` | Modified-SigLIP + NVILA full-token baseline | AutoGaze OFF; do not use AutoGaze token reduction claims |
+| `configs/experiment/A2_real.yaml` | Canonical AutoGaze + modified-SigLIP + NVILA path | AutoGaze ON; token reduction claims require real AutoGaze execution |
+
+For A1/A2 internal comparison, keep the benchmark axes identical:
+
+```text
+input video
+frame_selection_mode
+num_frames
+scaling_mode
+resolution
+device
+dtype
+max_new_tokens
+query_text
+benchmark_iterations
+```
+
 Full-pipeline plug-in benchmark options currently represented in the presets:
 
 | Option group | Fields |

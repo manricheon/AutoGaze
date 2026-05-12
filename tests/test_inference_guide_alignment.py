@@ -73,6 +73,14 @@ def test_inference_guide_and_quick_start_reference_exist() -> None:
         "Full Pipeline Component Plug-In Mode",
         "full_pipeline_plugin_mode: experiment_config",
         "module/class/checkpoint overrides are config-driven, not CLI flags",
+        "Current CLI Surface",
+        "A1 and A2 Canonical Config Guide",
+        "configs/experiment/A1_real.yaml",
+        "configs/experiment/A2_real.yaml",
+        "A1 Full-Token Full Pipeline",
+        "A2 AutoGaze-Only Visualization",
+        "A2 Full Pipeline With Query Text",
+        "Do not claim encoder-side acceleration unless A2 reduces tokens before the intended encoder compute stage.",
     ]:
         assert expected in poc_text
 

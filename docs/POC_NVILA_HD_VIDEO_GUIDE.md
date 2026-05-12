@@ -78,6 +78,23 @@ If a module, checkpoint, API, or coordinate mapping is missing, the script shoul
 | `autogaze_only` | Run preprocessing and AutoGaze path, then save AutoGaze metadata/visualization | Only for real AutoGaze execution |
 | `full_pipeline` | Run AutoGaze, vision encoder, and NVILA generation when available | Yes for real downstream inference |
 
+## Current CLI Surface
+
+The script options are grouped as follows.
+Defaults shown here are the script defaults, not necessarily the values used by every smoke config.
+
+| Group | Options | Default / Notes |
+|---|---|---|
+| Mode/input | `--mode check|autogaze_only|full_pipeline`, `--video dummy`, `--video-path`, `--query-text` | `check`, dummy input |
+| Frame selection | `--frame-selection-mode sample|chunk|interval|all`, `--num-frames`, `--frame-interval`, `--max-windows`, `--drop-last`, `--pad-last` | `num_frames=16`, `sample`; no overlapping stride mode |
+| Scaling/chop | `--scaling-mode none|resize|fit_short_side|fit_long_side|quickstart|chop`, `--resolution`, `--patch-size`, `--target-scales`, `--target-patch-size`, `--spatial-tile-size`, `--chop-size`, `--chop-overlap`, `--chop-stride`, `--max-chops`, `--chop-merge-mode none|metadata_only|overlay_union` | `resize`, `resolution=224`, `patch_size=16`; non-zero chop overlap/stride unsupported |
+| AutoGaze runtime | `--gaze-ratio`, `--task-loss-requirement` | Config value if provided; A2 defaults to `0.75` and `0.7` |
+| Runtime safety | `--device cpu|cuda|mps`, `--dtype float32|float16|bfloat16`, `--allow-checkpoint-load`, `--no-checkpoint-load`, `--checkpoint-metadata-only`, `--max-new-tokens` | CPU, float32, checkpoint loading disabled, `max_new_tokens=1` |
+| Visualization | `--save-overlay-video`, `--save-side-by-side-video`, `--save-scale-panel-video`, `--save-chop-frames`, `--save-chop-overlay-video`, `--video-fps`, `--video-export-mode sampled_only|full_length|hold_last`, `--overlay-alpha`, `--overlay-line-width`, `--overlay-style mask|box|both` | `sampled_only`; `hold_last` is stub-only |
+| Labels/panels | `--multi-scale-overlay/--no-multi-scale-overlay`, `--scale-color-mode gradient|categorical`, `--scale-panel-layout 2x2`, `--show-patch-index`, `--show-scale-label`, `--hide-patch-boxes`, `--hide-patch-indices` | Multi-scale gradient enabled; patch IDs disabled |
+| Layout/metadata | `--metadata-placement outside|inside|none`, `--info-panel-position bottom|right`, `--info-panel-size`, `--info-panel-mode external|inline|none`, `--comparison-layout processed_overlay|original_overlay|original_processed_overlay|chop_overlay` | External bottom panel; `chop_overlay` layout unsupported |
+| Config/output | `--config`, `--output-dir`, `--json` | `configs/experiment/A2_real.yaml`, `outputs/nvila_hd_video_poc` |
+
 ## Full Pipeline Component Plug-In Mode
 
 `full_pipeline` has a config-driven plug-in surface for the vision encoder and MLLM.
@@ -161,6 +178,171 @@ python scripts/poc_nvila_hd_video.py \
   --allow-checkpoint-load \
   --output-dir outputs/nvila_hd_video_poc/full_pipeline_plugin
 ```
+
+## A1 and A2 Canonical Config Guide
+
+Use A1 and A2 for the first canonical comparison:
+
+| Config | AutoGaze | Vision encoder | MLLM | Intended use |
+|---|---:|---|---|---|
+| `configs/experiment/A1_real.yaml` | OFF | modified SigLIP ViT | NVILA-HD-Video | Full-token modified-SigLIP baseline |
+| `configs/experiment/A2_real.yaml` | ON | modified SigLIP ViT | NVILA-HD-Video | Canonical AutoGaze-enabled path |
+
+Important interpretation rules:
+
+```text
+A1_real is the baseline. AutoGaze is disabled, so autogaze_only visualization is not meaningful for A1.
+A2_real is the AutoGaze path. Use it for AutoGaze metadata, patch overlays, token reduction, and A2 full-pipeline checks.
+Both configs are guarded real paths. Real model construction needs --allow-checkpoint-load.
+If checkpoint loading is disabled, query text is accepted but generation is recorded as skipped.
+```
+
+### A1 Check Mode
+
+```bash
+python scripts/poc_nvila_hd_video.py \
+  --mode check \
+  --config configs/experiment/A1_real.yaml \
+  --output-dir outputs/nvila_hd_video_poc/A1_check
+```
+
+Expected behavior:
+
+```text
+AutoGaze import stage: disabled
+SigLIP import/path checks: reported from model.vision_encoder
+NVILA import/path checks: reported from model.mllm
+No heavy checkpoint loading
+```
+
+### A1 Full-Token Full Pipeline
+
+Use this for the modified-SigLIP + NVILA baseline. It should not report AutoGaze token reduction.
+
+```bash
+python scripts/poc_nvila_hd_video.py \
+  --mode full_pipeline \
+  --video dummy \
+  --query-text "Question: What is happening in this video? Please answer directly." \
+  --frame-selection-mode sample \
+  --num-frames 16 \
+  --scaling-mode resize \
+  --resolution 224 \
+  --max-new-tokens 1 \
+  --config configs/experiment/A1_real.yaml \
+  --allow-checkpoint-load \
+  --output-dir outputs/nvila_hd_video_poc/A1_full_pipeline
+```
+
+Expected A1 labeling in outputs:
+
+```text
+experiment_id = A1_real
+autogaze_enabled = false
+selected_visual_token_count should equal the full-token path when reported
+skipped_stages must explain any missing NVILA generation
+```
+
+### A2 AutoGaze-Only Visualization
+
+Use this for AutoGaze selected patches, scales, token counts, masks, and videos.
+
+```bash
+python scripts/poc_nvila_hd_video.py \
+  --mode autogaze_only \
+  --video dummy \
+  --frame-selection-mode sample \
+  --num-frames 16 \
+  --scaling-mode resize \
+  --resolution 224 \
+  --gaze-ratio 0.75 \
+  --task-loss-requirement 0.7 \
+  --overlay-style both \
+  --multi-scale-overlay \
+  --save-overlay-video \
+  --save-side-by-side-video \
+  --config configs/experiment/A2_real.yaml \
+  --allow-checkpoint-load \
+  --output-dir outputs/nvila_hd_video_poc/A2_autogaze_only
+```
+
+Expected A2 AutoGaze outputs:
+
+```text
+autogaze/runtime_metadata.json
+autogaze/token_counts_summary.json
+autogaze/windows/window_000/selected_patch_indices.json
+autogaze/windows/window_000/selected_scales.json
+visualizations/autogaze/videos/autogaze_overlay.mp4
+visualizations/autogaze/videos/autogaze_side_by_side.mp4
+logs/metrics.json
+logs/poc_summary.json
+```
+
+### A2 Full Pipeline With Query Text
+
+Use this to test the canonical AutoGaze + modified SigLIP + NVILA-HD-Video path.
+
+```bash
+python scripts/poc_nvila_hd_video.py \
+  --mode full_pipeline \
+  --video dummy \
+  --query-text "Question: What is happening in this video? Please answer directly." \
+  --frame-selection-mode sample \
+  --num-frames 16 \
+  --scaling-mode resize \
+  --resolution 224 \
+  --gaze-ratio 0.75 \
+  --task-loss-requirement 0.7 \
+  --max-new-tokens 1 \
+  --save-overlay-video \
+  --save-side-by-side-video \
+  --config configs/experiment/A2_real.yaml \
+  --allow-checkpoint-load \
+  --output-dir outputs/nvila_hd_video_poc/A2_full_pipeline
+```
+
+Expected A2 labeling in outputs:
+
+```text
+experiment_id = A2_real
+autogaze_enabled = true
+query_text is saved or used; it must not be silently ignored
+visualization outputs are saved under visualizations/full_pipeline/ and visualizations/autogaze/
+skipped generation is not treated as successful generation
+```
+
+### A1 vs A2 Internal Comparison Checklist
+
+Before comparing A1 and A2, confirm these fields match:
+
+```text
+input video
+frame_selection_mode
+num_frames
+scaling_mode
+resolution
+device
+dtype
+max_new_tokens
+query_text
+```
+
+Then compare:
+
+```text
+original_visual_token_count
+selected_visual_token_count
+token_reduction_ratio
+autogaze_latency_ms
+vision_encoder_latency_ms
+mllm_decode_latency_ms
+end_to_end latency in logs/poc_summary.json
+peak_vram_mb, or N/A on CPU/MPS
+skipped_stages
+```
+
+Do not claim encoder-side acceleration unless A2 reduces tokens before the intended encoder compute stage.
 
 ## Output Type Samples by Mode
 
@@ -1029,16 +1211,43 @@ CPU and MPS memory metrics that are unavailable are recorded as `N/A`.
 
 Safe PoC configs:
 
+| Config | Mode | Main options represented |
+|---|---|---|
+| `configs/benchmark/poc_default.yaml` | `check` | Canonical defaults, `num_frames=16`, config-driven plug-in metadata |
+| `configs/benchmark/poc_feature_matrix_smoke.yaml` | `autogaze_only` | Frame selection, resize scaling, overlay and side-by-side video |
+| `configs/benchmark/poc_autogaze_only_visualization.yaml` | `autogaze_only` | AutoGaze image/video visualization |
+| `configs/benchmark/poc_full_pipeline_visualization.yaml` | `full_pipeline` | Query text, ViT/MLLM plug-in metadata, overlay, side-by-side, scale panel |
+| `configs/benchmark/poc_chop_mode_smoke.yaml` | `autogaze_only` | `scaling_mode=chop`, chop metadata, per-chop frames |
+| `configs/benchmark/poc_multiscale_visualization.yaml` | `autogaze_only` | Multi-scale gradient overlay, scale labels |
+| `configs/benchmark/poc_scale_panel_video.yaml` | `autogaze_only` | `save_scale_panel_video`, `scale_panel_layout=2x2` |
+| `configs/benchmark/poc_high_resolution_chop_smoke.yaml` | `autogaze_only` | Safe high-resolution/chop smoke, `overlay_union`, bounded `max_chops` |
+| `configs/benchmark/poc_high_resolution_chop_medium.yaml` | `autogaze_only` | Medium preparation only, `num_frames=16`, bounded iterations/chops |
+| `configs/benchmark/poc_full_length_video_export_smoke.yaml` | `autogaze_only` | `video_export_mode=full_length` with tiny input |
+
+All benchmark presets include these audit fields:
+
+```yaml
+full_pipeline_plugin_mode: experiment_config
+component_plugins:
+  status: config_driven_guarded
+  autogaze:
+    config_section: model.autogaze
+  vision_encoder:
+    config_section: model.vision_encoder
+    input_contract: "[B,T,C,H,W] with optional gazing_info"
+  mllm:
+    config_section: model.mllm
+    official_processor_path: true
+```
+
+The audit fields document the options that must be respected by benchmark execution.
+They do not replace `--config`; the experiment config remains the source of truth for real module paths and checkpoints.
+
+A1/A2 preset usage:
+
 ```text
-configs/benchmark/poc_feature_matrix_smoke.yaml
-configs/benchmark/poc_autogaze_only_visualization.yaml
-configs/benchmark/poc_full_pipeline_visualization.yaml
-configs/benchmark/poc_chop_mode_smoke.yaml
-configs/benchmark/poc_multiscale_visualization.yaml
-configs/benchmark/poc_scale_panel_video.yaml
-configs/benchmark/poc_high_resolution_chop_smoke.yaml
-configs/benchmark/poc_high_resolution_chop_medium.yaml
-configs/benchmark/poc_full_length_video_export_smoke.yaml
+Use configs/experiment/A1_real.yaml for the full-token modified-SigLIP baseline.
+Use configs/experiment/A2_real.yaml for AutoGaze metadata, visualization, and AutoGaze-enabled full-pipeline checks.
 ```
 
 They are config templates and smoke paths only. Do not treat them as benchmark results.
