@@ -502,7 +502,12 @@ class NVILAAdapter(MLLMAdapter):
             prompt_template = str(self.config.get("prompt_template") or "{video_token}\n\n{prompt}")
             video_token = getattr(getattr(self.processor, "tokenizer", None), "video_token", "<video>")
             prompt = prompt_template.format(prompt=query_text, query=query_text, video_token=video_token)
-            video_input, video_input_kind = _official_video_input(video=video, video_path=video_path)
+            target_frame_count = getattr(self.processor, "num_video_frames", None)
+            video_input, video_input_kind = _official_video_input(
+                video=video,
+                video_path=video_path,
+                target_frame_count=target_frame_count,
+            )
             inputs = self.processor(text=prompt, videos=video_input, return_tensors="pt")
             if isinstance(inputs, Mapping):
                 model_device = getattr(self.model, "device", self.device)
@@ -753,6 +758,9 @@ def _nvila_processor_from_pretrained_kwargs(config: Mapping[str, Any]) -> dict[s
         autogaze_model_id = "weights/AutoGaze"
     if autogaze_model_id is not None:
         kwargs["autogaze_model_id"] = _model_reference_for_loading(autogaze_model_id)
+    max_num_frames = _local_autogaze_max_num_frames(autogaze_model_id)
+    if max_num_frames is not None:
+        _set_or_validate_nvila_frame_counts(kwargs, max_num_frames=max_num_frames)
     if not bool(config.get("sync_autogaze_controls_from_config", False)):
         return kwargs
 
@@ -772,6 +780,51 @@ def _nvila_processor_from_pretrained_kwargs(config: Mapping[str, Any]) -> dict[s
         kwargs.setdefault("task_loss_requirement_tile", None)
         kwargs.setdefault("task_loss_requirement_thumbnail", None)
     return kwargs
+
+
+def _local_autogaze_max_num_frames(autogaze_model_id: Any) -> int | None:
+    if autogaze_model_id in {None, ""}:
+        return None
+    text = str(autogaze_model_id)
+    if not _looks_like_local_path(text):
+        return None
+    path = _resolve_local_path(text)
+    config_path = path / "config.json" if path.is_dir() else path
+    if not config_path.exists():
+        return None
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    value = data.get("max_num_frames")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _set_or_validate_nvila_frame_counts(kwargs: dict[str, Any], *, max_num_frames: int) -> None:
+    value = kwargs.get("num_video_frames")
+    if value is None:
+        kwargs["num_video_frames"] = max_num_frames
+    else:
+        num_video_frames = int(value)
+        if num_video_frames <= 0 or num_video_frames % max_num_frames != 0:
+            raise ValueError(
+                "NVILA processor num_video_frames must be a positive multiple of "
+                f"AutoGaze max_num_frames ({max_num_frames}); got {num_video_frames}"
+            )
+        kwargs["num_video_frames"] = num_video_frames
+
+    thumbnail_value = kwargs.get("num_video_frames_thumbnail")
+    if thumbnail_value is None:
+        kwargs["num_video_frames_thumbnail"] = max_num_frames
+    else:
+        num_thumbnail_frames = int(thumbnail_value)
+        if num_thumbnail_frames <= 0:
+            raise ValueError("NVILA processor num_video_frames_thumbnail must be positive")
+        kwargs["num_video_frames_thumbnail"] = num_thumbnail_frames
 
 
 def _jsonable_processor_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
@@ -798,7 +851,12 @@ def _torch_dtype(dtype: str) -> torch.dtype | None:
     return None
 
 
-def _official_video_input(*, video: torch.Tensor, video_path: str | None) -> tuple[Any, str]:
+def _official_video_input(
+    *,
+    video: torch.Tensor,
+    video_path: str | None,
+    target_frame_count: int | None = None,
+) -> tuple[Any, str]:
     if video_path and video_path != "dummy":
         path = Path(video_path).expanduser()
         if path.exists():
@@ -807,7 +865,9 @@ def _official_video_input(*, video: torch.Tensor, video_path: str | None) -> tup
         if repo_path.exists():
             return str(repo_path), "video_path"
         return video_path, "video_reference"
-    return _video_tensor_to_pil(video), "processed_tensor_pil_frames"
+    frames = _video_tensor_to_pil(video, target_frame_count=target_frame_count)
+    suffix = f"_to_{target_frame_count}" if target_frame_count is not None else ""
+    return frames, f"processed_tensor_pil_frames{suffix}"
 
 
 def _move_tensor_mapping(value: Mapping[str, Any], device: str) -> dict[str, Any]:
@@ -817,12 +877,27 @@ def _move_tensor_mapping(value: Mapping[str, Any], device: str) -> dict[str, Any
     return moved
 
 
-def _video_tensor_to_pil(video: torch.Tensor) -> list[Any]:
+def _video_tensor_to_pil(video: torch.Tensor, *, target_frame_count: int | None = None) -> list[Any]:
     from PIL import Image
 
     if video.ndim != 5:
         raise ValueError(f"expected video shape [B,T,C,H,W], got {tuple(video.shape)}")
     frames = video[0].detach().cpu().float().clamp(0, 1)
+    if target_frame_count is not None:
+        target = int(target_frame_count)
+        if target <= 0:
+            raise ValueError("target_frame_count must be positive")
+        if int(frames.shape[0]) > target:
+            if target == 1:
+                indices = torch.tensor([0], dtype=torch.long)
+            else:
+                indices = torch.linspace(0, int(frames.shape[0]) - 1, steps=target).round().to(torch.long)
+            frames = frames.index_select(0, indices)
+        elif int(frames.shape[0]) < target:
+            if int(frames.shape[0]) == 0:
+                raise ValueError("cannot pad an empty video tensor")
+            pad = frames[-1:].expand(target - int(frames.shape[0]), -1, -1, -1)
+            frames = torch.cat([frames, pad], dim=0)
     images = []
     for frame in frames:
         array = (frame.permute(1, 2, 0).numpy() * 255).astype("uint8")

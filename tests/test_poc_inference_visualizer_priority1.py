@@ -61,6 +61,8 @@ def test_configs_reference_local_weight_cache_when_available() -> None:
     assert a2["vision_encoder"]["from_pretrained_kwargs"]["scales"] == "32+64+112+224"
     assert a2["mllm"]["checkpoint_path"] == "weights/NVILA-8B-HD-Video"
     assert a2["mllm"]["processor_from_pretrained_kwargs"]["autogaze_model_id"] == "weights/AutoGaze"
+    assert a2["mllm"]["processor_from_pretrained_kwargs"]["num_video_frames"] == 16
+    assert a2["mllm"]["processor_from_pretrained_kwargs"]["num_video_frames_thumbnail"] == 16
     assert a2["mllm"]["local_files_only"] is True
     assert a2["mllm"]["trust_remote_code"] is True
     assert a2["mllm"]["class_name"] == "AutoModel"
@@ -455,7 +457,7 @@ def test_qwen_incomplete_local_shards_block_before_loading(tmp_path: Path) -> No
     assert status.metadata["missing_shards"] == ["model-00001-of-00002.safetensors"]
 
 
-def test_nvila_official_processor_path_and_autogaze_controls(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_nvila_official_processor_path_and_autogaze_controls(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     fake_module = types.ModuleType("fake_nvila")
 
     class AutoModel:
@@ -483,11 +485,13 @@ def test_nvila_official_processor_path_and_autogaze_controls(monkeypatch: pytest
             instance = cls()
             instance.processor_path = processor_path
             instance.kwargs = kwargs
+            instance.num_video_frames = kwargs.get("num_video_frames")
             return instance
 
         def __call__(self, *, text, videos=None, return_tensors=None, **_kwargs):
             assert text == "<video>\n\nQuestion: What changed?"
             assert isinstance(videos, list)
+            assert len(videos) == 16
             assert return_tensors == "pt"
             return {"input_ids": torch.tensor([[21, 22]])}
 
@@ -498,6 +502,9 @@ def test_nvila_official_processor_path_and_autogaze_controls(monkeypatch: pytest
     fake_module.AutoModel = AutoModel
     fake_module.AutoProcessor = AutoProcessor
     monkeypatch.setitem(sys.modules, "fake_nvila", fake_module)
+    autogaze_dir = tmp_path / "AutoGaze"
+    autogaze_dir.mkdir()
+    (autogaze_dir / "config.json").write_text(json.dumps({"max_num_frames": 16}), encoding="utf-8")
 
     adapter = NVILAAdapter(
         {
@@ -513,13 +520,15 @@ def test_nvila_official_processor_path_and_autogaze_controls(monkeypatch: pytest
             "poc_autogaze_enabled": False,
             "poc_gaze_ratio": 0.75,
             "poc_task_loss_requirement": 0.7,
-            "poc_autogaze_checkpoint_path": "weights/AutoGaze",
+            "poc_autogaze_checkpoint_path": str(autogaze_dir),
         }
     )
     status = adapter.load(allow_real_model_loading=True, device="cpu", dtype="float32")
     assert status.status == "real"
     assert status.metadata["processor_status"] == "real"
-    assert status.metadata["processor_autogaze_controls"]["autogaze_model_id"].endswith("weights/AutoGaze")
+    assert status.metadata["processor_autogaze_controls"]["autogaze_model_id"] == str(autogaze_dir)
+    assert status.metadata["processor_autogaze_controls"]["num_video_frames"] == 16
+    assert status.metadata["processor_autogaze_controls"]["num_video_frames_thumbnail"] == 16
     assert status.metadata["processor_autogaze_controls"]["gazing_ratio_tile"] is None
     assert status.metadata["processor_autogaze_controls"]["gazing_ratio_thumbnail"] is None
     result = adapter.generate(
@@ -531,7 +540,7 @@ def test_nvila_official_processor_path_and_autogaze_controls(monkeypatch: pytest
     assert result["status"] == "real"
     assert result["answer"] == "nvila answer"
     assert result["metadata"]["autogaze_visual_tokens_injected"] is False
-    assert result["metadata"]["video_input_kind"] == "processed_tensor_pil_frames"
+    assert result["metadata"]["video_input_kind"] == "processed_tensor_pil_frames_to_16"
 
 
 def test_real_loading_blocked_does_not_fall_back_to_stub_tokens(tmp_path: Path) -> None:

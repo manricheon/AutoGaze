@@ -68,6 +68,8 @@ Relative paths are resolved from the repo root.
 
 For NVILA, the local `weights/NVILA-8B-HD-Video/preprocessor_config.json` may still contain the upstream default `autogaze_model_id: bfshi/AutoGaze`. The PoC configs override that processor argument to `weights/AutoGaze`, and the adapter resolves it to an absolute local path before loading. This avoids offline failures such as `bfshi/AutoGaze is not a local folder and is not a valid model`.
 
+The same local NVILA processor defaults to `num_video_frames=8`, while the local AutoGaze checkpoint reports `max_num_frames=16`. NVILA's tile processor requires `num_video_frames` to be a positive multiple of AutoGaze `max_num_frames`, so A0-A3 explicitly pass `num_video_frames: 16` and `num_video_frames_thumbnail: 16`. If a custom config sets an invalid value such as `8`, the adapter blocks with a clear message before generation.
+
 ## Real Loading Policy
 
 By default, scripts do not load heavy checkpoints. They run guarded smoke paths and record `stub`, `skipped`, or `blocked` adapter status.
