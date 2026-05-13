@@ -4,10 +4,11 @@ from __future__ import annotations
 import csv
 import json
 import math
+import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import torch
 import torch.nn.functional as F
@@ -230,6 +231,79 @@ class GazeResult:
     runtime_metadata: dict[str, Any]
     latency_ms: float
     gazing_info_for_vit: Mapping[str, Any] | None = None
+
+
+class ProgressReporter:
+    def __init__(self, *, enabled: bool = True) -> None:
+        self.enabled = bool(enabled)
+
+    def warmup(
+        self,
+        label: str,
+        fn: Callable[[], Any],
+        *,
+        runs: int,
+        device: str | None = None,
+    ) -> None:
+        if runs <= 0:
+            return
+        bar = self._start(f"{label} warm-up", total=runs, unit="run")
+        try:
+            for _ in range(runs):
+                synchronize_device(device)
+                fn()
+                synchronize_device(device)
+                self._update(bar, 1)
+        finally:
+            self._close(bar)
+
+    def timed(
+        self,
+        label: str,
+        fn: Callable[[], Any],
+        *,
+        device: str | None = None,
+    ) -> tuple[Any, float]:
+        bar = self._start(label, total=1, unit="run")
+        try:
+            synchronize_device(device)
+            start = time.perf_counter()
+            result = fn()
+            synchronize_device(device)
+            latency_ms = (time.perf_counter() - start) * 1000
+            self._update(bar, 1)
+            return result, latency_ms
+        finally:
+            self._close(bar)
+
+    def _start(self, label: str, *, total: int, unit: str) -> Any:
+        if not self.enabled:
+            return None
+        try:
+            from tqdm import tqdm
+
+            return tqdm(total=total, desc=label, unit=unit, leave=True, dynamic_ncols=True, file=sys.stderr)
+        except Exception:
+            print(f"{label} ...", file=sys.stderr)
+            return None
+
+    def _update(self, bar: Any, amount: int) -> None:
+        if bar is not None:
+            bar.update(amount)
+
+    def _close(self, bar: Any) -> None:
+        if bar is not None:
+            bar.close()
+
+
+def synchronize_device(device: str | None) -> None:
+    if device is None:
+        return
+    device_name = str(device)
+    if device_name.startswith("cuda") and torch.cuda.is_available():
+        torch.cuda.synchronize()
+    elif device_name == "mps" and hasattr(torch, "mps") and hasattr(torch.mps, "synchronize"):
+        torch.mps.synchronize()
 
 
 def json_safe(value: Any) -> Any:
@@ -606,8 +680,10 @@ def run_autogaze_stage(
     task_loss_requirement: float | None,
     strict_autogaze_params: bool,
     allow_real_model_loading: bool,
+    warmup_runs: int = 0,
+    progress: ProgressReporter | None = None,
 ) -> GazeResult:
-    start = time.perf_counter()
+    progress = progress or ProgressReporter(enabled=False)
     autogaze_enabled = bool(nested_get(cfg, "autogaze.enabled", False))
     checkpoint = nested_get(cfg, "autogaze.checkpoint_path") or nested_get(cfg, "autogaze.model_id")
     reason: str | None = None
@@ -634,7 +710,7 @@ def run_autogaze_stage(
             gaze_ratio=1.0,
             task_loss_requirement=task_loss_requirement,
             runtime_metadata=runtime,
-            start_time=start,
+            latency_ms=0.0,
         )
         return result
 
@@ -650,7 +726,7 @@ def run_autogaze_stage(
             gaze_ratio=gaze_ratio,
             task_loss_requirement=task_loss_requirement,
             runtime_metadata=runtime,
-            start_time=start,
+            latency_ms=0.0,
         )
     if allow_real_model_loading and has_checkpoint:
         try:
@@ -662,7 +738,8 @@ def run_autogaze_stage(
                 gaze_ratio=gaze_ratio,
                 task_loss_requirement=task_loss_requirement,
                 runtime_metadata=runtime,
-                start_time=start,
+                warmup_runs=warmup_runs,
+                progress=progress,
             )
             return result
         except Exception as exc:  # pragma: no cover - real model path is environment-dependent.
@@ -680,7 +757,7 @@ def run_autogaze_stage(
             gaze_ratio=gaze_ratio,
             task_loss_requirement=task_loss_requirement,
             runtime_metadata=runtime,
-            start_time=start,
+            latency_ms=0.0,
         )
 
     if not has_checkpoint:
@@ -696,7 +773,7 @@ def run_autogaze_stage(
         gaze_ratio=gaze_ratio,
         task_loss_requirement=task_loss_requirement,
         runtime_metadata=runtime,
-        start_time=start,
+        latency_ms=0.0,
     )
 
 
@@ -709,7 +786,8 @@ def _run_real_autogaze(
     gaze_ratio: float,
     task_loss_requirement: float | None,
     runtime_metadata: dict[str, Any],
-    start_time: float,
+    warmup_runs: int,
+    progress: ProgressReporter,
 ) -> GazeResult:
     from autogaze.models.autogaze import AutoGaze
 
@@ -721,8 +799,13 @@ def _run_real_autogaze(
     kwargs: dict[str, Any] = {"gazing_ratio": gaze_ratio}
     if task_loss_requirement is not None:
         kwargs["task_loss_requirement"] = task_loss_requirement
-    with torch.inference_mode():
-        outputs = model({"video": video}, **kwargs)
+
+    def forward_once() -> Mapping[str, Any]:
+        with torch.inference_mode():
+            return model({"video": video}, **kwargs)
+
+    progress.warmup("AutoGaze", forward_once, runs=warmup_runs, device=device)
+    outputs, latency_ms = progress.timed("AutoGaze", forward_once, device=device)
     return build_gaze_result(
         prepared,
         autogaze_enabled=True,
@@ -732,7 +815,7 @@ def _run_real_autogaze(
         gaze_ratio=gaze_ratio,
         task_loss_requirement=task_loss_requirement,
         runtime_metadata={**runtime_metadata, "raw_output_keys": sorted(str(key) for key in outputs.keys())},
-        start_time=start_time,
+        latency_ms=latency_ms,
         real_outputs=outputs,
     )
 
@@ -747,7 +830,7 @@ def build_gaze_result(
     gaze_ratio: float,
     task_loss_requirement: float | None,
     runtime_metadata: dict[str, Any],
-    start_time: float,
+    latency_ms: float,
     real_outputs: Mapping[str, Any] | None = None,
 ) -> GazeResult:
     video = prepared.processed_video
@@ -811,7 +894,7 @@ def build_gaze_result(
         patch_size=patch_size,
         per_frame=per_frame,
         runtime_metadata=runtime,
-        latency_ms=(time.perf_counter() - start_time) * 1000,
+        latency_ms=latency_ms,
         gazing_info_for_vit=gazing_info_for_vit,
     )
 
@@ -1293,7 +1376,14 @@ def build_metrics(
     output_text: str | None,
     skipped_stages: list[dict[str, str]],
     total_latency_ms: float,
+    preprocessing_latency_ms: float | None = None,
+    vision_encoder_latency_ms: float | None = None,
+    mllm_generation_latency_ms: float | None = None,
+    visualization_latency_ms: float | None = None,
+    wall_clock_latency_ms: float | None = None,
+    warmup_runs: int = 0,
 ) -> dict[str, Any]:
+    module_processing_latency_ms = total_latency_ms
     return {
         "mode": mode,
         "config_path": cfg.get("_config_path"),
@@ -1319,12 +1409,17 @@ def build_metrics(
         "token_reduction_ratio": gaze.token_reduction_ratio,
         "selected_patches_per_frame": [item["selected_token_count"] for item in gaze.per_frame],
         "selected_patches_per_scale": _sum_scale_counts(gaze.per_frame),
-        "preprocessing_latency_ms": None,
+        "preprocessing_latency_ms": preprocessing_latency_ms,
         "autogaze_latency_ms": gaze.latency_ms,
-        "vision_encoder_latency_ms": None,
+        "vision_encoder_latency_ms": vision_encoder_latency_ms,
         "mllm_prefill_latency_ms": None,
-        "mllm_decode_latency_ms": None,
-        "end_to_end_latency_ms": total_latency_ms,
+        "mllm_decode_latency_ms": mllm_generation_latency_ms,
+        "mllm_generation_latency_ms": mllm_generation_latency_ms,
+        "module_processing_latency_ms": module_processing_latency_ms,
+        "visualization_latency_ms": visualization_latency_ms,
+        "wall_clock_latency_ms": wall_clock_latency_ms,
+        "warmup_runs": warmup_runs,
+        "end_to_end_latency_ms": module_processing_latency_ms,
         "peak_vram": torch.cuda.max_memory_allocated() if torch.cuda.is_available() else None,
         "memory_unavailable": not torch.cuda.is_available(),
         "output_text": output_text,

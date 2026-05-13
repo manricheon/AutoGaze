@@ -72,6 +72,24 @@ The same local NVILA processor defaults to `num_video_frames=8`, while the local
 
 The PoC adapters pass Hugging Face model dtype with the current `dtype` keyword instead of deprecated `torch_dtype`. Official processor configs set `use_fast: false` explicitly to preserve the slow image processor behavior saved with the local checkpoints and avoid the Transformers warning about a future default change. Override `processor_from_pretrained_kwargs.use_fast` only when you intentionally want to test the fast processor path.
 
+## Progress And Latency
+
+Inference commands show tqdm-style progress for the timed module stages:
+
+- `AutoGaze`
+- `ViT encoder`, when the full pipeline requires a separate encoder
+- `MLLM`
+
+Real module timing uses one warm-up run by default before measurement. The default is configured as `runtime.warmup_runs: 1` and can be overridden with `--warmup-runs 0` or another integer. Warm-up, model loading, artifact writing, and visualization are excluded from the module latency metrics.
+
+The main processing latency in `logs/metrics.json` is `module_processing_latency_ms`, also mirrored to `end_to_end_latency_ms` for compatibility. It is the sum of measured module processing latencies only:
+
+```text
+autogaze_latency_ms + vision_encoder_latency_ms + mllm_generation_latency_ms
+```
+
+`visualization_latency_ms`, `preprocessing_latency_ms`, and `wall_clock_latency_ms` are recorded separately. Use `--no-progress` to disable command-line progress bars while keeping the same timing behavior.
+
 ## Real Loading Policy
 
 By default, scripts do not load heavy checkpoints. They run guarded smoke paths and record `stub`, `skipped`, or `blocked` adapter status.

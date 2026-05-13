@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from poc_infer_utils import (
+    ProgressReporter,
     build_metrics,
     cli_or_config,
     load_config,
@@ -51,6 +52,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--task-loss-requirement", type=float, default=None)
     parser.add_argument("--strict-autogaze-params", action="store_true")
     parser.add_argument("--allow-real-model-loading", action="store_true")
+    parser.add_argument("--warmup-runs", type=int, default=None)
+    parser.add_argument("--no-progress", action="store_true")
 
     parser.add_argument("--overlay-style", choices=["mask", "box", "both"], default=None)
     parser.add_argument("--overlay-alpha", type=float, default=None)
@@ -89,14 +92,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
-    start = time.perf_counter()
+    run_start = time.perf_counter()
     cfg = _with_model_overrides(load_config(args.config), args)
     device = normalize_device(str(cli_or_config(args.device, cfg, "runtime.device", "cpu")))
     dtype = str(cli_or_config(args.dtype, cfg, "runtime.dtype", "float32"))
+    warmup_runs = max(0, int(cli_or_config(args.warmup_runs, cfg, "runtime.warmup_runs", 1)))
+    progress = ProgressReporter(enabled=not args.no_progress and bool(nested_get(cfg, "runtime.progress", True)))
     output_dir = Path(str(cli_or_config(args.output_dir, cfg, "output.output_dir", "outputs/poc_full"))).expanduser()
     if not output_dir.is_absolute():
         output_dir = Path.cwd() / output_dir
 
+    preprocessing_start = time.perf_counter()
     prepared = prepare_video(
         cfg,
         video_path=args.video_path,
@@ -111,6 +117,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         max_chops=cli_or_config(args.max_chops, cfg, "scaling.max_chops", None),
         chop_merge_mode=str(cli_or_config(args.chop_merge_mode, cfg, "scaling.chop_merge_mode", "metadata_only")),
     )
+    preprocessing_latency_ms = (time.perf_counter() - preprocessing_start) * 1000
     allow_real = bool(args.allow_real_model_loading or nested_get(cfg, "runtime.allow_real_model_loading", False))
     gaze = run_autogaze_stage(
         cfg,
@@ -121,6 +128,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         task_loss_requirement=cli_or_config(args.task_loss_requirement, cfg, "autogaze.task_loss_requirement", 0.7),
         strict_autogaze_params=bool(args.strict_autogaze_params or nested_get(cfg, "autogaze.strict_params", False)),
         allow_real_model_loading=allow_real,
+        warmup_runs=warmup_runs if allow_real else 0,
+        progress=progress,
     )
     artifacts = write_autogaze_artifacts(output_dir, prepared, gaze)
 
@@ -141,6 +150,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     visual_tokens = None
     actual_vision_encoder = vision.name
     blocked_stages: list[str] = []
+    vision_latency_ms: float | None = None
     if not vision_required:
         vision_status = AdapterStatus(
             vision.name,
@@ -162,7 +172,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         else:
             autogaze_payload = None if not gaze.autogaze_enabled or gaze.status == "blocked" else gaze.gazing_info_for_vit
             try:
-                vision_output = vision.forward(prepared.processed_video, autogaze=autogaze_payload)
+                def vision_forward_once() -> dict[str, Any]:
+                    return vision.forward(prepared.processed_video, autogaze=autogaze_payload)
+
+                if allow_real and vision_status.status == "real":
+                    progress.warmup("ViT encoder", vision_forward_once, runs=warmup_runs, device=device)
+                vision_output, vision_latency_ms = progress.timed("ViT encoder", vision_forward_once, device=device)
                 visual_tokens = vision_output.get("visual_tokens")
                 if vision_status.status != "real":
                     skipped.append({"stage": "vision_encoder", "reason": vision_status.reason or f"{vision.name} used stub output"})
@@ -174,6 +189,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     mllm = build_mllm(mllm_name, nested_get(cfg, "mllm", {}))
     mllm_status = mllm.load(allow_real_model_loading=allow_real, device=device, dtype=dtype)
     max_new_tokens = int(cli_or_config(args.max_new_tokens, cfg, "generation.max_new_tokens", 32))
+    mllm_generation_latency_ms: float | None = None
     if allow_real and mllm_status.status != "real":
         blocked_stages.append("mllm_generation")
         generation = {
@@ -198,13 +214,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "query_text_used": True,
         }
     else:
-        generation = mllm.generate(
-            query_text=args.query_text,
-            video=prepared.processed_video,
-            visual_tokens=visual_tokens if mllm.supports_direct_visual_tokens() else None,
-            max_new_tokens=max_new_tokens,
-            video_path=args.video_path,
-        )
+        def mllm_generate_once() -> dict[str, Any]:
+            return mllm.generate(
+                query_text=args.query_text,
+                video=prepared.processed_video,
+                visual_tokens=visual_tokens if mllm.supports_direct_visual_tokens() else None,
+                max_new_tokens=max_new_tokens,
+                video_path=args.video_path,
+            )
+
+        if allow_real and mllm_status.status == "real":
+            progress.warmup("MLLM", mllm_generate_once, runs=warmup_runs, device=device)
+        generation, mllm_generation_latency_ms = progress.timed("MLLM", mllm_generate_once, device=device)
     generation_status = str(generation.get("status", "unknown"))
     output_text = generation.get("answer")
     if generation_status != "real":
@@ -228,6 +249,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         },
     )
     artifacts["answer"] = str(answer_path)
+    visualization_start = time.perf_counter()
     artifacts.update(
         write_visualizations(
             output_dir,
@@ -249,8 +271,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             generation_status=generation_status,
         )
     )
+    visualization_latency_ms = (time.perf_counter() - visualization_start) * 1000
 
-    total_latency = (time.perf_counter() - start) * 1000
+    module_processing_latency_ms = gaze.latency_ms + float(vision_latency_ms or 0.0) + float(mllm_generation_latency_ms or 0.0)
+    wall_clock_latency_ms = (time.perf_counter() - run_start) * 1000
     metrics = build_metrics(
         mode="full_pipeline",
         cfg=cfg,
@@ -265,7 +289,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         generation_status=generation_status,
         output_text=output_text,
         skipped_stages=skipped,
-        total_latency_ms=total_latency,
+        total_latency_ms=module_processing_latency_ms,
+        preprocessing_latency_ms=preprocessing_latency_ms,
+        vision_encoder_latency_ms=vision_latency_ms,
+        mllm_generation_latency_ms=mllm_generation_latency_ms,
+        visualization_latency_ms=visualization_latency_ms,
+        wall_clock_latency_ms=wall_clock_latency_ms,
+        warmup_runs=warmup_runs,
     )
     metrics["adapter_statuses"] = {
         "vision_encoder": vision_status.to_dict(),

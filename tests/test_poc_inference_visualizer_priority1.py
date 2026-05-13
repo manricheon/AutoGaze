@@ -69,6 +69,8 @@ def test_configs_reference_local_weight_cache_when_available() -> None:
     assert a2["mllm"]["class_name"] == "AutoModel"
     assert a2["mllm"]["official_processor_owns_vision"] is True
     assert a2["mllm"]["sync_autogaze_controls_from_config"] is True
+    assert a2["runtime"]["warmup_runs"] == 1
+    assert a2["runtime"]["progress"] is True
 
     e1 = load_config(_cfg("E1_vjepa2_encoder.yaml"))
     assert e1["vision_encoder"]["checkpoint_path"] == "weights/vjepa2-vitl-fpc64-256"
@@ -226,6 +228,11 @@ def test_autogaze_dummy_run_writes_flat_outputs_and_metrics(tmp_path: Path) -> N
     metrics = json.loads((output_dir / "logs" / "metrics.json").read_text(encoding="utf-8"))
     assert metrics["real_stub_blocked_status"] == "stub_dummy_autogaze"
     assert metrics["gaze_ratio"] == 0.25
+    assert metrics["warmup_runs"] == 1
+    assert metrics["autogaze_latency_ms"] == 0.0
+    assert metrics["module_processing_latency_ms"] == metrics["end_to_end_latency_ms"]
+    assert metrics["visualization_latency_ms"] is not None
+    assert metrics["wall_clock_latency_ms"] >= metrics["module_processing_latency_ms"]
     selected = json.loads((output_dir / "autogaze" / "selected_patch_indices.json").read_text(encoding="utf-8"))
     records = selected["frames"][0]["selected_patch_records"]
     widths_by_scale = {
@@ -277,6 +284,10 @@ def test_full_pipeline_preserves_query_and_writes_reports(tmp_path: Path) -> Non
     assert metrics["query_text"] == "What is happening?"
     assert metrics["requested_vision_encoder"] == "modified_siglip"
     assert metrics["requested_mllm"] == "nvila"
+    assert metrics["warmup_runs"] == 1
+    assert metrics["mllm_generation_latency_ms"] is not None
+    assert metrics["module_processing_latency_ms"] == metrics["end_to_end_latency_ms"]
+    assert metrics["visualization_latency_ms"] is not None
     assert (output_dir / "logs" / "metrics.csv").exists()
 
 
@@ -682,6 +693,9 @@ def test_infer_full_qwen_real_official_processor_integration(monkeypatch: pytest
     metrics = json.loads((output_dir / "logs" / "metrics.json").read_text(encoding="utf-8"))
     assert metrics["adapter_statuses"]["vision_encoder"]["status"] == "skipped"
     assert metrics["adapter_statuses"]["mllm"]["metadata"]["official_processor_path"] is True
+    assert metrics["warmup_runs"] == 1
+    assert metrics["mllm_generation_latency_ms"] is not None
+    assert metrics["module_processing_latency_ms"] == metrics["end_to_end_latency_ms"]
 
 
 def test_infer_full_nvila_real_official_processor_integration(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -771,3 +785,6 @@ def test_infer_full_nvila_real_official_processor_integration(monkeypatch: pytes
     metrics = json.loads((output_dir / "logs" / "metrics.json").read_text(encoding="utf-8"))
     assert metrics["adapter_statuses"]["mllm"]["metadata"]["processor_autogaze_controls"]["gazing_ratio_tile"] is None
     assert metrics["adapter_statuses"]["mllm"]["metadata"]["official_processor_path"] is True
+    assert metrics["warmup_runs"] == 1
+    assert metrics["mllm_generation_latency_ms"] is not None
+    assert metrics["module_processing_latency_ms"] == metrics["end_to_end_latency_ms"]

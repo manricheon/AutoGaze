@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from poc_infer_utils import (
+    ProgressReporter,
     build_metrics,
     cli_or_config,
     load_config,
@@ -46,6 +47,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--task-loss-requirement", type=float, default=None)
     parser.add_argument("--strict-autogaze-params", action="store_true")
     parser.add_argument("--allow-real-model-loading", action="store_true")
+    parser.add_argument("--warmup-runs", type=int, default=None)
+    parser.add_argument("--no-progress", action="store_true")
 
     parser.add_argument("--overlay-style", choices=["mask", "box", "both"], default=None)
     parser.add_argument("--overlay-alpha", type=float, default=None)
@@ -68,14 +71,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
-    start = time.perf_counter()
+    run_start = time.perf_counter()
     cfg = load_config(args.config)
     device = normalize_device(str(cli_or_config(args.device, cfg, "runtime.device", "cpu")))
     dtype = str(cli_or_config(args.dtype, cfg, "runtime.dtype", "float32"))
+    warmup_runs = max(0, int(cli_or_config(args.warmup_runs, cfg, "runtime.warmup_runs", 1)))
+    progress = ProgressReporter(enabled=not args.no_progress and bool(nested_get(cfg, "runtime.progress", True)))
     output_dir = Path(str(cli_or_config(args.output_dir, cfg, "output.output_dir", "outputs/poc_autogaze"))).expanduser()
     if not output_dir.is_absolute():
         output_dir = Path.cwd() / output_dir
 
+    preprocessing_start = time.perf_counter()
     prepared = prepare_video(
         cfg,
         video_path=args.video_path,
@@ -90,6 +96,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         max_chops=cli_or_config(args.max_chops, cfg, "scaling.max_chops", None),
         chop_merge_mode=str(cli_or_config(args.chop_merge_mode, cfg, "scaling.chop_merge_mode", "metadata_only")),
     )
+    preprocessing_latency_ms = (time.perf_counter() - preprocessing_start) * 1000
     allow_real = bool(args.allow_real_model_loading or nested_get(cfg, "runtime.allow_real_model_loading", False))
     gaze = run_autogaze_stage(
         cfg,
@@ -100,9 +107,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         task_loss_requirement=cli_or_config(args.task_loss_requirement, cfg, "autogaze.task_loss_requirement", 0.7),
         strict_autogaze_params=bool(args.strict_autogaze_params or nested_get(cfg, "autogaze.strict_params", False)),
         allow_real_model_loading=allow_real,
+        warmup_runs=warmup_runs if allow_real else 0,
+        progress=progress,
     )
 
     artifacts = write_autogaze_artifacts(output_dir, prepared, gaze)
+    visualization_start = time.perf_counter()
     artifacts.update(
         write_visualizations(
             output_dir,
@@ -122,13 +132,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             video_export_mode=str(cli_or_config(args.video_export_mode, cfg, "visualization.video_export_mode", "sampled_only")),
         )
     )
+    visualization_latency_ms = (time.perf_counter() - visualization_start) * 1000
 
     skipped = []
     if gaze.status == "blocked":
         skipped.append({"stage": "autogaze", "reason": gaze.reason or "AutoGaze blocked"})
     elif gaze.status.startswith("stub"):
         skipped.append({"stage": "autogaze", "reason": gaze.reason or "stub AutoGaze output"})
-    total_latency = (time.perf_counter() - start) * 1000
+    module_processing_latency_ms = gaze.latency_ms
+    wall_clock_latency_ms = (time.perf_counter() - run_start) * 1000
     metrics = build_metrics(
         mode="autogaze_only",
         cfg=cfg,
@@ -143,7 +155,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         generation_status="not_applicable",
         output_text=None,
         skipped_stages=skipped,
-        total_latency_ms=total_latency,
+        total_latency_ms=module_processing_latency_ms,
+        preprocessing_latency_ms=preprocessing_latency_ms,
+        visualization_latency_ms=visualization_latency_ms,
+        wall_clock_latency_ms=wall_clock_latency_ms,
+        warmup_runs=warmup_runs,
     )
     summary = {
         "mode": "autogaze_only",

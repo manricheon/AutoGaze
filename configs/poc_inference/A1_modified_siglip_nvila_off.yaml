@@ -70,6 +70,8 @@ runtime:
   device: cpu
   dtype: float32
   allow_real_model_loading: false
+  warmup_runs: 1
+  progress: true
 
 generation:
   max_new_tokens: 32
