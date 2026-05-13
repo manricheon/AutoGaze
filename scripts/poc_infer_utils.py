@@ -520,6 +520,7 @@ def prepare_video(
         frame_selection_mode=frame_selection_mode,
         frame_interval=frame_interval,
         max_windows=max_windows,
+        pad_last=scaling_mode == "chop",
         original_fps=fps,
     )
 
@@ -596,6 +597,7 @@ def prepare_video(
         "resolution": resolution,
         "number_of_windows": len(selection.windows),
         "first_processed_shape": [int(dim) for dim in processed_video.shape],
+        "temporal_pad_last_applied": bool(scaling_mode == "chop" and any(window.is_padded for window in selection.windows)),
         "windows": scaling_windows,
     }
     return PreparedVideo(
@@ -1750,7 +1752,7 @@ def build_metrics(
 
 
 def _source_frame_count(frame_records: list[Mapping[str, Any]]) -> int:
-    return len({(int(item.get("window_id", 0)), int(item.get("position_in_window", idx))) for idx, item in enumerate(frame_records)})
+    return len({int(item.get("source_frame_index", idx)) for idx, item in enumerate(frame_records) if not bool(item.get("is_padded", False))})
 
 
 def _spatial_chops_per_window(chop_metadata: Mapping[str, Any] | None) -> dict[str, int] | None:

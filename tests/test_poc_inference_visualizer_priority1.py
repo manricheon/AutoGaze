@@ -218,6 +218,29 @@ def test_frame_selection_scaling_and_chop_metadata() -> None:
     assert chopped.frame_records[0]["chop_index"] == 0
     assert chopped.frame_records[2]["chop_index"] == 1
 
+    long_cfg = load_config(_cfg("A2_modified_siglip_nvila_on.yaml"))
+    long_cfg["input"] = {"dummy_frames": 28, "dummy_resolution": 64}
+    long_chopped = prepare_video(
+        long_cfg,
+        video_path="dummy",
+        frame_selection_mode="all",
+        num_frames=16,
+        frame_interval=1,
+        max_windows=None,
+        scaling_mode="chop",
+        resolution=32,
+        chop_size=16,
+        chop_overlap=0,
+        max_chops=2,
+        chop_merge_mode="metadata_only",
+    )
+    assert long_chopped.frame_selection.pad_last is True
+    assert len(long_chopped.frame_selection.windows) == 2
+    assert long_chopped.frame_selection.windows[1].is_padded is True
+    assert long_chopped.frame_selection.windows[1].effective_num_frames == 12
+    assert long_chopped.processed_video.shape == (4, 16, 3, 32, 32)
+    assert long_chopped.scaling_metadata["temporal_pad_last_applied"] is True
+
 
 def test_chop_mode_expands_processed_frames_and_token_counts(tmp_path: Path) -> None:
     output_dir = tmp_path / "autogaze_chop"
