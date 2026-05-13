@@ -305,6 +305,7 @@ def test_chop_mode_expands_processed_frames_and_token_counts(tmp_path: Path) -> 
             "3",
             "--gaze-ratio",
             "0.25",
+            "--save-frame-images",
             "--no-progress",
         ]
     )
@@ -350,6 +351,7 @@ def test_cli_all_frame_selection_saves_all_dummy_frames(tmp_path: Path) -> None:
             "resize",
             "--resolution",
             "32",
+            "--save-frame-images",
             "--no-progress",
         ]
     )
@@ -363,6 +365,42 @@ def test_cli_all_frame_selection_saves_all_dummy_frames(tmp_path: Path) -> None:
     assert frame_selection["original_frame_count"] == 8
     assert visualization["frame_count"] == 8
     assert (output_dir / "visualizations" / "autogaze" / "frames" / "frame_000007_overlay.png").exists()
+
+
+def test_frame_images_are_opt_in(tmp_path: Path) -> None:
+    output_dir = tmp_path / "no_frame_images"
+    args = infer_autogaze.parse_args(
+        [
+            "--config",
+            str(_cfg("A2_modified_siglip_nvila_on.yaml")),
+            "--video-path",
+            "dummy",
+            "--output-dir",
+            str(output_dir),
+            "--device",
+            "cpu",
+            "--dtype",
+            "float32",
+            "--frame-selection-mode",
+            "sample",
+            "--num-frames",
+            "2",
+            "--scaling-mode",
+            "resize",
+            "--resolution",
+            "32",
+            "--no-progress",
+        ]
+    )
+    infer_autogaze.run(args)
+    visualization = json.loads(
+        (output_dir / "visualizations" / "autogaze" / "metadata" / "visualization_metadata.json").read_text(encoding="utf-8")
+    )
+    assert visualization["frame_count"] == 2
+    assert visualization["rendered_frame_count"] == 0
+    assert visualization["frame_images_saved"] is False
+    assert not (output_dir / "visualizations" / "autogaze" / "frames").exists()
+    assert not (output_dir / "visualizations" / "autogaze" / "scale_panels").exists()
 
 
 def test_chop_mllm_generation_falls_back_to_source_video_for_text() -> None:
@@ -433,6 +471,7 @@ def test_autogaze_dummy_run_writes_flat_outputs_and_metrics(tmp_path: Path) -> N
             "32",
             "--gaze-ratio",
             "0.25",
+            "--save-frame-images",
             "--save-side-by-side-video",
         ]
     )
@@ -1089,6 +1128,68 @@ def test_nvila_tensor_video_input_flattens_chop_batches(monkeypatch: pytest.Monk
     )
     assert result["status"] == "real"
     assert result["metadata"]["video_input_kind"] == "processed_tensor_pil_frames_to_48"
+
+
+def test_nvila_tensor_video_input_uses_config_frame_count_when_processor_attr_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_module = types.ModuleType("fake_nvila_no_frame_attr")
+
+    class AutoModel:
+        device = torch.device("cpu")
+
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            return cls()
+
+        def eval(self):
+            return self
+
+        def generate(self, **inputs):
+            assert "input_ids" in inputs
+            return torch.tensor([[41, 42, 43]])
+
+    class AutoProcessor:
+        tokenizer = types.SimpleNamespace(video_token="<video>")
+
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            return cls()
+
+        def __call__(self, *, text, videos=None, return_tensors=None, **_kwargs):
+            assert isinstance(videos, list)
+            assert len(videos) == 16
+            return {"input_ids": torch.tensor([[41, 42]])}
+
+        def batch_decode(self, outputs, skip_special_tokens=True):
+            assert outputs.tolist() == [[43]]
+            return ["padded nvila answer"]
+
+    fake_module.AutoModel = AutoModel
+    fake_module.AutoProcessor = AutoProcessor
+    monkeypatch.setitem(sys.modules, "fake_nvila_no_frame_attr", fake_module)
+
+    adapter = NVILAAdapter(
+        {
+            "module_path": "fake_nvila_no_frame_attr",
+            "class_name": "AutoModel",
+            "processor_module_path": "fake_nvila_no_frame_attr",
+            "processor_class_name": "AutoProcessor",
+            "model_id": "fake/nvila",
+            "processor_path": "fake/nvila",
+            "prompt_template": "{video_token}\n\n{prompt}",
+            "processor_from_pretrained_kwargs": {"num_video_frames": 16},
+        }
+    )
+    status = adapter.load(allow_real_model_loading=True, device="cpu", dtype="float32")
+    assert status.status == "real"
+    result = adapter.generate(
+        query_text="Pad short tensor.",
+        video=torch.zeros(1, 1, 3, 8, 8),
+        max_new_tokens=3,
+        video_path=None,
+    )
+    assert result["status"] == "real"
+    assert result["metadata"]["video_input_kind"] == "processed_tensor_pil_frames_to_16"
+    assert result["metadata"]["target_frame_count"] == 16
 
 
 def test_real_loading_blocked_does_not_fall_back_to_stub_tokens(tmp_path: Path) -> None:

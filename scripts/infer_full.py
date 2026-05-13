@@ -66,6 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--show-scale-label", action="store_true")
     parser.add_argument("--metadata-placement", choices=["outside", "inside", "none"], default=None)
     parser.add_argument("--info-panel-position", choices=["bottom", "right"], default=None)
+    parser.add_argument("--save-frame-images", action="store_true")
     parser.add_argument("--save-overlay-video", action="store_true")
     parser.add_argument("--save-side-by-side-video", action="store_true")
     parser.add_argument("--save-scale-panel-video", action="store_true")
@@ -281,6 +282,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             show_scale_label=bool(args.show_scale_label or nested_get(cfg, "visualization.show_scale_label", False)),
             metadata_placement=str(cli_or_config(args.metadata_placement, cfg, "visualization.metadata_placement", "outside")),
             info_panel_position=str(cli_or_config(args.info_panel_position, cfg, "visualization.info_panel_position", "bottom")),
+            save_frame_images=bool(args.save_frame_images or nested_get(cfg, "visualization.save_frame_images", False)),
             save_overlay_video=bool(args.save_overlay_video or nested_get(cfg, "visualization.save_overlay_video", False)),
             save_side_by_side_video=bool(args.save_side_by_side_video or nested_get(cfg, "visualization.save_side_by_side_video", False)),
             save_scale_panel_video=bool(args.save_scale_panel_video or nested_get(cfg, "visualization.save_scale_panel_video", False)),

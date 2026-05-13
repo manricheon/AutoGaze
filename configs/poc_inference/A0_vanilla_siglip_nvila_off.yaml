@@ -85,6 +85,7 @@ visualization:
   show_scale_label: false
   metadata_placement: outside
   info_panel_position: bottom
+  save_frame_images: false
   save_overlay_video: false
   save_side_by_side_video: false
   save_scale_panel_video: false

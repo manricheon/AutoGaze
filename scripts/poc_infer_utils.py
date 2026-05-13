@@ -1268,6 +1268,7 @@ def write_visualizations(
     show_scale_label: bool,
     metadata_placement: str,
     info_panel_position: str,
+    save_frame_images: bool,
     save_overlay_video: bool,
     save_side_by_side_video: bool,
     save_scale_panel_video: bool,
@@ -1281,72 +1282,89 @@ def write_visualizations(
     panels_dir = base / "scale_panels"
     videos_dir = base / "videos"
     metadata_dir = base / "metadata"
-    for directory in (frames_dir, panels_dir, videos_dir, metadata_dir):
+    directories = [metadata_dir]
+    if save_frame_images:
+        directories.extend([frames_dir, panels_dir])
+    if save_overlay_video or save_side_by_side_video or save_scale_panel_video:
+        directories.append(videos_dir)
+    for directory in directories:
         directory.mkdir(parents=True, exist_ok=True)
 
+    render_needed = save_frame_images or save_overlay_video or save_side_by_side_video or save_scale_panel_video
     if prepared.chop_metadata is not None:
         visualization_mode = "merged_chop_source_frames"
-        overlay_images, side_by_side_images, scale_panel_images, visualization_records = _write_chop_merged_visualization_frames(
-            frames_dir,
-            panels_dir,
-            prepared,
-            gaze,
-            overlay_style=overlay_style,
-            overlay_alpha=overlay_alpha,
-            multi_scale_overlay=multi_scale_overlay,
-            show_patch_index=show_patch_index,
-            show_scale_label=show_scale_label,
-            metadata_placement=metadata_placement,
-            info_panel_position=info_panel_position,
-            query_text=query_text,
-            generation_status=generation_status,
-        )
+        if render_needed:
+            overlay_images, side_by_side_images, scale_panel_images, visualization_records = _write_chop_merged_visualization_frames(
+                frames_dir,
+                panels_dir,
+                prepared,
+                gaze,
+                overlay_style=overlay_style,
+                overlay_alpha=overlay_alpha,
+                multi_scale_overlay=multi_scale_overlay,
+                show_patch_index=show_patch_index,
+                show_scale_label=show_scale_label,
+                metadata_placement=metadata_placement,
+                info_panel_position=info_panel_position,
+                query_text=query_text,
+                generation_status=generation_status,
+                save_frame_images=save_frame_images,
+            )
+        else:
+            grouped_records = _group_chop_records(gaze.per_frame)
+            visualization_records = [_merged_chop_record(records, idx) for idx, records in enumerate(grouped_records)]
+            overlay_images = []
+            side_by_side_images = []
+            scale_panel_images = []
     else:
         visualization_mode = "processed_frames"
         visualization_records = prepared.frame_records
         overlay_images = []
         side_by_side_images = []
         scale_panel_images = []
-        frames = flatten_video_frames(prepared.processed_video).detach().cpu()
-        for idx, frame in enumerate(frames):
-            record = gaze.per_frame[idx]
-            base_image = tensor_to_image(frame)
-            overlay = render_overlay(
-                base_image,
-                record,
-                gaze.patch_grid,
-                overlay_style=overlay_style,
-                overlay_alpha=overlay_alpha,
-                multi_scale_overlay=multi_scale_overlay,
-                show_patch_index=show_patch_index,
-                show_scale_label=show_scale_label,
-            )
-            overlay_with_panel = add_info_panel(
-                overlay,
-                record,
-                gaze,
-                scaling_mode=prepared.scaling_metadata["scaling_mode"],
-                metadata_placement=metadata_placement,
-                info_panel_position=info_panel_position,
-                query_text=query_text,
-                generation_status=generation_status,
-            )
-            overlay_path = frames_dir / f"frame_{idx:06d}_overlay.png"
-            overlay_with_panel.save(overlay_path)
-            overlay_images.append(overlay_with_panel.convert("RGB"))
+        if render_needed:
+            frames = flatten_video_frames(prepared.processed_video).detach().cpu()
+            for idx, frame in enumerate(frames):
+                record = gaze.per_frame[idx]
+                base_image = tensor_to_image(frame)
+                overlay = render_overlay(
+                    base_image,
+                    record,
+                    gaze.patch_grid,
+                    overlay_style=overlay_style,
+                    overlay_alpha=overlay_alpha,
+                    multi_scale_overlay=multi_scale_overlay,
+                    show_patch_index=show_patch_index,
+                    show_scale_label=show_scale_label,
+                )
+                overlay_with_panel = add_info_panel(
+                    overlay,
+                    record,
+                    gaze,
+                    scaling_mode=prepared.scaling_metadata["scaling_mode"],
+                    metadata_placement=metadata_placement,
+                    info_panel_position=info_panel_position,
+                    query_text=query_text,
+                    generation_status=generation_status,
+                )
+                if save_frame_images:
+                    overlay_path = frames_dir / f"frame_{idx:06d}_overlay.png"
+                    overlay_with_panel.save(overlay_path)
+                overlay_images.append(overlay_with_panel.convert("RGB"))
 
-            scale_panel = render_scale_panel(base_image, record, gaze.patch_grid)
-            scale_panel_path = panels_dir / f"frame_{idx:06d}_scale_panel.png"
-            scale_panel.save(scale_panel_path)
-            scale_panel_images.append(scale_panel.convert("RGB"))
+                scale_panel = render_scale_panel(base_image, record, gaze.patch_grid)
+                if save_frame_images:
+                    scale_panel_path = panels_dir / f"frame_{idx:06d}_scale_panel.png"
+                    scale_panel.save(scale_panel_path)
+                scale_panel_images.append(scale_panel.convert("RGB"))
 
-            side_by_side = combine_side_by_side(base_image, overlay)
-            side_by_side_images.append(side_by_side.convert("RGB"))
+                side_by_side = combine_side_by_side(base_image, overlay)
+                side_by_side_images.append(side_by_side.convert("RGB"))
 
-    artifacts: dict[str, str] = {
-        "frames_dir": str(frames_dir),
-        "scale_panels_dir": str(panels_dir),
-    }
+    artifacts: dict[str, str] = {}
+    if save_frame_images:
+        artifacts["frames_dir"] = str(frames_dir)
+        artifacts["scale_panels_dir"] = str(panels_dir)
     video_errors: dict[str, str] = {}
     if save_overlay_video:
         path = videos_dir / "autogaze_overlay.mp4"
@@ -1374,7 +1392,9 @@ def write_visualizations(
             "flat_output_structure": True,
             "visualization_mode": visualization_mode,
             "video_export_mode": video_export_mode,
-            "frame_count": len(overlay_images),
+            "frame_images_saved": bool(save_frame_images),
+            "rendered_frame_count": len(overlay_images),
+            "frame_count": len(visualization_records),
             "processed_crop_frame_count": len(gaze.per_frame) if prepared.chop_metadata is not None else None,
             "frame_records": visualization_records,
             "processed_frame_records": prepared.frame_records,
@@ -1403,6 +1423,7 @@ def _write_chop_merged_visualization_frames(
     info_panel_position: str,
     query_text: str | None,
     generation_status: str | None,
+    save_frame_images: bool,
 ) -> tuple[list[Image.Image], list[Image.Image], list[Image.Image], list[dict[str, Any]]]:
     overlay_images: list[Image.Image] = []
     side_by_side_images: list[Image.Image] = []
@@ -1434,13 +1455,15 @@ def _write_chop_merged_visualization_frames(
             query_text=query_text,
             generation_status=generation_status,
         )
-        overlay_path = frames_dir / f"frame_{idx:06d}_overlay.png"
-        overlay_with_panel.save(overlay_path)
+        if save_frame_images:
+            overlay_path = frames_dir / f"frame_{idx:06d}_overlay.png"
+            overlay_with_panel.save(overlay_path)
         overlay_images.append(overlay_with_panel.convert("RGB"))
 
         scale_panel = render_chop_merged_scale_panel(base_image, records)
-        scale_panel_path = panels_dir / f"frame_{idx:06d}_scale_panel.png"
-        scale_panel.save(scale_panel_path)
+        if save_frame_images:
+            scale_panel_path = panels_dir / f"frame_{idx:06d}_scale_panel.png"
+            scale_panel.save(scale_panel_path)
         scale_panel_images.append(scale_panel.convert("RGB"))
 
         side_by_side = combine_side_by_side(base_image, overlay)

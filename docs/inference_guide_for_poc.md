@@ -123,6 +123,7 @@ python scripts/infer_autogaze.py \
   --scaling-mode resize \
   --resolution 64 \
   --gaze-ratio 0.25 \
+  --save-frame-images \
   --save-side-by-side-video \
   --json
 ```
@@ -315,9 +316,11 @@ For large and long videos, chop mode applies two separate operations. Spatially,
 
 The token-saving comparison in chop mode is therefore crop-expanded: `full_processed_visual_token_count` is the full token count across all processed crops, and `autogaze_selected_visual_token_count` is the subset selected by AutoGaze. `estimated_visual_token_savings_ratio` reports the reduction before the MLLM. In full inference, chop mode forces the MLLM adapter to consume the processed crop tensor instead of bypassing it with the original video path. Metrics record this as `mllm_video_input_source: processed_chop_tensor`.
 
-If the official MLLM processor cannot generate from the flat processed chop tensor, the full pipeline retries generation with the source video path when one is available. This is recorded explicitly with `mllm_chop_tensor_attempted: true`, `mllm_chop_source_fallback_used: true`, and `mllm_video_input_source: source_video_path_after_chop_tensor_failure`. For NVILA, the source-video retry still uses the official NVILA-HD-Video processor, which performs its own tiling/chunking and AutoGaze-controlled token scaling when the NVILA processor is configured with AutoGaze. For Qwen, the source-video retry uses Qwen's own processor and does not claim AutoGaze visual-token injection.
+If the official MLLM processor cannot generate from the flat processed chop tensor, the full pipeline retries generation with the source video path when one is available. This is recorded explicitly with `mllm_chop_tensor_attempted: true`, `mllm_chop_source_fallback_used: true`, and `mllm_video_input_source: source_video_path_after_chop_tensor_failure`. For NVILA tensor inputs, the adapter pads or samples PIL frames to the validated `num_video_frames` processor setting, normally 16 with the local AutoGaze checkpoint, before calling the official processor. For Qwen, the source-video retry uses Qwen's own processor and does not claim AutoGaze visual-token injection.
 
-For visualization, chop mode writes the primary `visualizations/autogaze/frames` and video outputs as merged source-frame views. Each selected crop overlay is projected back into its `source_box` on the original frame, so the frame/video view matches the original video layout. Crop-frame records remain available in JSON via `processed_frame_records` and `autogaze/selected_patch_indices.json`.
+Frame PNGs are no longer saved by default. Pass `--save-frame-images` or set `visualization.save_frame_images: true` to write `visualizations/autogaze/frames` and `visualizations/autogaze/scale_panels`. Video exports remain separate opt-in flags: `--save-overlay-video`, `--save-side-by-side-video`, and `--save-scale-panel-video`.
+
+For visualization, chop mode renders merged source-frame views when frame images or videos are requested. Each selected crop overlay is projected back into its `source_box` on the original frame, so the frame/video view matches the original video layout. Crop-frame records remain available in JSON via `processed_frame_records` and `autogaze/selected_patch_indices.json`.
 
 When `--frame-selection-mode all` is passed on the command line, the CLI treats it as an explicit request to process every frame window and ignores the smoke-config `frame_selection.max_windows: 1` cap. Use `--max-windows N` to cap it again, or `--max-windows 0` to request unlimited windows explicitly.
 
@@ -340,11 +343,11 @@ outputs/<run>/
     chop_metadata.json
   visualizations/
     autogaze/
-      frames/frame_000000_overlay.png
-      scale_panels/frame_000000_scale_panel.png
-      videos/autogaze_overlay.mp4
-      videos/autogaze_side_by_side.mp4
-      videos/autogaze_scale_panels.mp4
+      frames/frame_000000_overlay.png              # only with --save-frame-images
+      scale_panels/frame_000000_scale_panel.png    # only with --save-frame-images
+      videos/autogaze_overlay.mp4                  # only with --save-overlay-video
+      videos/autogaze_side_by_side.mp4             # only with --save-side-by-side-video
+      videos/autogaze_scale_panels.mp4             # only with --save-scale-panel-video
       metadata/visualization_metadata.json
   predictions/
     answer.json

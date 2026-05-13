@@ -541,7 +541,10 @@ class NVILAAdapter(MLLMAdapter):
             prompt_template = str(self.config.get("prompt_template") or "{video_token}\n\n{prompt}")
             video_token = getattr(getattr(self.processor, "tokenizer", None), "video_token", "<video>")
             prompt = prompt_template.format(prompt=query_text, query=query_text, video_token=video_token)
-            target_frame_count = getattr(self.processor, "num_video_frames", None)
+            processor_kwargs = _nvila_processor_from_pretrained_kwargs(self.config)
+            target_frame_count = _positive_int_or_none(processor_kwargs.get("num_video_frames")) or _positive_int_or_none(
+                getattr(self.processor, "num_video_frames", None)
+            )
             video_input, video_input_kind = _official_video_input(
                 video=video,
                 video_path=video_path,
@@ -572,7 +575,8 @@ class NVILAAdapter(MLLMAdapter):
                     "max_new_tokens": max_new_tokens,
                     "autogaze_visualizer_status": self.config.get("poc_autogaze_status"),
                     "autogaze_enabled_for_processor": self.config.get("poc_autogaze_enabled"),
-                    "processor_autogaze_controls": _jsonable_processor_kwargs(_nvila_processor_from_pretrained_kwargs(self.config)),
+                    "processor_autogaze_controls": _jsonable_processor_kwargs(processor_kwargs),
+                    "target_frame_count": target_frame_count,
                     "autogaze_visual_tokens_injected": False,
                     "note": (
                         "NVILA generation uses the official processor video path. "
@@ -1248,6 +1252,14 @@ def _set_or_validate_nvila_frame_counts(kwargs: dict[str, Any], *, max_num_frame
         if num_thumbnail_frames <= 0:
             raise ValueError("NVILA processor num_video_frames_thumbnail must be positive")
         kwargs["num_video_frames_thumbnail"] = num_thumbnail_frames
+
+
+def _positive_int_or_none(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _jsonable_processor_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
