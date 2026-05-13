@@ -241,8 +241,12 @@ Supported scaling modes:
 | `fit_short_side` | aspect-preserving short-side resize |
 | `fit_long_side` | aspect-preserving long-side resize |
 | `quickstart` | guarded 224/392-style policy from `QUICK_START.md` |
-| `chop` | writes chop metadata and keeps outputs flat over processed frames |
+| `chop` | spatially chops selected source frames into real crop tensors, then keeps outputs flat over processed crop-frames |
 | `none` | no resize |
+
+`chop` follows the intent of the original `QUICK_START.md` any-resolution guidance: high-resolution frames are split into spatial crops before AutoGaze/ViT processing instead of being represented by one resized frame. For a 1k-ish frame with `--chop-size 224`, the number of processed crop-frames is roughly the number of spatial crops times the selected source frames. Each crop-frame still has the normal per-crop token layout, but aggregate source-frame token counts increase with the crop count.
+
+The token-saving comparison in chop mode is therefore crop-expanded: `full_processed_visual_token_count` is the full token count across all processed crops, and `autogaze_selected_visual_token_count` is the subset selected by AutoGaze. `estimated_visual_token_savings_ratio` reports the reduction before the MLLM. The PoC only marks `mllm_visual_token_saving_claimed=true` when a verified path can carry that saving into the MLLM, currently the real NVILA official processor with AutoGaze enabled or a future direct-token adapter.
 
 ## Output Layout
 

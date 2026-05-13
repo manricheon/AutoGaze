@@ -189,6 +189,57 @@ def test_frame_selection_scaling_and_chop_metadata() -> None:
     assert chopped.chop_metadata is not None
     assert chopped.chop_metadata["windows"][0]["records"]
     assert len(chopped.chop_metadata["windows"][0]["records"]) == 3
+    assert chopped.chop_metadata["windows"][0]["status"] == "actual_spatial_chops"
+    assert chopped.chop_metadata["windows"][0]["processed_frame_count"] == 6
+    assert chopped.processed_video.shape == (3, 2, 3, 32, 32)
+    assert len(chopped.frame_records) == 6
+    assert chopped.frame_records[0]["chop_index"] == 0
+    assert chopped.frame_records[2]["chop_index"] == 1
+
+
+def test_chop_mode_expands_processed_frames_and_token_counts(tmp_path: Path) -> None:
+    output_dir = tmp_path / "autogaze_chop"
+    args = infer_autogaze.parse_args(
+        [
+            "--config",
+            str(_cfg("A2_modified_siglip_nvila_on.yaml")),
+            "--video-path",
+            "dummy",
+            "--output-dir",
+            str(output_dir),
+            "--device",
+            "cpu",
+            "--dtype",
+            "float32",
+            "--frame-selection-mode",
+            "sample",
+            "--num-frames",
+            "2",
+            "--scaling-mode",
+            "chop",
+            "--resolution",
+            "32",
+            "--chop-size",
+            "16",
+            "--max-chops",
+            "3",
+            "--gaze-ratio",
+            "0.25",
+            "--no-progress",
+        ]
+    )
+    summary = infer_autogaze.run(args)
+    assert summary["status"] == "partial"
+    metrics = json.loads((output_dir / "logs" / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["number_of_source_frames"] == 2
+    assert metrics["number_of_processed_frames"] == 6
+    assert metrics["spatial_chops_per_window"] == {"0": 3}
+    assert metrics["original_token_count"] == 6 * 265
+    selected = json.loads((output_dir / "autogaze" / "selected_patch_indices.json").read_text(encoding="utf-8"))
+    assert len(selected["frames"]) == 6
+    assert selected["frames"][0]["chop_index"] == 0
+    assert selected["frames"][2]["chop_index"] == 1
+    assert (output_dir / "visualizations" / "autogaze" / "frames" / "frame_000005_overlay.png").exists()
 
 
 def test_autogaze_dummy_run_writes_flat_outputs_and_metrics(tmp_path: Path) -> None:

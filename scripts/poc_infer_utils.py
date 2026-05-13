@@ -505,20 +505,45 @@ def prepare_video(
                     "windows": [],
                 }
             chop_metadata["windows"].append({"window_id": window.window_id, **window_chops})
-        for position, source_index in enumerate(window.frame_indices):
-            frame_records.append(
-                {
-                    "processed_frame_index": processed_index,
-                    "source_frame_index": int(source_index),
-                    "window_id": int(window.window_id),
-                    "position_in_window": int(position),
-                    "anchor_frame_index": None,
-                    "is_padded": bool(window.padded_frame_mask[position]),
-                }
-            )
-            processed_index += 1
+        if window_chops is not None:
+            for chop_record in window_chops["records"]:
+                for position, source_index in enumerate(window.frame_indices):
+                    frame_records.append(
+                        {
+                            "processed_frame_index": processed_index,
+                            "source_frame_index": int(source_index),
+                            "window_id": int(window.window_id),
+                            "position_in_window": int(position),
+                            "anchor_frame_index": None,
+                            "is_padded": bool(window.padded_frame_mask[position]),
+                            "chop_index": int(chop_record["chop_index"]),
+                            "source_box": [
+                                int(chop_record["x0"]),
+                                int(chop_record["y0"]),
+                                int(chop_record["x1"]),
+                                int(chop_record["y1"]),
+                            ],
+                        }
+                    )
+                    processed_index += 1
+        else:
+            for position, source_index in enumerate(window.frame_indices):
+                frame_records.append(
+                    {
+                        "processed_frame_index": processed_index,
+                        "source_frame_index": int(source_index),
+                        "window_id": int(window.window_id),
+                        "position_in_window": int(position),
+                        "anchor_frame_index": None,
+                        "is_padded": bool(window.padded_frame_mask[position]),
+                    }
+                )
+                processed_index += 1
 
-    processed_video = torch.cat(processed_windows, dim=1) if processed_windows else source_video[:0].unsqueeze(0)
+    if processed_windows and scaling_mode == "chop":
+        processed_video = torch.cat(processed_windows, dim=0)
+    else:
+        processed_video = torch.cat(processed_windows, dim=1) if processed_windows else source_video[:0].unsqueeze(0)
     scaling_metadata = {
         "scaling_mode": scaling_mode,
         "resolution": resolution,
@@ -574,7 +599,6 @@ def scale_video(
         output = _resize_video_hw(video, resolution, resolution)
         notes.append("QUICK_START-compatible square resize policy was applied.")
     elif mode == "chop":
-        output = _resize_video_hw(video, resolution, resolution)
         chop_metadata = generate_chop_metadata(
             height=height,
             width=width,
@@ -584,7 +608,12 @@ def scale_video(
             max_chops=max_chops,
             merge_mode=chop_merge_mode,
         )
-        notes.append("Chop metadata was generated; Priority 1 keeps visual outputs flat over processed frames.")
+        chunks: list[torch.Tensor] = []
+        for record in chop_metadata["records"]:
+            crop = video[:, :, :, int(record["y0"]) : int(record["y1"]), int(record["x0"]) : int(record["x1"])]
+            chunks.append(_resize_video_hw(crop, resolution, resolution))
+        output = torch.cat(chunks, dim=0) if chunks else video[:0]
+        notes.append("Frames were spatially chopped into real model inputs, then each crop was resized to the target resolution.")
     else:
         raise ValueError("scaling_mode must be one of resize, fit_short_side, fit_long_side, chop, quickstart, none")
 
@@ -599,7 +628,7 @@ def scale_video(
         "processed_resolution": [processed_h, processed_w],
         "notes": notes,
         "coordinate_mapping": {
-            "processed_from_original": "chop_metadata_with_resize" if mode == "chop" else mode,
+            "processed_from_original": "spatial_chop_then_resize" if mode == "chop" else mode,
             "scale_x": processed_w / float(width),
             "scale_y": processed_h / float(height),
             "inverse_scale_x": width / float(processed_w),
@@ -634,37 +663,40 @@ def generate_chop_metadata(
         raise ValueError("chop_overlap must be >= 0 and < chop_size")
     stride = chop_size - chop_overlap
     records: list[dict[str, int]] = []
-    for frame_index in range(frames):
-        for y in range(0, max(1, height), stride):
-            y0 = min(y, max(0, height - chop_size))
-            y1 = min(height, y0 + chop_size)
-            for x in range(0, max(1, width), stride):
-                x0 = min(x, max(0, width - chop_size))
-                x1 = min(width, x0 + chop_size)
-                item = {
+    seen: set[tuple[int, int, int, int]] = set()
+    for y in range(0, max(1, height), stride):
+        y0 = min(y, max(0, height - chop_size))
+        y1 = min(height, y0 + chop_size)
+        for x in range(0, max(1, width), stride):
+            x0 = min(x, max(0, width - chop_size))
+            x1 = min(width, x0 + chop_size)
+            box = (x0, y0, x1, y1)
+            if box in seen:
+                continue
+            seen.add(box)
+            records.append(
+                {
                     "chop_index": len(records),
-                    "frame_index_within_window": frame_index,
                     "x0": x0,
                     "y0": y0,
                     "x1": x1,
                     "y1": y1,
                 }
-                if item not in records:
-                    records.append(item)
-                if max_chops is not None and len(records) >= max_chops:
-                    break
+            )
             if max_chops is not None and len(records) >= max_chops:
                 break
         if max_chops is not None and len(records) >= max_chops:
             break
     return {
-        "status": "metadata_only",
+        "status": "actual_spatial_chops",
         "frame_count": frames,
         "source_resolution": [height, width],
         "chop_size": chop_size,
         "chop_overlap": chop_overlap,
         "stride": stride,
         "max_chops": max_chops,
+        "spatial_chop_count": len(records),
+        "processed_frame_count": len(records) * frames,
         "merge_mode": merge_mode,
         "records": records,
     }
@@ -834,7 +866,7 @@ def build_gaze_result(
     real_outputs: Mapping[str, Any] | None = None,
 ) -> GazeResult:
     video = prepared.processed_video
-    _, frame_count, _, height, width = [int(dim) for dim in video.shape]
+    batch_size, frame_count, _, height, width = [int(dim) for dim in video.shape]
     patch_size = int(runtime_metadata.get("patch_size") or 16)
     grid_h = max(1, height // patch_size)
     grid_w = max(1, width // patch_size)
@@ -843,22 +875,36 @@ def build_gaze_result(
     per_frame: list[dict[str, Any]] = []
 
     if real_outputs is not None and "gazing_pos" in real_outputs and "num_gazing_each_frame" in real_outputs:
-        gazing_pos = real_outputs["gazing_pos"][0].detach().cpu()
+        gazing_pos_all = real_outputs["gazing_pos"].detach().cpu()
+        if gazing_pos_all.ndim == 1:
+            gazing_pos_all = gazing_pos_all.unsqueeze(0)
         padded = real_outputs.get("if_padded_gazing")
-        padded_flat = padded[0].detach().cpu().bool() if isinstance(padded, torch.Tensor) else torch.zeros_like(gazing_pos).bool()
-        counts = real_outputs["num_gazing_each_frame"].detach().cpu().tolist()
+        if isinstance(padded, torch.Tensor):
+            padded_all = padded.detach().cpu().bool()
+            if padded_all.ndim == 1:
+                padded_all = padded_all.unsqueeze(0)
+        else:
+            padded_all = torch.zeros_like(gazing_pos_all).bool()
+        counts_all = real_outputs["num_gazing_each_frame"].detach().cpu()
         tokens_each = int(real_outputs.get("num_vision_tokens_each_frame", tokens_per_frame))
-        offset = 0
-        for idx in range(frame_count):
-            count = int(counts[idx]) if idx < len(counts) else 0
-            pos = gazing_pos[offset : offset + count]
-            pad = padded_flat[offset : offset + count]
-            local = [int((item - idx * tokens_each).item()) % tokens_each for item in pos[~pad]]
-            per_frame.append(_frame_gaze_record(prepared.frame_records[idx], local, tokens_each, idx, scale_layout))
-            offset += count
+        for batch_idx in range(batch_size):
+            gazing_pos = gazing_pos_all[min(batch_idx, gazing_pos_all.shape[0] - 1)]
+            padded_flat = padded_all[min(batch_idx, padded_all.shape[0] - 1)]
+            counts = _counts_for_batch(counts_all, batch_idx=batch_idx, frame_count=frame_count)
+            offset = 0
+            for idx in range(frame_count):
+                record_index = batch_idx * frame_count + idx
+                if record_index >= len(prepared.frame_records):
+                    break
+                count = int(counts[idx]) if idx < len(counts) else 0
+                pos = gazing_pos[offset : offset + count]
+                pad = padded_flat[offset : offset + count]
+                local = [int((item - idx * tokens_each).item()) % tokens_each for item in pos[~pad]]
+                per_frame.append(_frame_gaze_record(prepared.frame_records[record_index], local, tokens_each, record_index, scale_layout))
+                offset += count
     else:
         selected_count = tokens_per_frame if not autogaze_enabled else max(1, min(tokens_per_frame, math.ceil(tokens_per_frame * gaze_ratio)))
-        for idx in range(frame_count):
+        for idx in range(len(prepared.frame_records)):
             local_indices = _deterministic_patch_indices(idx, tokens_per_frame, selected_count)
             per_frame.append(_frame_gaze_record(prepared.frame_records[idx], local_indices, tokens_per_frame, idx, scale_layout))
 
@@ -897,6 +943,15 @@ def build_gaze_result(
         latency_ms=latency_ms,
         gazing_info_for_vit=gazing_info_for_vit,
     )
+
+
+def _counts_for_batch(counts: torch.Tensor, *, batch_idx: int, frame_count: int) -> list[int]:
+    if counts.ndim == 0:
+        return [int(counts.item())] * frame_count
+    if counts.ndim == 1:
+        return [int(item) for item in counts.tolist()]
+    selected = counts[min(batch_idx, counts.shape[0] - 1)]
+    return [int(item) for item in selected.reshape(-1).tolist()]
 
 
 def _deterministic_patch_indices(frame_idx: int, total: int, selected_count: int) -> list[int]:
@@ -1033,10 +1088,15 @@ def write_autogaze_artifacts(output_dir: Path, prepared: PreparedVideo, gaze: Ga
                     for k in (
                         "processed_frame_index",
                         "source_frame_index",
+                        "window_id",
+                        "position_in_window",
+                        "chop_index",
+                        "source_box",
                         "selected_patch_indices",
                         "selected_patch_records",
                         "global_patch_indices",
                     )
+                    if k in item
                 }
                 for item in gaze.per_frame
             ]
@@ -1108,7 +1168,7 @@ def write_visualizations(
     for directory in (frames_dir, panels_dir, videos_dir, metadata_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
-    frames = prepared.processed_video[0].detach().cpu()
+    frames = flatten_video_frames(prepared.processed_video).detach().cpu()
     overlay_images: list[Image.Image] = []
     side_by_side_images: list[Image.Image] = []
     scale_panel_images: list[Image.Image] = []
@@ -1187,6 +1247,13 @@ def write_visualizations(
     )
     artifacts["visualization_metadata"] = str(metadata_dir / "visualization_metadata.json")
     return artifacts
+
+
+def flatten_video_frames(video: torch.Tensor) -> torch.Tensor:
+    if video.ndim != 5:
+        raise ValueError(f"expected video shape [B,T,C,H,W], got {tuple(video.shape)}")
+    batch, frames, channels, height, width = [int(dim) for dim in video.shape]
+    return video.reshape(batch * frames, channels, height, width)
 
 
 def tensor_to_image(frame: torch.Tensor) -> Image.Image:
@@ -1295,6 +1362,8 @@ def add_info_panel(
         f"gaze_status: {gaze.status}",
         f"scaling_mode: {scaling_mode}",
     ]
+    if "chop_index" in record:
+        lines.append(f"chop_index: {record['chop_index']}  source_box: {record.get('source_box')}")
     if query_text is not None:
         lines.append(f"query: {query_text[:80]}")
         lines.append(f"generation: {generation_status or 'not_run'}")
@@ -1391,10 +1460,13 @@ def build_metrics(
         "query_text": query_text,
         "frame_selection_mode": prepared.frame_selection.mode,
         "number_of_frames": len(prepared.frame_records),
+        "number_of_processed_frames": len(prepared.frame_records),
+        "number_of_source_frames": _source_frame_count(prepared.frame_records),
         "number_of_windows": len(prepared.frame_selection.windows),
         "scaling_mode": prepared.scaling_metadata["scaling_mode"],
         "resolution": prepared.scaling_metadata["resolution"],
         "chop_settings": prepared.chop_metadata,
+        "spatial_chops_per_window": _spatial_chops_per_window(prepared.chop_metadata),
         "autogaze_enabled": gaze.autogaze_enabled,
         "requested_vision_encoder": requested_vision_encoder,
         "actual_vision_encoder": actual_vision_encoder,
@@ -1407,6 +1479,9 @@ def build_metrics(
         "original_token_count": gaze.original_token_count,
         "selected_token_count": gaze.selected_token_count,
         "token_reduction_ratio": gaze.token_reduction_ratio,
+        "full_processed_visual_token_count": gaze.original_token_count,
+        "autogaze_selected_visual_token_count": gaze.selected_token_count,
+        "estimated_visual_token_savings_ratio": gaze.token_reduction_ratio,
         "selected_patches_per_frame": [item["selected_token_count"] for item in gaze.per_frame],
         "selected_patches_per_scale": _sum_scale_counts(gaze.per_frame),
         "preprocessing_latency_ms": preprocessing_latency_ms,
@@ -1427,6 +1502,19 @@ def build_metrics(
         "failure_reason": skipped_stages[0]["reason"] if skipped_stages else None,
         "encoder_side_acceleration_claimed": bool(gaze.real_model_used and gaze.autogaze_enabled),
     }
+
+
+def _source_frame_count(frame_records: list[Mapping[str, Any]]) -> int:
+    return len({(int(item.get("window_id", 0)), int(item.get("position_in_window", idx))) for idx, item in enumerate(frame_records)})
+
+
+def _spatial_chops_per_window(chop_metadata: Mapping[str, Any] | None) -> dict[str, int] | None:
+    if chop_metadata is None:
+        return None
+    result: dict[str, int] = {}
+    for window in chop_metadata.get("windows", []):
+        result[str(window.get("window_id", len(result)))] = int(window.get("spatial_chop_count", len(window.get("records", []))))
+    return result
 
 
 def _sum_scale_counts(per_frame: list[Mapping[str, Any]]) -> dict[str, int]:

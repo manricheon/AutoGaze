@@ -304,6 +304,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     metrics["vision_encoder_required_for_full_pipeline"] = vision_required
     metrics["generation_input_mode"] = "direct_visual_tokens" if direct_visual_token_mode else "official_processor"
     metrics["gazing_info_passed_to_vision_encoder"] = bool(gaze.gazing_info_for_vit is not None and vision_required)
+    metrics["mllm_visual_token_saving_claimed"] = bool(
+        (
+            direct_visual_token_mode
+            and mllm.supports_direct_visual_tokens()
+            and visual_tokens is not None
+        )
+        or (
+            mllm.name == "nvila"
+            and mllm_status.status == "real"
+            and bool(nested_get(cfg, "autogaze.enabled", False))
+            and bool(nested_get(cfg, "mllm.official_processor_path", False))
+            and bool(nested_get(cfg, "mllm.sync_autogaze_controls_from_config", False))
+        )
+    )
     if gaze.status == "blocked":
         blocked_stages.append("autogaze")
     if blocked_stages:
