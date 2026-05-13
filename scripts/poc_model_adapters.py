@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -10,6 +12,7 @@ from typing import Any, Mapping
 import torch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+TORCH_DTYPE_DEPRECATION_WARNING = "`torch_dtype` is deprecated! Use `dtype` instead!"
 
 
 @dataclass
@@ -26,6 +29,27 @@ class AdapterStatus:
             "reason": self.reason,
             "metadata": self.metadata,
         }
+
+
+@contextmanager
+def _suppress_transformers_torch_dtype_warning():
+    class _Filter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            return TORCH_DTYPE_DEPRECATION_WARNING not in record.getMessage()
+
+    warning_filter = _Filter()
+    loggers = [
+        logging.getLogger("transformers"),
+        logging.getLogger("transformers.configuration_utils"),
+        logging.getLogger("transformers.modeling_utils"),
+    ]
+    for logger in loggers:
+        logger.addFilter(warning_filter)
+    try:
+        yield
+    finally:
+        for logger in loggers:
+            logger.removeFilter(warning_filter)
 
 
 class VisionEncoderAdapter:
@@ -69,7 +93,8 @@ class VisionEncoderAdapter:
         try:
             factory = getattr(importlib.import_module(str(module_path)), str(class_name))
             load_kwargs = _from_pretrained_kwargs(self.config, dtype=dtype)
-            self.model = factory.from_pretrained(checkpoint_ref, **load_kwargs) if hasattr(factory, "from_pretrained") else factory()
+            with _suppress_transformers_torch_dtype_warning():
+                self.model = factory.from_pretrained(checkpoint_ref, **load_kwargs) if hasattr(factory, "from_pretrained") else factory()
             if hasattr(self.model, "to"):
                 self.model.to(device)
             if hasattr(self.model, "eval"):
@@ -247,7 +272,8 @@ class VJEPA2Adapter(VisionEncoderAdapter):
         try:
             factory = getattr(importlib.import_module(str(processor_module)), str(processor_class))
             processor_ref = _model_reference_for_loading(processor_path)
-            self.processor = factory.from_pretrained(processor_ref, **_processor_from_pretrained_kwargs(self.config))
+            with _suppress_transformers_torch_dtype_warning():
+                self.processor = factory.from_pretrained(processor_ref, **_processor_from_pretrained_kwargs(self.config))
             status.metadata["processor_status"] = "real"
             status.metadata["processor_path"] = processor_path
             status.metadata["resolved_processor_path"] = processor_ref
@@ -322,7 +348,8 @@ class MLLMAdapter:
         try:
             factory = getattr(importlib.import_module(str(module_path)), str(class_name))
             load_kwargs = _from_pretrained_kwargs(self.config, dtype=dtype)
-            self.model = factory.from_pretrained(checkpoint_ref, **load_kwargs) if hasattr(factory, "from_pretrained") else factory()
+            with _suppress_transformers_torch_dtype_warning():
+                self.model = factory.from_pretrained(checkpoint_ref, **load_kwargs) if hasattr(factory, "from_pretrained") else factory()
             if hasattr(self.model, "to") and "device_map" not in load_kwargs:
                 self.model.to(device)
             if hasattr(self.model, "eval"):
@@ -426,7 +453,8 @@ class NVILAAdapter(MLLMAdapter):
             factory = getattr(importlib.import_module(str(processor_module)), str(processor_class))
             processor_ref = _model_reference_for_loading(processor_path)
             processor_kwargs = _nvila_processor_from_pretrained_kwargs(self.config)
-            self.processor = factory.from_pretrained(processor_ref, **processor_kwargs)
+            with _suppress_transformers_torch_dtype_warning():
+                self.processor = factory.from_pretrained(processor_ref, **processor_kwargs)
             status.metadata["processor_status"] = "real"
             status.metadata["processor_path"] = processor_path
             status.metadata["resolved_processor_path"] = processor_ref
@@ -582,7 +610,8 @@ class QwenAdapter(MLLMAdapter):
         try:
             factory = getattr(importlib.import_module(str(processor_module)), str(processor_class))
             processor_ref = _model_reference_for_loading(processor_path)
-            self.processor = factory.from_pretrained(processor_ref, **_processor_from_pretrained_kwargs(self.config))
+            with _suppress_transformers_torch_dtype_warning():
+                self.processor = factory.from_pretrained(processor_ref, **_processor_from_pretrained_kwargs(self.config))
             status.metadata["processor_status"] = "real"
             status.metadata["processor_path"] = processor_path
             status.metadata["resolved_processor_path"] = processor_ref
@@ -881,7 +910,7 @@ def _official_video_input(
             return str(repo_path), "video_path"
         return video_path, "video_reference"
     frames = _video_tensor_to_pil(video, target_frame_count=target_frame_count)
-    suffix = f"_to_{target_frame_count}" if target_frame_count is not None else ""
+    suffix = f"_to_{len(frames)}" if target_frame_count is not None else ""
     return frames, f"processed_tensor_pil_frames{suffix}"
 
 
@@ -897,12 +926,19 @@ def _video_tensor_to_pil(video: torch.Tensor, *, target_frame_count: int | None 
 
     if video.ndim != 5:
         raise ValueError(f"expected video shape [B,T,C,H,W], got {tuple(video.shape)}")
-    frames = video[0].detach().cpu().float().clamp(0, 1)
+    batch, frame_count = int(video.shape[0]), int(video.shape[1])
+    frames = video.detach().cpu().float().clamp(0, 1)
+    frames = frames.reshape(batch * frame_count, *frames.shape[2:]) if batch > 1 else frames[0]
     if target_frame_count is not None:
         target = int(target_frame_count)
         if target <= 0:
             raise ValueError("target_frame_count must be positive")
-        if int(frames.shape[0]) > target:
+        if batch > 1 and int(frames.shape[0]) > target:
+            remainder = int(frames.shape[0]) % target
+            if remainder:
+                pad = frames[-1:].expand(target - remainder, -1, -1, -1)
+                frames = torch.cat([frames, pad], dim=0)
+        elif int(frames.shape[0]) > target:
             if target == 1:
                 indices = torch.tensor([0], dtype=torch.long)
             else:

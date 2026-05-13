@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import math
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -17,6 +19,7 @@ from omegaconf import DictConfig, OmegaConf
 from PIL import Image, ImageDraw
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+TORCH_DTYPE_DEPRECATION_WARNING = "`torch_dtype` is deprecated! Use `dtype` instead!"
 
 
 SCALE_COLORS: dict[int, tuple[int, int, int]] = {
@@ -304,6 +307,27 @@ def synchronize_device(device: str | None) -> None:
         torch.cuda.synchronize()
     elif device_name == "mps" and hasattr(torch, "mps") and hasattr(torch.mps, "synchronize"):
         torch.mps.synchronize()
+
+
+@contextmanager
+def suppress_transformers_torch_dtype_warning():
+    class _Filter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            return TORCH_DTYPE_DEPRECATION_WARNING not in record.getMessage()
+
+    warning_filter = _Filter()
+    loggers = [
+        logging.getLogger("transformers"),
+        logging.getLogger("transformers.configuration_utils"),
+        logging.getLogger("transformers.modeling_utils"),
+    ]
+    for logger in loggers:
+        logger.addFilter(warning_filter)
+    try:
+        yield
+    finally:
+        for logger in loggers:
+            logger.removeFilter(warning_filter)
 
 
 def json_safe(value: Any) -> Any:
@@ -824,7 +848,8 @@ def _run_real_autogaze(
     from autogaze.models.autogaze import AutoGaze
 
     checkpoint = nested_get(cfg, "autogaze.checkpoint_path") or nested_get(cfg, "autogaze.model_id")
-    model = AutoGaze.from_pretrained(model_reference_for_loading(checkpoint))
+    with suppress_transformers_torch_dtype_warning():
+        model = AutoGaze.from_pretrained(model_reference_for_loading(checkpoint))
     model = model.to(normalize_device(device))
     model.eval()
     video = prepared.processed_video.to(device=normalize_device(device), dtype=dtype_from_name(dtype))
@@ -1168,44 +1193,64 @@ def write_visualizations(
     for directory in (frames_dir, panels_dir, videos_dir, metadata_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
-    frames = flatten_video_frames(prepared.processed_video).detach().cpu()
-    overlay_images: list[Image.Image] = []
-    side_by_side_images: list[Image.Image] = []
-    scale_panel_images: list[Image.Image] = []
-    for idx, frame in enumerate(frames):
-        record = gaze.per_frame[idx]
-        base_image = tensor_to_image(frame)
-        overlay = render_overlay(
-            base_image,
-            record,
-            gaze.patch_grid,
+    if prepared.chop_metadata is not None:
+        visualization_mode = "merged_chop_source_frames"
+        overlay_images, side_by_side_images, scale_panel_images, visualization_records = _write_chop_merged_visualization_frames(
+            frames_dir,
+            panels_dir,
+            prepared,
+            gaze,
             overlay_style=overlay_style,
             overlay_alpha=overlay_alpha,
             multi_scale_overlay=multi_scale_overlay,
             show_patch_index=show_patch_index,
             show_scale_label=show_scale_label,
-        )
-        overlay_with_panel = add_info_panel(
-            overlay,
-            record,
-            gaze,
-            scaling_mode=prepared.scaling_metadata["scaling_mode"],
             metadata_placement=metadata_placement,
             info_panel_position=info_panel_position,
             query_text=query_text,
             generation_status=generation_status,
         )
-        overlay_path = frames_dir / f"frame_{idx:06d}_overlay.png"
-        overlay_with_panel.save(overlay_path)
-        overlay_images.append(overlay_with_panel.convert("RGB"))
+    else:
+        visualization_mode = "processed_frames"
+        visualization_records = prepared.frame_records
+        overlay_images = []
+        side_by_side_images = []
+        scale_panel_images = []
+        frames = flatten_video_frames(prepared.processed_video).detach().cpu()
+        for idx, frame in enumerate(frames):
+            record = gaze.per_frame[idx]
+            base_image = tensor_to_image(frame)
+            overlay = render_overlay(
+                base_image,
+                record,
+                gaze.patch_grid,
+                overlay_style=overlay_style,
+                overlay_alpha=overlay_alpha,
+                multi_scale_overlay=multi_scale_overlay,
+                show_patch_index=show_patch_index,
+                show_scale_label=show_scale_label,
+            )
+            overlay_with_panel = add_info_panel(
+                overlay,
+                record,
+                gaze,
+                scaling_mode=prepared.scaling_metadata["scaling_mode"],
+                metadata_placement=metadata_placement,
+                info_panel_position=info_panel_position,
+                query_text=query_text,
+                generation_status=generation_status,
+            )
+            overlay_path = frames_dir / f"frame_{idx:06d}_overlay.png"
+            overlay_with_panel.save(overlay_path)
+            overlay_images.append(overlay_with_panel.convert("RGB"))
 
-        scale_panel = render_scale_panel(base_image, record, gaze.patch_grid)
-        scale_panel_path = panels_dir / f"frame_{idx:06d}_scale_panel.png"
-        scale_panel.save(scale_panel_path)
-        scale_panel_images.append(scale_panel.convert("RGB"))
+            scale_panel = render_scale_panel(base_image, record, gaze.patch_grid)
+            scale_panel_path = panels_dir / f"frame_{idx:06d}_scale_panel.png"
+            scale_panel.save(scale_panel_path)
+            scale_panel_images.append(scale_panel.convert("RGB"))
 
-        side_by_side = combine_side_by_side(base_image, overlay)
-        side_by_side_images.append(side_by_side.convert("RGB"))
+            side_by_side = combine_side_by_side(base_image, overlay)
+            side_by_side_images.append(side_by_side.convert("RGB"))
 
     artifacts: dict[str, str] = {
         "frames_dir": str(frames_dir),
@@ -1236,9 +1281,12 @@ def write_visualizations(
         {
             "status": "ready",
             "flat_output_structure": True,
+            "visualization_mode": visualization_mode,
             "video_export_mode": video_export_mode,
             "frame_count": len(overlay_images),
-            "frame_records": prepared.frame_records,
+            "processed_crop_frame_count": len(gaze.per_frame) if prepared.chop_metadata is not None else None,
+            "frame_records": visualization_records,
+            "processed_frame_records": prepared.frame_records,
             "scale_colors": {str(key): value for key, value in SCALE_COLORS.items()},
             "scale_layout": gaze.runtime_metadata.get("scale_layout"),
             "video_errors": video_errors,
@@ -1247,6 +1295,106 @@ def write_visualizations(
     )
     artifacts["visualization_metadata"] = str(metadata_dir / "visualization_metadata.json")
     return artifacts
+
+
+def _write_chop_merged_visualization_frames(
+    frames_dir: Path,
+    panels_dir: Path,
+    prepared: PreparedVideo,
+    gaze: GazeResult,
+    *,
+    overlay_style: str,
+    overlay_alpha: float,
+    multi_scale_overlay: bool,
+    show_patch_index: bool,
+    show_scale_label: bool,
+    metadata_placement: str,
+    info_panel_position: str,
+    query_text: str | None,
+    generation_status: str | None,
+) -> tuple[list[Image.Image], list[Image.Image], list[Image.Image], list[dict[str, Any]]]:
+    overlay_images: list[Image.Image] = []
+    side_by_side_images: list[Image.Image] = []
+    scale_panel_images: list[Image.Image] = []
+    visualization_records: list[dict[str, Any]] = []
+    source_video = prepared.source_video.detach().cpu()
+    grouped_records = _group_chop_records(gaze.per_frame)
+    for idx, records in enumerate(grouped_records):
+        source_index = max(0, min(int(records[0]["source_frame_index"]), int(source_video.shape[0]) - 1))
+        base_image = tensor_to_image(source_video[source_index])
+        merged_record = _merged_chop_record(records, idx)
+        visualization_records.append(merged_record)
+        overlay = render_chop_merged_overlay(
+            base_image,
+            records,
+            overlay_style=overlay_style,
+            overlay_alpha=overlay_alpha,
+            multi_scale_overlay=multi_scale_overlay,
+            show_patch_index=show_patch_index,
+            show_scale_label=show_scale_label,
+        )
+        overlay_with_panel = add_info_panel(
+            overlay,
+            merged_record,
+            gaze,
+            scaling_mode=prepared.scaling_metadata["scaling_mode"],
+            metadata_placement=metadata_placement,
+            info_panel_position=info_panel_position,
+            query_text=query_text,
+            generation_status=generation_status,
+        )
+        overlay_path = frames_dir / f"frame_{idx:06d}_overlay.png"
+        overlay_with_panel.save(overlay_path)
+        overlay_images.append(overlay_with_panel.convert("RGB"))
+
+        scale_panel = render_chop_merged_scale_panel(base_image, records)
+        scale_panel_path = panels_dir / f"frame_{idx:06d}_scale_panel.png"
+        scale_panel.save(scale_panel_path)
+        scale_panel_images.append(scale_panel.convert("RGB"))
+
+        side_by_side = combine_side_by_side(base_image, overlay)
+        side_by_side_images.append(side_by_side.convert("RGB"))
+    return overlay_images, side_by_side_images, scale_panel_images, visualization_records
+
+
+def _group_chop_records(records: list[Mapping[str, Any]]) -> list[list[Mapping[str, Any]]]:
+    grouped: dict[tuple[int, int, int], list[Mapping[str, Any]]] = {}
+    for record in records:
+        key = (
+            int(record.get("window_id", 0)),
+            int(record.get("position_in_window", 0)),
+            int(record.get("source_frame_index", 0)),
+        )
+        grouped.setdefault(key, []).append(record)
+    return list(grouped.values())
+
+
+def _merged_chop_record(records: list[Mapping[str, Any]], processed_frame_index: int) -> dict[str, Any]:
+    first = records[0]
+    original = sum(int(record.get("original_token_count", 0)) for record in records)
+    selected = sum(int(record.get("selected_token_count", 0)) for record in records)
+    scale_counts = {str(scale): 0 for scale in sorted(SCALE_COLORS)}
+    source_boxes = []
+    for record in records:
+        source_box = record.get("source_box")
+        if source_box is not None:
+            source_boxes.append(source_box)
+        for scale, count in dict(record.get("selected_patch_count_by_scale", {})).items():
+            scale_counts[str(scale)] = scale_counts.get(str(scale), 0) + int(count)
+    return {
+        "processed_frame_index": processed_frame_index,
+        "source_frame_index": int(first.get("source_frame_index", 0)),
+        "window_id": int(first.get("window_id", 0)),
+        "position_in_window": int(first.get("position_in_window", 0)),
+        "anchor_frame_index": first.get("anchor_frame_index"),
+        "is_padded": bool(first.get("is_padded", False)),
+        "chop_count": len(records),
+        "source_boxes": source_boxes,
+        "original_token_count": original,
+        "selected_token_count": selected,
+        "token_reduction_ratio": 1.0 - (selected / float(original)) if original else None,
+        "selected_patch_count_by_scale": scale_counts,
+    }
 
 
 def flatten_video_frames(video: torch.Tensor) -> torch.Tensor:
@@ -1341,6 +1489,78 @@ def render_scale_panel(image: Image.Image, record: Mapping[str, Any], patch_grid
     return canvas
 
 
+def render_chop_merged_overlay(
+    image: Image.Image,
+    records: list[Mapping[str, Any]],
+    *,
+    overlay_style: str,
+    overlay_alpha: float,
+    multi_scale_overlay: bool,
+    show_patch_index: bool,
+    show_scale_label: bool,
+    scale_filter: int | None = None,
+) -> Image.Image:
+    result = image.convert("RGBA")
+    overlay = Image.new("RGBA", result.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    for record in records:
+        source_box = record.get("source_box")
+        if not isinstance(source_box, list) or len(source_box) != 4:
+            continue
+        box_x0, box_y0, box_x1, box_y1 = [float(value) for value in source_box]
+        box_w = max(1.0, box_x1 - box_x0)
+        box_h = max(1.0, box_y1 - box_y0)
+        indices = list(record.get("selected_patch_indices", []))
+        scales = list(record.get("selected_scales", []))
+        patch_records = list(record.get("selected_patch_records", []))
+        for idx, patch_idx in enumerate(indices):
+            scale = int(scales[idx]) if idx < len(scales) else 0
+            if scale_filter is not None and scale != scale_filter:
+                continue
+            patch_record = patch_records[idx] if idx < len(patch_records) and isinstance(patch_records[idx], Mapping) else None
+            if patch_record is not None and "normalized_box" in patch_record:
+                nx0, ny0, nx1, ny1 = [float(value) for value in patch_record["normalized_box"]]
+            else:
+                nx0, ny0, nx1, ny1 = 0.0, 0.0, 1.0, 1.0
+            rect = [
+                box_x0 + nx0 * box_w,
+                box_y0 + ny0 * box_h,
+                box_x0 + nx1 * box_w,
+                box_y0 + ny1 * box_h,
+            ]
+            color = SCALE_COLORS.get(scale if multi_scale_overlay else 0, SCALE_COLORS[0])
+            if overlay_style in {"mask", "both"}:
+                draw.rectangle(rect, fill=(*color, int(255 * overlay_alpha)))
+            if overlay_style in {"box", "both"}:
+                draw.rectangle(rect, outline=(*color, 255), width=2)
+            if show_patch_index:
+                draw.text((rect[0] + 2, rect[1] + 2), str(patch_idx), fill=(20, 20, 20, 255))
+            if show_scale_label:
+                draw.text((rect[0] + 2, rect[3] - 12), str(scale), fill=(20, 20, 20, 255))
+    return Image.alpha_composite(result, overlay).convert("RGB")
+
+
+def render_chop_merged_scale_panel(image: Image.Image, records: list[Mapping[str, Any]]) -> Image.Image:
+    panels = [
+        render_chop_merged_overlay(
+            image,
+            records,
+            overlay_style="both",
+            overlay_alpha=0.35,
+            multi_scale_overlay=True,
+            show_patch_index=False,
+            show_scale_label=False,
+            scale_filter=scale,
+        )
+        for scale in range(4)
+    ]
+    width, height = image.size
+    canvas = Image.new("RGB", (width * 2, height * 2), (255, 255, 255))
+    for idx, panel in enumerate(panels):
+        canvas.paste(panel, ((idx % 2) * width, (idx // 2) * height))
+    return canvas
+
+
 def add_info_panel(
     image: Image.Image,
     record: Mapping[str, Any],
@@ -1364,6 +1584,8 @@ def add_info_panel(
     ]
     if "chop_index" in record:
         lines.append(f"chop_index: {record['chop_index']}  source_box: {record.get('source_box')}")
+    if "chop_count" in record:
+        lines.append(f"merged_chops: {record['chop_count']}")
     if query_text is not None:
         lines.append(f"query: {query_text[:80]}")
         lines.append(f"generation: {generation_status or 'not_run'}")

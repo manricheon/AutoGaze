@@ -72,6 +72,8 @@ The same local NVILA processor defaults to `num_video_frames=8`, while the local
 
 The PoC adapters pass Hugging Face model dtype with the current `dtype` keyword instead of deprecated `torch_dtype`. Official processor configs set `use_fast: false` explicitly to preserve the slow image processor behavior saved with the local checkpoints and avoid the Transformers warning about a future default change. Override `processor_from_pretrained_kwargs.use_fast` only when you intentionally want to test the fast processor path.
 
+The local NVILA checkpoint code still reads `config.torch_dtype` internally. That access is inside checkpoint-provided remote code, so the PoC does not edit it. Instead, inference wraps Hugging Face model/processor loading with a targeted filter for the exact deprecation warning while still passing `dtype` from our own code.
+
 ## Progress And Latency
 
 Inference commands show tqdm-style progress for the timed module stages:
@@ -246,7 +248,9 @@ Supported scaling modes:
 
 `chop` follows the intent of the original `QUICK_START.md` any-resolution guidance: high-resolution frames are split into spatial crops before AutoGaze/ViT processing instead of being represented by one resized frame. For a 1k-ish frame with `--chop-size 224`, the number of processed crop-frames is roughly the number of spatial crops times the selected source frames. Each crop-frame still has the normal per-crop token layout, but aggregate source-frame token counts increase with the crop count.
 
-The token-saving comparison in chop mode is therefore crop-expanded: `full_processed_visual_token_count` is the full token count across all processed crops, and `autogaze_selected_visual_token_count` is the subset selected by AutoGaze. `estimated_visual_token_savings_ratio` reports the reduction before the MLLM. The PoC only marks `mllm_visual_token_saving_claimed=true` when a verified path can carry that saving into the MLLM, currently the real NVILA official processor with AutoGaze enabled or a future direct-token adapter.
+The token-saving comparison in chop mode is therefore crop-expanded: `full_processed_visual_token_count` is the full token count across all processed crops, and `autogaze_selected_visual_token_count` is the subset selected by AutoGaze. `estimated_visual_token_savings_ratio` reports the reduction before the MLLM. In full inference, chop mode forces the MLLM adapter to consume the processed crop tensor instead of bypassing it with the original video path. Metrics record this as `mllm_video_input_source: processed_chop_tensor`.
+
+For visualization, chop mode writes the primary `visualizations/autogaze/frames` and video outputs as merged source-frame views. Each selected crop overlay is projected back into its `source_box` on the original frame, so the frame/video view matches the original video layout. Crop-frame records remain available in JSON via `processed_frame_records` and `autogaze/selected_patch_indices.json`.
 
 ## Output Layout
 

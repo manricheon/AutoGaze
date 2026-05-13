@@ -214,13 +214,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "query_text_used": True,
         }
     else:
+        mllm_video_path = None if prepared.chop_metadata is not None else args.video_path
+
         def mllm_generate_once() -> dict[str, Any]:
             return mllm.generate(
                 query_text=args.query_text,
                 video=prepared.processed_video,
                 visual_tokens=visual_tokens if mllm.supports_direct_visual_tokens() else None,
                 max_new_tokens=max_new_tokens,
-                video_path=args.video_path,
+                video_path=mllm_video_path,
             )
 
         if allow_real and mllm_status.status == "real":
@@ -303,6 +305,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     }
     metrics["vision_encoder_required_for_full_pipeline"] = vision_required
     metrics["generation_input_mode"] = "direct_visual_tokens" if direct_visual_token_mode else "official_processor"
+    metrics["mllm_video_input_source"] = "processed_chop_tensor" if prepared.chop_metadata is not None else "video_path_or_processed_tensor"
     metrics["gazing_info_passed_to_vision_encoder"] = bool(gaze.gazing_info_for_vit is not None and vision_required)
     metrics["mllm_visual_token_saving_claimed"] = bool(
         (

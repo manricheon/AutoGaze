@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import types
 from pathlib import Path
@@ -239,7 +240,13 @@ def test_chop_mode_expands_processed_frames_and_token_counts(tmp_path: Path) -> 
     assert len(selected["frames"]) == 6
     assert selected["frames"][0]["chop_index"] == 0
     assert selected["frames"][2]["chop_index"] == 1
-    assert (output_dir / "visualizations" / "autogaze" / "frames" / "frame_000005_overlay.png").exists()
+    viz = json.loads((output_dir / "visualizations" / "autogaze" / "metadata" / "visualization_metadata.json").read_text(encoding="utf-8"))
+    assert viz["visualization_mode"] == "merged_chop_source_frames"
+    assert viz["frame_count"] == 2
+    assert viz["processed_crop_frame_count"] == 6
+    assert viz["frame_records"][0]["chop_count"] == 3
+    assert (output_dir / "visualizations" / "autogaze" / "frames" / "frame_000001_overlay.png").exists()
+    assert not (output_dir / "visualizations" / "autogaze" / "frames" / "frame_000005_overlay.png").exists()
 
 
 def test_autogaze_dummy_run_writes_flat_outputs_and_metrics(tmp_path: Path) -> None:
@@ -420,6 +427,45 @@ def test_vjepa2_real_loading_with_available_factory(monkeypatch: pytest.MonkeyPa
     output = adapter.forward(torch.zeros(1, 2, 3, 8, 8))
     assert output["status"] == "real"
     assert output["visual_tokens"].shape == (1, 2, 5)
+
+
+def test_transformers_torch_dtype_warning_is_suppressed_during_model_load(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake_module = types.ModuleType("fake_warning_model")
+
+    class AutoModel:
+        @classmethod
+        def from_pretrained(cls, model_id: str, **kwargs):
+            logging.getLogger("transformers.configuration_utils").warning(
+                "`torch_dtype` is deprecated! Use `dtype` instead!"
+            )
+            instance = cls()
+            instance.model_id = model_id
+            instance.kwargs = kwargs
+            return instance
+
+        def to(self, device: str):
+            return self
+
+        def eval(self):
+            return self
+
+    fake_module.AutoModel = AutoModel
+    monkeypatch.setitem(sys.modules, "fake_warning_model", fake_module)
+    adapter = VJEPA2Adapter(
+        {
+            "module_path": "fake_warning_model",
+            "class_name": "AutoModel",
+            "model_id": "fake/warning-model",
+            "local_files_only": True,
+        }
+    )
+    with caplog.at_level(logging.WARNING, logger="transformers.configuration_utils"):
+        status = adapter.load(allow_real_model_loading=True, device="cpu", dtype="float32")
+    assert status.status == "real"
+    assert "`torch_dtype` is deprecated" not in caplog.text
 
 
 def test_qwen_official_processor_path_with_available_factory(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -615,6 +661,69 @@ def test_nvila_official_processor_path_and_autogaze_controls(monkeypatch: pytest
     assert result["answer"] == "nvila answer"
     assert result["metadata"]["autogaze_visual_tokens_injected"] is False
     assert result["metadata"]["video_input_kind"] == "processed_tensor_pil_frames_to_16"
+
+
+def test_nvila_tensor_video_input_flattens_chop_batches(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_module = types.ModuleType("fake_nvila_chop")
+
+    class AutoModel:
+        device = torch.device("cpu")
+
+        @classmethod
+        def from_pretrained(cls, model_id: str, **kwargs):
+            return cls()
+
+        def eval(self):
+            return self
+
+        def generate(self, **inputs):
+            assert "input_ids" in inputs
+            return torch.tensor([[31, 32, 33]])
+
+    class AutoProcessor:
+        tokenizer = types.SimpleNamespace(video_token="<video>")
+
+        @classmethod
+        def from_pretrained(cls, processor_path: str, **kwargs):
+            instance = cls()
+            instance.num_video_frames = kwargs.get("num_video_frames")
+            return instance
+
+        def __call__(self, *, text, videos=None, return_tensors=None, **_kwargs):
+            assert isinstance(videos, list)
+            assert len(videos) == 48
+            return {"input_ids": torch.tensor([[31, 32]])}
+
+        def batch_decode(self, outputs, skip_special_tokens=True):
+            assert outputs.tolist() == [[33]]
+            return ["chop nvila answer"]
+
+    fake_module.AutoModel = AutoModel
+    fake_module.AutoProcessor = AutoProcessor
+    monkeypatch.setitem(sys.modules, "fake_nvila_chop", fake_module)
+
+    adapter = NVILAAdapter(
+        {
+            "module_path": "fake_nvila_chop",
+            "class_name": "AutoModel",
+            "processor_module_path": "fake_nvila_chop",
+            "processor_class_name": "AutoProcessor",
+            "model_id": "fake/nvila",
+            "processor_path": "fake/nvila",
+            "prompt_template": "{video_token}\n\n{prompt}",
+            "processor_from_pretrained_kwargs": {"num_video_frames": 16},
+        }
+    )
+    status = adapter.load(allow_real_model_loading=True, device="cpu", dtype="float32")
+    assert status.status == "real"
+    result = adapter.generate(
+        query_text="Use chops.",
+        video=torch.zeros(3, 16, 3, 8, 8),
+        max_new_tokens=3,
+        video_path=None,
+    )
+    assert result["status"] == "real"
+    assert result["metadata"]["video_input_kind"] == "processed_tensor_pil_frames_to_48"
 
 
 def test_real_loading_blocked_does_not_fall_back_to_stub_tokens(tmp_path: Path) -> None:
