@@ -329,6 +329,42 @@ def test_chop_mode_expands_processed_frames_and_token_counts(tmp_path: Path) -> 
     assert not (output_dir / "visualizations" / "autogaze" / "frames" / "frame_000005_overlay.png").exists()
 
 
+def test_autogaze_forces_float32_even_when_runtime_dtype_requests_bfloat16(tmp_path: Path) -> None:
+    output_dir = tmp_path / "autogaze_dtype"
+    args = infer_autogaze.parse_args(
+        [
+            "--config",
+            str(_cfg("A2_modified_siglip_nvila_on.yaml")),
+            "--video-path",
+            "dummy",
+            "--output-dir",
+            str(output_dir),
+            "--device",
+            "cpu",
+            "--dtype",
+            "bfloat16",
+            "--frame-selection-mode",
+            "sample",
+            "--num-frames",
+            "2",
+            "--scaling-mode",
+            "resize",
+            "--resolution",
+            "32",
+            "--no-progress",
+        ]
+    )
+    infer_autogaze.run(args)
+    runtime = json.loads((output_dir / "autogaze" / "runtime_metadata.json").read_text(encoding="utf-8"))
+    metrics = json.loads((output_dir / "logs" / "metrics.json").read_text(encoding="utf-8"))
+    assert runtime["requested_dtype"] == "bfloat16"
+    assert runtime["autogaze_execution_dtype"] == "float32"
+    assert runtime["autogaze_forced_float32"] is True
+    assert metrics["requested_runtime_dtype"] == "bfloat16"
+    assert metrics["autogaze_dtype"] == "float32"
+    assert metrics["autogaze_forced_float32"] is True
+
+
 def test_cli_all_frame_selection_saves_all_dummy_frames(tmp_path: Path) -> None:
     output_dir = tmp_path / "autogaze_all"
     args = infer_autogaze.parse_args(
@@ -1237,9 +1273,11 @@ def test_infer_full_qwen_real_official_processor_integration(monkeypatch: pytest
 
     class AutoModelForVision2Seq:
         device = torch.device("cpu")
+        last_from_pretrained_kwargs: dict | None = None
 
         @classmethod
-        def from_pretrained(cls, *_args, **_kwargs):
+        def from_pretrained(cls, *_args, **kwargs):
+            cls.last_from_pretrained_kwargs = kwargs
             return cls()
 
         def to(self, device: str):
@@ -1309,6 +1347,8 @@ def test_infer_full_qwen_real_official_processor_integration(monkeypatch: pytest
             "cpu",
             "--dtype",
             "float32",
+            "--mllm-dtype",
+            "bfloat16",
             "--frame-selection-mode",
             "sample",
             "--num-frames",
@@ -1325,9 +1365,14 @@ def test_infer_full_qwen_real_official_processor_integration(monkeypatch: pytest
     assert answer["answer"] == "qwen full answer"
     assert answer["adapter_statuses"]["vision_encoder"]["status"] == "skipped"
     assert answer["adapter_statuses"]["mllm"]["status"] == "real"
+    assert AutoModelForVision2Seq.last_from_pretrained_kwargs is not None
+    assert AutoModelForVision2Seq.last_from_pretrained_kwargs["dtype"] is torch.bfloat16
     metrics = json.loads((output_dir / "logs" / "metrics.json").read_text(encoding="utf-8"))
     assert metrics["adapter_statuses"]["vision_encoder"]["status"] == "skipped"
     assert metrics["adapter_statuses"]["mllm"]["metadata"]["official_processor_path"] is True
+    assert metrics["requested_runtime_dtype"] == "float32"
+    assert metrics["autogaze_dtype"] == "float32"
+    assert metrics["mllm_dtype"] == "bfloat16"
     assert metrics["warmup_runs"] == 1
     assert metrics["mllm_generation_latency_ms"] is not None
     assert metrics["module_processing_latency_ms"] == metrics["end_to_end_latency_ms"]

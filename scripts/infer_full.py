@@ -36,6 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--device", choices=["cpu", "cuda", "mps"], default=None)
     parser.add_argument("--dtype", choices=["float32", "float16", "bfloat16"], default=None)
+    parser.add_argument("--mllm-dtype", choices=["float32", "float16", "bfloat16"], default=None)
     parser.add_argument("--max-new-tokens", type=int, default=None)
 
     parser.add_argument("--frame-selection-mode", choices=["sample", "chunk", "interval", "all"], default=None)
@@ -100,7 +101,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     run_start = time.perf_counter()
     cfg = _with_model_overrides(load_config(args.config), args)
     device = normalize_device(str(cli_or_config(args.device, cfg, "runtime.device", "cpu")))
-    dtype = str(cli_or_config(args.dtype, cfg, "runtime.dtype", "float32"))
+    requested_dtype = str(cli_or_config(args.dtype, cfg, "runtime.dtype", "float32"))
+    autogaze_dtype = "float32"
+    vision_dtype = str(nested_get(cfg, "runtime.vision_dtype", requested_dtype))
+    mllm_dtype = str(cli_or_config(args.mllm_dtype, cfg, "runtime.mllm_dtype", requested_dtype))
     warmup_runs = max(0, int(cli_or_config(args.warmup_runs, cfg, "runtime.warmup_runs", 1)))
     progress = ProgressReporter(enabled=not args.no_progress and bool(nested_get(cfg, "runtime.progress", True)))
     output_dir = Path(str(cli_or_config(args.output_dir, cfg, "output.output_dir", "outputs/poc_full"))).expanduser()
@@ -136,7 +140,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         cfg,
         prepared,
         device=device,
-        dtype=dtype,
+        dtype=autogaze_dtype,
+        requested_dtype=requested_dtype,
         gaze_ratio=float(cli_or_config(args.gaze_ratio, cfg, "autogaze.gaze_ratio", 0.75)),
         task_loss_requirement=cli_or_config(args.task_loss_requirement, cfg, "autogaze.task_loss_requirement", 0.7),
         strict_autogaze_params=bool(args.strict_autogaze_params or nested_get(cfg, "autogaze.strict_params", False)),
@@ -178,7 +183,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             }
         )
     else:
-        vision_status = vision.load(allow_real_model_loading=allow_real, device=device, dtype=dtype)
+        vision_status = vision.load(allow_real_model_loading=allow_real, device=device, dtype=vision_dtype)
         if allow_real and vision_status.status != "real":
             skipped.append({"stage": "vision_encoder", "reason": vision_status.reason or f"{vision.name} real loading unavailable"})
             blocked_stages.append("vision_encoder")
@@ -200,7 +205,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     blocked_stages.append("vision_encoder")
 
     mllm = build_mllm(mllm_name, nested_get(cfg, "mllm", {}))
-    mllm_status = mllm.load(allow_real_model_loading=allow_real, device=device, dtype=dtype)
+    mllm_status = mllm.load(allow_real_model_loading=allow_real, device=device, dtype=mllm_dtype)
     max_new_tokens = int(cli_or_config(args.max_new_tokens, cfg, "generation.max_new_tokens", 32))
     mllm_autogaze_payload = _mllm_autogaze_payload(cfg, gaze)
     mllm_generation_latency_ms: float | None = None
@@ -322,6 +327,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "vision_encoder": vision_status.to_dict(),
         "mllm": mllm_status.to_dict(),
     }
+    metrics["requested_runtime_dtype"] = requested_dtype
+    metrics["autogaze_dtype"] = autogaze_dtype
+    metrics["vision_encoder_dtype"] = vision_dtype
+    metrics["mllm_dtype"] = mllm_dtype
     metrics["vision_encoder_required_for_full_pipeline"] = vision_required
     metrics["generation_input_mode"] = "direct_visual_tokens" if direct_visual_token_mode else "official_processor"
     generation_metadata = generation.get("metadata") if isinstance(generation.get("metadata"), dict) else {}

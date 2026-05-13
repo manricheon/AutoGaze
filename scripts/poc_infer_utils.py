@@ -823,6 +823,7 @@ def run_autogaze_stage(
     *,
     device: str,
     dtype: str,
+    requested_dtype: str | None = None,
     gaze_ratio: float,
     task_loss_requirement: float | None,
     strict_autogaze_params: bool,
@@ -835,12 +836,16 @@ def run_autogaze_stage(
     checkpoint = nested_get(cfg, "autogaze.checkpoint_path") or nested_get(cfg, "autogaze.model_id")
     reason: str | None = None
     real_model_used = False
+    requested_dtype = requested_dtype or dtype
     runtime: dict[str, Any] = {
         "gaze_ratio": gaze_ratio,
         "task_loss_requirement": task_loss_requirement,
         "strict_autogaze_params": strict_autogaze_params,
         "requested_checkpoint": checkpoint,
         "allow_real_model_loading": allow_real_model_loading,
+        "requested_dtype": requested_dtype,
+        "autogaze_execution_dtype": dtype,
+        "autogaze_forced_float32": dtype == "float32" and requested_dtype != "float32",
         "patch_size": int(nested_get(cfg, "scaling.patch_size", 16)),
         "scales": configured_scales(cfg),
     }
@@ -941,7 +946,7 @@ def _run_real_autogaze(
     checkpoint = nested_get(cfg, "autogaze.checkpoint_path") or nested_get(cfg, "autogaze.model_id")
     with suppress_transformers_torch_dtype_warning():
         model = AutoGaze.from_pretrained(model_reference_for_loading(checkpoint))
-    model = model.to(normalize_device(device))
+    model = model.to(device=normalize_device(device), dtype=torch.float32)
     model.eval()
     video = prepared.processed_video.to(device=normalize_device(device), dtype=dtype_from_name(dtype))
     kwargs: dict[str, Any] = {"gazing_ratio": gaze_ratio}
@@ -1810,6 +1815,9 @@ def build_metrics(
         "actual_mllm": actual_mllm,
         "real_stub_blocked_status": gaze.status,
         "generation_status": generation_status,
+        "requested_runtime_dtype": gaze.runtime_metadata.get("requested_dtype"),
+        "autogaze_dtype": gaze.runtime_metadata.get("autogaze_execution_dtype"),
+        "autogaze_forced_float32": gaze.runtime_metadata.get("autogaze_forced_float32"),
         "gaze_ratio": gaze.runtime_metadata.get("gaze_ratio"),
         "task_loss_requirement": gaze.runtime_metadata.get("task_loss_requirement"),
         "original_token_count": gaze.original_token_count,

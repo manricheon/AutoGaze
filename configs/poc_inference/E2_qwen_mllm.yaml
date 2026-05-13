@@ -62,6 +62,7 @@ scaling:
 runtime:
   device: cpu
   dtype: float32
+  mllm_dtype: float32
   allow_real_model_loading: false
   warmup_runs: 1
   progress: true

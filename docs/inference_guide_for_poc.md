@@ -72,6 +72,10 @@ For NVILA, the local `weights/NVILA-8B-HD-Video/preprocessor_config.json` may st
 
 The same local NVILA processor defaults to `num_video_frames=8`, while the local AutoGaze checkpoint reports `max_num_frames=16`. NVILA's tile processor requires `num_video_frames` to be a positive multiple of AutoGaze `max_num_frames`, so A0-A3 explicitly pass `num_video_frames: 16` and `num_video_frames_thumbnail: 16`. If a custom config sets an invalid value such as `8`, the adapter blocks with a clear message before generation.
 
+AutoGaze always executes in `float32`, even when the CLI or config requests a mixed-precision runtime dtype. The requested dtype is still recorded in `autogaze/runtime_metadata.json` and `logs/metrics.json`, and `autogaze_forced_float32=true` marks when it was overridden for AutoGaze.
+
+For the full pipeline, `--dtype` / `runtime.dtype` remains the default dtype for non-AutoGaze modules. Use `--mllm-dtype` or `runtime.mllm_dtype` to choose the MLLM generation dtype independently, for example `--dtype float32 --mllm-dtype bfloat16`.
+
 The PoC adapters pass Hugging Face model dtype with the current `dtype` keyword instead of deprecated `torch_dtype`. Official processor configs set `use_fast: false` explicitly to preserve the slow image processor behavior saved with the local checkpoints and avoid the Transformers warning about a future default change. Override `processor_from_pretrained_kwargs.use_fast` only when you intentionally want to test the fast processor path.
 
 The local NVILA checkpoint code still reads `config.torch_dtype` internally. That access is inside checkpoint-provided remote code, so the PoC does not edit it. Instead, inference wraps Hugging Face model/processor loading with a targeted filter for the exact deprecation warning while still passing `dtype` from our own code.
@@ -136,7 +140,7 @@ python scripts/infer_autogaze.py \
   --video-path /path/to/video.mp4 \
   --output-dir outputs/poc_inference/a2_autogaze_real \
   --device cuda \
-  --dtype float16 \
+  --dtype float32 \
   --allow-real-model-loading \
   --json
 ```
@@ -178,7 +182,8 @@ python scripts/infer_full.py \
   --allow-real-model-loading \
   --local-files-only \
   --device cuda \
-  --dtype bfloat16 \
+  --dtype float32 \
+  --mllm-dtype bfloat16 \
   --max-new-tokens 32 \
   --output-dir outputs/poc_inference/a2_nvila_real \
   --json
@@ -203,7 +208,8 @@ python scripts/infer_full.py \
   --allow-real-model-loading \
   --local-files-only \
   --device cuda \
-  --dtype bfloat16 \
+  --dtype float32 \
+  --mllm-dtype bfloat16 \
   --max-new-tokens 32 \
   --output-dir outputs/poc_inference/e2_qwen_real \
   --json
@@ -224,7 +230,8 @@ python scripts/infer_full.py \
   --allow-real-model-loading \
   --local-files-only \
   --device cuda \
-  --dtype bfloat16 \
+  --dtype float32 \
+  --mllm-dtype bfloat16 \
   --frame-selection-mode sample \
   --num-frames 16 \
   --scaling-mode resize \
@@ -247,7 +254,8 @@ python scripts/infer_full.py \
   --allow-real-model-loading \
   --local-files-only \
   --device cuda \
-  --dtype bfloat16 \
+  --dtype float32 \
+  --mllm-dtype bfloat16 \
   --frame-selection-mode sample \
   --num-frames 4 \
   --scaling-mode resize \
