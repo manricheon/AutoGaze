@@ -31,10 +31,21 @@ mllm:
   processor_path: weights/NVILA-8B-HD-Video
   tokenizer_path: weights/NVILA-8B-HD-Video
   module_path: transformers
-  class_name: AutoModelForVision2Seq
+  class_name: AutoModel
+  processor_module_path: transformers
+  processor_class_name: AutoProcessor
   official_processor_path: true
+  official_processor_owns_vision: true
+  generation_input_mode: official_processor
+  sync_autogaze_controls_from_config: true
+  prompt_template: "{video_token}\n\n{prompt}"
   trust_remote_code: true
   local_files_only: true
+  from_pretrained_kwargs:
+    device_map: auto
+    max_batch_size_siglip: 32
+  processor_from_pretrained_kwargs:
+    max_batch_size_autogaze: 16
 
 frame_selection:
   mode: sample

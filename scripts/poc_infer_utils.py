@@ -58,6 +58,7 @@ class GazeResult:
     per_frame: list[dict[str, Any]]
     runtime_metadata: dict[str, Any]
     latency_ms: float
+    gazing_info_for_vit: Mapping[str, Any] | None = None
 
 
 def json_safe(value: Any) -> Any:
@@ -619,6 +620,11 @@ def build_gaze_result(
         "task_loss_requirement": task_loss_requirement,
         "encoder_side_acceleration_claimed": bool(real_model_used and autogaze_enabled),
     }
+    gazing_info_for_vit = None
+    if real_outputs is not None:
+        required = ("gazing_pos", "num_gazing_each_frame", "if_padded_gazing")
+        if all(key in real_outputs for key in required):
+            gazing_info_for_vit = {key: real_outputs[key] for key in required}
     return GazeResult(
         status=status,
         reason=reason,
@@ -632,6 +638,7 @@ def build_gaze_result(
         per_frame=per_frame,
         runtime_metadata=runtime,
         latency_ms=(time.perf_counter() - start_time) * 1000,
+        gazing_info_for_vit=gazing_info_for_vit,
     )
 
 

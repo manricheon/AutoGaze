@@ -132,7 +132,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     vision_name = str(nested_get(cfg, "vision_encoder.name", "generic_vit"))
     mllm_name = str(nested_get(cfg, "mllm.name", "generic_mllm"))
-    vision_required = bool(nested_get(cfg, "vision_encoder.required_for_full_pipeline", mllm_name != "qwen"))
+    _sync_mllm_with_poc_autogaze_controls(cfg, gaze)
+    mllm_owns_vision = bool(nested_get(cfg, "mllm.official_processor_owns_vision", mllm_name == "qwen"))
+    generation_input_mode = str(nested_get(cfg, "mllm.generation_input_mode", "official_processor"))
+    direct_visual_token_mode = generation_input_mode == "direct_visual_tokens"
+    vision_required = bool(nested_get(cfg, "vision_encoder.required_for_full_pipeline", direct_visual_token_mode))
     vision = build_vision_encoder(vision_name, nested_get(cfg, "vision_encoder", {}))
     visual_tokens = None
     actual_vision_encoder = vision.name
@@ -156,7 +160,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             skipped.append({"stage": "vision_encoder", "reason": vision_status.reason or f"{vision.name} real loading unavailable"})
             blocked_stages.append("vision_encoder")
         else:
-            autogaze_payload = None if not gaze.autogaze_enabled or gaze.status == "blocked" else {"per_frame": gaze.per_frame}
+            autogaze_payload = None if not gaze.autogaze_enabled or gaze.status == "blocked" else gaze.gazing_info_for_vit
             try:
                 vision_output = vision.forward(prepared.processed_video, autogaze=autogaze_payload)
                 visual_tokens = vision_output.get("visual_tokens")
@@ -178,6 +182,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "reason": mllm_status.reason or f"{mllm.name} real loading unavailable",
             "query_text_used": True,
         }
+    elif direct_visual_token_mode and not mllm.supports_direct_visual_tokens():
+        blocked_stages.append("mllm_generation")
+        generation = {
+            "status": "blocked",
+            "answer": None,
+            "reason": f"{mllm.name} does not support verified direct visual token injection; use official_processor mode",
+            "query_text_used": True,
+        }
     elif allow_real and vision_required and "vision_encoder" in blocked_stages and mllm.supports_direct_visual_tokens():
         generation = {
             "status": "blocked",
@@ -191,6 +203,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             video=prepared.processed_video,
             visual_tokens=visual_tokens if mllm.supports_direct_visual_tokens() else None,
             max_new_tokens=max_new_tokens,
+            video_path=args.video_path,
         )
     generation_status = str(generation.get("status", "unknown"))
     output_text = generation.get("answer")
@@ -259,6 +272,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "mllm": mllm_status.to_dict(),
     }
     metrics["vision_encoder_required_for_full_pipeline"] = vision_required
+    metrics["generation_input_mode"] = "direct_visual_tokens" if direct_visual_token_mode else "official_processor"
+    metrics["gazing_info_passed_to_vision_encoder"] = bool(gaze.gazing_info_for_vit is not None and vision_required)
     if gaze.status == "blocked":
         blocked_stages.append("autogaze")
     if blocked_stages:
@@ -323,6 +338,16 @@ def _with_model_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> dict
         mllm["local_files_only"] = True
         vision["local_files_only"] = True
     return updated
+
+
+def _sync_mllm_with_poc_autogaze_controls(cfg: dict[str, Any], gaze: Any) -> None:
+    mllm = cfg.setdefault("mllm", {})
+    if not isinstance(mllm, dict) or not bool(mllm.get("sync_autogaze_controls_from_config", False)):
+        return
+    mllm["poc_autogaze_enabled"] = bool(nested_get(cfg, "autogaze.enabled", False))
+    mllm["poc_autogaze_status"] = getattr(gaze, "status", None)
+    mllm["poc_gaze_ratio"] = nested_get(cfg, "autogaze.gaze_ratio")
+    mllm["poc_task_loss_requirement"] = nested_get(cfg, "autogaze.task_loss_requirement")
 
 
 def _failure_reason_for_blocked_stages(skipped: list[dict[str, str]], blocked_stages: list[str]) -> str | None:

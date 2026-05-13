@@ -18,7 +18,7 @@ import infer_autogaze
 import infer_full
 from poc_infer_utils import SCALE_COLORS, load_config, prepare_video
 from poc_model_registry import build_mllm, build_vision_encoder
-from poc_model_adapters import QwenAdapter, VJEPA2Adapter
+from poc_model_adapters import NVILAAdapter, QwenAdapter, VJEPA2Adapter
 
 
 POC_CONFIGS = [
@@ -62,6 +62,9 @@ def test_configs_reference_local_weight_cache_when_available() -> None:
     assert a2["mllm"]["checkpoint_path"] == "weights/NVILA-8B-HD-Video"
     assert a2["mllm"]["local_files_only"] is True
     assert a2["mllm"]["trust_remote_code"] is True
+    assert a2["mllm"]["class_name"] == "AutoModel"
+    assert a2["mllm"]["official_processor_owns_vision"] is True
+    assert a2["mllm"]["sync_autogaze_controls_from_config"] is True
 
     e1 = load_config(_cfg("E1_vjepa2_encoder.yaml"))
     assert e1["vision_encoder"]["checkpoint_path"] == "weights/vjepa2-vitl-fpc64-256"
@@ -443,6 +446,83 @@ def test_qwen_incomplete_local_shards_block_before_loading(tmp_path: Path) -> No
     assert status.metadata["missing_shards"] == ["model-00001-of-00002.safetensors"]
 
 
+def test_nvila_official_processor_path_and_autogaze_controls(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_module = types.ModuleType("fake_nvila")
+
+    class AutoModel:
+        device = torch.device("cpu")
+
+        @classmethod
+        def from_pretrained(cls, model_id: str, **kwargs):
+            instance = cls()
+            instance.model_id = model_id
+            instance.kwargs = kwargs
+            return instance
+
+        def eval(self):
+            return self
+
+        def generate(self, **inputs):
+            assert "input_ids" in inputs
+            return torch.tensor([[21, 22, 23]])
+
+    class AutoProcessor:
+        tokenizer = types.SimpleNamespace(video_token="<video>")
+
+        @classmethod
+        def from_pretrained(cls, processor_path: str, **kwargs):
+            instance = cls()
+            instance.processor_path = processor_path
+            instance.kwargs = kwargs
+            return instance
+
+        def __call__(self, *, text, videos=None, return_tensors=None, **_kwargs):
+            assert text == "<video>\n\nQuestion: What changed?"
+            assert isinstance(videos, list)
+            assert return_tensors == "pt"
+            return {"input_ids": torch.tensor([[21, 22]])}
+
+        def batch_decode(self, outputs, skip_special_tokens=True):
+            assert outputs.tolist() == [[23]]
+            return ["nvila answer"]
+
+    fake_module.AutoModel = AutoModel
+    fake_module.AutoProcessor = AutoProcessor
+    monkeypatch.setitem(sys.modules, "fake_nvila", fake_module)
+
+    adapter = NVILAAdapter(
+        {
+            "module_path": "fake_nvila",
+            "class_name": "AutoModel",
+            "processor_module_path": "fake_nvila",
+            "processor_class_name": "AutoProcessor",
+            "model_id": "fake/nvila",
+            "processor_path": "fake/nvila",
+            "trust_remote_code": True,
+            "prompt_template": "{video_token}\n\nQuestion: {prompt}",
+            "sync_autogaze_controls_from_config": True,
+            "poc_autogaze_enabled": False,
+            "poc_gaze_ratio": 0.75,
+            "poc_task_loss_requirement": 0.7,
+        }
+    )
+    status = adapter.load(allow_real_model_loading=True, device="cpu", dtype="float32")
+    assert status.status == "real"
+    assert status.metadata["processor_status"] == "real"
+    assert status.metadata["processor_autogaze_controls"]["gazing_ratio_tile"] is None
+    assert status.metadata["processor_autogaze_controls"]["gazing_ratio_thumbnail"] is None
+    result = adapter.generate(
+        query_text="What changed?",
+        video=torch.zeros(1, 2, 3, 8, 8),
+        max_new_tokens=3,
+        video_path="dummy",
+    )
+    assert result["status"] == "real"
+    assert result["answer"] == "nvila answer"
+    assert result["metadata"]["autogaze_visual_tokens_injected"] is False
+    assert result["metadata"]["video_input_kind"] == "processed_tensor_pil_frames"
+
+
 def test_real_loading_blocked_does_not_fall_back_to_stub_tokens(tmp_path: Path) -> None:
     output_dir = tmp_path / "blocked"
     cfg = load_config(_cfg("E1_vjepa2_encoder.yaml"))
@@ -569,4 +649,93 @@ def test_infer_full_qwen_real_official_processor_integration(monkeypatch: pytest
     assert answer["adapter_statuses"]["mllm"]["status"] == "real"
     metrics = json.loads((output_dir / "logs" / "metrics.json").read_text(encoding="utf-8"))
     assert metrics["adapter_statuses"]["vision_encoder"]["status"] == "skipped"
+    assert metrics["adapter_statuses"]["mllm"]["metadata"]["official_processor_path"] is True
+
+
+def test_infer_full_nvila_real_official_processor_integration(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    fake_module = types.ModuleType("fake_nvila_full")
+
+    class AutoModel:
+        device = torch.device("cpu")
+
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            return cls()
+
+        def eval(self):
+            return self
+
+        def generate(self, **_inputs):
+            return torch.tensor([[7, 8, 9]])
+
+    class AutoProcessor:
+        tokenizer = types.SimpleNamespace(video_token="<video>")
+
+        @classmethod
+        def from_pretrained(cls, *_args, **kwargs):
+            instance = cls()
+            instance.kwargs = kwargs
+            return instance
+
+        def __call__(self, *, text, videos=None, return_tensors=None, **_kwargs):
+            assert text == "<video>\n\nNVILA question?"
+            assert isinstance(videos, list)
+            return {"input_ids": torch.tensor([[7, 8]])}
+
+        def batch_decode(self, outputs, skip_special_tokens=True):
+            assert outputs.tolist() == [[9]]
+            return ["nvila full answer"]
+
+    fake_module.AutoModel = AutoModel
+    fake_module.AutoProcessor = AutoProcessor
+    monkeypatch.setitem(sys.modules, "fake_nvila_full", fake_module)
+
+    cfg = load_config(_cfg("A1_modified_siglip_nvila_off.yaml"))
+    cfg["mllm"].update(
+        {
+            "module_path": "fake_nvila_full",
+            "class_name": "AutoModel",
+            "processor_module_path": "fake_nvila_full",
+            "processor_class_name": "AutoProcessor",
+            "model_id": "fake/nvila",
+            "processor_path": "fake/nvila",
+            "prompt_template": "{video_token}\n\n{prompt}",
+        }
+    )
+    cfg_path = _write_cfg(tmp_path, cfg, "nvila_real.yaml")
+    output_dir = tmp_path / "nvila"
+    args = infer_full.parse_args(
+        [
+            "--config",
+            str(cfg_path),
+            "--video-path",
+            "dummy",
+            "--query-text",
+            "NVILA question?",
+            "--output-dir",
+            str(output_dir),
+            "--allow-real-model-loading",
+            "--local-files-only",
+            "--device",
+            "cpu",
+            "--dtype",
+            "float32",
+            "--frame-selection-mode",
+            "sample",
+            "--num-frames",
+            "2",
+            "--scaling-mode",
+            "resize",
+            "--resolution",
+            "32",
+        ]
+    )
+    summary = infer_full.run(args)
+    assert summary["status"] == "completed"
+    answer = json.loads((output_dir / "predictions" / "answer.json").read_text(encoding="utf-8"))
+    assert answer["answer"] == "nvila full answer"
+    assert answer["adapter_statuses"]["vision_encoder"]["status"] == "skipped"
+    assert answer["adapter_statuses"]["mllm"]["status"] == "real"
+    metrics = json.loads((output_dir / "logs" / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["adapter_statuses"]["mllm"]["metadata"]["processor_autogaze_controls"]["gazing_ratio_tile"] is None
     assert metrics["adapter_statuses"]["mllm"]["metadata"]["official_processor_path"] is True

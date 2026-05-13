@@ -120,7 +120,7 @@ class VisionEncoderAdapter:
         model_input = video.to(self.device) if hasattr(video, "to") else video
         kwargs = {}
         if autogaze is not None and self.supports_autogaze_tokens():
-            kwargs["gazing_info"] = autogaze
+            kwargs["gazing_info"] = _move_tensor_mapping(autogaze, self.device)
         errors: list[str] = []
         batch_frames: tuple[int, int] | None = None
         if (
@@ -321,8 +321,9 @@ class MLLMAdapter:
         checkpoint_ref = _model_reference_for_loading(checkpoint)
         try:
             factory = getattr(importlib.import_module(str(module_path)), str(class_name))
-            self.model = factory.from_pretrained(checkpoint_ref, **_from_pretrained_kwargs(self.config, dtype=dtype)) if hasattr(factory, "from_pretrained") else factory()
-            if hasattr(self.model, "to"):
+            load_kwargs = _from_pretrained_kwargs(self.config, dtype=dtype)
+            self.model = factory.from_pretrained(checkpoint_ref, **load_kwargs) if hasattr(factory, "from_pretrained") else factory()
+            if hasattr(self.model, "to") and "device_map" not in load_kwargs:
                 self.model.to(device)
             if hasattr(self.model, "eval"):
                 self.model.eval()
@@ -342,10 +343,25 @@ class MLLMAdapter:
             self.status = AdapterStatus(self.name, "blocked", f"real MLLM loading failed: {exc}")
         return self.status
 
-    def prepare_inputs(self, *, query_text: str, video: torch.Tensor, visual_tokens: torch.Tensor | None = None) -> dict[str, Any]:
-        return {"query_text": query_text, "video": video, "visual_tokens": visual_tokens}
+    def prepare_inputs(
+        self,
+        *,
+        query_text: str,
+        video: torch.Tensor,
+        visual_tokens: torch.Tensor | None = None,
+        video_path: str | None = None,
+    ) -> dict[str, Any]:
+        return {"query_text": query_text, "video": video, "visual_tokens": visual_tokens, "video_path": video_path}
 
-    def generate(self, *, query_text: str, video: torch.Tensor, visual_tokens: torch.Tensor | None = None, max_new_tokens: int = 32) -> dict[str, Any]:
+    def generate(
+        self,
+        *,
+        query_text: str,
+        video: torch.Tensor,
+        visual_tokens: torch.Tensor | None = None,
+        max_new_tokens: int = 32,
+        video_path: str | None = None,
+    ) -> dict[str, Any]:
         if not query_text:
             return {"status": "blocked", "answer": None, "reason": "query text is required"}
         if self.model is None:
@@ -388,6 +404,47 @@ class MLLMAdapter:
 class NVILAAdapter(MLLMAdapter):
     name = "nvila"
 
+    def load(self, *, allow_real_model_loading: bool = False, device: str = "cpu", dtype: str = "float32") -> AdapterStatus:
+        status = super().load(allow_real_model_loading=allow_real_model_loading, device=device, dtype=dtype)
+        if status.status != "real":
+            return status
+        processor_path = self.config.get("processor_path") or self._checkpoint()
+        if not processor_path:
+            self.status = AdapterStatus(self.name, "blocked", "NVILA processor_path or checkpoint_path is required for official processor loading")
+            return self.status
+        if _looks_like_local_path(str(processor_path)) and not _resolve_local_path(processor_path).exists():
+            self.status = AdapterStatus(
+                self.name,
+                "blocked",
+                f"NVILA official processor path does not exist: {processor_path}",
+                metadata=status.metadata,
+            )
+            return self.status
+        processor_module = self.config.get("processor_module_path") or "transformers"
+        processor_class = self.config.get("processor_class_name") or self.config.get("processor_class_or_factory") or "AutoProcessor"
+        try:
+            factory = getattr(importlib.import_module(str(processor_module)), str(processor_class))
+            processor_ref = _model_reference_for_loading(processor_path)
+            processor_kwargs = _nvila_processor_from_pretrained_kwargs(self.config)
+            self.processor = factory.from_pretrained(processor_ref, **processor_kwargs)
+            status.metadata["processor_status"] = "real"
+            status.metadata["processor_path"] = processor_path
+            status.metadata["resolved_processor_path"] = processor_ref
+            status.metadata["processor_module_path"] = processor_module
+            status.metadata["processor_class_name"] = processor_class
+            status.metadata["official_processor_path"] = True
+            status.metadata["processor_autogaze_controls"] = _jsonable_processor_kwargs(processor_kwargs)
+            self.status = status
+        except Exception as exc:
+            self.status = AdapterStatus(
+                self.name,
+                "blocked",
+                f"NVILA official processor loading failed: {exc}",
+                metadata=status.metadata,
+            )
+            return self.status
+        return status
+
     def default_module_path(self) -> str | None:
         return "transformers"
 
@@ -395,10 +452,99 @@ class NVILAAdapter(MLLMAdapter):
         return "AutoModel"
 
     def supports_direct_visual_tokens(self) -> bool:
-        return True
+        return False
 
     def supports_official_processor_path(self) -> bool:
         return True
+
+    def generate(
+        self,
+        *,
+        query_text: str,
+        video: torch.Tensor,
+        visual_tokens: torch.Tensor | None = None,
+        max_new_tokens: int = 32,
+        video_path: str | None = None,
+    ) -> dict[str, Any]:
+        if visual_tokens is not None:
+            return {
+                "status": "blocked",
+                "answer": None,
+                "reason": "NVILA direct visual token injection is not verified in this PoC; use official processor video input.",
+                "query_text_used": True,
+            }
+        if self.model is not None and self.processor is not None:
+            return self._generate_with_official_processor(
+                query_text=query_text,
+                video=video,
+                video_path=video_path,
+                max_new_tokens=max_new_tokens,
+            )
+        return super().generate(
+            query_text=query_text,
+            video=video,
+            visual_tokens=visual_tokens,
+            max_new_tokens=max_new_tokens,
+            video_path=video_path,
+        )
+
+    def _generate_with_official_processor(
+        self,
+        *,
+        query_text: str,
+        video: torch.Tensor,
+        video_path: str | None,
+        max_new_tokens: int,
+    ) -> dict[str, Any]:
+        if not query_text:
+            return {"status": "blocked", "answer": None, "reason": "query text is required", "query_text_used": False}
+        try:
+            prompt_template = str(self.config.get("prompt_template") or "{video_token}\n\n{prompt}")
+            video_token = getattr(getattr(self.processor, "tokenizer", None), "video_token", "<video>")
+            prompt = prompt_template.format(prompt=query_text, query=query_text, video_token=video_token)
+            video_input, video_input_kind = _official_video_input(video=video, video_path=video_path)
+            inputs = self.processor(text=prompt, videos=video_input, return_tensors="pt")
+            if isinstance(inputs, Mapping):
+                model_device = getattr(self.model, "device", self.device)
+                inputs = {
+                    key: value.to(model_device) if isinstance(value, torch.Tensor) else value
+                    for key, value in inputs.items()
+                }
+            with torch.inference_mode():
+                outputs = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
+            input_ids = inputs.get("input_ids") if isinstance(inputs, Mapping) else None
+            decode_input = outputs[:, input_ids.shape[1] :] if isinstance(outputs, torch.Tensor) and isinstance(input_ids, torch.Tensor) else outputs
+            decoded = self.processor.batch_decode(decode_input, skip_special_tokens=True)
+            answer = str(decoded[0]).strip() if decoded else ""
+            return {
+                "status": "real",
+                "answer": answer,
+                "reason": None,
+                "query_text_used": True,
+                "official_processor_path": True,
+                "metadata": {
+                    "prompt_template": prompt_template,
+                    "video_input_kind": video_input_kind,
+                    "max_new_tokens": max_new_tokens,
+                    "autogaze_visualizer_status": self.config.get("poc_autogaze_status"),
+                    "autogaze_enabled_for_processor": self.config.get("poc_autogaze_enabled"),
+                    "processor_autogaze_controls": _jsonable_processor_kwargs(_nvila_processor_from_pretrained_kwargs(self.config)),
+                    "autogaze_visual_tokens_injected": False,
+                    "note": (
+                        "NVILA generation uses the official processor video path. "
+                        "The separate PoC AutoGaze stage is retained for visualization and metrics; "
+                        "direct visual-token injection into NVILA is not claimed."
+                    ),
+                },
+            }
+        except Exception as exc:  # pragma: no cover - real model path is environment-dependent.
+            return {
+                "status": "blocked",
+                "answer": None,
+                "reason": f"NVILA official processor generation failed: {exc}",
+                "query_text_used": True,
+                "official_processor_path": True,
+            }
 
 
 class QwenAdapter(MLLMAdapter):
@@ -451,7 +597,15 @@ class QwenAdapter(MLLMAdapter):
     def supports_official_processor_path(self) -> bool:
         return True
 
-    def generate(self, *, query_text: str, video: torch.Tensor, visual_tokens: torch.Tensor | None = None, max_new_tokens: int = 32) -> dict[str, Any]:
+    def generate(
+        self,
+        *,
+        query_text: str,
+        video: torch.Tensor,
+        visual_tokens: torch.Tensor | None = None,
+        max_new_tokens: int = 32,
+        video_path: str | None = None,
+    ) -> dict[str, Any]:
         if visual_tokens is not None and not self.supports_direct_visual_tokens():
             return {
                 "status": "blocked",
@@ -461,7 +615,7 @@ class QwenAdapter(MLLMAdapter):
             }
         if self.model is not None and self.processor is not None:
             return self._generate_with_official_processor(query_text=query_text, video=video, max_new_tokens=max_new_tokens)
-        return super().generate(query_text=query_text, video=video, visual_tokens=visual_tokens, max_new_tokens=max_new_tokens)
+        return super().generate(query_text=query_text, video=video, visual_tokens=visual_tokens, max_new_tokens=max_new_tokens, video_path=video_path)
 
     def _generate_with_official_processor(self, *, query_text: str, video: torch.Tensor, max_new_tokens: int) -> dict[str, Any]:
         if not query_text:
@@ -587,6 +741,43 @@ def _processor_from_pretrained_kwargs(config: Mapping[str, Any]) -> dict[str, An
     return kwargs
 
 
+def _nvila_processor_from_pretrained_kwargs(config: Mapping[str, Any]) -> dict[str, Any]:
+    kwargs = _processor_from_pretrained_kwargs(config)
+    if not bool(config.get("sync_autogaze_controls_from_config", False)):
+        return kwargs
+
+    autogaze_enabled = config.get("poc_autogaze_enabled")
+    if autogaze_enabled is True:
+        gaze_ratio = config.get("poc_gaze_ratio")
+        task_loss_requirement = config.get("poc_task_loss_requirement")
+        if gaze_ratio is not None:
+            kwargs.setdefault("gazing_ratio_tile", gaze_ratio)
+            kwargs.setdefault("gazing_ratio_thumbnail", gaze_ratio)
+        if task_loss_requirement is not None:
+            kwargs.setdefault("task_loss_requirement_tile", task_loss_requirement)
+            kwargs.setdefault("task_loss_requirement_thumbnail", task_loss_requirement)
+    elif autogaze_enabled is False:
+        kwargs.setdefault("gazing_ratio_tile", None)
+        kwargs.setdefault("gazing_ratio_thumbnail", None)
+        kwargs.setdefault("task_loss_requirement_tile", None)
+        kwargs.setdefault("task_loss_requirement_thumbnail", None)
+    return kwargs
+
+
+def _jsonable_processor_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in kwargs.items():
+        if isinstance(value, torch.dtype):
+            result[key] = str(value)
+        elif isinstance(value, (str, int, float, bool)) or value is None:
+            result[key] = value
+        elif isinstance(value, (list, tuple)):
+            result[key] = list(value)
+        else:
+            result[key] = str(value)
+    return result
+
+
 def _torch_dtype(dtype: str) -> torch.dtype | None:
     if dtype == "float16":
         return torch.float16
@@ -595,6 +786,25 @@ def _torch_dtype(dtype: str) -> torch.dtype | None:
     if dtype == "float32":
         return torch.float32
     return None
+
+
+def _official_video_input(*, video: torch.Tensor, video_path: str | None) -> tuple[Any, str]:
+    if video_path and video_path != "dummy":
+        path = Path(video_path).expanduser()
+        if path.exists():
+            return str(path if path.is_absolute() else path.resolve()), "video_path"
+        repo_path = REPO_ROOT / path
+        if repo_path.exists():
+            return str(repo_path), "video_path"
+        return video_path, "video_reference"
+    return _video_tensor_to_pil(video), "processed_tensor_pil_frames"
+
+
+def _move_tensor_mapping(value: Mapping[str, Any], device: str) -> dict[str, Any]:
+    moved: dict[str, Any] = {}
+    for key, item in value.items():
+        moved[key] = item.to(device) if isinstance(item, torch.Tensor) else item
+    return moved
 
 
 def _video_tensor_to_pil(video: torch.Tensor) -> list[Any]:

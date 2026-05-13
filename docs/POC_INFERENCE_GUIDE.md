@@ -120,11 +120,59 @@ python scripts/infer_full.py \
 
 Qwen direct visual token injection is not claimed as supported. The initial Qwen path is official-processor/input-level selection only.
 
-NVILA local loading is configured through `weights/NVILA-8B-HD-Video`, but real NVILA generation is still blocked in this lightweight PoC until a model-specific NVILA generation adapter is implemented. The script reports that adapter blocker instead of silently substituting another MLLM.
+NVILA local loading is configured through `weights/NVILA-8B-HD-Video`. In full-pipeline mode, the NVILA adapter uses the official processor-first path from `docs/nvila-hd-video-readme.md`: load `AutoProcessor`, load `AutoModel`, format `{video_token}\n\n{prompt}`, pass video input through the processor, call `model.generate`, and decode with `processor.batch_decode`.
+
+## Integration Modes
+
+There are two separate integration modes:
+
+| Mode | Config field | Behavior |
+|---|---|---|
+| `official_processor` | `mllm.generation_input_mode: official_processor` | The MLLM processor owns video ingestion. This is the default for NVILA and Qwen. The separate AutoGaze stage still writes visualization/metrics. |
+| `direct_visual_tokens` | `mllm.generation_input_mode: direct_visual_tokens` | Real AutoGaze `gazing_info` is passed to a compatible ViT, then visual features are sent to a compatible MLLM adapter. This is only allowed for adapters that explicitly support verified direct token input. |
+
+The lower-level `direct_visual_tokens` path follows `INTEGRATION.md`: real AutoGaze must provide `gazing_pos`, `num_gazing_each_frame`, and `if_padded_gazing`, and the modified ViT receives that dict as `gazing_info`. Stub AutoGaze metadata is not passed to the ViT as real `gazing_info`.
+
+For A0-A3, NVILA uses `official_processor` mode by default because the public NVILA-HD-Video guide is processor-first. Direct visual-token injection into NVILA remains unverified and is not claimed.
+
+## AutoGaze ON/OFF In Full Pipeline
+
+A0/A1 keep `autogaze.enabled: false`; A2/A3 keep `autogaze.enabled: true`.
+
+For NVILA processor-first generation, the PoC syncs that setting into processor construction when `mllm.sync_autogaze_controls_from_config: true`:
+
+| PoC setting | NVILA processor request |
+|---|---|
+| `autogaze.enabled: true` | Pass configured `gazing_ratio` and `task_loss_requirement` as tile/thumbnail AutoGaze controls. |
+| `autogaze.enabled: false` | Pass `gazing_ratio_*: null` and `task_loss_requirement_*: null` to request a no-gazing/full-token processor path where supported. |
+
+If the processor rejects an AutoGaze OFF request, the run blocks with the processor error instead of silently changing the ablation.
 
 ## Priority 2 Real Smoke Commands
 
 These commands are intended for local environments where the listed checkpoints or Hugging Face cache entries already exist. Add `--local-files-only` to avoid network access.
+
+NVILA official processor smoke:
+
+```bash
+python scripts/infer_full.py \
+  --config configs/poc_inference/A2_modified_siglip_nvila_on.yaml \
+  --video-path /path/to/video.mp4 \
+  --query-text "What is happening in this video?" \
+  --mllm nvila \
+  --allow-real-model-loading \
+  --local-files-only \
+  --device cuda \
+  --dtype bfloat16 \
+  --max-new-tokens 32 \
+  --output-dir outputs/a2_nvila_real_smoke
+```
+
+Expected behavior:
+- If `weights/NVILA-8B-HD-Video` and runtime dependencies are available, generation uses the official NVILA processor path.
+- `logs/metrics.json` records `generation_input_mode=official_processor`.
+- The separate AutoGaze visualizer still writes selected patch/token reports.
+- Direct visual-token injection into NVILA is not claimed.
 
 V-JEPA2 encoder smoke:
 
@@ -275,6 +323,8 @@ Full-pipeline metrics also include:
 - `adapter_statuses.vision_encoder`
 - `adapter_statuses.mllm`
 - `vision_encoder_required_for_full_pipeline`
+- `generation_input_mode`
+- `gazing_info_passed_to_vision_encoder`
 
 Each adapter status contains `name`, `status`, `reason`, and `metadata`. Valid statuses are `real`, `stub`, `skipped`, and `blocked`.
 
@@ -286,5 +336,5 @@ Encoder-side acceleration is only marked when real AutoGaze execution is used wi
 - Qwen real loading requires both model and official processor availability.
 - Qwen is configured to use `weights/Qwen2.5-VL-7B-Instruct`; if any shard referenced by `model.safetensors.index.json` is missing, the adapter blocks before model construction and reports the missing filenames.
 - Qwen direct visual token injection is unsupported.
-- NVILA checkpoints are configured locally, but real NVILA generation needs a dedicated adapter before it can be marked supported.
+- NVILA direct visual-token injection is unsupported in this generic PoC until the expected visual feature interface is verified.
 - Dummy video runs generate explicit stub AutoGaze metadata. They are useful for smoke tests and visualization checks, but are not real model outputs.
