@@ -1,6 +1,0 @@
-enabled: false
-mode: disabled
-cache_dir: null
-offline: false
-local_files_only: false
-token_env_var: HF_TOKEN

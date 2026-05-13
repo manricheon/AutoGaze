@@ -1,3 +1,0 @@
-enabled: true
-type: video_vqa
-metric: exact_match

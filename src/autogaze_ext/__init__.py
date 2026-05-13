@@ -1,1 +1,0 @@
-"""AutoGaze extension PoC package."""

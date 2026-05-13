@@ -1,9 +1,0 @@
-enabled: false
-model_id: null
-revision: null
-trust_remote_code: false
-token_env_var: HF_TOKEN
-cache_dir: null
-local_files_only: false
-offline: false
-model_class: AutoModel

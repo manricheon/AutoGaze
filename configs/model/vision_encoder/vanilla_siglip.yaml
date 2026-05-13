@@ -1,6 +1,0 @@
-type: vanilla_siglip
-family: siglip_vit
-variant: vanilla
-checkpoint: null
-revision: null
-status: vanilla_siglip_baseline_or_ablation

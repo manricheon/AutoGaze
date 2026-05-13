@@ -1,3 +1,0 @@
-type: cpu
-allow_cuda: true
-allow_mps: true

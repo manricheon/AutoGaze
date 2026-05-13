@@ -1,3 +1,0 @@
-enabled: false
-type: action_recognition
-metric: top1
