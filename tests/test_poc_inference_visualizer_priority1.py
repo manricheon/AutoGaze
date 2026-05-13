@@ -60,6 +60,7 @@ def test_configs_reference_local_weight_cache_when_available() -> None:
     assert a2["vision_encoder"]["checkpoint_path"] == "weights/siglip2-base-patch16-224"
     assert a2["vision_encoder"]["from_pretrained_kwargs"]["scales"] == "32+64+112+224"
     assert a2["mllm"]["checkpoint_path"] == "weights/NVILA-8B-HD-Video"
+    assert a2["mllm"]["processor_from_pretrained_kwargs"]["use_fast"] is False
     assert a2["mllm"]["processor_from_pretrained_kwargs"]["autogaze_model_id"] == "weights/AutoGaze"
     assert a2["mllm"]["processor_from_pretrained_kwargs"]["num_video_frames"] == 16
     assert a2["mllm"]["processor_from_pretrained_kwargs"]["num_video_frames_thumbnail"] == 16
@@ -72,12 +73,14 @@ def test_configs_reference_local_weight_cache_when_available() -> None:
     e1 = load_config(_cfg("E1_vjepa2_encoder.yaml"))
     assert e1["vision_encoder"]["checkpoint_path"] == "weights/vjepa2-vitl-fpc64-256"
     assert e1["vision_encoder"]["processor_path"] == "weights/vjepa2-vitl-fpc64-256"
+    assert e1["vision_encoder"]["processor_from_pretrained_kwargs"]["use_fast"] is False
     assert e1["vision_encoder"]["resolution"] == 256
 
     e2 = load_config(_cfg("E2_qwen_mllm.yaml"))
     assert e2["mllm"]["name"] == "qwen"
     assert e2["mllm"]["checkpoint_path"] == "weights/Qwen2.5-VL-7B-Instruct"
     assert e2["mllm"]["processor_path"] == "weights/Qwen2.5-VL-7B-Instruct"
+    assert e2["mllm"]["processor_from_pretrained_kwargs"]["use_fast"] is False
 
 
 def test_cli_parsing_and_model_overrides() -> None:
@@ -350,6 +353,8 @@ def test_vjepa2_real_loading_with_available_factory(monkeypatch: pytest.MonkeyPa
     status = adapter.load(allow_real_model_loading=True, device="cpu", dtype="float32")
     assert status.status == "real"
     assert status.metadata["processor_status"] == "not_configured_tensor_input"
+    assert adapter.model.kwargs["dtype"] is torch.float32
+    assert "torch_dtype" not in adapter.model.kwargs
     output = adapter.forward(torch.zeros(1, 2, 3, 8, 8))
     assert output["status"] == "real"
     assert output["visual_tokens"].shape == (1, 2, 5)
@@ -417,6 +422,9 @@ def test_qwen_official_processor_path_with_available_factory(monkeypatch: pytest
     status = adapter.load(allow_real_model_loading=True, device="cpu", dtype="float32")
     assert status.status == "real"
     assert status.metadata["processor_status"] == "real"
+    assert adapter.model.kwargs["dtype"] is torch.float32
+    assert "torch_dtype" not in adapter.model.kwargs
+    assert adapter.processor.kwargs["use_fast"] is False
     result = adapter.generate(
         query_text="What is happening?",
         video=torch.zeros(1, 2, 3, 8, 8),
@@ -526,7 +534,11 @@ def test_nvila_official_processor_path_and_autogaze_controls(monkeypatch: pytest
     status = adapter.load(allow_real_model_loading=True, device="cpu", dtype="float32")
     assert status.status == "real"
     assert status.metadata["processor_status"] == "real"
+    assert adapter.model.kwargs["dtype"] is torch.float32
+    assert "torch_dtype" not in adapter.model.kwargs
+    assert adapter.processor.kwargs["use_fast"] is False
     assert status.metadata["processor_autogaze_controls"]["autogaze_model_id"] == str(autogaze_dir)
+    assert status.metadata["processor_autogaze_controls"]["use_fast"] is False
     assert status.metadata["processor_autogaze_controls"]["num_video_frames"] == 16
     assert status.metadata["processor_autogaze_controls"]["num_video_frames_thumbnail"] == 16
     assert status.metadata["processor_autogaze_controls"]["gazing_ratio_tile"] is None

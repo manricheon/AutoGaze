@@ -26,6 +26,8 @@ vision_encoder:
   required_for_full_pipeline: true
   trust_remote_code: false
   local_files_only: true
+  processor_from_pretrained_kwargs:
+    use_fast: false
 
 mllm:
   name: generic_mllm

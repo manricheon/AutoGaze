@@ -727,10 +727,13 @@ def _from_pretrained_kwargs(config: Mapping[str, Any], *, dtype: str) -> dict[st
         kwargs["trust_remote_code"] = bool(config.get("trust_remote_code"))
     if "local_files_only" in config:
         kwargs["local_files_only"] = bool(config.get("local_files_only"))
-    torch_dtype = _torch_dtype(dtype)
-    if torch_dtype is not None:
-        kwargs["torch_dtype"] = torch_dtype
+    model_dtype = _torch_dtype(dtype)
+    if model_dtype is not None:
+        kwargs["dtype"] = model_dtype
     for key, value in dict(config.get("from_pretrained_kwargs") or {}).items():
+        if key == "torch_dtype":
+            key = "dtype"
+            value = _dtype_from_config_value(value)
         kwargs[key] = value
     return kwargs
 
@@ -743,6 +746,8 @@ def _processor_from_pretrained_kwargs(config: Mapping[str, Any]) -> dict[str, An
         kwargs["local_files_only"] = bool(config.get("local_files_only"))
     for key, value in dict(config.get("processor_from_pretrained_kwargs") or {}).items():
         kwargs[key] = value
+    if "use_fast" not in kwargs:
+        kwargs["use_fast"] = False
     return kwargs
 
 
@@ -849,6 +854,16 @@ def _torch_dtype(dtype: str) -> torch.dtype | None:
     if dtype == "float32":
         return torch.float32
     return None
+
+
+def _dtype_from_config_value(value: Any) -> Any:
+    if isinstance(value, torch.dtype):
+        return value
+    text = str(value)
+    if text.startswith("torch."):
+        text = text.removeprefix("torch.")
+    parsed = _torch_dtype(text)
+    return parsed if parsed is not None else value
 
 
 def _official_video_input(

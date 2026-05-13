@@ -39,6 +39,8 @@ mllm:
   prompt_template: "{video_token}\nQuestion: {prompt}"
   trust_remote_code: true
   local_files_only: true
+  processor_from_pretrained_kwargs:
+    use_fast: false
 
 frame_selection:
   mode: sample

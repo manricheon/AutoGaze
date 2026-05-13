@@ -70,6 +70,8 @@ For NVILA, the local `weights/NVILA-8B-HD-Video/preprocessor_config.json` may st
 
 The same local NVILA processor defaults to `num_video_frames=8`, while the local AutoGaze checkpoint reports `max_num_frames=16`. NVILA's tile processor requires `num_video_frames` to be a positive multiple of AutoGaze `max_num_frames`, so A0-A3 explicitly pass `num_video_frames: 16` and `num_video_frames_thumbnail: 16`. If a custom config sets an invalid value such as `8`, the adapter blocks with a clear message before generation.
 
+The PoC adapters pass Hugging Face model dtype with the current `dtype` keyword instead of deprecated `torch_dtype`. Official processor configs set `use_fast: false` explicitly to preserve the slow image processor behavior saved with the local checkpoints and avoid the Transformers warning about a future default change. Override `processor_from_pretrained_kwargs.use_fast` only when you intentionally want to test the fast processor path.
+
 ## Real Loading Policy
 
 By default, scripts do not load heavy checkpoints. They run guarded smoke paths and record `stub`, `skipped`, or `blocked` adapter status.
