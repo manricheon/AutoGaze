@@ -308,6 +308,8 @@ outputs/<run>/
 
 The scripts do not write `visualizations/autogaze/windows/window_*/frames/`.
 
+Scale panels are scale-aware. A selected token from a low-resolution scale such as `32` is projected back onto the processed frame as a larger footprint than a selected token from `64`, `112`, or `224`. The per-token `selected_patch_records` in `autogaze/selected_patch_indices.json` include the scale-local grid and normalized box used for visualization.
+
 ## Metrics
 
 Every run writes:

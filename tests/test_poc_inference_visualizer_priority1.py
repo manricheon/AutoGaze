@@ -220,8 +220,16 @@ def test_autogaze_dummy_run_writes_flat_outputs_and_metrics(tmp_path: Path) -> N
     metrics = json.loads((output_dir / "logs" / "metrics.json").read_text(encoding="utf-8"))
     assert metrics["real_stub_blocked_status"] == "stub_dummy_autogaze"
     assert metrics["gaze_ratio"] == 0.25
+    selected = json.loads((output_dir / "autogaze" / "selected_patch_indices.json").read_text(encoding="utf-8"))
+    records = selected["frames"][0]["selected_patch_records"]
+    widths_by_scale = {
+        record["scale"]: record["normalized_box"][2] - record["normalized_box"][0]
+        for record in records
+    }
+    assert widths_by_scale[0] > widths_by_scale[1] > widths_by_scale[2] > widths_by_scale[3]
     viz = json.loads((output_dir / "visualizations" / "autogaze" / "metadata" / "visualization_metadata.json").read_text(encoding="utf-8"))
     assert viz["flat_output_structure"] is True
+    assert [item["scale_resolution"] for item in viz["scale_layout"]] == [32, 64, 112, 224]
     assert viz["scale_colors"] == {str(key): list(value) for key, value in SCALE_COLORS.items()}
 
 

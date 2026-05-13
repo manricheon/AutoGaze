@@ -448,6 +448,7 @@ def run_autogaze_stage(
         "requested_checkpoint": checkpoint,
         "allow_real_model_loading": allow_real_model_loading,
         "patch_size": int(nested_get(cfg, "scaling.patch_size", 16)),
+        "scales": configured_scales(cfg),
     }
 
     if not autogaze_enabled:
@@ -583,7 +584,8 @@ def build_gaze_result(
     patch_size = int(runtime_metadata.get("patch_size") or 16)
     grid_h = max(1, height // patch_size)
     grid_w = max(1, width // patch_size)
-    patches_per_frame = grid_h * grid_w
+    scale_layout = build_scale_layout(runtime_metadata.get("scales"), patch_size=patch_size, fallback_resolution=max(height, width))
+    tokens_per_frame = sum(item["token_count"] for item in scale_layout)
     per_frame: list[dict[str, Any]] = []
 
     if real_outputs is not None and "gazing_pos" in real_outputs and "num_gazing_each_frame" in real_outputs:
@@ -591,20 +593,20 @@ def build_gaze_result(
         padded = real_outputs.get("if_padded_gazing")
         padded_flat = padded[0].detach().cpu().bool() if isinstance(padded, torch.Tensor) else torch.zeros_like(gazing_pos).bool()
         counts = real_outputs["num_gazing_each_frame"].detach().cpu().tolist()
-        tokens_each = int(real_outputs.get("num_vision_tokens_each_frame", patches_per_frame))
+        tokens_each = int(real_outputs.get("num_vision_tokens_each_frame", tokens_per_frame))
         offset = 0
         for idx in range(frame_count):
             count = int(counts[idx]) if idx < len(counts) else 0
             pos = gazing_pos[offset : offset + count]
             pad = padded_flat[offset : offset + count]
-            local = [int((item - idx * tokens_each).item()) % patches_per_frame for item in pos[~pad]]
-            per_frame.append(_frame_gaze_record(prepared.frame_records[idx], local, patches_per_frame, idx))
+            local = [int((item - idx * tokens_each).item()) % tokens_each for item in pos[~pad]]
+            per_frame.append(_frame_gaze_record(prepared.frame_records[idx], local, tokens_each, idx, scale_layout))
             offset += count
     else:
-        selected_count = patches_per_frame if not autogaze_enabled else max(1, min(patches_per_frame, math.ceil(patches_per_frame * gaze_ratio)))
+        selected_count = tokens_per_frame if not autogaze_enabled else max(1, min(tokens_per_frame, math.ceil(tokens_per_frame * gaze_ratio)))
         for idx in range(frame_count):
-            local_indices = _deterministic_patch_indices(idx, patches_per_frame, selected_count)
-            per_frame.append(_frame_gaze_record(prepared.frame_records[idx], local_indices, patches_per_frame, idx))
+            local_indices = _deterministic_patch_indices(idx, tokens_per_frame, selected_count)
+            per_frame.append(_frame_gaze_record(prepared.frame_records[idx], local_indices, tokens_per_frame, idx, scale_layout))
 
     original = sum(int(item["original_token_count"]) for item in per_frame)
     selected = sum(int(item["selected_token_count"]) for item in per_frame)
@@ -616,6 +618,7 @@ def build_gaze_result(
         "real_model_used": real_model_used,
         "patch_grid": [grid_h, grid_w],
         "patch_size": patch_size,
+        "scale_layout": scale_layout,
         "gaze_ratio": gaze_ratio,
         "task_loss_requirement": task_loss_requirement,
         "encoder_side_acceleration_claimed": bool(real_model_used and autogaze_enabled),
@@ -650,21 +653,102 @@ def _deterministic_patch_indices(frame_idx: int, total: int, selected_count: int
     return sorted(set(values))[:selected_count]
 
 
+def configured_scales(cfg: Mapping[str, Any]) -> list[int]:
+    candidates = (
+        nested_get(cfg, "autogaze.target_scales"),
+        nested_get(cfg, "autogaze.scales"),
+        nested_get(cfg, "vision_encoder.from_pretrained_kwargs.scales"),
+        nested_get(cfg, "vision_encoder.scales"),
+    )
+    for value in candidates:
+        parsed = parse_scales(value)
+        if parsed:
+            return parsed
+    if bool(nested_get(cfg, "autogaze.enabled", False)):
+        return [32, 64, 112, 224]
+    return [int(nested_get(cfg, "scaling.resolution", 224))]
+
+
+def parse_scales(value: Any) -> list[int]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        parts = value.replace(",", "+").split("+")
+        return [int(part.strip()) for part in parts if part.strip()]
+    if isinstance(value, (list, tuple)):
+        return [int(item) for item in value]
+    return [int(value)]
+
+
+def build_scale_layout(scales: Any, *, patch_size: int, fallback_resolution: int) -> list[dict[str, Any]]:
+    parsed = parse_scales(scales) or [int(fallback_resolution)]
+    layout: list[dict[str, Any]] = []
+    start = 0
+    for scale_index, resolution in enumerate(parsed):
+        grid_h = max(1, int(resolution) // patch_size)
+        grid_w = max(1, int(resolution) // patch_size)
+        token_count = grid_h * grid_w
+        layout.append(
+            {
+                "scale": scale_index,
+                "scale_resolution": int(resolution),
+                "grid_h": grid_h,
+                "grid_w": grid_w,
+                "start": start,
+                "end": start + token_count,
+                "token_count": token_count,
+            }
+        )
+        start += token_count
+    return layout
+
+
+def token_record_from_multiscale_index(token_index: int, scale_layout: list[dict[str, Any]]) -> dict[str, Any]:
+    for layout in scale_layout:
+        if int(layout["start"]) <= token_index < int(layout["end"]):
+            local = token_index - int(layout["start"])
+            grid_w = int(layout["grid_w"])
+            grid_h = int(layout["grid_h"])
+            row = local // grid_w
+            col = local % grid_w
+            return {
+                "local_token_index": int(token_index),
+                "scale": int(layout["scale"]),
+                "scale_resolution": int(layout["scale_resolution"]),
+                "scale_patch_index": int(local),
+                "scale_grid": [grid_h, grid_w],
+                "normalized_box": [
+                    col / float(grid_w),
+                    row / float(grid_h),
+                    (col + 1) / float(grid_w),
+                    (row + 1) / float(grid_h),
+                ],
+            }
+    fallback = scale_layout[-1]
+    return token_record_from_multiscale_index(int(fallback["end"]) - 1, scale_layout)
+
+
 def _frame_gaze_record(
     frame_record: Mapping[str, Any],
     local_indices: list[int],
-    patches_per_frame: int,
+    tokens_per_frame: int,
     processed_frame_index: int,
+    scale_layout: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    selected_scales = [idx % len(SCALE_COLORS) for idx, _patch in enumerate(local_indices)]
+    patch_records = [
+        token_record_from_multiscale_index(int(token_index), scale_layout)
+        for token_index in local_indices
+    ]
+    selected_scales = [int(item["scale"]) for item in patch_records]
     return {
         **dict(frame_record),
-        "original_token_count": patches_per_frame,
+        "original_token_count": tokens_per_frame,
         "selected_token_count": len(local_indices),
-        "token_reduction_ratio": 1.0 - (len(local_indices) / float(patches_per_frame)) if patches_per_frame else None,
+        "token_reduction_ratio": 1.0 - (len(local_indices) / float(tokens_per_frame)) if tokens_per_frame else None,
         "selected_patch_indices": [int(item) for item in local_indices],
         "selected_scales": selected_scales,
-        "global_patch_indices": [processed_frame_index * patches_per_frame + int(item) for item in local_indices],
+        "selected_patch_records": patch_records,
+        "global_patch_indices": [processed_frame_index * tokens_per_frame + int(item) for item in local_indices],
         "selected_patch_count_by_scale": {
             str(scale): selected_scales.count(scale) for scale in sorted(SCALE_COLORS)
         },
@@ -688,7 +772,21 @@ def write_autogaze_artifacts(output_dir: Path, prepared: PreparedVideo, gaze: Ga
     )
     write_json(
         autogaze_dir / "selected_patch_indices.json",
-        {"frames": [{k: item[k] for k in ("processed_frame_index", "source_frame_index", "selected_patch_indices", "global_patch_indices")} for item in gaze.per_frame]},
+        {
+            "frames": [
+                {
+                    k: item[k]
+                    for k in (
+                        "processed_frame_index",
+                        "source_frame_index",
+                        "selected_patch_indices",
+                        "selected_patch_records",
+                        "global_patch_indices",
+                    )
+                }
+                for item in gaze.per_frame
+            ]
+        },
     )
     write_json(
         autogaze_dir / "selected_scales.json",
@@ -828,6 +926,7 @@ def write_visualizations(
             "frame_count": len(overlay_images),
             "frame_records": prepared.frame_records,
             "scale_colors": {str(key): value for key, value in SCALE_COLORS.items()},
+            "scale_layout": gaze.runtime_metadata.get("scale_layout"),
             "video_errors": video_errors,
             "paths": artifacts,
         },
@@ -861,11 +960,17 @@ def render_overlay(
     draw = ImageDraw.Draw(overlay)
     indices = list(record.get("selected_patch_indices", []))
     scales = list(record.get("selected_scales", []))
+    patch_records = list(record.get("selected_patch_records", []))
     for idx, patch_idx in enumerate(indices):
-        row = int(patch_idx) // grid_w
-        col = int(patch_idx) % grid_w
+        patch_record = patch_records[idx] if idx < len(patch_records) and isinstance(patch_records[idx], Mapping) else None
         color = SCALE_COLORS.get(int(scales[idx]) if idx < len(scales) and multi_scale_overlay else 0, SCALE_COLORS[0])
-        rect = [col * patch_w, row * patch_h, (col + 1) * patch_w, (row + 1) * patch_h]
+        if patch_record is not None and "normalized_box" in patch_record:
+            x0, y0, x1, y1 = [float(value) for value in patch_record["normalized_box"]]
+            rect = [x0 * width, y0 * height, x1 * width, y1 * height]
+        else:
+            row = int(patch_idx) // grid_w
+            col = int(patch_idx) % grid_w
+            rect = [col * patch_w, row * patch_h, (col + 1) * patch_w, (row + 1) * patch_h]
         if overlay_style in {"mask", "both"}:
             draw.rectangle(rect, fill=(*color, int(255 * overlay_alpha)))
         if overlay_style in {"box", "both"}:
@@ -882,10 +987,20 @@ def render_scale_panel(image: Image.Image, record: Mapping[str, Any], patch_grid
     panels = []
     selected = list(record.get("selected_patch_indices", []))
     scales = list(record.get("selected_scales", []))
+    patch_records = list(record.get("selected_patch_records", []))
     for scale in range(4):
         scale_record = dict(record)
-        scale_record["selected_patch_indices"] = [patch for patch, item_scale in zip(selected, scales) if item_scale == scale]
+        selected_items = [
+            (patch, patch_records[idx] if idx < len(patch_records) else None)
+            for idx, (patch, item_scale) in enumerate(zip(selected, scales))
+            if item_scale == scale
+        ]
+        scale_record["selected_patch_indices"] = [patch for patch, _patch_record in selected_items]
         scale_record["selected_scales"] = [scale] * len(scale_record["selected_patch_indices"])
+        scale_record["selected_patch_records"] = [
+            patch_record if isinstance(patch_record, Mapping) else {}
+            for _patch, patch_record in selected_items
+        ]
         panels.append(
             render_overlay(
                 image,
