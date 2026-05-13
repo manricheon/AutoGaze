@@ -80,6 +80,9 @@ def test_inference_guide_and_quick_start_reference_exist() -> None:
         "A1 Full-Token Full Pipeline",
         "A2 AutoGaze-Only Visualization",
         "A2 Full Pipeline With Query Text",
+        "A1 vs A2 Benchmark Wrapper",
+        "scripts/benchmark_poc_autogaze_impact.py",
+        "autogaze_impact_summary.json",
         "Do not claim encoder-side acceleration unless A2 reduces tokens before the intended encoder compute stage.",
     ]:
         assert expected in poc_text

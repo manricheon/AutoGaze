@@ -344,6 +344,78 @@ skipped_stages
 
 Do not claim encoder-side acceleration unless A2 reduces tokens before the intended encoder compute stage.
 
+### A1 vs A2 Benchmark Wrapper
+
+For latency, memory, and token-count comparison, use the PoC benchmark wrapper before running larger benchmark configs:
+
+```bash
+python scripts/benchmark_poc_autogaze_impact.py \
+  --mode full_pipeline \
+  --frame-selection-mode sample \
+  --num-frames 16 \
+  --scaling-mode resize \
+  --resolution 224 \
+  --device mps \
+  --dtype float32 \
+  --max-new-tokens 1 \
+  --output-dir outputs/poc_autogaze_impact
+```
+
+The default is a dry run. It writes the exact A1/A2 PoC commands to:
+
+```text
+outputs/poc_autogaze_impact/benchmark_plan.json
+outputs/poc_autogaze_impact/commands.sh
+```
+
+Execute real guarded PoC runs only when the modules/checkpoints and device are ready:
+
+```bash
+python scripts/benchmark_poc_autogaze_impact.py \
+  --mode full_pipeline \
+  --frame-selection-mode sample \
+  --num-frames 16 \
+  --scaling-mode resize \
+  --resolution 224 \
+  --device mps \
+  --dtype float32 \
+  --max-new-tokens 1 \
+  --allow-checkpoint-load \
+  --execute \
+  --output-dir outputs/poc_autogaze_impact
+```
+
+Summarize existing PoC outputs:
+
+```bash
+python scripts/benchmark_poc_autogaze_impact.py \
+  --summarize-existing \
+  --output-dir outputs/poc_autogaze_impact
+```
+
+Summary outputs:
+
+```text
+outputs/poc_autogaze_impact/autogaze_impact_summary.json
+outputs/poc_autogaze_impact/autogaze_impact_summary.csv
+```
+
+The summary checks that A1 and A2 used matching axes and reports:
+
+```text
+original_visual_token_count
+selected_visual_token_count
+token_reduction_ratio
+autogaze_latency_ms
+vision_encoder_latency_ms
+mllm_decode_latency_ms
+end_to_end_latency_ms
+peak_vram_mb
+skipped_stages
+```
+
+Visualization export is disabled by default in the wrapper so timing is not dominated by MP4 writing. Add `--include-visualization` only when the comparison is for inspectability, not latency.
+
 ## Output Type Samples by Mode
 
 This section shows representative output shapes, metadata, and ASCII visualization layouts.
@@ -1214,6 +1286,7 @@ Safe PoC configs:
 | Config | Mode | Main options represented |
 |---|---|---|
 | `configs/benchmark/poc_default.yaml` | `check` | Canonical defaults, `num_frames=16`, config-driven plug-in metadata |
+| `configs/benchmark/poc_autogaze_impact_full_pipeline.yaml` | `full_pipeline` | A1/A2 AutoGaze impact comparison plan using `scripts/benchmark_poc_autogaze_impact.py` |
 | `configs/benchmark/poc_feature_matrix_smoke.yaml` | `autogaze_only` | Frame selection, resize scaling, overlay and side-by-side video |
 | `configs/benchmark/poc_autogaze_only_visualization.yaml` | `autogaze_only` | AutoGaze image/video visualization |
 | `configs/benchmark/poc_full_pipeline_visualization.yaml` | `full_pipeline` | Query text, ViT/MLLM plug-in metadata, overlay, side-by-side, scale panel |

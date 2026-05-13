@@ -124,6 +124,71 @@ PYTHONPATH=src python -m autogaze_ext.pipeline.hf_benchmark \
 
 ## 5. Measurement Methodology
 
+### PoC A1/A2 AutoGaze Impact Path
+
+For the first full-pipeline AutoGaze impact check, use the PoC benchmark wrapper:
+
+```bash
+python scripts/benchmark_poc_autogaze_impact.py \
+  --mode full_pipeline \
+  --frame-selection-mode sample \
+  --num-frames 16 \
+  --scaling-mode resize \
+  --resolution 224 \
+  --device mps \
+  --dtype float32 \
+  --max-new-tokens 1 \
+  --output-dir outputs/poc_autogaze_impact
+```
+
+This command is a dry-run by default. It writes:
+
+```text
+outputs/poc_autogaze_impact/benchmark_plan.json
+outputs/poc_autogaze_impact/commands.sh
+```
+
+To execute the guarded PoC runs, add explicit loading:
+
+```bash
+python scripts/benchmark_poc_autogaze_impact.py \
+  --mode full_pipeline \
+  --frame-selection-mode sample \
+  --num-frames 16 \
+  --scaling-mode resize \
+  --resolution 224 \
+  --device mps \
+  --dtype float32 \
+  --max-new-tokens 1 \
+  --allow-checkpoint-load \
+  --execute \
+  --output-dir outputs/poc_autogaze_impact
+```
+
+The wrapper runs the same PoC command axes for:
+
+```text
+A1_real = AutoGaze OFF + modified SigLIP + NVILA
+A2_real = AutoGaze ON + modified SigLIP + NVILA
+```
+
+After execution, or when metrics already exist, summarize with:
+
+```bash
+python scripts/benchmark_poc_autogaze_impact.py \
+  --summarize-existing \
+  --output-dir outputs/poc_autogaze_impact
+```
+
+Summary outputs:
+
+```text
+outputs/poc_autogaze_impact/autogaze_impact_summary.json
+outputs/poc_autogaze_impact/autogaze_impact_summary.csv
+```
+
+Use this PoC wrapper before larger canonical benchmark configs. It keeps A1/A2 axes identical and makes skipped stages visible.
+
 ### Latency
 
 - warm-up iteration 수는 config로 제어합니다.
@@ -203,6 +268,7 @@ These configs exercise Priority 2 visualization and metadata wiring only. They u
 | Config | Mode | Purpose | Result Label |
 |---|---|---|---|
 | `configs/benchmark/poc_default.yaml` | `check` | Default PoC reference preset with canonical `num_frames=16` and full-pipeline plug-in metadata | default config |
+| `configs/benchmark/poc_autogaze_impact_full_pipeline.yaml` | `full_pipeline` | A1 vs A2 AutoGaze impact comparison plan using the PoC wrapper | dry-run plan by default |
 | `configs/benchmark/poc_feature_matrix_smoke.yaml` | `autogaze_only` | General feature-matrix smoke path | dummy/stub smoke |
 | `configs/benchmark/poc_autogaze_only_visualization.yaml` | `autogaze_only` | Overlay, side-by-side, and scale-panel video export | dummy/stub smoke |
 | `configs/benchmark/poc_full_pipeline_visualization.yaml` | `full_pipeline` | Query-text path plus AutoGaze visualization outputs | guarded/stub by default |

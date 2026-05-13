@@ -44,6 +44,29 @@
 | A1 vs A2 | A1 | A2 | modified SigLIP | NVILA | TBD | TBD | TBD | TBD | TBD | canonical comparison |
 | A0 vs A3 | A0 | A3 | vanilla SigLIP | NVILA | TBD | TBD | TBD | TBD | compatibility-only until tested | A3 experimental |
 
+PoC full-pipeline impact summary should come from:
+
+```text
+scripts/benchmark_poc_autogaze_impact.py
+outputs/poc_autogaze_impact/autogaze_impact_summary.json
+outputs/poc_autogaze_impact/autogaze_impact_summary.csv
+```
+
+Required sanity checks before using A1/A2 internally:
+
+| Check | Required Value |
+|---|---|
+| `axis_match.mode` | true |
+| `axis_match.frame_selection_mode` | true |
+| `axis_match.number_of_frames` | true |
+| `axis_match.scaling_mode` | true |
+| `axis_match.processed_resolution` | true |
+| `token_reduction_observed` | true for AutoGaze token impact |
+| `generation_skipped` | must be reported, not hidden |
+| `encoder_side_acceleration_claim_allowed` | false unless separately verified |
+
+Use the summary for latency/memory/token inspection, not paper reproduction.
+
 ## 4. Modified SigLIP vs Vanilla SigLIP
 
 | Pair | AutoGaze | modified SigLIP | vanilla SigLIP | Dataset | Metric Delta | Latency Delta | Notes |
