@@ -374,6 +374,12 @@ def _with_model_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> dict
         mllm["class_name"] = args.mllm_class
     if args.model_id:
         mllm["model_id"] = args.model_id
+        if not args.mllm_ckpt:
+            mllm["checkpoint_path"] = None
+        if not args.processor_path:
+            mllm["processor_path"] = args.model_id
+        if not args.tokenizer_path:
+            mllm["tokenizer_path"] = args.model_id
     if args.processor_path:
         mllm["processor_path"] = args.processor_path
     if args.tokenizer_path:

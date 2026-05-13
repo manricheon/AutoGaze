@@ -1,6 +1,6 @@
 experiment:
   id: E2
-  description: Qwen-family MLLM extension stub using official processor path
+  description: Qwen-family MLLM extension using official chat-template processor path
 
 autogaze:
   enabled: false
@@ -36,7 +36,7 @@ mllm:
   official_processor_path: true
   official_processor_owns_vision: true
   direct_visual_token_injection: unsupported
-  prompt_template: "{video_token}\nQuestion: {prompt}"
+  prompt_template: "Question: {prompt}"
   trust_remote_code: true
   local_files_only: true
   processor_from_pretrained_kwargs:

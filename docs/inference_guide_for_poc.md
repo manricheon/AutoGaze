@@ -184,12 +184,14 @@ A0/A1 set AutoGaze off. A2/A3 set AutoGaze on. When `sync_autogaze_controls_from
 
 ## Qwen Smoke
 
-Qwen uses the official processor path. Direct visual-token injection is unsupported in this PoC.
+Qwen uses the official Qwen2.5-VL processor path: build a chat-template message with one video item and one text item, call `processor.apply_chat_template(..., add_generation_prompt=True)`, pass the video through the Qwen processor, call `generate`, and decode. Direct visual-token injection is unsupported in this PoC.
+
+The local default config points at `weights/Qwen2.5-VL-7B-Instruct`. The adapter uses `qwen_vl_utils.process_vision_info` when that optional package is installed and the input is a real video path. If `qwen_vl_utils` is not installed, it uses the Hugging Face Qwen processor directly with an explicit `vision_preprocess_path: processor_direct_video_payload` entry in `predictions/answer.json` and `logs/metrics.json`; this is not silent fallback.
 
 ```bash
 python scripts/infer_full.py \
   --config configs/poc_inference/E2_qwen_mllm.yaml \
-  --video-path dummy \
+  --video-path /path/to/video.mp4 \
   --query-text "What is happening in this video?" \
   --mllm qwen \
   --model-id weights/Qwen2.5-VL-7B-Instruct \
@@ -204,6 +206,35 @@ python scripts/infer_full.py \
 ```
 
 If any shard referenced by `model.safetensors.index.json` is missing, loading blocks with the missing filenames.
+
+Dummy Qwen processor smoke, useful for checking wiring without a local video file:
+
+```bash
+python scripts/infer_full.py \
+  --config configs/poc_inference/E2_qwen_mllm.yaml \
+  --video-path dummy \
+  --query-text "What is visible?" \
+  --mllm qwen \
+  --allow-real-model-loading \
+  --local-files-only \
+  --device cuda \
+  --dtype bfloat16 \
+  --frame-selection-mode sample \
+  --num-frames 4 \
+  --scaling-mode resize \
+  --resolution 224 \
+  --max-new-tokens 16 \
+  --output-dir outputs/poc_inference/e2_qwen_dummy_real \
+  --json
+```
+
+MLLM switching summary:
+
+| MLLM | Config | Supported generation path | Direct AutoGaze visual tokens |
+|---|---|---|---|
+| NVILA | `A0`-`A3` | official NVILA processor, with AutoGaze processor controls in A2/A3 | not directly injected by this PoC |
+| Qwen | `E2_qwen_mllm.yaml` | official Qwen2.5-VL chat-template processor | unsupported; input-level frame/chop selection only |
+| Generic | `E1_vjepa2_encoder.yaml` | stub/status reporting only | unsupported until a model-specific adapter is added |
 
 ## V-JEPA2 Smoke
 

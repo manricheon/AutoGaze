@@ -618,6 +618,9 @@ class QwenAdapter(MLLMAdapter):
             status.metadata["processor_module_path"] = processor_module
             status.metadata["processor_class_name"] = processor_class
             status.metadata["official_processor_path"] = True
+            status.metadata["chat_template_path"] = bool(hasattr(self.processor, "apply_chat_template"))
+            status.metadata["qwen_vl_utils_available"] = _qwen_vl_utils_available()
+            status.metadata["processor_kwargs"] = _jsonable_processor_kwargs(_processor_from_pretrained_kwargs(self.config))
         except Exception as exc:
             self.status = AdapterStatus(
                 self.name,
@@ -648,36 +651,38 @@ class QwenAdapter(MLLMAdapter):
                 "query_text_used": True,
             }
         if self.model is not None and self.processor is not None:
-            return self._generate_with_official_processor(query_text=query_text, video=video, max_new_tokens=max_new_tokens)
+            return self._generate_with_official_processor(
+                query_text=query_text,
+                video=video,
+                video_path=video_path,
+                max_new_tokens=max_new_tokens,
+            )
         return super().generate(query_text=query_text, video=video, visual_tokens=visual_tokens, max_new_tokens=max_new_tokens, video_path=video_path)
 
-    def _generate_with_official_processor(self, *, query_text: str, video: torch.Tensor, max_new_tokens: int) -> dict[str, Any]:
+    def _generate_with_official_processor(
+        self,
+        *,
+        query_text: str,
+        video: torch.Tensor,
+        video_path: str | None,
+        max_new_tokens: int,
+    ) -> dict[str, Any]:
         if not query_text:
             return {"status": "blocked", "answer": None, "reason": "query text is required", "query_text_used": False}
         try:
-            prompt_template = str(self.config.get("prompt_template") or "{prompt}")
-            video_token = getattr(getattr(self.processor, "tokenizer", None), "video_token", "<video>")
-            prompt = prompt_template.format(prompt=query_text, query=query_text, video_token=video_token)
-            frames = _video_tensor_to_pil(video)
-            processor_errors: list[str] = []
-            for call in (
-                lambda: self.processor(text=prompt, videos=frames, return_tensors="pt"),
-                lambda: self.processor(text=[prompt], videos=frames, return_tensors="pt"),
-                lambda: self.processor(text=prompt, images=frames, return_tensors="pt"),
-                lambda: self.processor(text=[prompt], images=frames, return_tensors="pt"),
-            ):
-                try:
-                    inputs = call()
-                    break
-                except TypeError as exc:
-                    processor_errors.append(str(exc))
-            else:
+            inputs, input_metadata = self._prepare_official_qwen_inputs(
+                query_text=query_text,
+                video=video,
+                video_path=video_path,
+            )
+            if input_metadata.get("status") == "blocked":
                 return {
                     "status": "blocked",
                     "answer": None,
-                    "reason": f"Qwen official processor did not accept supported video/image signatures: {processor_errors}",
+                    "reason": str(input_metadata.get("reason")),
                     "query_text_used": True,
                     "official_processor_path": True,
+                    "metadata": input_metadata,
                 }
             if isinstance(inputs, Mapping):
                 model_device = getattr(self.model, "device", self.device)
@@ -698,8 +703,7 @@ class QwenAdapter(MLLMAdapter):
                 "query_text_used": True,
                 "official_processor_path": True,
                 "metadata": {
-                    "prompt_template": prompt_template,
-                    "num_video_frames": len(frames),
+                    **input_metadata,
                     "max_new_tokens": max_new_tokens,
                 },
             }
@@ -711,6 +715,94 @@ class QwenAdapter(MLLMAdapter):
                 "query_text_used": True,
                 "official_processor_path": True,
             }
+
+    def _prepare_official_qwen_inputs(
+        self,
+        *,
+        query_text: str,
+        video: torch.Tensor,
+        video_path: str | None,
+    ) -> tuple[Any, dict[str, Any]]:
+        if not hasattr(self.processor, "apply_chat_template"):
+            return None, {
+                "status": "blocked",
+                "reason": "Qwen official processor path requires apply_chat_template; loaded processor does not expose it.",
+                "chat_template_path": False,
+            }
+        prompt_template = str(self.config.get("prompt_template") or "Question: {prompt}")
+        prompt_text = prompt_template.format(prompt=query_text, query=query_text, video_token="").strip()
+        video_input, video_input_kind = _official_video_input(video=video, video_path=video_path)
+        message_video_ref = _qwen_message_video_reference(video_input, video_input_kind)
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "video", "video": message_video_ref},
+                    {"type": "text", "text": prompt_text},
+                ],
+            }
+        ]
+        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        qwen_vl_utils_available = _qwen_vl_utils_available()
+        use_qwen_vl_utils = bool(self.config.get("use_qwen_vl_utils", True))
+        require_qwen_vl_utils = bool(self.config.get("require_qwen_vl_utils", False))
+        call_kwargs = dict(self.config.get("processor_call_kwargs") or {})
+        metadata: dict[str, Any] = {
+            "prompt_template": prompt_template,
+            "prompt_text": prompt_text,
+            "video_input_kind": video_input_kind,
+            "chat_template_path": True,
+            "qwen_vl_utils_available": qwen_vl_utils_available,
+            "qwen_vl_utils_requested": use_qwen_vl_utils,
+            "vision_preprocess_path": "processor_direct_video_payload",
+            "processor_call_kwargs": _jsonable_processor_kwargs(call_kwargs),
+            "direct_visual_token_injection": False,
+        }
+
+        if use_qwen_vl_utils and qwen_vl_utils_available and video_input_kind in {"video_path", "video_reference"}:
+            try:
+                from qwen_vl_utils import process_vision_info
+
+                try:
+                    image_inputs, video_inputs, video_kwargs = process_vision_info(messages, return_video_kwargs=True)
+                except TypeError:
+                    image_inputs, video_inputs = process_vision_info(messages)
+                    video_kwargs = {}
+                metadata["vision_preprocess_path"] = "qwen_vl_utils"
+                metadata["qwen_vl_utils_video_kwargs"] = _jsonable_processor_kwargs(video_kwargs)
+                processor_kwargs = {**video_kwargs, **call_kwargs}
+                inputs = self.processor(
+                    text=[text],
+                    images=image_inputs,
+                    videos=video_inputs,
+                    return_tensors="pt",
+                    **processor_kwargs,
+                )
+                return inputs, metadata
+            except Exception as exc:
+                return None, {
+                    **metadata,
+                    "status": "blocked",
+                    "reason": f"Qwen qwen_vl_utils preprocessing failed: {exc}",
+                }
+        if require_qwen_vl_utils and video_input_kind in {"video_path", "video_reference"}:
+            return None, {
+                **metadata,
+                "status": "blocked",
+                "reason": "Qwen qwen_vl_utils preprocessing is required by config but qwen_vl_utils is not available.",
+            }
+
+        processor_videos = _qwen_processor_video_payload(video_input)
+        metadata["processor_video_batch_count"] = len(processor_videos) if isinstance(processor_videos, list) else 1
+        try:
+            inputs = self.processor(text=[text], videos=processor_videos, return_tensors="pt", **call_kwargs)
+        except Exception as exc:
+            return None, {
+                **metadata,
+                "status": "blocked",
+                "reason": f"Qwen official processor generation input preparation failed: {exc}",
+            }
+        return inputs, metadata
 
 
 class GenericMLLMAdapter(MLLMAdapter):
@@ -912,6 +1004,22 @@ def _official_video_input(
     frames = _video_tensor_to_pil(video, target_frame_count=target_frame_count)
     suffix = f"_to_{len(frames)}" if target_frame_count is not None else ""
     return frames, f"processed_tensor_pil_frames{suffix}"
+
+
+def _qwen_vl_utils_available() -> bool:
+    return importlib.util.find_spec("qwen_vl_utils") is not None
+
+
+def _qwen_message_video_reference(video_input: Any, video_input_kind: str) -> Any:
+    if video_input_kind in {"video_path", "video_reference"}:
+        return video_input
+    return "processed_tensor_frames"
+
+
+def _qwen_processor_video_payload(video_input: Any) -> Any:
+    if isinstance(video_input, list):
+        return [video_input]
+    return [video_input]
 
 
 def _move_tensor_mapping(value: Mapping[str, Any], device: str) -> dict[str, Any]:

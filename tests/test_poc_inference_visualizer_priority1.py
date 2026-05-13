@@ -83,6 +83,7 @@ def test_configs_reference_local_weight_cache_when_available() -> None:
     assert e2["mllm"]["name"] == "qwen"
     assert e2["mllm"]["checkpoint_path"] == "weights/Qwen2.5-VL-7B-Instruct"
     assert e2["mllm"]["processor_path"] == "weights/Qwen2.5-VL-7B-Instruct"
+    assert e2["mllm"]["prompt_template"] == "Question: {prompt}"
     assert e2["mllm"]["processor_from_pretrained_kwargs"]["use_fast"] is False
 
 
@@ -112,6 +113,7 @@ def test_cli_parsing_and_model_overrides() -> None:
     assert cfg["vision_encoder"]["checkpoint_path"] == "/tmp/vjepa2.pt"
     assert cfg["mllm"]["name"] == "qwen"
     assert cfg["mllm"]["model_id"] == "local-qwen"
+    assert cfg["mllm"]["checkpoint_path"] is None
     assert cfg["mllm"]["processor_path"] == "/tmp/processor"
 
     with pytest.raises(SystemExit):
@@ -500,9 +502,18 @@ def test_qwen_official_processor_path_with_available_factory(monkeypatch: pytest
             instance.kwargs = kwargs
             return instance
 
+        def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
+            assert tokenize is False
+            assert add_generation_prompt is True
+            assert messages[0]["content"][0]["type"] == "video"
+            assert messages[0]["content"][1]["text"] == "Question: What is happening?"
+            return "<qwen-chat>Question: What is happening?</qwen-chat>"
+
         def __call__(self, *, text, videos=None, return_tensors=None, **_kwargs):
-            assert "Question" in (text[0] if isinstance(text, list) else text)
-            assert videos is not None
+            assert text == ["<qwen-chat>Question: What is happening?</qwen-chat>"]
+            assert isinstance(videos, list)
+            assert len(videos) == 1
+            assert isinstance(videos[0], list)
             assert return_tensors == "pt"
             return {"input_ids": torch.tensor([[10, 11]])}
 
@@ -541,6 +552,55 @@ def test_qwen_official_processor_path_with_available_factory(monkeypatch: pytest
     assert result["status"] == "real"
     assert result["answer"] == "official qwen answer"
     assert result["official_processor_path"] is True
+    assert result["metadata"]["chat_template_path"] is True
+    assert result["metadata"]["vision_preprocess_path"] == "processor_direct_video_payload"
+    assert result["metadata"]["video_input_kind"] == "processed_tensor_pil_frames"
+
+
+def test_qwen_blocks_without_chat_template(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_module = types.ModuleType("fake_qwen_no_chat_template")
+
+    class AutoModelForVision2Seq:
+        device = torch.device("cpu")
+
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            return cls()
+
+        def eval(self):
+            return self
+
+        def generate(self, **_inputs):
+            raise AssertionError("Qwen generation should block before model.generate")
+
+    class AutoProcessor:
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            return cls()
+
+        def __call__(self, **_kwargs):
+            raise AssertionError("Qwen generation should block before processor call")
+
+    fake_module.AutoModelForVision2Seq = AutoModelForVision2Seq
+    fake_module.AutoProcessor = AutoProcessor
+    monkeypatch.setitem(sys.modules, "fake_qwen_no_chat_template", fake_module)
+
+    adapter = QwenAdapter(
+        {
+            "module_path": "fake_qwen_no_chat_template",
+            "class_name": "AutoModelForVision2Seq",
+            "processor_module_path": "fake_qwen_no_chat_template",
+            "processor_class_name": "AutoProcessor",
+            "model_id": "fake/qwen",
+            "processor_path": "fake/qwen",
+        }
+    )
+    status = adapter.load(allow_real_model_loading=True, device="cpu", dtype="float32")
+    assert status.status == "real"
+    assert status.metadata["chat_template_path"] is False
+    result = adapter.generate(query_text="What is happening?", video=torch.zeros(1, 2, 3, 8, 8))
+    assert result["status"] == "blocked"
+    assert "apply_chat_template" in str(result["reason"])
 
 
 def test_qwen_incomplete_local_shards_block_before_loading(tmp_path: Path) -> None:
@@ -791,9 +851,18 @@ def test_infer_full_qwen_real_official_processor_integration(monkeypatch: pytest
         def from_pretrained(cls, *_args, **_kwargs):
             return cls()
 
+        def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
+            assert tokenize is False
+            assert add_generation_prompt is True
+            assert messages[0]["content"][0]["type"] == "video"
+            assert messages[0]["content"][1]["text"] == "Question: Audit qwen?"
+            return "<qwen-chat>Question: Audit qwen?</qwen-chat>"
+
         def __call__(self, *, text, videos=None, return_tensors=None, **_kwargs):
-            assert text == "Question: Audit qwen?"
-            assert videos is not None
+            assert text == ["<qwen-chat>Question: Audit qwen?</qwen-chat>"]
+            assert isinstance(videos, list)
+            assert len(videos) == 1
+            assert isinstance(videos[0], list)
             return {"input_ids": torch.tensor([[1, 2]])}
 
         def batch_decode(self, outputs, skip_special_tokens=True):
