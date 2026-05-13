@@ -15,6 +15,7 @@ from poc_infer_utils import (
     nested_get,
     normalize_device,
     prepare_video,
+    resolve_frame_selection_max_windows,
     run_autogaze_stage,
     write_autogaze_artifacts,
     write_json,
@@ -34,7 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--frame-selection-mode", choices=["sample", "chunk", "interval", "all"], default=None)
     parser.add_argument("--num-frames", type=int, default=None)
     parser.add_argument("--frame-interval", type=int, default=None)
-    parser.add_argument("--max-windows", type=int, default=None)
+    parser.add_argument("--max-windows", type=int, default=None, help="maximum frame windows to process; 0 means unlimited")
 
     parser.add_argument("--scaling-mode", choices=["resize", "fit_short_side", "fit_long_side", "chop", "quickstart", "none"], default=None)
     parser.add_argument("--resolution", type=int, default=None)
@@ -82,13 +83,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         output_dir = Path.cwd() / output_dir
 
     preprocessing_start = time.perf_counter()
+    frame_selection_mode = str(cli_or_config(args.frame_selection_mode, cfg, "frame_selection.mode", "sample"))
     prepared = prepare_video(
         cfg,
         video_path=args.video_path,
-        frame_selection_mode=str(cli_or_config(args.frame_selection_mode, cfg, "frame_selection.mode", "sample")),
+        frame_selection_mode=frame_selection_mode,
         num_frames=int(cli_or_config(args.num_frames, cfg, "frame_selection.num_frames", 16)),
         frame_interval=int(cli_or_config(args.frame_interval, cfg, "frame_selection.frame_interval", 1)),
-        max_windows=cli_or_config(args.max_windows, cfg, "frame_selection.max_windows", None),
+        max_windows=resolve_frame_selection_max_windows(
+            cli_max_windows=args.max_windows,
+            cfg=cfg,
+            frame_selection_mode=frame_selection_mode,
+            cli_frame_selection_mode=args.frame_selection_mode,
+        ),
         scaling_mode=str(cli_or_config(args.scaling_mode, cfg, "scaling.mode", "resize")),
         resolution=int(cli_or_config(args.resolution, cfg, "scaling.resolution", 224)),
         chop_size=int(cli_or_config(args.chop_size, cfg, "scaling.chop_size", 224)),

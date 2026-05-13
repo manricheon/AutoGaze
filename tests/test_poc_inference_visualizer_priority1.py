@@ -17,7 +17,7 @@ if str(SCRIPTS) not in sys.path:
 
 import infer_autogaze
 import infer_full
-from poc_infer_utils import SCALE_COLORS, load_config, prepare_video
+from poc_infer_utils import SCALE_COLORS, load_config, prepare_video, resolve_frame_selection_max_windows
 from poc_model_registry import build_mllm, build_vision_encoder
 from poc_model_adapters import NVILAAdapter, QwenAdapter, VJEPA2Adapter
 
@@ -140,6 +140,25 @@ def test_no_silent_fallback_between_model_types() -> None:
 
 def test_frame_selection_scaling_and_chop_metadata() -> None:
     cfg = load_config(_cfg("A2_modified_siglip_nvila_on.yaml"))
+    assert resolve_frame_selection_max_windows(
+        cli_max_windows=None,
+        cfg=cfg,
+        frame_selection_mode="all",
+        cli_frame_selection_mode="all",
+    ) is None
+    assert resolve_frame_selection_max_windows(
+        cli_max_windows=0,
+        cfg=cfg,
+        frame_selection_mode="all",
+        cli_frame_selection_mode="all",
+    ) is None
+    assert resolve_frame_selection_max_windows(
+        cli_max_windows=None,
+        cfg=cfg,
+        frame_selection_mode="chunk",
+        cli_frame_selection_mode="chunk",
+    ) == 1
+
     for mode in ("sample", "chunk", "interval", "all"):
         prepared = prepare_video(
             cfg,
@@ -249,6 +268,87 @@ def test_chop_mode_expands_processed_frames_and_token_counts(tmp_path: Path) -> 
     assert viz["frame_records"][0]["chop_count"] == 3
     assert (output_dir / "visualizations" / "autogaze" / "frames" / "frame_000001_overlay.png").exists()
     assert not (output_dir / "visualizations" / "autogaze" / "frames" / "frame_000005_overlay.png").exists()
+
+
+def test_cli_all_frame_selection_saves_all_dummy_frames(tmp_path: Path) -> None:
+    output_dir = tmp_path / "autogaze_all"
+    args = infer_autogaze.parse_args(
+        [
+            "--config",
+            str(_cfg("A2_modified_siglip_nvila_on.yaml")),
+            "--video-path",
+            "dummy",
+            "--output-dir",
+            str(output_dir),
+            "--device",
+            "cpu",
+            "--dtype",
+            "float32",
+            "--frame-selection-mode",
+            "all",
+            "--num-frames",
+            "3",
+            "--scaling-mode",
+            "resize",
+            "--resolution",
+            "32",
+            "--no-progress",
+        ]
+    )
+    infer_autogaze.run(args)
+    frame_selection = json.loads((output_dir / "autogaze" / "frame_selection_metadata.json").read_text(encoding="utf-8"))
+    visualization = json.loads(
+        (output_dir / "visualizations" / "autogaze" / "metadata" / "visualization_metadata.json").read_text(encoding="utf-8")
+    )
+    assert frame_selection["mode"] == "all"
+    assert frame_selection["max_windows"] is None
+    assert frame_selection["original_frame_count"] == 8
+    assert visualization["frame_count"] == 8
+    assert (output_dir / "visualizations" / "autogaze" / "frames" / "frame_000007_overlay.png").exists()
+
+
+def test_chop_mllm_generation_falls_back_to_source_video_for_text() -> None:
+    calls: list[str | None] = []
+
+    class FakeMLLM:
+        def supports_direct_visual_tokens(self):
+            return False
+
+        def generate(self, *, query_text, video, visual_tokens=None, max_new_tokens=32, video_path=None):
+            calls.append(video_path)
+            if video_path is None:
+                return {
+                    "status": "blocked",
+                    "answer": None,
+                    "reason": "processor rejected flat chop tensor",
+                    "query_text_used": True,
+                    "metadata": {"video_input_kind": "processed_tensor_pil_frames"},
+                }
+            return {
+                "status": "real",
+                "answer": "source video answer",
+                "reason": None,
+                "query_text_used": True,
+                "metadata": {"video_input_kind": "video_reference"},
+            }
+
+    result = infer_full._generate_mllm_with_video_policy(
+        FakeMLLM(),
+        query_text="What changed?",
+        video=torch.zeros(2, 16, 3, 8, 8),
+        visual_tokens=None,
+        max_new_tokens=4,
+        video_path="/tmp/source.mp4",
+        has_chop_metadata=True,
+        allow_chop_source_fallback=True,
+    )
+    assert calls == [None, "/tmp/source.mp4"]
+    assert result["status"] == "real"
+    assert result["answer"] == "source video answer"
+    assert result["metadata"]["actual_video_input_source"] == "source_video_path_after_chop_tensor_failure"
+    assert result["metadata"]["chop_tensor_attempted"] is True
+    assert result["metadata"]["chop_source_fallback_used"] is True
+    assert result["metadata"]["chop_tensor_failure_reason"] == "processor rejected flat chop tensor"
 
 
 def test_autogaze_dummy_run_writes_flat_outputs_and_metrics(tmp_path: Path) -> None:

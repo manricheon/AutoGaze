@@ -16,6 +16,7 @@ from poc_infer_utils import (
     nested_get,
     normalize_device,
     prepare_video,
+    resolve_frame_selection_max_windows,
     run_autogaze_stage,
     write_autogaze_artifacts,
     write_json,
@@ -39,7 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--frame-selection-mode", choices=["sample", "chunk", "interval", "all"], default=None)
     parser.add_argument("--num-frames", type=int, default=None)
     parser.add_argument("--frame-interval", type=int, default=None)
-    parser.add_argument("--max-windows", type=int, default=None)
+    parser.add_argument("--max-windows", type=int, default=None, help="maximum frame windows to process; 0 means unlimited")
 
     parser.add_argument("--scaling-mode", choices=["resize", "fit_short_side", "fit_long_side", "chop", "quickstart", "none"], default=None)
     parser.add_argument("--resolution", type=int, default=None)
@@ -103,13 +104,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         output_dir = Path.cwd() / output_dir
 
     preprocessing_start = time.perf_counter()
+    frame_selection_mode = str(cli_or_config(args.frame_selection_mode, cfg, "frame_selection.mode", "sample"))
     prepared = prepare_video(
         cfg,
         video_path=args.video_path,
-        frame_selection_mode=str(cli_or_config(args.frame_selection_mode, cfg, "frame_selection.mode", "sample")),
+        frame_selection_mode=frame_selection_mode,
         num_frames=int(cli_or_config(args.num_frames, cfg, "frame_selection.num_frames", 16)),
         frame_interval=int(cli_or_config(args.frame_interval, cfg, "frame_selection.frame_interval", 1)),
-        max_windows=cli_or_config(args.max_windows, cfg, "frame_selection.max_windows", None),
+        max_windows=resolve_frame_selection_max_windows(
+            cli_max_windows=args.max_windows,
+            cfg=cfg,
+            frame_selection_mode=frame_selection_mode,
+            cli_frame_selection_mode=args.frame_selection_mode,
+        ),
         scaling_mode=str(cli_or_config(args.scaling_mode, cfg, "scaling.mode", "resize")),
         resolution=int(cli_or_config(args.resolution, cfg, "scaling.resolution", 224)),
         chop_size=int(cli_or_config(args.chop_size, cfg, "scaling.chop_size", 224)),
@@ -214,15 +221,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "query_text_used": True,
         }
     else:
-        mllm_video_path = None if prepared.chop_metadata is not None else args.video_path
+        allow_chop_source_fallback = bool(nested_get(cfg, "mllm.chop_tensor_fallback_to_source_video", True))
 
         def mllm_generate_once() -> dict[str, Any]:
-            return mllm.generate(
+            return _generate_mllm_with_video_policy(
+                mllm,
                 query_text=args.query_text,
                 video=prepared.processed_video,
                 visual_tokens=visual_tokens if mllm.supports_direct_visual_tokens() else None,
                 max_new_tokens=max_new_tokens,
-                video_path=mllm_video_path,
+                video_path=args.video_path,
+                has_chop_metadata=prepared.chop_metadata is not None,
+                allow_chop_source_fallback=allow_chop_source_fallback,
             )
 
         if allow_real and mllm_status.status == "real":
@@ -305,7 +315,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     }
     metrics["vision_encoder_required_for_full_pipeline"] = vision_required
     metrics["generation_input_mode"] = "direct_visual_tokens" if direct_visual_token_mode else "official_processor"
-    metrics["mllm_video_input_source"] = "processed_chop_tensor" if prepared.chop_metadata is not None else "video_path_or_processed_tensor"
+    generation_metadata = generation.get("metadata") if isinstance(generation.get("metadata"), dict) else {}
+    metrics["mllm_video_input_source"] = generation_metadata.get(
+        "actual_video_input_source",
+        "processed_chop_tensor" if prepared.chop_metadata is not None else "video_path_or_processed_tensor",
+    )
+    metrics["mllm_chop_tensor_attempted"] = bool(generation_metadata.get("chop_tensor_attempted", prepared.chop_metadata is not None))
+    metrics["mllm_chop_source_fallback_used"] = bool(generation_metadata.get("chop_source_fallback_used", False))
     metrics["gazing_info_passed_to_vision_encoder"] = bool(gaze.gazing_info_for_vit is not None and vision_required)
     metrics["mllm_visual_token_saving_claimed"] = bool(
         (
@@ -390,6 +406,90 @@ def _with_model_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> dict
     if args.local_files_only:
         mllm["local_files_only"] = True
         vision["local_files_only"] = True
+    return updated
+
+
+def _generate_mllm_with_video_policy(
+    mllm: Any,
+    *,
+    query_text: str,
+    video: Any,
+    visual_tokens: Any,
+    max_new_tokens: int,
+    video_path: str,
+    has_chop_metadata: bool,
+    allow_chop_source_fallback: bool,
+) -> dict[str, Any]:
+    if not has_chop_metadata or visual_tokens is not None:
+        result = mllm.generate(
+            query_text=query_text,
+            video=video,
+            visual_tokens=visual_tokens,
+            max_new_tokens=max_new_tokens,
+            video_path=video_path,
+        )
+        return _with_generation_metadata(
+            result,
+            {
+                "actual_video_input_source": "video_path_or_processed_tensor",
+                "chop_tensor_attempted": False,
+                "chop_source_fallback_used": False,
+            },
+        )
+
+    primary = mllm.generate(
+        query_text=query_text,
+        video=video,
+        visual_tokens=None,
+        max_new_tokens=max_new_tokens,
+        video_path=None,
+    )
+    primary = _with_generation_metadata(
+        primary,
+        {
+            "actual_video_input_source": "processed_chop_tensor",
+            "chop_tensor_attempted": True,
+            "chop_source_fallback_used": False,
+        },
+    )
+    if _generation_has_output_text(primary):
+        return primary
+    if not allow_chop_source_fallback or not _source_video_path_available(video_path):
+        return primary
+
+    fallback = mllm.generate(
+        query_text=query_text,
+        video=video,
+        visual_tokens=None,
+        max_new_tokens=max_new_tokens,
+        video_path=video_path,
+    )
+    return _with_generation_metadata(
+        fallback,
+        {
+            "actual_video_input_source": "source_video_path_after_chop_tensor_failure",
+            "chop_tensor_attempted": True,
+            "chop_source_fallback_used": True,
+            "chop_tensor_generation_status": primary.get("status"),
+            "chop_tensor_failure_reason": primary.get("reason"),
+        },
+    )
+
+
+def _generation_has_output_text(generation: dict[str, Any]) -> bool:
+    return generation.get("status") == "real" and bool(str(generation.get("answer") or "").strip())
+
+
+def _source_video_path_available(video_path: str | None) -> bool:
+    return bool(video_path and video_path != "dummy")
+
+
+def _with_generation_metadata(generation: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
+    updated = dict(generation)
+    existing = updated.get("metadata")
+    merged = dict(existing) if isinstance(existing, dict) else {}
+    merged.update(metadata)
+    updated["metadata"] = merged
     return updated
 
 

@@ -281,7 +281,11 @@ Supported scaling modes:
 
 The token-saving comparison in chop mode is therefore crop-expanded: `full_processed_visual_token_count` is the full token count across all processed crops, and `autogaze_selected_visual_token_count` is the subset selected by AutoGaze. `estimated_visual_token_savings_ratio` reports the reduction before the MLLM. In full inference, chop mode forces the MLLM adapter to consume the processed crop tensor instead of bypassing it with the original video path. Metrics record this as `mllm_video_input_source: processed_chop_tensor`.
 
+If the official MLLM processor cannot generate from the flat processed chop tensor, the full pipeline retries generation with the source video path when one is available. This is recorded explicitly with `mllm_chop_tensor_attempted: true`, `mllm_chop_source_fallback_used: true`, and `mllm_video_input_source: source_video_path_after_chop_tensor_failure`. For NVILA, the source-video retry still uses the official NVILA-HD-Video processor, which performs its own tiling/chunking and AutoGaze-controlled token scaling when the NVILA processor is configured with AutoGaze. For Qwen, the source-video retry uses Qwen's own processor and does not claim AutoGaze visual-token injection.
+
 For visualization, chop mode writes the primary `visualizations/autogaze/frames` and video outputs as merged source-frame views. Each selected crop overlay is projected back into its `source_box` on the original frame, so the frame/video view matches the original video layout. Crop-frame records remain available in JSON via `processed_frame_records` and `autogaze/selected_patch_indices.json`.
+
+When `--frame-selection-mode all` is passed on the command line, the CLI treats it as an explicit request to process every frame window and ignores the smoke-config `frame_selection.max_windows: 1` cap. Use `--max-windows N` to cap it again, or `--max-windows 0` to request unlimited windows explicitly.
 
 ## Output Layout
 

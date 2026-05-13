@@ -83,14 +83,14 @@ class FrameSelector:
             raise ValueError("num_frames must be > 0")
         if frame_interval <= 0:
             raise ValueError("frame_interval must be > 0")
-        if max_windows is not None and max_windows <= 0:
-            raise ValueError("max_windows must be > 0 when provided")
+        if max_windows is not None and max_windows < 0:
+            raise ValueError("max_windows must be >= 0 when provided")
         if drop_last and pad_last:
             raise ValueError("drop_last and pad_last cannot both be true")
         self.mode = mode
         self.num_frames = int(num_frames)
         self.frame_interval = int(frame_interval)
-        self.max_windows = int(max_windows) if max_windows is not None else None
+        self.max_windows = _normalize_max_windows(max_windows)
         self.drop_last = bool(drop_last)
         self.pad_last = bool(pad_last)
 
@@ -408,6 +408,29 @@ def nested_get(mapping: Mapping[str, Any], dotted: str, default: Any = None) -> 
 
 def cli_or_config(value: Any, cfg: Mapping[str, Any], dotted: str, default: Any = None) -> Any:
     return value if value is not None else nested_get(cfg, dotted, default)
+
+
+def resolve_frame_selection_max_windows(
+    *,
+    cli_max_windows: Any,
+    cfg: Mapping[str, Any],
+    frame_selection_mode: str,
+    cli_frame_selection_mode: str | None,
+) -> int | None:
+    if cli_max_windows is not None:
+        return _normalize_max_windows(cli_max_windows)
+    if cli_frame_selection_mode == "all" and frame_selection_mode == "all":
+        return None
+    return _normalize_max_windows(nested_get(cfg, "frame_selection.max_windows", None))
+
+
+def _normalize_max_windows(value: Any) -> int | None:
+    if value in {None, "", "none", "None", "null", "Null"}:
+        return None
+    parsed = int(value)
+    if parsed < 0:
+        raise ValueError("max_windows must be >= 0 when provided")
+    return parsed if parsed > 0 else None
 
 
 def normalize_device(device: str) -> str:
