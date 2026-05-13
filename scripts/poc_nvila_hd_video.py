@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import inspect
 import importlib
 import json
 import sys
@@ -768,6 +769,56 @@ def _processor_kwargs(
     return kwargs
 
 
+def _autogaze_callable_param_validation(model: Any, kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    callable_obj: Any = getattr(model, "forward", None)
+    callable_name = "forward"
+    if callable_obj is None or not callable(callable_obj):
+        callable_obj = model if callable(model) else getattr(model, "__call__", None)
+        callable_name = "__call__"
+    if callable_obj is None or not callable(callable_obj):
+        return {
+            "status": "unsupported",
+            "callable": None,
+            "accepted": False,
+            "accepted_via_var_kwargs": False,
+            "unsupported_kwargs": list(kwargs.keys()),
+            "reason": "AutoGaze object is not callable and does not expose a callable forward method",
+        }
+    try:
+        signature = inspect.signature(callable_obj)
+    except (TypeError, ValueError) as exc:
+        return {
+            "status": "unknown",
+            "callable": callable_name,
+            "accepted": False,
+            "accepted_via_var_kwargs": False,
+            "unsupported_kwargs": list(kwargs.keys()),
+            "reason": f"could not inspect AutoGaze callable signature: {exc}",
+        }
+
+    parameters = signature.parameters
+    accepts_var_kwargs = any(param.kind is inspect.Parameter.VAR_KEYWORD for param in parameters.values())
+    accepted_names = {
+        name
+        for name, param in parameters.items()
+        if param.kind
+        in {
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        }
+    }
+    unsupported = [] if accepts_var_kwargs else [key for key in kwargs if key not in accepted_names]
+    return {
+        "status": "passed" if not unsupported else "unsupported_kwargs",
+        "callable": callable_name,
+        "signature": str(signature),
+        "accepted": not unsupported,
+        "accepted_via_var_kwargs": accepts_var_kwargs,
+        "unsupported_kwargs": unsupported,
+        "provided_kwargs": list(kwargs.keys()),
+    }
+
+
 def _filtered_patch_indices(gaze_output: Mapping[str, Any], patch_grid: tuple[int, int]) -> list[int]:
     gaze_pos = gaze_output.get("gazing_pos")
     if not isinstance(gaze_pos, torch.Tensor):
@@ -802,6 +853,57 @@ def _write_scaling_metadata(output_dir: Path, scaling: Mapping[str, Any]) -> Pat
 def _write_runtime_metadata(output_dir: Path, runtime: Mapping[str, Any]) -> Path:
     path = output_dir / "autogaze" / "runtime_metadata.json"
     _write_json(path, runtime)
+    return path
+
+
+def _write_visualization_skip_metadata(
+    output_dir: Path,
+    *,
+    mode: str,
+    reason: str,
+    video_export_mode: str,
+    save_overlay_video: bool,
+    save_side_by_side_video: bool,
+    save_scale_panel_video: bool,
+    save_chop_frames: bool,
+    save_chop_overlay_video: bool,
+    frame_selection: FrameSelectionResult | None,
+    scaling: Mapping[str, Any] | None,
+    checkpoint_policy: str,
+) -> Path:
+    path = output_dir / "visualizations" / "autogaze" / "metadata" / "visualization_skip_metadata.json"
+    requested_outputs = {
+        "frame_images": True,
+        "overlay_video": save_overlay_video,
+        "side_by_side_video": save_side_by_side_video,
+        "scale_panel_video": save_scale_panel_video,
+        "chop_frames": save_chop_frames,
+        "chop_overlay_video": save_chop_overlay_video,
+    }
+    skipped_outputs = {
+        "frame_images": "visualizations/autogaze/windows/window_*/frames/",
+        "overlay_video": f"visualizations/autogaze/videos/autogaze_overlay_{video_export_mode}.mp4",
+        "side_by_side_video": f"visualizations/autogaze/videos/autogaze_side_by_side_{video_export_mode}.mp4",
+        "scale_panel_video": f"visualizations/autogaze/videos/autogaze_scale_panels_{video_export_mode}.mp4",
+        "chop_frames": "visualizations/autogaze/chops/window_*/frame_*/chop_*/frames/",
+        "chop_overlay_video": "visualizations/autogaze/videos/autogaze_chop_overlay.mp4",
+    }
+    _write_json(
+        path,
+        {
+            "status": "skipped",
+            "mode": mode,
+            "reason": reason,
+            "checkpoint_policy": checkpoint_policy,
+            "video_export_mode": video_export_mode,
+            "requested_outputs": requested_outputs,
+            "skipped_outputs": skipped_outputs,
+            "frame_selection": frame_selection.to_dict() if isinstance(frame_selection, FrameSelectionResult) else None,
+            "scaling_mode": scaling.get("scaling_mode") if isinstance(scaling, Mapping) else None,
+            "processed_shape": scaling.get("first_processed_shape") if isinstance(scaling, Mapping) else None,
+            "note": "Visualization requires AutoGaze selected patch metadata. No image or video artifact is produced when AutoGaze output is unavailable.",
+        },
+    )
     return path
 
 
@@ -1313,6 +1415,21 @@ def _build_metrics(summary: PocSummary, memory_snapshot: Any) -> dict[str, Any]:
             str(item.get("chop_id")): item.get("selected_patch_count")
             for item in chop_metadata.get("chops", [])
         }
+    visualization_skip: dict[str, Any] | None = None
+    visualization_skip_path = summary.artifacts.get("visualization_skip_metadata")
+    if visualization_skip_path and Path(visualization_skip_path).exists():
+        visualization_skip = json.loads(Path(visualization_skip_path).read_text(encoding="utf-8"))
+    visualization_stage_statuses = [
+        stage.status for stage in summary.stages if stage.name.startswith("visualization")
+    ]
+    if visualization_skip is not None:
+        visualization_status = "skipped"
+    elif "passed" in visualization_stage_statuses:
+        visualization_status = "generated"
+    elif "skipped" in visualization_stage_statuses:
+        visualization_status = "skipped"
+    else:
+        visualization_status = "not_requested_or_not_executed"
     metrics = {
         "mode": summary.mode,
         "status": summary.status,
@@ -1336,6 +1453,9 @@ def _build_metrics(summary: PocSummary, memory_snapshot: Any) -> dict[str, Any]:
         "effective_task_loss_requirement": runtime.get(
             "effective_task_loss_requirement", runtime.get("task_loss_requirement")
         ),
+        "strict_autogaze_params": runtime.get("strict_autogaze_params", False),
+        "unsupported_runtime_params": runtime.get("unsupported_runtime_params", []),
+        "autogaze_param_validation": runtime.get("autogaze_param_validation", "N/A"),
         "original_visual_token_count": summary.original_visual_token_count,
         "selected_visual_token_count": summary.selected_token_count,
         "token_reduction_ratio": token_reduction,
@@ -1343,6 +1463,9 @@ def _build_metrics(summary: PocSummary, memory_snapshot: Any) -> dict[str, Any]:
         "selected_patches_per_scale": token_summary.get("selected_patches_per_scale", "N/A"),
         "selected_patches_per_window": token_summary.get("selected_patches_per_window", "N/A"),
         "selected_patches_per_chop": selected_patches_per_chop,
+        "visualization_status": visualization_status,
+        "visualization_skip_reason": visualization_skip.get("reason") if visualization_skip else None,
+        "visualization_skip_metadata": visualization_skip or "N/A",
         "autogaze_latency_ms": _stage_latency(summary.stages, prefix="autogaze_window_"),
         "preprocessing_latency_ms": _stage_latency(summary.stages, "frame_selection_and_decode"),
         "scaling_chop_latency_ms": _stage_latency(summary.stages, "scaling_chop"),
@@ -1460,6 +1583,7 @@ def run_poc(
     save_chop_overlay_video: bool = False,
     gaze_ratio: float | None = None,
     task_loss_requirement: float | None = None,
+    strict_autogaze_params: bool = False,
     device: str = "cpu",
     dtype: str = "float32",
     max_new_tokens: int = 1,
@@ -1772,6 +1896,13 @@ def run_poc(
         "effective_gaze_ratio": effective_gaze_ratio,
         "effective_task_loss_requirement": effective_task_loss_requirement,
         "unsupported_runtime_params": [],
+        "strict_autogaze_params": strict_autogaze_params,
+        "autogaze_param_validation": {
+            "status": "not_executed",
+            "accepted": None,
+            "unsupported_kwargs": [],
+            "reason": "AutoGaze callable has not been constructed",
+        },
         "target_scales": resolved_target_scales,
         "target_patch_size": resolved_target_patch_size if resolved_target_scales else None,
         "scaling_mode": resolved_scaling_mode,
@@ -1833,6 +1964,17 @@ def run_poc(
                 if resolved_target_scales is not None:
                     kwargs["target_scales"] = resolved_target_scales
                     kwargs["target_patch_size"] = resolved_target_patch_size
+                param_validation = _autogaze_callable_param_validation(model, kwargs)
+                autogaze_runtime["autogaze_param_validation"] = param_validation
+                autogaze_runtime["unsupported_runtime_params"] = list(
+                    param_validation.get("unsupported_kwargs", [])
+                )
+                if strict_autogaze_params and not param_validation.get("accepted", False):
+                    raise TypeError(
+                        "strict AutoGaze parameter validation failed: "
+                        f"unsupported kwargs {param_validation.get('unsupported_kwargs', [])} "
+                        f"for {param_validation.get('callable') or 'unknown callable'}"
+                    )
                 autogaze_runtime.update(kwargs)
                 total_original = 0
                 total_selected = 0
@@ -2157,6 +2299,42 @@ def run_poc(
                 skipped.append({"stage": "autogaze", "reason": reason})
                 stages.append(PocStage("autogaze", "skipped", module_path=_as_str(autogaze.get("module_path")), class_or_factory=_as_str(autogaze.get("class_or_factory")), skipped_reason=reason))
 
+        if gaze_output is None:
+            autogaze_skip_reason = next(
+                (
+                    item["reason"]
+                    for item in reversed(skipped)
+                    if item.get("stage") in {"autogaze", "video_preprocessing"}
+                ),
+                "AutoGaze output is unavailable",
+            )
+            visualization_skip_path = _write_visualization_skip_metadata(
+                output_root,
+                mode=mode,
+                reason=f"AutoGaze visualization skipped because {autogaze_skip_reason}",
+                video_export_mode=video_export_mode,
+                save_overlay_video=save_overlay_video,
+                save_side_by_side_video=save_side_by_side_video,
+                save_scale_panel_video=save_scale_panel_video,
+                save_chop_frames=save_chop_frames,
+                save_chop_overlay_video=save_chop_overlay_video,
+                frame_selection=selection if isinstance(selection, FrameSelectionResult) else None,
+                scaling=scaling_metadata if isinstance(scaling_metadata, Mapping) else None,
+                checkpoint_policy="disabled" if no_checkpoint_load else "explicitly_enabled",
+            )
+            artifacts["visualization_skip_metadata"] = str(visualization_skip_path)
+            stages.append(
+                PocStage(
+                    "visualization",
+                    "skipped",
+                    skipped_reason=f"AutoGaze visualization skipped because {autogaze_skip_reason}",
+                    details={
+                        "metadata_path": str(visualization_skip_path),
+                        "video_export_mode": video_export_mode,
+                    },
+                )
+            )
+
     if mode == "full_pipeline":
         if gaze_output is not None and video_tensor is not None and not (no_checkpoint_load or checkpoint_metadata_only):
             stage_start = time.perf_counter()
@@ -2439,6 +2617,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--spatial-tile-size", type=int, default=None, help="Tile size for --scaling-mode chop.")
     parser.add_argument("--gaze-ratio", type=float, default=None)
     parser.add_argument("--task-loss-requirement", type=float, default=None)
+    parser.add_argument(
+        "--strict-autogaze-params",
+        action="store_true",
+        help="Fail the AutoGaze stage if the configured callable signature does not accept requested runtime kwargs.",
+    )
     parser.add_argument("--device", choices=["cpu", "cuda", "mps"], default="cpu")
     parser.add_argument("--dtype", choices=["float32", "float16", "bfloat16"], default="float32")
     parser.add_argument("--max-new-tokens", type=int, default=1)
@@ -2511,6 +2694,7 @@ def main(argv: list[str] | None = None) -> int:
         save_chop_overlay_video=args.save_chop_overlay_video,
         gaze_ratio=args.gaze_ratio,
         task_loss_requirement=args.task_loss_requirement,
+        strict_autogaze_params=args.strict_autogaze_params,
         device=args.device,
         dtype=args.dtype,
         max_new_tokens=args.max_new_tokens,

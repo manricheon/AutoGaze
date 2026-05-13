@@ -159,6 +159,14 @@ def _install_fake_modules(monkeypatch: pytest.MonkeyPatch) -> None:
                 "selected_scales": torch.tensor([[32, 64, 32, 64]] * batch),
             }
 
+    class StrictAutoGaze(AutoGaze):
+        def __call__(self, _inputs):
+            batch = int(_inputs["video"].shape[0])
+            return {
+                "gazing_pos": torch.tensor([[0, 1]] * batch),
+                "if_padded_gazing": torch.tensor([[False, False]] * batch),
+            }
+
     class SiglipVisionModel:
         @classmethod
         def from_pretrained(cls, *_args, **_kwargs):
@@ -203,6 +211,7 @@ def _install_fake_modules(monkeypatch: pytest.MonkeyPatch) -> None:
             return torch.tensor([[1, 2, 3]])
 
     fake_autogaze.AutoGaze = AutoGaze
+    fake_autogaze.StrictAutoGaze = StrictAutoGaze
     fake_siglip.SiglipVisionModel = SiglipVisionModel
     fake_transformers.AutoProcessor = AutoProcessor
     fake_transformers.AutoModel = AutoModel
@@ -554,6 +563,72 @@ def test_runtime_controls_and_scaling_metadata_are_saved(tmp_path: Path, monkeyp
     assert scaling["windows"][0]["aspect_ratio_preserved"] is True
 
 
+def test_strict_autogaze_params_records_signature_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_script_module()
+    _install_fake_modules(monkeypatch)
+    config = _write_config(tmp_path, dummy_frames=4)
+    output_dir = tmp_path / "strict_params_pass"
+
+    summary = module.run_poc(
+        mode="autogaze_only",
+        config=config,
+        output_dir=output_dir,
+        num_frames=2,
+        resolution=32,
+        gaze_ratio=0.5,
+        task_loss_requirement=0.6,
+        strict_autogaze_params=True,
+        no_checkpoint_load=False,
+    )
+
+    runtime = json.loads((output_dir / "autogaze" / "runtime_metadata.json").read_text(encoding="utf-8"))
+    metrics = json.loads((output_dir / "logs" / "metrics.json").read_text(encoding="utf-8"))
+
+    assert summary.status == "passed"
+    assert runtime["strict_autogaze_params"] is True
+    assert runtime["autogaze_param_validation"]["accepted"] is True
+    assert runtime["autogaze_param_validation"]["accepted_via_var_kwargs"] is True
+    assert runtime["unsupported_runtime_params"] == []
+    assert metrics["strict_autogaze_params"] is True
+    assert metrics["unsupported_runtime_params"] == []
+
+
+def test_strict_autogaze_params_reports_unsupported_kwargs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_script_module()
+    _install_fake_modules(monkeypatch)
+    config = _write_config(tmp_path, dummy_frames=4)
+    cfg = OmegaConf.load(config)
+    cfg.model.autogaze.class_or_factory = "StrictAutoGaze"
+    OmegaConf.save(cfg, config)
+    output_dir = tmp_path / "strict_params_fail"
+
+    summary = module.run_poc(
+        mode="autogaze_only",
+        config=config,
+        output_dir=output_dir,
+        num_frames=2,
+        resolution=32,
+        gaze_ratio=0.5,
+        task_loss_requirement=0.6,
+        strict_autogaze_params=True,
+        no_checkpoint_load=False,
+    )
+
+    runtime = json.loads((output_dir / "autogaze" / "runtime_metadata.json").read_text(encoding="utf-8"))
+
+    assert summary.status == "partial"
+    assert runtime["strict_autogaze_params"] is True
+    assert runtime["autogaze_param_validation"]["accepted"] is False
+    assert set(runtime["unsupported_runtime_params"]) >= {"gazing_ratio", "task_loss_requirement"}
+    assert any("strict AutoGaze parameter validation failed" in item["reason"] for item in summary.skipped_stages)
+
+
 def test_full_pipeline_saves_autogaze_visualization_under_full_pipeline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -739,6 +814,44 @@ def test_stub_stages_are_clearly_reported(tmp_path: Path, monkeypatch: pytest.Mo
     assert "checkpoint loading disabled" in str(autogaze_stage.skipped_reason)
 
 
+def test_visualization_skip_metadata_is_saved_when_autogaze_is_skipped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_script_module()
+    _install_fake_modules(monkeypatch)
+    config = _write_config(tmp_path)
+    output_dir = tmp_path / "visualization_skip"
+
+    summary = module.run_poc(
+        mode="autogaze_only",
+        config=config,
+        output_dir=output_dir,
+        num_frames=2,
+        resolution=32,
+        save_overlay_video=True,
+        save_side_by_side_video=True,
+        save_scale_panel_video=True,
+    )
+
+    metadata_path = output_dir / "visualizations" / "autogaze" / "metadata" / "visualization_skip_metadata.json"
+    metrics = json.loads((output_dir / "logs" / "metrics.json").read_text(encoding="utf-8"))
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+    assert summary.status == "partial"
+    assert summary.artifacts["visualization_skip_metadata"] == str(metadata_path)
+    assert metadata["status"] == "skipped"
+    assert "checkpoint loading disabled" in metadata["reason"]
+    assert metadata["requested_outputs"]["overlay_video"] is True
+    assert metadata["requested_outputs"]["side_by_side_video"] is True
+    assert metadata["requested_outputs"]["scale_panel_video"] is True
+    assert metadata["frame_selection"]["mode"] == "sample"
+    assert metrics["visualization_status"] == "skipped"
+    assert "checkpoint loading disabled" in metrics["visualization_skip_reason"]
+    assert metrics["visualization_skip_metadata"]["status"] == "skipped"
+    assert not (output_dir / "visualizations" / "autogaze" / "videos" / "autogaze_overlay.mp4").exists()
+
+
 @pytest.mark.parametrize("export_mode", ["hold_last"])
 def test_poc_video_export_unsupported_modes_raise(
     tmp_path: Path,
@@ -852,9 +965,9 @@ def test_priority2_benchmark_configs_load() -> None:
         assert benchmark["component_plugins"]["mllm"]["config_section"] == "model.mllm"
         assert benchmark["component_plugins"]["mllm"]["official_processor_path"] is True
         assert benchmark["heavy_benchmark"] is False
+        assert benchmark["run_by_default"] is False
         if benchmark["preset_id"] == "poc_default":
             assert benchmark["num_frames"] == 16
-            assert benchmark["run_by_default"] is False
 
 
 def test_priority3_high_resolution_configs_load_with_safety_limits() -> None:

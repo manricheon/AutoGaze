@@ -1356,6 +1356,7 @@ The isolated PoC applies these controls in both `--mode autogaze_only` and `--mo
 ```text
 --gaze-ratio <float>
 --task-loss-requirement <float>
+--strict-autogaze-params
 --scaling-mode none|resize|fit_short_side|fit_long_side|quickstart|chop
 --patch-size <int>
 --target-scales 56,112,196,392
@@ -1382,6 +1383,8 @@ The isolated PoC applies these controls in both `--mode autogaze_only` and `--mo
 --info-panel-mode external|inline|none
 ```
 
+`--strict-autogaze-params` is optional. When enabled, the PoC inspects the configured AutoGaze callable before execution and fails the AutoGaze stage clearly if requested kwargs such as `gazing_ratio` or `task_loss_requirement` are not accepted.
+
 By default, visualization metadata is rendered in an external panel outside the image area so patch overlays do not hide the sampled frame content.
 Patch index labels are disabled by default. Enable them only when visual inspection of patch IDs is needed.
 
@@ -1399,6 +1402,7 @@ Priority 2 support status:
 | Chop metadata | partially implemented | Metadata and chop-local visualizations are saved. |
 | Merged chop overlay | implemented for non-overlap | `overlay_union` maps chop-local patches back to full processed-frame coordinates. Non-zero overlap/custom stride remains unsupported. |
 | Full-length video | implemented | Preserves original frame count and FPS when metadata is available; unprocessed frames are explicitly marked. |
+| Visualization skip metadata | implemented | Guarded/no-checkpoint runs write `visualizations/autogaze/metadata/visualization_skip_metadata.json`; metrics include `visualization_status` and `visualization_skip_reason`. |
 | Hold-last videos | stub-only | `hold_last` raises `NotImplementedError`. |
 
 Full pipeline AutoGaze inspection example:

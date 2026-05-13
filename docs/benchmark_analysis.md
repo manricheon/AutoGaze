@@ -178,7 +178,7 @@ Priority 3 correctness checks:
 | Full-length export | `output_frame_count == original_frame_count` and processed indices are recorded | Calling sampled-only output full-length |
 | Original-space overlay | `coordinate_mapping.mapping_exact=true` and scale factors are recorded | Drawing processed-frame coordinates on original frames |
 | Chop overlay union | `coordinate_space=full_processed_frame` and merge/conflict policy is recorded | Drawing chop-local patch IDs as full-frame patch IDs |
-| High-resolution configs | `run_by_default=false`, bounded frames/chops/iterations | Treating smoke configs as public benchmark reproduction |
+| PoC benchmark configs | `run_by_default=false`, bounded frames/chops/iterations | Treating smoke configs as public benchmark reproduction |
 
 When comparing visualization smoke outputs, keep these labels separate:
 

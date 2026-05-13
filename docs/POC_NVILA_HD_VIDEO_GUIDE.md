@@ -88,7 +88,7 @@ Defaults shown here are the script defaults, not necessarily the values used by 
 | Mode/input | `--mode check|autogaze_only|full_pipeline`, `--video dummy`, `--video-path`, `--query-text` | `check`, dummy input |
 | Frame selection | `--frame-selection-mode sample|chunk|interval|all`, `--num-frames`, `--frame-interval`, `--max-windows`, `--drop-last`, `--pad-last` | `num_frames=16`, `sample`; no overlapping stride mode |
 | Scaling/chop | `--scaling-mode none|resize|fit_short_side|fit_long_side|quickstart|chop`, `--resolution`, `--patch-size`, `--target-scales`, `--target-patch-size`, `--spatial-tile-size`, `--chop-size`, `--chop-overlap`, `--chop-stride`, `--max-chops`, `--chop-merge-mode none|metadata_only|overlay_union` | `resize`, `resolution=224`, `patch_size=16`; non-zero chop overlap/stride unsupported |
-| AutoGaze runtime | `--gaze-ratio`, `--task-loss-requirement` | Config value if provided; A2 defaults to `0.75` and `0.7` |
+| AutoGaze runtime | `--gaze-ratio`, `--task-loss-requirement`, `--strict-autogaze-params` | Config value if provided; A2 defaults to `0.75` and `0.7`; strict mode validates callable kwargs before AutoGaze execution |
 | Runtime safety | `--device cpu|cuda|mps`, `--dtype float32|float16|bfloat16`, `--allow-checkpoint-load`, `--no-checkpoint-load`, `--checkpoint-metadata-only`, `--max-new-tokens` | CPU, float32, checkpoint loading disabled, `max_new_tokens=1` |
 | Visualization | `--save-overlay-video`, `--save-side-by-side-video`, `--save-scale-panel-video`, `--save-chop-frames`, `--save-chop-overlay-video`, `--video-fps`, `--video-export-mode sampled_only|full_length|hold_last`, `--overlay-alpha`, `--overlay-line-width`, `--overlay-style mask|box|both` | `sampled_only`; `hold_last` is stub-only |
 | Labels/panels | `--multi-scale-overlay/--no-multi-scale-overlay`, `--scale-color-mode gradient|categorical`, `--scale-panel-layout 2x2`, `--show-patch-index`, `--show-scale-label`, `--hide-patch-boxes`, `--hide-patch-indices` | Multi-scale gradient enabled; patch IDs disabled |
@@ -98,8 +98,8 @@ Defaults shown here are the script defaults, not necessarily the values used by 
 ## Full Pipeline Component Plug-In Mode
 
 `full_pipeline` has a config-driven plug-in surface for the vision encoder and MLLM.
-The script does not expose direct CLI overrides such as `--vision-module-path` or `--mllm-module-path`.
-Instead, it reads the component wiring from the experiment config passed by `--config`.
+The script intentionally does not expose direct CLI overrides such as `--vision-module-path` or `--mllm-module-path`.
+Instead, it reads the component wiring from the experiment config passed by `--config`, so module path, class/factory name, checkpoint path, processor path, tokenizer path, and construction kwargs stay synchronized.
 
 Current plug-in status:
 
@@ -150,6 +150,7 @@ Current limitations:
 
 ```text
 module/class/checkpoint overrides are config-driven, not CLI flags
+use a dedicated A1/A2/A0/A3 config YAML rather than mixing component paths through ad-hoc CLI overrides
 only the official processor path is implemented for NVILA-HD-Video MLLM input
 direct visual token injection into arbitrary MLLMs is not claimed
 vision output extraction is limited to tensor, last_hidden_state, visual_features, or first tuple tensor
@@ -275,6 +276,7 @@ autogaze/windows/window_000/selected_patch_indices.json
 autogaze/windows/window_000/selected_scales.json
 visualizations/autogaze/videos/autogaze_overlay.mp4
 visualizations/autogaze/videos/autogaze_side_by_side.mp4
+visualizations/autogaze/metadata/visualization_skip_metadata.json  # only when AutoGaze is skipped
 logs/metrics.json
 logs/poc_summary.json
 ```
@@ -472,6 +474,7 @@ ASCII view:
 ### `autogaze_only` Mode Outputs
 
 `autogaze_only` mode runs through AutoGaze and produces selected patch metadata, token counts, optional visualizations, and metrics.
+If checkpoint loading is disabled or AutoGaze fails before selected patch metadata is available, the PoC writes `visualizations/autogaze/metadata/visualization_skip_metadata.json` instead of leaving missing images/videos unexplained. `logs/metrics.json` mirrors this as `visualization_status=skipped` and `visualization_skip_reason`.
 
 Output tree:
 
@@ -494,6 +497,7 @@ outputs/<run>/
       frames/
       videos/
       metadata/
+        visualization_skip_metadata.json  # guarded/no-checkpoint or failed AutoGaze path
   logs/
     metrics.json
     metrics.csv
@@ -1332,7 +1336,7 @@ batch_size = 1
 small num_frames
 bounded max_chops
 small benchmark_iterations
-run_by_default = false for high-resolution preparation configs
+run_by_default = false for PoC benchmark presets, including high-resolution preparation configs
 ```
 
 ## Unsupported or Stub-Only Paths

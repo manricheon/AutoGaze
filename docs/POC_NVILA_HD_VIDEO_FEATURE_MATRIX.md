@@ -47,6 +47,7 @@ Current `scripts/poc_nvila_hd_video.py` supports:
 --spatial-tile-size <int>
 --gaze-ratio <float>
 --task-loss-requirement <float>
+--strict-autogaze-params
 --device cpu/cuda/mps
 --dtype float32/float16/bfloat16
 --max-new-tokens <int>
@@ -84,10 +85,11 @@ Current `scripts/poc_nvila_hd_video.py` supports:
 --json
 ```
 
-Current script does not expose these requested names yet:
+Current script does not expose direct per-component override flags; this PoC uses
+`--config` as the supported component plug-in boundary so model/module/checkpoint
+settings stay together:
 
 ```text
---strict-autogaze-params
 --vision-encoder / --vision-encoder-module / --vision-encoder-class
 --vision-encoder-ckpt / --vision-encoder-config
 --mllm / --mllm-module / --mllm-class
@@ -136,7 +138,7 @@ Some of these are partially represented by existing flags, for example
 | `fit_short_side` | implemented | Preserves aspect ratio; short side equals `resolution`. | Real AutoGaze compatibility with non-square inputs needs validation. | Yes | Yes |
 | `fit_long_side` | implemented | Preserves aspect ratio; long side equals `resolution`. | Real AutoGaze compatibility with non-square inputs needs validation. | Yes | Yes |
 | `quickstart` | partially implemented | Exactly supports documented QUICK_START policies: 224/patch16 and 392/patch14 target-scale mode. Unsupported requests raise and write `unsupported_reason`. | Does not cover every NVILA-HD-Video processor setting. | Yes | Yes |
-| `chop` | partially implemented | Uses non-overlapping spatio-temporal tile chunks and records chop metadata inside scaling metadata. | Requested `--chop-*` flags, per-chop files under `outputs/chops/`, overlay union, and full-frame coordinate mapping are missing. | Yes | Yes |
+| `chop` | partially implemented | Uses non-overlapping spatio-temporal tile chunks, supports `--chop-*` metadata fields, writes per-chop outputs under `outputs/chops/`, and supports non-overlap `overlay_union` full processed-frame overlay. | Non-zero overlap/custom stride and original decoded-frame chop overlay remain unsupported. | Yes | Yes |
 | Chop overlap/stride | stub-only | CLI fields are present, but non-overlap is the only supported mode. Non-zero overlap or custom stride raises clearly. | Full overlap/stride coordinate semantics are Priority 3/future. | Stub | Stub |
 | Original-space chop overlay | partially implemented | Non-overlap `overlay_union` maps chop-local patches to full processed-frame coordinates. | Original decoded-frame overlay for arbitrary chop scaling/overlap remains blocked. | Partial | Partial |
 
@@ -144,19 +146,19 @@ Some of these are partially represented by existing flags, for example
 
 | Feature | Status | Current behavior | Missing or blocked work | autogaze_only | full_pipeline |
 |---|---|---|---|---:|---:|
-| `--gaze-ratio` | partially implemented | CLI/config value is mapped to AutoGaze call as `gazing_ratio`; also forwarded to NVILA processor kwargs as `gazing_ratio_tile` if provided. Requested/effective values are saved in runtime metadata and metrics. | Unsupported-param warning records still need strict callable validation. | Yes | Yes |
-| `--task-loss-requirement` | partially implemented | CLI/config value is passed to AutoGaze and NVILA processor kwargs. | Need strict validation that target callable accepted it; do not claim behavior effect beyond passing the parameter. | Yes | Yes |
+| `--gaze-ratio` | implemented | CLI/config value is mapped to AutoGaze call as `gazing_ratio`; also forwarded to NVILA processor kwargs as `gazing_ratio_tile` if provided. Requested/effective values are saved in runtime metadata and metrics. Optional strict validation checks callable acceptance before execution. | Real behavioral effect still requires checkpoint execution. | Yes | Yes |
+| `--task-loss-requirement` | implemented | CLI/config value is passed to AutoGaze and NVILA processor kwargs. Optional strict validation checks callable acceptance before execution. | Do not claim behavior effect beyond passing the parameter unless real AutoGaze execution verifies it. | Yes | Yes |
 | Config defaults | partially implemented | A1/A2 configs include `gaze_ratio` and `task_loss_requirement` fields under `inference`. | Request mentions `autogaze_runtime`; not yet represented as a separate group. | Yes | Yes |
 | Equivalent parameter detection | partially implemented | Uses original `gazing_ratio` name for AutoGaze call. | Does not detect `gaze_ratio`, `task_requirement`, or `loss_requirement` callable aliases. | Partial | Partial |
-| `--strict-autogaze-params` | stub-only | Not present. | Add CLI flag and signature/call result validation. | Stub | Stub |
+| `--strict-autogaze-params` | implemented | Enables signature validation for requested AutoGaze kwargs. If a configured callable lacks required kwargs, the AutoGaze stage fails clearly and records unsupported params in runtime metadata/metrics. | Does not prove semantic use of a parameter inside the implementation. | Yes | Yes |
 
 ### Vision Encoder and MLLM Switching
 
 | Feature | Status | Current behavior | Missing or blocked work | autogaze_only | full_pipeline |
 |---|---|---|---|---:|---:|
 | Modified SigLIP + NVILA-HD-Video | partially implemented | Config-driven path resolves module/class/checkpoints; full mode attempts modified SigLIP and NVILA when checkpoint loading is allowed. | Real construction and generation require valid local modules/checkpoints and enough memory. | N/A | Partial |
-| Vision encoder config override | partially implemented | Can change by editing or passing `--config`. | Requested per-component CLI override flags are missing. | N/A | Partial |
-| MLLM config override | partially implemented | Can change by editing or passing `--config`. | Requested `--mllm-*`, `--processor-path`, and `--tokenizer-path` flags are missing. | N/A | Partial |
+| Vision encoder config override | implemented as config-driven | Can change by editing or passing `--config`; benchmark configs record the expected config sections. | Direct per-component CLI overrides are intentionally not exposed in this PoC layer. | N/A | Yes |
+| MLLM config override | implemented as config-driven | Can change by editing or passing `--config`; processor/tokenizer paths are read from `model.mllm`. | Direct `--mllm-*`, `--processor-path`, and `--tokenizer-path` overrides remain future work if needed. | N/A | Yes |
 | Vanilla SigLIP + NVILA | blocked | A0/A3 real configs exist elsewhere, but PoC does not claim compatibility. | Requires explicit feasibility/smoke validation. | N/A | Blocked |
 | Qwen / generic HF MLLM | future work | Separate adapter stubs exist in project, not this PoC path. | Need official processor baseline and no direct token injection assumption. | N/A | Future |
 
@@ -167,7 +169,7 @@ Some of these are partially represented by existing flags, for example
 | Top-level config selection | implemented | `--config` loads experiment/config YAML. | None. | Yes | Yes |
 | Path checks | implemented | `check` mode validates module import/class/path existence. | More detailed per-component override reporting would help. | Yes | Yes |
 | Explicit checkpoint loading guard | implemented | Heavy loading is disabled unless `--allow-checkpoint-load` is used. | None. | Yes | Yes |
-| Per-component CLI checkpoint override | stub-only | Not present. | Add requested `--vision-encoder-ckpt`, `--mllm-ckpt`, etc. | N/A | Stub |
+| Per-component CLI checkpoint override | config-driven only | Not exposed as direct flags; use a dedicated experiment YAML through `--config`. | Add direct flags only if the PoC must support ad-hoc runtime overrides. | N/A | Future |
 
 ### Visualization
 
@@ -204,8 +206,9 @@ Some of these are partially represented by existing flags, for example
 | Scaling metadata | implemented | Saved under `scaling/scaling_metadata.json`. | None. | Yes | Yes |
 | Per-window token counts | implemented | Saved under `autogaze/windows/window_*/token_counts.json`. | None for current window scope. | Yes | Yes |
 | Selected patch masks | implemented | Saved as per-window `selected_patch_mask.json`. | Needs richer mask metadata by scale/chop. | Yes | Yes |
-| Runtime metadata | implemented | Saved under `autogaze/runtime_metadata.json`. | Strict unsupported-parameter validation is still missing. | Yes | Yes |
+| Runtime metadata | implemented | Saved under `autogaze/runtime_metadata.json`, including requested/effective AutoGaze controls and strict validation results. | None for current PoC scope. | Yes | Yes |
 | Metrics JSON/CSV | implemented | Saved under `logs/metrics.json` and `logs/metrics.csv`. | Metrics are PoC-level and use `N/A` for unavailable or skipped stages. | Yes | Yes |
+| Visualization skip report | implemented | When AutoGaze output is unavailable, saves `visualizations/autogaze/metadata/visualization_skip_metadata.json` and mirrors the reason in metrics. | None for guarded/no-checkpoint smoke scope. | Yes | Yes |
 | Memory metrics | partially implemented | CUDA peak memory is sampled; CPU/MPS metrics are explicitly marked unavailable. | No process-level CPU memory sampling. | Yes | Yes |
 | Stage latency breakdown | implemented | Import/check, preprocessing, scaling/chop, AutoGaze, visualization, vision encoder, and NVILA generation stages are recorded when executed. | MLLM prefill/decode separation is not available in the current guarded generation call. | Yes | Yes |
 | Token reduction summary | implemented | Top-level `autogaze/token_counts_summary.json` aggregates per-window before/after counts, reduction ratio, and selected patches by frame/window/scale. | Per-chop token summary is still future work. | Yes | Yes |
@@ -275,8 +278,7 @@ Some of these are partially represented by existing flags, for example
 | Real AutoGaze execution | blocked when assets unavailable | Requires importable original AutoGaze and checkpoint/config path. | AutoGaze module, checkpoint, processor path. | Run `--mode check`; configure real paths; allow checkpoint load. | Yes | Yes |
 | Real modified SigLIP execution | blocked when assets unavailable | Requires original modified SigLIP module and checkpoint/config. | `autogaze.vision_encoders.siglip.SiglipVisionModel` or configured equivalent. | Validate construction before inference. | No | Yes |
 | Real NVILA generation | blocked when assets or memory unavailable | NVILA-HD-Video is large and uses trusted remote code. | NVILA checkpoint/cache, processor/tokenizer, enough device memory. | Use guarded construction first; run with explicit checkpoint/model load only. | No | Yes |
-| `--strict-autogaze-params` | stub-only | CLI not present. | N/A. | Add flag and callable signature validation. | Yes | Yes |
-| Per-component model override CLI | stub-only | Script reads config but does not expose requested per-component flags. | N/A. | Add override merge layer before construction. | No | Yes |
+| Per-component model override CLI | future work | Script reads config but does not expose requested per-component flags by design. | N/A. | Add override merge layer only if config-driven wiring is insufficient. | No | Yes |
 | Hold-last export | stub-only | Requires state carry-forward policy across unprocessed frames. | Original frame access and temporal hold policy. | Keep explicit `NotImplementedError`. | Yes | Yes |
 | Custom comparison layouts | partially implemented | `processed_overlay`, `original_overlay`, and `original_processed_overlay` are supported. | `chop_overlay` as side-by-side layout remains unsupported; use `overlay_union`. | Add layouts only with exact mapping. | Yes | Yes |
 | Chop overlay video | partially implemented | `--save-chop-overlay-video` works with non-overlap `overlay_union`. | Non-zero overlap/custom stride and original decoded-frame overlay. | Add overlap semantics only after coordinate policy is defined. | Yes | Yes |
@@ -315,6 +317,7 @@ outputs/<run_name>/
   visualizations/autogaze/videos/autogaze_original_processed_overlay.mp4
   visualizations/autogaze/videos/autogaze_chop_overlay.mp4
   visualizations/autogaze/metadata/chop_overlay_metadata.json
+  visualizations/autogaze/metadata/visualization_skip_metadata.json
   chops/chop_metadata.json
   chops/windows/window_000/frame_000/chop_000/
   visualizations/autogaze/chops/window_000/frame_000/chop_000/
@@ -335,13 +338,10 @@ logs/reproducibility_manifest.json
 
 Recommended next batch should stay small and avoid large benchmark jobs:
 
-1. Add strict AutoGaze parameter validation:
-   - `--strict-autogaze-params`
-
-2. Add per-component full-pipeline override flags:
+1. Add per-component full-pipeline override flags only if config-driven wiring proves too slow for iteration:
    - `--vision-encoder-*`
    - `--mllm-*`
    - `--processor-path`
    - `--tokenizer-path`
 
-3. Keep hold-last export, non-zero chop overlap/custom stride, and original decoded-frame chop overlays as explicit future work until coordinate mapping and merge semantics are defined.
+2. Keep hold-last export, non-zero chop overlap/custom stride, and original decoded-frame chop overlays as explicit future work until coordinate mapping and merge semantics are defined.

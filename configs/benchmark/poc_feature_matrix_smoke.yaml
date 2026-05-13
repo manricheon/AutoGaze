@@ -73,4 +73,5 @@ benchmark:
   info_panel_position: bottom
   output_dir: outputs/poc_feature_matrix_smoke
   heavy_benchmark: false
+  run_by_default: false
   result_label: dummy_or_stub_only
