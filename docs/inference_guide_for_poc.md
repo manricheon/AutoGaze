@@ -1,6 +1,6 @@
 # PoC Inference Guide
 
-This branch is now scoped to the lightweight PoC inference surface only. It keeps the runnable inference entry points, A0-A3 and E1-E3 configs, local model adapters, flat visualizations, and metrics output. Broader benchmark, HF dataset, profiling, and all-in-one NVILA-HD experiment code were removed from this branch.
+This branch is now scoped to the lightweight PoC inference surface only. It keeps the runnable inference entry points, A0-A3 and E1-E4 configs, local model adapters, flat visualizations, and metrics output. Broader benchmark, HF dataset, profiling, and all-in-one NVILA-HD experiment code were removed from this branch.
 
 ## Kept Files
 
@@ -24,6 +24,7 @@ configs/poc_inference/A3_vanilla_siglip_nvila_on.yaml
 configs/poc_inference/E1_vjepa2_encoder.yaml
 configs/poc_inference/E2_qwen_mllm.yaml
 configs/poc_inference/E3_vjepa2_qwen.yaml
+configs/poc_inference/E4_qwen_autogaze_vision_mask.yaml
 ```
 
 Tests:
@@ -53,6 +54,7 @@ docs/inference_guide_for_poc.md
 | `E1_vjepa2_encoder.yaml` | off | V-JEPA2 | generic MLLM | V-JEPA2 loading smoke |
 | `E2_qwen_mllm.yaml` | off | skipped/generic | Qwen | Qwen official processor smoke |
 | `E3_vjepa2_qwen.yaml` | on | V-JEPA2 | Qwen | extension smoke with explicit blockers |
+| `E4_qwen_autogaze_vision_mask.yaml` | on | Qwen-owned vision | Qwen | AutoGaze masks Qwen-native vision patches |
 
 Local defaults point at this workspace cache:
 
@@ -102,6 +104,7 @@ Use `--allow-real-model-loading` to request real loading. With that flag:
 - incomplete Qwen sharded checkpoints block before model construction;
 - requested model types are not silently replaced by another model;
 - direct visual-token injection into NVILA or Qwen is not claimed unless an adapter explicitly supports it;
+- Qwen AutoGaze vision masking is reported separately from visual-token shortening and encoder-side acceleration;
 - `predictions/answer.json`, `logs/poc_summary.json`, and `logs/metrics.json` record adapter status and failure reasons.
 
 ## AutoGaze-Only Smoke
@@ -207,6 +210,31 @@ python scripts/infer_full.py \
 
 If any shard referenced by `model.safetensors.index.json` is missing, loading blocks with the missing filenames.
 
+Qwen + AutoGaze vision-mask smoke:
+
+```bash
+python scripts/infer_full.py \
+  --config configs/poc_inference/E4_qwen_autogaze_vision_mask.yaml \
+  --video-path /path/to/video.mp4 \
+  --query-text "What is happening in this video?" \
+  --mllm qwen \
+  --model-id weights/Qwen2.5-VL-7B-Instruct \
+  --processor-path weights/Qwen2.5-VL-7B-Instruct \
+  --allow-real-model-loading \
+  --local-files-only \
+  --device cuda \
+  --dtype bfloat16 \
+  --frame-selection-mode sample \
+  --num-frames 16 \
+  --scaling-mode resize \
+  --resolution 224 \
+  --max-new-tokens 32 \
+  --output-dir outputs/poc_inference/e4_qwen_autogaze_mask_real \
+  --json
+```
+
+This mode follows the `dev` branch concept for Qwen: AutoGaze-selected regions are mapped onto Qwen's own `video_grid_thw`, then a forward hook masks non-selected `model.visual.patch_embed` outputs before Qwen's visual encoder continues. The official Qwen processor and generation path are still used. It does not shorten the Qwen visual placeholder sequence and does not claim encoder-side acceleration; `logs/metrics.json` records `qwen_visual_mask_applied`, `qwen_visual_tokens_shortened=false`, and `qwen_encoder_side_acceleration_claimed=false`.
+
 Dummy Qwen processor smoke, useful for checking wiring without a local video file:
 
 ```bash
@@ -233,7 +261,8 @@ MLLM switching summary:
 | MLLM | Config | Supported generation path | Direct AutoGaze visual tokens |
 |---|---|---|---|
 | NVILA | `A0`-`A3` | official NVILA processor, with AutoGaze processor controls in A2/A3 | not directly injected by this PoC |
-| Qwen | `E2_qwen_mllm.yaml` | official Qwen2.5-VL chat-template processor | unsupported; input-level frame/chop selection only |
+| Qwen | `E2_qwen_mllm.yaml` | official Qwen2.5-VL chat-template processor | unsupported |
+| Qwen + AutoGaze mask | `E4_qwen_autogaze_vision_mask.yaml` | official Qwen2.5-VL processor plus Qwen-native vision patch masking | unsupported; selected patches are masked inside Qwen vision, not injected as external tokens |
 | Generic | `E1_vjepa2_encoder.yaml` | stub/status reporting only | unsupported until a model-specific adapter is added |
 
 ## V-JEPA2 Smoke

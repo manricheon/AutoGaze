@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import inspect
 import json
 import time
 from pathlib import Path
@@ -200,6 +201,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     mllm = build_mllm(mllm_name, nested_get(cfg, "mllm", {}))
     mllm_status = mllm.load(allow_real_model_loading=allow_real, device=device, dtype=dtype)
     max_new_tokens = int(cli_or_config(args.max_new_tokens, cfg, "generation.max_new_tokens", 32))
+    mllm_autogaze_payload = _mllm_autogaze_payload(cfg, gaze)
     mllm_generation_latency_ms: float | None = None
     if allow_real and mllm_status.status != "real":
         blocked_stages.append("mllm_generation")
@@ -237,6 +239,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 video_path=args.video_path,
                 has_chop_metadata=prepared.chop_metadata is not None,
                 allow_chop_source_fallback=allow_chop_source_fallback,
+                autogaze=mllm_autogaze_payload,
             )
 
         if allow_real and mllm_status.status == "real":
@@ -327,6 +330,25 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     metrics["mllm_chop_tensor_attempted"] = bool(generation_metadata.get("chop_tensor_attempted", prepared.chop_metadata is not None))
     metrics["mllm_chop_source_fallback_used"] = bool(generation_metadata.get("chop_source_fallback_used", False))
     metrics["gazing_info_passed_to_vision_encoder"] = bool(gaze.gazing_info_for_vit is not None and vision_required)
+    metrics["qwen_autogaze_integration"] = generation_metadata.get(
+        "qwen_autogaze_integration",
+        nested_get(cfg, "mllm.autogaze_integration", "none") if mllm.name == "qwen" else "not_applicable",
+    )
+    metrics["qwen_visual_mask_applied"] = bool(generation_metadata.get("qwen_visual_mask_applied", False))
+    metrics["qwen_visual_tokens_shortened"] = bool(generation_metadata.get("qwen_visual_tokens_shortened", False))
+    metrics["qwen_encoder_side_acceleration_claimed"] = bool(
+        generation_metadata.get("qwen_encoder_side_acceleration_claimed", False)
+    )
+    for key in (
+        "qwen_visual_tokens_before",
+        "qwen_visual_tokens_kept_by_mask",
+        "qwen_visual_mask_keep_ratio",
+        "qwen_visual_mask_grid_thw",
+        "qwen_autogaze_empty_temporal_chunks",
+        "qwen_autogaze_empty_chunk_policy",
+    ):
+        if key in generation_metadata:
+            metrics[key] = generation_metadata[key]
     metrics["mllm_visual_token_saving_claimed"] = bool(
         (
             direct_visual_token_mode
@@ -423,14 +445,17 @@ def _generate_mllm_with_video_policy(
     video_path: str,
     has_chop_metadata: bool,
     allow_chop_source_fallback: bool,
+    autogaze: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not has_chop_metadata or visual_tokens is not None:
-        result = mllm.generate(
+        result = _call_mllm_generate(
+            mllm,
             query_text=query_text,
             video=video,
             visual_tokens=visual_tokens,
             max_new_tokens=max_new_tokens,
             video_path=video_path,
+            autogaze=autogaze,
         )
         return _with_generation_metadata(
             result,
@@ -441,12 +466,14 @@ def _generate_mllm_with_video_policy(
             },
         )
 
-    primary = mllm.generate(
+    primary = _call_mllm_generate(
+        mllm,
         query_text=query_text,
         video=video,
         visual_tokens=None,
         max_new_tokens=max_new_tokens,
         video_path=None,
+        autogaze=autogaze,
     )
     primary = _with_generation_metadata(
         primary,
@@ -461,12 +488,14 @@ def _generate_mllm_with_video_policy(
     if not allow_chop_source_fallback or not _source_video_path_available(video_path):
         return primary
 
-    fallback = mllm.generate(
+    fallback = _call_mllm_generate(
+        mllm,
         query_text=query_text,
         video=video,
         visual_tokens=None,
         max_new_tokens=max_new_tokens,
         video_path=video_path,
+        autogaze=autogaze,
     )
     return _with_generation_metadata(
         fallback,
@@ -478,6 +507,56 @@ def _generate_mllm_with_video_policy(
             "chop_tensor_failure_reason": primary.get("reason"),
         },
     )
+
+
+def _call_mllm_generate(
+    mllm: Any,
+    *,
+    query_text: str,
+    video: Any,
+    visual_tokens: Any,
+    max_new_tokens: int,
+    video_path: str | None,
+    autogaze: dict[str, Any] | None,
+) -> dict[str, Any]:
+    kwargs = {
+        "query_text": query_text,
+        "video": video,
+        "visual_tokens": visual_tokens,
+        "max_new_tokens": max_new_tokens,
+        "video_path": video_path,
+    }
+    if autogaze is not None and _generate_accepts_kwarg(mllm, "autogaze"):
+        kwargs["autogaze"] = autogaze
+    return mllm.generate(**kwargs)
+
+
+def _generate_accepts_kwarg(mllm: Any, name: str) -> bool:
+    try:
+        signature = inspect.signature(mllm.generate)
+    except (TypeError, ValueError):
+        return False
+    if name in signature.parameters:
+        return True
+    return any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
+
+
+def _mllm_autogaze_payload(cfg: dict[str, Any], gaze: Any) -> dict[str, Any] | None:
+    if str(nested_get(cfg, "mllm.autogaze_integration", "none")) != "qwen_vision_mask":
+        return None
+    return {
+        "autogaze_enabled": bool(getattr(gaze, "autogaze_enabled", False)),
+        "status": getattr(gaze, "status", None),
+        "reason": getattr(gaze, "reason", None),
+        "real_model_used": bool(getattr(gaze, "real_model_used", False)),
+        "original_token_count": getattr(gaze, "original_token_count", None),
+        "selected_token_count": getattr(gaze, "selected_token_count", None),
+        "token_reduction_ratio": getattr(gaze, "token_reduction_ratio", None),
+        "patch_grid": list(getattr(gaze, "patch_grid", []) or []),
+        "patch_size": getattr(gaze, "patch_size", None),
+        "per_frame": list(getattr(gaze, "per_frame", []) or []),
+        "runtime_metadata": dict(getattr(gaze, "runtime_metadata", {}) or {}),
+    }
 
 
 def _generation_has_output_text(generation: dict[str, Any]) -> bool:

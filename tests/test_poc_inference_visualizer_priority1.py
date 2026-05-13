@@ -30,6 +30,7 @@ POC_CONFIGS = [
     "E1_vjepa2_encoder.yaml",
     "E2_qwen_mllm.yaml",
     "E3_vjepa2_qwen.yaml",
+    "E4_qwen_autogaze_vision_mask.yaml",
 ]
 
 
@@ -52,7 +53,7 @@ def test_priority1_configs_load_and_name_required_models() -> None:
         assert cfg["mllm"]["name"] in {"nvila", "qwen", "generic_mllm"}
         assert "checkpoint_path" in cfg["vision_encoder"]
         assert "processor_path" in cfg["mllm"]
-    assert seen == {"A0", "A1", "A2", "A3", "E1", "E2", "E3"}
+    assert seen == {"A0", "A1", "A2", "A3", "E1", "E2", "E3", "E4"}
 
 
 def test_configs_reference_local_weight_cache_when_available() -> None:
@@ -83,6 +84,14 @@ def test_configs_reference_local_weight_cache_when_available() -> None:
     assert e2["mllm"]["name"] == "qwen"
     assert e2["mllm"]["checkpoint_path"] == "weights/Qwen2.5-VL-7B-Instruct"
     assert e2["mllm"]["processor_path"] == "weights/Qwen2.5-VL-7B-Instruct"
+
+    e4 = load_config(_cfg("E4_qwen_autogaze_vision_mask.yaml"))
+    assert e4["autogaze"]["enabled"] is True
+    assert e4["autogaze"]["checkpoint_path"] == "weights/AutoGaze"
+    assert e4["mllm"]["name"] == "qwen"
+    assert e4["mllm"]["official_processor_owns_vision"] is True
+    assert e4["mllm"]["autogaze_integration"] == "qwen_vision_mask"
+    assert e4["vision_encoder"]["required_for_full_pipeline"] is False
     assert e2["mllm"]["prompt_template"] == "Question: {prompt}"
     assert e2["mllm"]["processor_from_pretrained_kwargs"]["use_fast"] is False
 
@@ -704,6 +713,153 @@ def test_qwen_official_processor_path_with_available_factory(monkeypatch: pytest
     assert result["metadata"]["chat_template_path"] is True
     assert result["metadata"]["vision_preprocess_path"] == "processor_direct_video_payload"
     assert result["metadata"]["video_input_kind"] == "processed_tensor_pil_frames"
+
+
+def test_qwen_autogaze_vision_mask_applies_patch_embed_hook(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_module = types.ModuleType("fake_qwen_mask")
+
+    class FakePatchEmbed(torch.nn.Module):
+        def forward(self, hidden_states):
+            return hidden_states
+
+    class AutoModelForVision2Seq:
+        device = torch.device("cpu")
+
+        @classmethod
+        def from_pretrained(cls, model_id: str, **kwargs):
+            instance = cls()
+            instance.model_id = model_id
+            instance.kwargs = kwargs
+            instance.visual = types.SimpleNamespace(patch_embed=FakePatchEmbed())
+            instance.masked_patch_embed_output = None
+            return instance
+
+        def to(self, device: str):
+            self.device = torch.device(device)
+            return self
+
+        def eval(self):
+            return self
+
+        def generate(self, **inputs):
+            assert "video_grid_thw" in inputs
+            self.masked_patch_embed_output = self.visual.patch_embed(torch.ones(8, 2))
+            return torch.tensor([[10, 11, 12]])
+
+    class AutoProcessor:
+        @classmethod
+        def from_pretrained(cls, processor_path: str, **kwargs):
+            return cls()
+
+        def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
+            return "<qwen-chat>Question: Where?</qwen-chat>"
+
+        def __call__(self, *, text, videos=None, return_tensors=None, **_kwargs):
+            assert isinstance(videos[0], list)
+            return {
+                "input_ids": torch.tensor([[10, 11]]),
+                "video_grid_thw": torch.tensor([[2, 2, 2]]),
+            }
+
+        def batch_decode(self, outputs, skip_special_tokens=True):
+            return ["masked qwen answer"]
+
+    fake_module.AutoModelForVision2Seq = AutoModelForVision2Seq
+    fake_module.AutoProcessor = AutoProcessor
+    monkeypatch.setitem(sys.modules, "fake_qwen_mask", fake_module)
+
+    adapter = QwenAdapter(
+        {
+            "module_path": "fake_qwen_mask",
+            "class_name": "AutoModelForVision2Seq",
+            "processor_module_path": "fake_qwen_mask",
+            "processor_class_name": "AutoProcessor",
+            "model_id": "fake/qwen",
+            "processor_path": "fake/qwen",
+            "prompt_template": "Question: {prompt}",
+            "autogaze_integration": "qwen_vision_mask",
+            "qwen_autogaze_empty_chunk_policy": "block",
+        }
+    )
+    status = adapter.load(allow_real_model_loading=True, device="cpu", dtype="float32")
+    assert status.status == "real"
+    autogaze = {
+        "autogaze_enabled": True,
+        "status": "stub_dummy_autogaze",
+        "per_frame": [
+            {"selected_patch_records": [{"normalized_box": [0.0, 0.0, 0.5, 0.5]}]},
+            {"selected_patch_records": [{"normalized_box": [0.5, 0.5, 1.0, 1.0]}]},
+        ],
+    }
+    result = adapter.generate(
+        query_text="Where?",
+        video=torch.zeros(1, 2, 3, 8, 8),
+        max_new_tokens=4,
+        autogaze=autogaze,
+    )
+    assert result["status"] == "real"
+    assert result["answer"] == "masked qwen answer"
+    assert result["metadata"]["qwen_autogaze_integration"] == "qwen_vision_mask"
+    assert result["metadata"]["qwen_visual_mask_applied"] is True
+    assert result["metadata"]["qwen_visual_tokens_shortened"] is False
+    assert result["metadata"]["qwen_encoder_side_acceleration_claimed"] is False
+    assert result["metadata"]["qwen_visual_tokens_before"] == 8
+    assert result["metadata"]["qwen_visual_tokens_kept_by_mask"] == 2
+    masked = adapter.model.masked_patch_embed_output
+    assert masked is not None
+    assert int((masked.sum(dim=1) > 0).sum().item()) == 2
+
+
+def test_qwen_autogaze_vision_mask_blocks_without_grid(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_module = types.ModuleType("fake_qwen_mask_no_grid")
+
+    class AutoModelForVision2Seq:
+        device = torch.device("cpu")
+
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            return cls()
+
+        def eval(self):
+            return self
+
+        def generate(self, **_inputs):
+            raise AssertionError("generation should block before model.generate")
+
+    class AutoProcessor:
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            return cls()
+
+        def apply_chat_template(self, *_args, **_kwargs):
+            return "<qwen-chat/>"
+
+        def __call__(self, **_kwargs):
+            return {"input_ids": torch.tensor([[1, 2]])}
+
+    fake_module.AutoModelForVision2Seq = AutoModelForVision2Seq
+    fake_module.AutoProcessor = AutoProcessor
+    monkeypatch.setitem(sys.modules, "fake_qwen_mask_no_grid", fake_module)
+
+    adapter = QwenAdapter(
+        {
+            "module_path": "fake_qwen_mask_no_grid",
+            "class_name": "AutoModelForVision2Seq",
+            "processor_module_path": "fake_qwen_mask_no_grid",
+            "processor_class_name": "AutoProcessor",
+            "model_id": "fake/qwen",
+            "processor_path": "fake/qwen",
+            "autogaze_integration": "qwen_vision_mask",
+        }
+    )
+    adapter.load(allow_real_model_loading=True, device="cpu", dtype="float32")
+    result = adapter.generate(
+        query_text="Where?",
+        video=torch.zeros(1, 2, 3, 8, 8),
+        autogaze={"autogaze_enabled": True, "status": "stub_dummy_autogaze", "per_frame": []},
+    )
+    assert result["status"] == "blocked"
+    assert "video_grid_thw" in result["reason"]
 
 
 def test_qwen_blocks_without_chat_template(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import math
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -377,8 +378,15 @@ class MLLMAdapter:
         video: torch.Tensor,
         visual_tokens: torch.Tensor | None = None,
         video_path: str | None = None,
+        autogaze: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return {"query_text": query_text, "video": video, "visual_tokens": visual_tokens, "video_path": video_path}
+        return {
+            "query_text": query_text,
+            "video": video,
+            "visual_tokens": visual_tokens,
+            "video_path": video_path,
+            "autogaze": autogaze,
+        }
 
     def generate(
         self,
@@ -388,6 +396,7 @@ class MLLMAdapter:
         visual_tokens: torch.Tensor | None = None,
         max_new_tokens: int = 32,
         video_path: str | None = None,
+        autogaze: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not query_text:
             return {"status": "blocked", "answer": None, "reason": "query text is required"}
@@ -493,6 +502,7 @@ class NVILAAdapter(MLLMAdapter):
         visual_tokens: torch.Tensor | None = None,
         max_new_tokens: int = 32,
         video_path: str | None = None,
+        autogaze: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         if visual_tokens is not None:
             return {
@@ -514,6 +524,7 @@ class NVILAAdapter(MLLMAdapter):
             visual_tokens=visual_tokens,
             max_new_tokens=max_new_tokens,
             video_path=video_path,
+            autogaze=autogaze,
         )
 
     def _generate_with_official_processor(
@@ -642,6 +653,7 @@ class QwenAdapter(MLLMAdapter):
         visual_tokens: torch.Tensor | None = None,
         max_new_tokens: int = 32,
         video_path: str | None = None,
+        autogaze: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         if visual_tokens is not None and not self.supports_direct_visual_tokens():
             return {
@@ -656,8 +668,16 @@ class QwenAdapter(MLLMAdapter):
                 video=video,
                 video_path=video_path,
                 max_new_tokens=max_new_tokens,
+                autogaze=autogaze,
             )
-        return super().generate(query_text=query_text, video=video, visual_tokens=visual_tokens, max_new_tokens=max_new_tokens, video_path=video_path)
+        return super().generate(
+            query_text=query_text,
+            video=video,
+            visual_tokens=visual_tokens,
+            max_new_tokens=max_new_tokens,
+            video_path=video_path,
+            autogaze=autogaze,
+        )
 
     def _generate_with_official_processor(
         self,
@@ -666,14 +686,17 @@ class QwenAdapter(MLLMAdapter):
         video: torch.Tensor,
         video_path: str | None,
         max_new_tokens: int,
+        autogaze: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not query_text:
             return {"status": "blocked", "answer": None, "reason": "query text is required", "query_text_used": False}
         try:
+            use_autogaze_mask = self._qwen_autogaze_integration_mode() == "qwen_vision_mask"
             inputs, input_metadata = self._prepare_official_qwen_inputs(
                 query_text=query_text,
                 video=video,
-                video_path=video_path,
+                video_path=None if use_autogaze_mask else video_path,
+                prefer_processed_tensor=use_autogaze_mask,
             )
             if input_metadata.get("status") == "blocked":
                 return {
@@ -690,7 +713,20 @@ class QwenAdapter(MLLMAdapter):
                     key: value.to(model_device) if isinstance(value, torch.Tensor) else value
                     for key, value in inputs.items()
                 }
-            with torch.inference_mode():
+            mask_context, mask_metadata = self._qwen_autogaze_mask_context(
+                inputs=inputs,
+                autogaze=autogaze,
+            )
+            if mask_metadata.get("status") == "blocked":
+                return {
+                    "status": "blocked",
+                    "answer": None,
+                    "reason": str(mask_metadata.get("reason")),
+                    "query_text_used": True,
+                    "official_processor_path": True,
+                    "metadata": {**input_metadata, **mask_metadata},
+                }
+            with mask_context, torch.inference_mode():
                 outputs = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
             input_ids = inputs.get("input_ids") if isinstance(inputs, Mapping) else None
             decode_input = outputs[:, input_ids.shape[1] :] if isinstance(outputs, torch.Tensor) and isinstance(input_ids, torch.Tensor) else outputs
@@ -704,6 +740,7 @@ class QwenAdapter(MLLMAdapter):
                 "official_processor_path": True,
                 "metadata": {
                     **input_metadata,
+                    **mask_metadata,
                     "max_new_tokens": max_new_tokens,
                 },
             }
@@ -722,6 +759,7 @@ class QwenAdapter(MLLMAdapter):
         query_text: str,
         video: torch.Tensor,
         video_path: str | None,
+        prefer_processed_tensor: bool = False,
     ) -> tuple[Any, dict[str, Any]]:
         if not hasattr(self.processor, "apply_chat_template"):
             return None, {
@@ -731,7 +769,10 @@ class QwenAdapter(MLLMAdapter):
             }
         prompt_template = str(self.config.get("prompt_template") or "Question: {prompt}")
         prompt_text = prompt_template.format(prompt=query_text, query=query_text, video_token="").strip()
-        video_input, video_input_kind = _official_video_input(video=video, video_path=video_path)
+        video_input, video_input_kind = _official_video_input(
+            video=video,
+            video_path=None if prefer_processed_tensor else video_path,
+        )
         message_video_ref = _qwen_message_video_reference(video_input, video_input_kind)
         messages = [
             {
@@ -757,6 +798,7 @@ class QwenAdapter(MLLMAdapter):
             "vision_preprocess_path": "processor_direct_video_payload",
             "processor_call_kwargs": _jsonable_processor_kwargs(call_kwargs),
             "direct_visual_token_injection": False,
+            "qwen_autogaze_prefer_processed_tensor": bool(prefer_processed_tensor),
         }
 
         if use_qwen_vl_utils and qwen_vl_utils_available and video_input_kind in {"video_path", "video_reference"}:
@@ -804,9 +846,264 @@ class QwenAdapter(MLLMAdapter):
             }
         return inputs, metadata
 
+    def _qwen_autogaze_integration_mode(self) -> str:
+        return str(self.config.get("autogaze_integration") or self.config.get("qwen_autogaze_integration") or "none")
+
+    def _qwen_autogaze_mask_context(
+        self,
+        *,
+        inputs: Mapping[str, Any] | Any,
+        autogaze: Mapping[str, Any] | None,
+    ) -> tuple[Any, dict[str, Any]]:
+        from contextlib import nullcontext
+
+        mode = self._qwen_autogaze_integration_mode()
+        base_metadata: dict[str, Any] = {
+            "qwen_autogaze_integration": mode,
+            "qwen_visual_mask_applied": False,
+            "qwen_visual_tokens_shortened": False,
+            "qwen_encoder_side_acceleration_claimed": False,
+            "direct_visual_token_injection": False,
+        }
+        if mode in {"", "none", "disabled"}:
+            return nullcontext(), base_metadata
+        if mode != "qwen_vision_mask":
+            return nullcontext(), {
+                **base_metadata,
+                "status": "blocked",
+                "reason": f"Unsupported Qwen AutoGaze integration mode: {mode}",
+            }
+        if not isinstance(inputs, Mapping):
+            return nullcontext(), {
+                **base_metadata,
+                "status": "blocked",
+                "reason": "Qwen AutoGaze vision mask requires mapping-style processor inputs",
+            }
+        if not isinstance(autogaze, Mapping):
+            return nullcontext(), {
+                **base_metadata,
+                "status": "blocked",
+                "reason": "Qwen AutoGaze vision mask requested but AutoGaze metadata was not provided",
+            }
+        if not bool(autogaze.get("autogaze_enabled", False)):
+            return nullcontext(), {
+                **base_metadata,
+                "status": "blocked",
+                "reason": "Qwen AutoGaze vision mask requested but AutoGaze is disabled",
+            }
+        autogaze_status = str(autogaze.get("status") or "unknown")
+        if autogaze_status == "blocked":
+            return nullcontext(), {
+                **base_metadata,
+                "status": "blocked",
+                "reason": f"Qwen AutoGaze vision mask requested but AutoGaze is blocked: {autogaze.get('reason')}",
+            }
+        grid_thw = inputs.get("video_grid_thw")
+        if not isinstance(grid_thw, torch.Tensor) or grid_thw.numel() < 3:
+            return nullcontext(), {
+                **base_metadata,
+                "status": "blocked",
+                "reason": "Qwen AutoGaze vision mask requires video_grid_thw from the official Qwen processor",
+            }
+        if grid_thw.ndim == 1:
+            grid = grid_thw
+        else:
+            grid = grid_thw[0]
+        qwen_t = int(grid[0].item())
+        qwen_h = int(grid[1].item())
+        qwen_w = int(grid[2].item())
+        if qwen_t <= 0 or qwen_h <= 0 or qwen_w <= 0:
+            return nullcontext(), {
+                **base_metadata,
+                "status": "blocked",
+                "reason": f"Qwen processor returned invalid video_grid_thw: {[qwen_t, qwen_h, qwen_w]}",
+            }
+
+        mask, mask_stats = _qwen_patch_mask_from_autogaze(
+            autogaze,
+            qwen_t=qwen_t,
+            qwen_h=qwen_h,
+            qwen_w=qwen_w,
+            min_keep_tokens=int(self.config.get("qwen_autogaze_min_keep_tokens", 1)),
+            empty_chunk_policy=str(self.config.get("qwen_autogaze_empty_chunk_policy", "keep_center")),
+        )
+        if mask is None:
+            return nullcontext(), {
+                **base_metadata,
+                "status": "blocked",
+                "reason": str(mask_stats.get("reason") or "failed to build Qwen AutoGaze patch mask"),
+                **mask_stats,
+            }
+        ctx, hook_metadata = self._qwen_visual_patch_mask_hook(mask)
+        return ctx, {
+            **base_metadata,
+            **mask_stats,
+            **hook_metadata,
+            "qwen_visual_mask_applied": True,
+            "status": "ready",
+        }
+
+    def _qwen_visual_patch_mask_hook(self, flat_mask: torch.Tensor) -> tuple[Any, dict[str, Any]]:
+        visual = getattr(self.model, "visual", None)
+        patch_embed = getattr(visual, "patch_embed", None)
+        if patch_embed is None or not hasattr(patch_embed, "register_forward_hook"):
+            from contextlib import nullcontext
+
+            return nullcontext(), {
+                "status": "blocked",
+                "reason": "Qwen model.visual.patch_embed is not available for AutoGaze vision masking",
+            }
+
+        hook_state: dict[str, Any] = {"qwen_patch_embed_hook_registered": True}
+
+        @contextmanager
+        def _hook_context():
+            mask = flat_mask.detach().float()
+
+            def _hook(_module: Any, _input: Any, output: Any) -> Any:
+                if not isinstance(output, torch.Tensor):
+                    hook_state["qwen_patch_embed_hook_error"] = "patch_embed output is not a tensor"
+                    return output
+                mask_device = mask.to(device=output.device, dtype=output.dtype)
+                if output.ndim == 2:
+                    n = min(int(output.shape[0]), int(mask_device.shape[0]))
+                    result = output.clone()
+                    result[:n] = result[:n] * mask_device[:n].unsqueeze(-1)
+                    hook_state["qwen_patch_embed_output_tokens"] = int(output.shape[0])
+                    hook_state["qwen_patch_embed_mask_tokens_applied"] = n
+                    return result
+                if output.ndim == 3:
+                    n = min(int(output.shape[1]), int(mask_device.shape[0]))
+                    result = output.clone()
+                    result[:, :n, :] = result[:, :n, :] * mask_device[:n].view(1, n, 1)
+                    hook_state["qwen_patch_embed_output_tokens"] = int(output.shape[1])
+                    hook_state["qwen_patch_embed_mask_tokens_applied"] = n
+                    return result
+                hook_state["qwen_patch_embed_hook_error"] = f"unsupported patch_embed output shape: {tuple(output.shape)}"
+                return output
+
+            handle = patch_embed.register_forward_hook(_hook)
+            try:
+                yield
+            finally:
+                handle.remove()
+
+        return _hook_context(), hook_state
+
 
 class GenericMLLMAdapter(MLLMAdapter):
     name = "generic_mllm"
+
+
+def _qwen_patch_mask_from_autogaze(
+    autogaze: Mapping[str, Any],
+    *,
+    qwen_t: int,
+    qwen_h: int,
+    qwen_w: int,
+    min_keep_tokens: int,
+    empty_chunk_policy: str,
+) -> tuple[torch.Tensor | None, dict[str, Any]]:
+    per_frame = list(autogaze.get("per_frame") or [])
+    if not per_frame:
+        return None, {"reason": "Qwen AutoGaze mask cannot be built because per-frame AutoGaze records are empty"}
+    mask = torch.zeros((qwen_t, qwen_h, qwen_w), dtype=torch.float32)
+    empty_chunks = 0
+    boxes_seen = 0
+    chunks_with_boxes = 0
+    frame_count = len(per_frame)
+    min_keep = max(0, int(min_keep_tokens))
+    policy = empty_chunk_policy or "keep_center"
+
+    for chunk_idx in range(qwen_t):
+        start = int(math.floor(chunk_idx * frame_count / float(qwen_t)))
+        end = int(math.ceil((chunk_idx + 1) * frame_count / float(qwen_t)))
+        start = max(0, min(frame_count - 1, start))
+        end = max(start + 1, min(frame_count, end))
+        chunk_mask = mask[chunk_idx]
+        chunk_boxes = 0
+        for frame_record in per_frame[start:end]:
+            for patch_record in list(frame_record.get("selected_patch_records") or []):
+                box = patch_record.get("normalized_box") if isinstance(patch_record, Mapping) else None
+                if not isinstance(box, (list, tuple)) or len(box) != 4:
+                    continue
+                if _mark_normalized_box_on_qwen_grid(chunk_mask, box):
+                    boxes_seen += 1
+                    chunk_boxes += 1
+        if chunk_boxes > 0:
+            chunks_with_boxes += 1
+        if int(chunk_mask.sum().item()) == 0:
+            empty_chunks += 1
+            if policy == "block":
+                return None, {
+                    "reason": f"Qwen AutoGaze mask produced an empty temporal chunk at index {chunk_idx}",
+                    "qwen_autogaze_empty_chunk_policy": policy,
+                }
+            if policy == "keep_all":
+                chunk_mask.fill_(1.0)
+            elif policy == "keep_none":
+                pass
+            else:
+                _mark_center_tokens(chunk_mask, max(1, min_keep))
+        if min_keep > 0 and int(chunk_mask.sum().item()) < min_keep:
+            _mark_center_tokens(chunk_mask, min_keep)
+
+    flat_mask = mask.reshape(-1)
+    selected = int(flat_mask.sum().item())
+    original = int(flat_mask.numel())
+    if selected <= 0:
+        return None, {"reason": "Qwen AutoGaze mask selected zero Qwen visual patches"}
+    return flat_mask, {
+        "qwen_visual_mask_grid_thw": [qwen_t, qwen_h, qwen_w],
+        "qwen_visual_tokens_before": original,
+        "qwen_visual_tokens_kept_by_mask": selected,
+        "qwen_visual_mask_keep_ratio": selected / float(original),
+        "qwen_autogaze_frame_records": frame_count,
+        "qwen_autogaze_boxes_mapped": boxes_seen,
+        "qwen_autogaze_temporal_chunks_with_boxes": chunks_with_boxes,
+        "qwen_autogaze_empty_temporal_chunks": empty_chunks,
+        "qwen_autogaze_empty_chunk_policy": policy,
+        "qwen_autogaze_min_keep_tokens": min_keep,
+        "qwen_visual_mask_source": "autogaze_selected_patch_records_normalized_box_overlap",
+    }
+
+
+def _mark_normalized_box_on_qwen_grid(mask: torch.Tensor, box: Any) -> bool:
+    x0, y0, x1, y1 = _normalized_box(box)
+    if x1 <= x0 or y1 <= y0:
+        return False
+    height, width = int(mask.shape[0]), int(mask.shape[1])
+    col0 = max(0, min(width - 1, int(math.floor(x0 * width))))
+    col1 = max(col0 + 1, min(width, int(math.ceil(x1 * width))))
+    row0 = max(0, min(height - 1, int(math.floor(y0 * height))))
+    row1 = max(row0 + 1, min(height, int(math.ceil(y1 * height))))
+    mask[row0:row1, col0:col1] = 1.0
+    return True
+
+
+def _normalized_box(box: Any) -> tuple[float, float, float, float]:
+    values = [float(item) for item in box]
+    x0, y0, x1, y1 = values
+    x0 = max(0.0, min(1.0, x0))
+    y0 = max(0.0, min(1.0, y0))
+    x1 = max(0.0, min(1.0, x1))
+    y1 = max(0.0, min(1.0, y1))
+    return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
+
+
+def _mark_center_tokens(mask: torch.Tensor, count: int) -> None:
+    height, width = int(mask.shape[0]), int(mask.shape[1])
+    center_y = (height - 1) / 2.0
+    center_x = (width - 1) / 2.0
+    candidates: list[tuple[float, int, int]] = []
+    for row in range(height):
+        for col in range(width):
+            if float(mask[row, col].item()) > 0:
+                continue
+            dist = (row - center_y) ** 2 + (col - center_x) ** 2
+            candidates.append((dist, row, col))
+    for _dist, row, col in sorted(candidates)[: max(0, int(count) - int(mask.sum().item()))]:
+        mask[row, col] = 1.0
 
 
 def _looks_like_local_path(value: str) -> bool:
