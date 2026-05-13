@@ -35,6 +35,7 @@ mllm:
   processor_class_name: AutoProcessor
   official_processor_path: true
   official_processor_owns_vision: true
+  video_input_source: processed_tensor
   direct_visual_token_injection: unsupported
   prompt_template: "Question: {prompt}"
   trust_remote_code: true

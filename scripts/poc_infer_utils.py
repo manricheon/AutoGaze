@@ -516,13 +516,20 @@ def prepare_video(
         dummy_frames=dummy_frames,
         dummy_resolution=dummy_resolution,
     )
+    source_frame_count = int(source_video.shape[0])
+    drop_incomplete_chop_windows = (
+        scaling_mode in {"chop", "resize_then_chop"}
+        and frame_selection_mode in {"all", "chunk"}
+        and source_frame_count >= int(num_frames)
+    )
     selection = select_frame_windows(
         original_frame_count=int(source_video.shape[0]),
         num_frames=num_frames,
         frame_selection_mode=frame_selection_mode,
         frame_interval=frame_interval,
         max_windows=max_windows,
-        pad_last=scaling_mode in {"chop", "resize_then_chop"},
+        drop_last=drop_incomplete_chop_windows,
+        pad_last=scaling_mode in {"chop", "resize_then_chop"} and not drop_incomplete_chop_windows,
         original_fps=fps,
     )
 
@@ -603,6 +610,12 @@ def prepare_video(
         "number_of_windows": len(selection.windows),
         "first_processed_shape": [int(dim) for dim in processed_video.shape],
         "temporal_pad_last_applied": bool(scaling_mode in {"chop", "resize_then_chop"} and any(window.is_padded for window in selection.windows)),
+        "temporal_drop_last_applied": bool(
+            scaling_mode in {"chop", "resize_then_chop"}
+            and selection.drop_last
+            and _selected_source_frame_count(selection.windows) < int(source_video.shape[0])
+        ),
+        "selected_source_frame_count": _selected_source_frame_count(selection.windows),
         "windows": scaling_windows,
     }
     return PreparedVideo(
@@ -726,6 +739,15 @@ def _resize_video_hw(video: torch.Tensor, height: int, width: int) -> torch.Tens
     flat = video.reshape(batch * frames, channels, old_h, old_w)
     resized = F.interpolate(flat, size=(int(height), int(width)), mode="bilinear", align_corners=False)
     return resized.reshape(batch, frames, channels, int(height), int(width))
+
+
+def _selected_source_frame_count(windows: list[FrameWindow]) -> int:
+    selected = set()
+    for window in windows:
+        for index, is_padded in zip(window.frame_indices, window.padded_frame_mask):
+            if not is_padded:
+                selected.add(int(index))
+    return len(selected)
 
 
 def generate_chop_metadata(

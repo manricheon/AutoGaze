@@ -549,6 +549,7 @@ class NVILAAdapter(MLLMAdapter):
                 video=video,
                 video_path=video_path,
                 target_frame_count=target_frame_count,
+                batch_pil_frames=True,
             )
             inputs = self.processor(text=prompt, videos=video_input, return_tensors="pt")
             if isinstance(inputs, Mapping):
@@ -696,11 +697,14 @@ class QwenAdapter(MLLMAdapter):
             return {"status": "blocked", "answer": None, "reason": "query text is required", "query_text_used": False}
         try:
             use_autogaze_mask = self._qwen_autogaze_integration_mode() == "qwen_vision_mask"
+            prefer_processed_tensor = use_autogaze_mask or bool(
+                self.config.get("prefer_processed_tensor", self.config.get("qwen_prefer_processed_tensor", False))
+            )
             inputs, input_metadata = self._prepare_official_qwen_inputs(
                 query_text=query_text,
                 video=video,
-                video_path=None if use_autogaze_mask else video_path,
-                prefer_processed_tensor=use_autogaze_mask,
+                video_path=None if prefer_processed_tensor else video_path,
+                prefer_processed_tensor=prefer_processed_tensor,
             )
             if input_metadata.get("status") == "blocked":
                 return {
@@ -1301,6 +1305,7 @@ def _official_video_input(
     video: torch.Tensor,
     video_path: str | None,
     target_frame_count: int | None = None,
+    batch_pil_frames: bool = False,
 ) -> tuple[Any, str]:
     if video_path and video_path != "dummy":
         path = Path(video_path).expanduser()
@@ -1312,6 +1317,8 @@ def _official_video_input(
         return video_path, "video_reference"
     frames = _video_tensor_to_pil(video, target_frame_count=target_frame_count)
     suffix = f"_to_{len(frames)}" if target_frame_count is not None else ""
+    if batch_pil_frames:
+        return [frames], f"processed_tensor_pil_video{suffix}"
     return frames, f"processed_tensor_pil_frames{suffix}"
 
 

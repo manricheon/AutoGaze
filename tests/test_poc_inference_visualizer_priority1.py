@@ -72,6 +72,7 @@ def test_configs_reference_local_weight_cache_when_available() -> None:
     assert a2["mllm"]["trust_remote_code"] is True
     assert a2["mllm"]["class_name"] == "AutoModel"
     assert a2["mllm"]["official_processor_owns_vision"] is True
+    assert a2["mllm"]["video_input_source"] == "processed_tensor"
     assert a2["mllm"]["sync_autogaze_controls_from_config"] is True
     assert a2["runtime"]["warmup_runs"] == 1
     assert a2["runtime"]["progress"] is True
@@ -107,6 +108,8 @@ def test_configs_reference_local_weight_cache_when_available() -> None:
     assert q1["mllm"]["name"] == "qwen"
     assert q0["mllm"]["autogaze_integration"] == "none"
     assert q1["mllm"]["autogaze_integration"] == "qwen_vision_mask"
+    assert q0["mllm"]["video_input_source"] == "processed_tensor"
+    assert q1["mllm"]["video_input_source"] == "processed_tensor"
     assert q0["mllm"]["checkpoint_path"] == q1["mllm"]["checkpoint_path"] == "weights/Qwen2.5-VL-7B-Instruct"
     assert q0["mllm"]["official_processor_owns_vision"] is True
     assert q1["mllm"]["official_processor_owns_vision"] is True
@@ -259,12 +262,63 @@ def test_frame_selection_scaling_and_chop_metadata() -> None:
         max_chops=2,
         chop_merge_mode="metadata_only",
     )
-    assert long_chopped.frame_selection.pad_last is True
-    assert len(long_chopped.frame_selection.windows) == 2
-    assert long_chopped.frame_selection.windows[1].is_padded is True
-    assert long_chopped.frame_selection.windows[1].effective_num_frames == 12
-    assert long_chopped.processed_video.shape == (4, 16, 3, 32, 32)
-    assert long_chopped.scaling_metadata["temporal_pad_last_applied"] is True
+    assert long_chopped.frame_selection.drop_last is True
+    assert long_chopped.frame_selection.pad_last is False
+    assert len(long_chopped.frame_selection.windows) == 1
+    assert long_chopped.processed_video.shape == (2, 16, 3, 32, 32)
+    assert long_chopped.scaling_metadata["temporal_pad_last_applied"] is False
+    assert long_chopped.scaling_metadata["temporal_drop_last_applied"] is True
+
+    short_cfg = load_config(_cfg("A2_modified_siglip_nvila_on.yaml"))
+    short_cfg["input"] = {"dummy_frames": 8, "dummy_resolution": 128}
+    short_chopped = prepare_video(
+        short_cfg,
+        video_path="dummy",
+        frame_selection_mode="all",
+        num_frames=16,
+        frame_interval=1,
+        max_windows=None,
+        scaling_mode="chop",
+        resolution=32,
+        chop_size=16,
+        chop_overlap=0,
+        max_chops=2,
+        chop_merge_mode="metadata_only",
+    )
+    assert short_chopped.frame_selection.drop_last is False
+    assert short_chopped.frame_selection.pad_last is True
+    assert len(short_chopped.frame_selection.windows) == 1
+    assert short_chopped.frame_selection.windows[0].effective_num_frames == 8
+    assert short_chopped.processed_video.shape == (2, 16, 3, 32, 32)
+    assert short_chopped.scaling_metadata["temporal_pad_last_applied"] is True
+    assert short_chopped.scaling_metadata["temporal_drop_last_applied"] is False
+
+    non_divisible_cfg = load_config(_cfg("A2_modified_siglip_nvila_on.yaml"))
+    non_divisible_cfg["input"] = {"dummy_frames": 49, "dummy_resolution": 128}
+    non_divisible = prepare_video(
+        non_divisible_cfg,
+        video_path="dummy",
+        frame_selection_mode="all",
+        num_frames=16,
+        frame_interval=1,
+        max_windows=None,
+        scaling_mode="resize_then_chop",
+        resolution=32,
+        chop_size=32,
+        chop_overlap=0,
+        max_chops=None,
+        chop_merge_mode="metadata_only",
+        resize_before_chop_threshold=100,
+        resize_before_chop_factor=0.5,
+    )
+    assert non_divisible.frame_selection.drop_last is True
+    assert len(non_divisible.frame_selection.windows) == 3
+    assert non_divisible.frame_selection.original_frame_count == 49
+    assert non_divisible.scaling_metadata["selected_source_frame_count"] == 48
+    assert non_divisible.scaling_metadata["temporal_drop_last_applied"] is True
+    assert non_divisible.scaling_metadata["temporal_pad_last_applied"] is False
+    assert all(not window.is_padded for window in non_divisible.frame_selection.windows)
+    assert non_divisible.processed_video.shape == (12, 16, 3, 32, 32)
 
     hybrid_chopped = prepare_video(
         long_cfg,
@@ -455,7 +509,7 @@ def test_frame_images_are_opt_in(tmp_path: Path) -> None:
     assert not (output_dir / "visualizations" / "autogaze" / "scale_panels").exists()
 
 
-def test_chop_mllm_generation_falls_back_to_source_video_for_text() -> None:
+def test_chop_mllm_generation_uses_single_processed_tensor_path() -> None:
     calls: list[str | None] = []
 
     class FakeMLLM:
@@ -464,20 +518,12 @@ def test_chop_mllm_generation_falls_back_to_source_video_for_text() -> None:
 
         def generate(self, *, query_text, video, visual_tokens=None, max_new_tokens=32, video_path=None):
             calls.append(video_path)
-            if video_path is None:
-                return {
-                    "status": "blocked",
-                    "answer": None,
-                    "reason": "processor rejected flat chop tensor",
-                    "query_text_used": True,
-                    "metadata": {"video_input_kind": "processed_tensor_pil_frames"},
-                }
             return {
                 "status": "real",
-                "answer": "source video answer",
+                "answer": "processed tensor answer",
                 "reason": None,
                 "query_text_used": True,
-                "metadata": {"video_input_kind": "video_reference"},
+                "metadata": {"video_input_kind": "processed_tensor_pil_frames"},
             }
 
     result = infer_full._generate_mllm_with_video_policy(
@@ -486,17 +532,15 @@ def test_chop_mllm_generation_falls_back_to_source_video_for_text() -> None:
         video=torch.zeros(2, 16, 3, 8, 8),
         visual_tokens=None,
         max_new_tokens=4,
-        video_path="/tmp/source.mp4",
+        video_path=None,
         has_chop_metadata=True,
-        allow_chop_source_fallback=True,
     )
-    assert calls == [None, "/tmp/source.mp4"]
+    assert calls == [None]
     assert result["status"] == "real"
-    assert result["answer"] == "source video answer"
-    assert result["metadata"]["actual_video_input_source"] == "source_video_path_after_chop_tensor_failure"
+    assert result["answer"] == "processed tensor answer"
+    assert result["metadata"]["actual_video_input_source"] == "processed_chop_tensor"
     assert result["metadata"]["chop_tensor_attempted"] is True
-    assert result["metadata"]["chop_source_fallback_used"] is True
-    assert result["metadata"]["chop_tensor_failure_reason"] == "processor rejected flat chop tensor"
+    assert result["metadata"]["chop_source_fallback_used"] is False
 
 
 def test_autogaze_dummy_run_writes_flat_outputs_and_metrics(tmp_path: Path) -> None:
@@ -806,6 +850,77 @@ def test_qwen_official_processor_path_with_available_factory(monkeypatch: pytest
     assert result["metadata"]["video_input_kind"] == "processed_tensor_pil_frames"
 
 
+def test_qwen_can_force_processed_tensor_without_video_path_decode(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_module = types.ModuleType("fake_qwen_processed_tensor")
+
+    class AutoModelForVision2Seq:
+        device = torch.device("cpu")
+
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            return cls()
+
+        def to(self, device: str):
+            self.device = torch.device(device)
+            return self
+
+        def eval(self):
+            return self
+
+        def generate(self, **inputs):
+            assert "input_ids" in inputs
+            return torch.tensor([[5, 6, 7]])
+
+    class AutoProcessor:
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            return cls()
+
+        def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
+            assert messages[0]["content"][0]["type"] == "video"
+            return "<qwen-chat/>"
+
+        def __call__(self, *, text, videos=None, return_tensors=None, **_kwargs):
+            assert isinstance(videos, list)
+            assert len(videos) == 1
+            assert isinstance(videos[0], list)
+            return {"input_ids": torch.tensor([[5, 6]])}
+
+        def batch_decode(self, outputs, skip_special_tokens=True):
+            assert outputs.tolist() == [[7]]
+            return ["processed tensor qwen answer"]
+
+    fake_module.AutoModelForVision2Seq = AutoModelForVision2Seq
+    fake_module.AutoProcessor = AutoProcessor
+    monkeypatch.setitem(sys.modules, "fake_qwen_processed_tensor", fake_module)
+
+    adapter = QwenAdapter(
+        {
+            "module_path": "fake_qwen_processed_tensor",
+            "class_name": "AutoModelForVision2Seq",
+            "processor_module_path": "fake_qwen_processed_tensor",
+            "processor_class_name": "AutoProcessor",
+            "model_id": "fake/qwen",
+            "processor_path": "fake/qwen",
+            "prompt_template": "Question: {prompt}",
+            "use_qwen_vl_utils": False,
+            "prefer_processed_tensor": True,
+        }
+    )
+    status = adapter.load(allow_real_model_loading=True, device="cpu", dtype="float32")
+    assert status.status == "real"
+    result = adapter.generate(
+        query_text="What is visible?",
+        video=torch.zeros(1, 2, 3, 8, 8),
+        max_new_tokens=3,
+        video_path="/tmp/source.mp4",
+    )
+    assert result["status"] == "real"
+    assert result["answer"] == "processed tensor qwen answer"
+    assert result["metadata"]["qwen_autogaze_prefer_processed_tensor"] is True
+    assert result["metadata"]["video_input_kind"] == "processed_tensor_pil_frames"
+
+
 def test_qwen_autogaze_vision_mask_applies_patch_embed_hook(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_module = types.ModuleType("fake_qwen_mask")
 
@@ -1063,7 +1178,9 @@ def test_nvila_official_processor_path_and_autogaze_controls(monkeypatch: pytest
         def __call__(self, *, text, videos=None, return_tensors=None, **_kwargs):
             assert text == "<video>\n\nQuestion: What changed?"
             assert isinstance(videos, list)
-            assert len(videos) == 16
+            assert len(videos) == 1
+            assert isinstance(videos[0], list)
+            assert len(videos[0]) == 16
             assert return_tensors == "pt"
             return {"input_ids": torch.tensor([[21, 22]])}
 
@@ -1116,7 +1233,7 @@ def test_nvila_official_processor_path_and_autogaze_controls(monkeypatch: pytest
     assert result["status"] == "real"
     assert result["answer"] == "nvila answer"
     assert result["metadata"]["autogaze_visual_tokens_injected"] is False
-    assert result["metadata"]["video_input_kind"] == "processed_tensor_pil_frames_to_16"
+    assert result["metadata"]["video_input_kind"] == "processed_tensor_pil_video_to_16"
 
 
 def test_nvila_tensor_video_input_flattens_chop_batches(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1147,7 +1264,9 @@ def test_nvila_tensor_video_input_flattens_chop_batches(monkeypatch: pytest.Monk
 
         def __call__(self, *, text, videos=None, return_tensors=None, **_kwargs):
             assert isinstance(videos, list)
-            assert len(videos) == 48
+            assert len(videos) == 1
+            assert isinstance(videos[0], list)
+            assert len(videos[0]) == 48
             return {"input_ids": torch.tensor([[31, 32]])}
 
         def batch_decode(self, outputs, skip_special_tokens=True):
@@ -1179,7 +1298,7 @@ def test_nvila_tensor_video_input_flattens_chop_batches(monkeypatch: pytest.Monk
         video_path=None,
     )
     assert result["status"] == "real"
-    assert result["metadata"]["video_input_kind"] == "processed_tensor_pil_frames_to_48"
+    assert result["metadata"]["video_input_kind"] == "processed_tensor_pil_video_to_48"
 
 
 def test_nvila_tensor_video_input_uses_config_frame_count_when_processor_attr_missing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1208,7 +1327,9 @@ def test_nvila_tensor_video_input_uses_config_frame_count_when_processor_attr_mi
 
         def __call__(self, *, text, videos=None, return_tensors=None, **_kwargs):
             assert isinstance(videos, list)
-            assert len(videos) == 16
+            assert len(videos) == 1
+            assert isinstance(videos[0], list)
+            assert len(videos[0]) == 16
             return {"input_ids": torch.tensor([[41, 42]])}
 
         def batch_decode(self, outputs, skip_special_tokens=True):
@@ -1240,7 +1361,7 @@ def test_nvila_tensor_video_input_uses_config_frame_count_when_processor_attr_mi
         video_path=None,
     )
     assert result["status"] == "real"
-    assert result["metadata"]["video_input_kind"] == "processed_tensor_pil_frames_to_16"
+    assert result["metadata"]["video_input_kind"] == "processed_tensor_pil_video_to_16"
     assert result["metadata"]["target_frame_count"] == 16
 
 

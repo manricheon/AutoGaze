@@ -37,6 +37,7 @@ mllm:
   official_processor_owns_vision: true
   generation_input_mode: official_processor
   autogaze_integration: none
+  video_input_source: processed_tensor
   direct_visual_token_injection: unsupported
   prompt_template: "Question: {prompt}"
   trust_remote_code: true

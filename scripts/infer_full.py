@@ -233,7 +233,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "query_text_used": True,
         }
     else:
-        allow_chop_source_fallback = bool(nested_get(cfg, "mllm.chop_tensor_fallback_to_source_video", True))
+        mllm_video_input_source = str(nested_get(cfg, "mllm.video_input_source", "processed_tensor"))
+        if mllm_video_input_source not in {"processed_tensor", "source_video"}:
+            raise ValueError("mllm.video_input_source must be one of processed_tensor or source_video")
+        mllm_video_path = args.video_path if mllm_video_input_source == "source_video" else None
 
         def mllm_generate_once() -> dict[str, Any]:
             return _generate_mllm_with_video_policy(
@@ -242,9 +245,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 video=prepared.processed_video,
                 visual_tokens=visual_tokens if mllm.supports_direct_visual_tokens() else None,
                 max_new_tokens=max_new_tokens,
-                video_path=args.video_path,
+                video_path=mllm_video_path,
                 has_chop_metadata=prepared.chop_metadata is not None,
-                allow_chop_source_fallback=allow_chop_source_fallback,
                 autogaze=mllm_autogaze_payload,
             )
 
@@ -336,7 +338,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     generation_metadata = generation.get("metadata") if isinstance(generation.get("metadata"), dict) else {}
     metrics["mllm_video_input_source"] = generation_metadata.get(
         "actual_video_input_source",
-        "processed_chop_tensor" if prepared.chop_metadata is not None else "video_path_or_processed_tensor",
+        "processed_chop_tensor" if prepared.chop_metadata is not None else "processed_tensor",
     )
     metrics["mllm_chop_tensor_attempted"] = bool(generation_metadata.get("chop_tensor_attempted", prepared.chop_metadata is not None))
     metrics["mllm_chop_source_fallback_used"] = bool(generation_metadata.get("chop_source_fallback_used", False))
@@ -453,69 +455,31 @@ def _generate_mllm_with_video_policy(
     video: Any,
     visual_tokens: Any,
     max_new_tokens: int,
-    video_path: str,
+    video_path: str | None,
     has_chop_metadata: bool,
-    allow_chop_source_fallback: bool,
     autogaze: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if not has_chop_metadata or visual_tokens is not None:
-        result = _call_mllm_generate(
-            mllm,
-            query_text=query_text,
-            video=video,
-            visual_tokens=visual_tokens,
-            max_new_tokens=max_new_tokens,
-            video_path=video_path,
-            autogaze=autogaze,
-        )
-        return _with_generation_metadata(
-            result,
-            {
-                "actual_video_input_source": "video_path_or_processed_tensor",
-                "chop_tensor_attempted": False,
-                "chop_source_fallback_used": False,
-            },
-        )
-
-    primary = _call_mllm_generate(
+    result = _call_mllm_generate(
         mllm,
         query_text=query_text,
         video=video,
-        visual_tokens=None,
-        max_new_tokens=max_new_tokens,
-        video_path=None,
-        autogaze=autogaze,
-    )
-    primary = _with_generation_metadata(
-        primary,
-        {
-            "actual_video_input_source": "processed_chop_tensor",
-            "chop_tensor_attempted": True,
-            "chop_source_fallback_used": False,
-        },
-    )
-    if _generation_has_output_text(primary):
-        return primary
-    if not allow_chop_source_fallback or not _source_video_path_available(video_path):
-        return primary
-
-    fallback = _call_mllm_generate(
-        mllm,
-        query_text=query_text,
-        video=video,
-        visual_tokens=None,
+        visual_tokens=visual_tokens,
         max_new_tokens=max_new_tokens,
         video_path=video_path,
         autogaze=autogaze,
     )
+    if video_path:
+        actual_source = "source_video_path"
+    elif has_chop_metadata:
+        actual_source = "processed_chop_tensor"
+    else:
+        actual_source = "processed_tensor"
     return _with_generation_metadata(
-        fallback,
+        result,
         {
-            "actual_video_input_source": "source_video_path_after_chop_tensor_failure",
-            "chop_tensor_attempted": True,
-            "chop_source_fallback_used": True,
-            "chop_tensor_generation_status": primary.get("status"),
-            "chop_tensor_failure_reason": primary.get("reason"),
+            "actual_video_input_source": actual_source,
+            "chop_tensor_attempted": bool(has_chop_metadata and not video_path),
+            "chop_source_fallback_used": False,
         },
     )
 
@@ -568,14 +532,6 @@ def _mllm_autogaze_payload(cfg: dict[str, Any], gaze: Any) -> dict[str, Any] | N
         "per_frame": list(getattr(gaze, "per_frame", []) or []),
         "runtime_metadata": dict(getattr(gaze, "runtime_metadata", {}) or {}),
     }
-
-
-def _generation_has_output_text(generation: dict[str, Any]) -> bool:
-    return generation.get("status") == "real" and bool(str(generation.get("answer") or "").strip())
-
-
-def _source_video_path_available(video_path: str | None) -> bool:
-    return bool(video_path and video_path != "dummy")
 
 
 def _with_generation_metadata(generation: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:

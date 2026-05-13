@@ -39,6 +39,7 @@ mllm:
   official_processor_path: true
   official_processor_owns_vision: true
   generation_input_mode: official_processor
+  video_input_source: processed_tensor
   autogaze_integration: qwen_vision_mask
   qwen_autogaze_empty_chunk_policy: keep_center
   qwen_autogaze_min_keep_tokens: 1

@@ -36,6 +36,7 @@ mllm:
   official_processor_path: true
   official_processor_owns_vision: true
   generation_input_mode: official_processor
+  video_input_source: processed_tensor
   sync_autogaze_controls_from_config: true
   prompt_template: "{video_token}\n\n{prompt}"
   trust_remote_code: true
