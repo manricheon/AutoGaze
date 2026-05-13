@@ -12,15 +12,15 @@ autogaze:
 vision_encoder:
   name: vjepa2
   model_id: null
-  checkpoint_path: null
+  checkpoint_path: weights/vjepa2-vitl-fpc64-256
   config_path: null
-  processor_path: null
+  processor_path: weights/vjepa2-vitl-fpc64-256
   processor_module_path: transformers
   processor_class_name: AutoProcessor
   module_path: transformers
   class_name: AutoModel
   patch_size: 16
-  resolution: 224
+  resolution: 256
   output_dim: 1024
   integration_mode: official_full_frame_encoder_first
   required_for_full_pipeline: true

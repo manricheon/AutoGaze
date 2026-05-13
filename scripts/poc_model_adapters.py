@@ -8,6 +8,8 @@ from typing import Any, Mapping
 
 import torch
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 @dataclass
 class AdapterStatus:
@@ -48,13 +50,14 @@ class VisionEncoderAdapter:
         if not checkpoint:
             self.status = AdapterStatus(self.name, "blocked", f"{self.name} checkpoint_path or model_id is required for real loading")
             return self.status
-        if _looks_like_local_path(str(checkpoint)) and not Path(str(checkpoint)).expanduser().exists():
+        if _looks_like_local_path(str(checkpoint)) and not _resolve_local_path(checkpoint).exists():
             self.status = AdapterStatus(self.name, "blocked", f"{self.name} checkpoint path does not exist: {checkpoint}")
             return self.status
+        checkpoint_ref = _model_reference_for_loading(checkpoint)
         try:
             factory = getattr(importlib.import_module(str(module_path)), str(class_name))
             load_kwargs = _from_pretrained_kwargs(self.config, dtype=dtype)
-            self.model = factory.from_pretrained(str(checkpoint), **load_kwargs) if hasattr(factory, "from_pretrained") else factory()
+            self.model = factory.from_pretrained(checkpoint_ref, **load_kwargs) if hasattr(factory, "from_pretrained") else factory()
             if hasattr(self.model, "to"):
                 self.model.to(device)
             if hasattr(self.model, "eval"):
@@ -64,6 +67,7 @@ class VisionEncoderAdapter:
                 "real",
                 metadata={
                     "checkpoint": checkpoint,
+                    "resolved_checkpoint": checkpoint_ref,
                     "module_path": module_path,
                     "class_name": class_name,
                     "local_files_only": bool(self.config.get("local_files_only", False)),
@@ -106,17 +110,32 @@ class VisionEncoderAdapter:
         if autogaze is not None and self.supports_autogaze_tokens():
             kwargs["gazing_info"] = autogaze
         errors: list[str] = []
+        batch_frames: tuple[int, int] | None = None
+        if (
+            isinstance(model_input, torch.Tensor)
+            and model_input.ndim == 5
+            and self.config.get("video_input_mode") == "flatten_frames"
+        ):
+            batch, frames, channels, height, width = [int(dim) for dim in model_input.shape]
+            model_candidates = [model_input.reshape(batch * frames, channels, height, width), model_input]
+            batch_frames = (batch, frames)
+        else:
+            model_candidates = [model_input]
         with torch.inference_mode():
-            for call in (
-                lambda: self.model(pixel_values=model_input, **kwargs),
-                lambda: self.model(videos=model_input, **kwargs),
-                lambda: self.model(model_input, **kwargs),
-            ):
-                try:
-                    output = call()
-                    break
-                except TypeError as exc:
-                    errors.append(str(exc))
+            for candidate in model_candidates:
+                for call in (
+                    lambda candidate=candidate: self.model(pixel_values=candidate, **kwargs),
+                    lambda candidate=candidate: self.model(videos=candidate, **kwargs),
+                    lambda candidate=candidate: self.model(candidate, **kwargs),
+                ):
+                    try:
+                        output = call()
+                        break
+                    except TypeError as exc:
+                        errors.append(str(exc))
+                else:
+                    continue
+                break
             else:
                 raise RuntimeError(f"{self.name} real forward failed for supported call signatures: {errors}")
         tokens = getattr(output, "last_hidden_state", output)
@@ -126,6 +145,9 @@ class VisionEncoderAdapter:
             tokens = tokens[0]
         if not isinstance(tokens, torch.Tensor):
             raise RuntimeError(f"{self.name} real forward did not return a tensor-like visual output")
+        if batch_frames is not None and tokens.ndim >= 3 and int(tokens.shape[0]) == batch_frames[0] * batch_frames[1]:
+            batch, frames = batch_frames
+            tokens = tokens.reshape(batch, frames * int(tokens.shape[1]), *tokens.shape[2:])
         return {
             "status": "real",
             "visual_tokens": tokens,
@@ -200,13 +222,23 @@ class VJEPA2Adapter(VisionEncoderAdapter):
         if not processor_class and not self.config.get("processor_path"):
             status.metadata["processor_status"] = "not_configured_tensor_input"
             return status
+        if _looks_like_local_path(str(processor_path)) and not _resolve_local_path(processor_path).exists():
+            self.status = AdapterStatus(
+                self.name,
+                "blocked",
+                f"real V-JEPA2 processor path does not exist: {processor_path}",
+                metadata=status.metadata,
+            )
+            return self.status
         processor_module = self.config.get("processor_module_path") or "transformers"
         processor_class = processor_class or "AutoProcessor"
         try:
             factory = getattr(importlib.import_module(str(processor_module)), str(processor_class))
-            self.processor = factory.from_pretrained(str(processor_path), **_processor_from_pretrained_kwargs(self.config))
+            processor_ref = _model_reference_for_loading(processor_path)
+            self.processor = factory.from_pretrained(processor_ref, **_processor_from_pretrained_kwargs(self.config))
             status.metadata["processor_status"] = "real"
             status.metadata["processor_path"] = processor_path
+            status.metadata["resolved_processor_path"] = processor_ref
             status.metadata["processor_module_path"] = processor_module
             status.metadata["processor_class_name"] = processor_class
         except Exception as exc:
@@ -260,12 +292,13 @@ class MLLMAdapter:
         if not checkpoint:
             self.status = AdapterStatus(self.name, "blocked", f"{self.name} checkpoint_path or model_id is required for real loading")
             return self.status
-        if _looks_like_local_path(str(checkpoint)) and not Path(str(checkpoint)).expanduser().exists():
+        if _looks_like_local_path(str(checkpoint)) and not _resolve_local_path(checkpoint).exists():
             self.status = AdapterStatus(self.name, "blocked", f"{self.name} checkpoint path does not exist: {checkpoint}")
             return self.status
+        checkpoint_ref = _model_reference_for_loading(checkpoint)
         try:
             factory = getattr(importlib.import_module(str(module_path)), str(class_name))
-            self.model = factory.from_pretrained(str(checkpoint), **_from_pretrained_kwargs(self.config, dtype=dtype)) if hasattr(factory, "from_pretrained") else factory()
+            self.model = factory.from_pretrained(checkpoint_ref, **_from_pretrained_kwargs(self.config, dtype=dtype)) if hasattr(factory, "from_pretrained") else factory()
             if hasattr(self.model, "to"):
                 self.model.to(device)
             if hasattr(self.model, "eval"):
@@ -275,6 +308,7 @@ class MLLMAdapter:
                 "real",
                 metadata={
                     "checkpoint": checkpoint,
+                    "resolved_checkpoint": checkpoint_ref,
                     "module_path": module_path,
                     "class_name": class_name,
                     "local_files_only": bool(self.config.get("local_files_only", False)),
@@ -298,7 +332,12 @@ class MLLMAdapter:
                 "reason": self.status.reason or "MLLM generation unavailable",
                 "query_text_used": True,
             }
-        raise NotImplementedError("Real generic MLLM generation requires a model-specific adapter")
+        return {
+            "status": "blocked",
+            "answer": None,
+            "reason": f"real generation is not implemented for {self.name}; add a model-specific generation adapter",
+            "query_text_used": True,
+        }
 
     def count_visual_tokens(self, visual_tokens: torch.Tensor | None) -> int | None:
         if visual_tokens is None:
@@ -356,13 +395,23 @@ class QwenAdapter(MLLMAdapter):
         if not processor_path:
             self.status = AdapterStatus(self.name, "blocked", "Qwen processor_path or model_id is required for official processor loading")
             return self.status
+        if _looks_like_local_path(str(processor_path)) and not _resolve_local_path(processor_path).exists():
+            self.status = AdapterStatus(
+                self.name,
+                "blocked",
+                f"Qwen official processor path does not exist: {processor_path}",
+                metadata=status.metadata,
+            )
+            return self.status
         processor_module = self.config.get("processor_module_path") or "transformers"
         processor_class = self.config.get("processor_class_name") or self.config.get("processor_class_or_factory") or "AutoProcessor"
         try:
             factory = getattr(importlib.import_module(str(processor_module)), str(processor_class))
-            self.processor = factory.from_pretrained(str(processor_path), **_processor_from_pretrained_kwargs(self.config))
+            processor_ref = _model_reference_for_loading(processor_path)
+            self.processor = factory.from_pretrained(processor_ref, **_processor_from_pretrained_kwargs(self.config))
             status.metadata["processor_status"] = "real"
             status.metadata["processor_path"] = processor_path
+            status.metadata["resolved_processor_path"] = processor_ref
             status.metadata["processor_module_path"] = processor_module
             status.metadata["processor_class_name"] = processor_class
             status.metadata["official_processor_path"] = True
@@ -461,6 +510,18 @@ def _looks_like_local_path(value: str) -> bool:
     if value.startswith((".", "/", "~")):
         return True
     return value.startswith("weights/") or value.startswith("checkpoints/") or value.endswith(".pt") or value.endswith(".safetensors")
+
+
+def _resolve_local_path(value: Any) -> Path:
+    path = Path(str(value)).expanduser()
+    return path if path.is_absolute() else REPO_ROOT / path
+
+
+def _model_reference_for_loading(value: Any) -> str:
+    text = str(value)
+    if _looks_like_local_path(text):
+        return str(_resolve_local_path(text))
+    return text
 
 
 def _from_pretrained_kwargs(config: Mapping[str, Any], *, dtype: str) -> dict[str, Any]:

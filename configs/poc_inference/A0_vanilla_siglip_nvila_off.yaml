@@ -4,31 +4,36 @@ experiment:
 
 autogaze:
   enabled: false
-  checkpoint_path: null
-  processor_path: null
+  checkpoint_path: weights/AutoGaze
+  processor_path: weights/AutoGaze
   gaze_ratio: 1.0
   task_loss_requirement: null
 
 vision_encoder:
   name: vanilla_siglip
-  checkpoint_path: null
+  checkpoint_path: weights/siglip2-base-patch16-224
   config_path: null
-  processor_path: null
+  processor_path: weights/siglip2-base-patch16-224
   module_path: transformers
-  class_name: AutoModel
+  class_name: SiglipVisionModel
   patch_size: 16
   resolution: 224
   output_dim: 768
+  video_input_mode: flatten_frames
   experimental_autogaze_adapter: false
+  local_files_only: true
 
 mllm:
   name: nvila
-  checkpoint_path: null
+  checkpoint_path: weights/NVILA-8B-HD-Video
   config_path: null
-  processor_path: null
-  tokenizer_path: null
+  processor_path: weights/NVILA-8B-HD-Video
+  tokenizer_path: weights/NVILA-8B-HD-Video
   module_path: transformers
-  class_name: AutoModel
+  class_name: AutoModelForVision2Seq
+  official_processor_path: true
+  trust_remote_code: true
+  local_files_only: true
 
 frame_selection:
   mode: sample

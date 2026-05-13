@@ -120,6 +120,13 @@ def checkpoint_exists(value: Any) -> bool:
     return "/" in text
 
 
+def model_reference_for_loading(value: Any) -> str:
+    text = str(value)
+    if text.startswith((".", "/", "~", "weights/", "checkpoints/")):
+        return str(resolve_path(text))
+    return text
+
+
 def nested_get(mapping: Mapping[str, Any], dotted: str, default: Any = None) -> Any:
     cursor: Any = mapping
     for part in dotted.split("."):
@@ -534,7 +541,7 @@ def _run_real_autogaze(
     from autogaze.models.autogaze import AutoGaze
 
     checkpoint = nested_get(cfg, "autogaze.checkpoint_path") or nested_get(cfg, "autogaze.model_id")
-    model = AutoGaze.from_pretrained(str(checkpoint))
+    model = AutoGaze.from_pretrained(model_reference_for_loading(checkpoint))
     model = model.to(normalize_device(device))
     model.eval()
     video = prepared.processed_video.to(device=normalize_device(device), dtype=dtype_from_name(dtype))

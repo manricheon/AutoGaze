@@ -36,6 +36,12 @@ def _cfg(name: str) -> Path:
     return ROOT / "configs" / "poc_inference" / name
 
 
+def _write_cfg(tmp_path: Path, cfg: dict, name: str = "config.yaml") -> Path:
+    cfg_path = tmp_path / name
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+    return cfg_path
+
+
 def test_priority1_configs_load_and_name_required_models() -> None:
     seen = set()
     for name in POC_CONFIGS:
@@ -46,6 +52,26 @@ def test_priority1_configs_load_and_name_required_models() -> None:
         assert "checkpoint_path" in cfg["vision_encoder"]
         assert "processor_path" in cfg["mllm"]
     assert seen == {"A0", "A1", "A2", "A3", "E1", "E2", "E3"}
+
+
+def test_configs_reference_local_weight_cache_when_available() -> None:
+    a2 = load_config(_cfg("A2_modified_siglip_nvila_on.yaml"))
+    assert a2["autogaze"]["checkpoint_path"] == "weights/AutoGaze"
+    assert a2["vision_encoder"]["checkpoint_path"] == "weights/siglip2-base-patch16-224"
+    assert a2["vision_encoder"]["from_pretrained_kwargs"]["scales"] == "32+64+112+224"
+    assert a2["mllm"]["checkpoint_path"] == "weights/NVILA-8B-HD-Video"
+    assert a2["mllm"]["local_files_only"] is True
+    assert a2["mllm"]["trust_remote_code"] is True
+
+    e1 = load_config(_cfg("E1_vjepa2_encoder.yaml"))
+    assert e1["vision_encoder"]["checkpoint_path"] == "weights/vjepa2-vitl-fpc64-256"
+    assert e1["vision_encoder"]["processor_path"] == "weights/vjepa2-vitl-fpc64-256"
+    assert e1["vision_encoder"]["resolution"] == 256
+
+    e2 = load_config(_cfg("E2_qwen_mllm.yaml"))
+    assert e2["mllm"]["name"] == "qwen"
+    assert e2["mllm"]["checkpoint_path"] is None
+    assert e2["mllm"]["processor_path"] is None
 
 
 def test_cli_parsing_and_model_overrides() -> None:
@@ -239,10 +265,14 @@ def test_full_pipeline_preserves_query_and_writes_reports(tmp_path: Path) -> Non
 
 def test_allow_real_autogaze_missing_checkpoint_blocks_even_with_dummy_video(tmp_path: Path) -> None:
     output_dir = tmp_path / "autogaze_blocked"
+    cfg = load_config(_cfg("A2_modified_siglip_nvila_on.yaml"))
+    cfg["autogaze"]["checkpoint_path"] = str(tmp_path / "missing_autogaze")
+    cfg["autogaze"]["processor_path"] = str(tmp_path / "missing_autogaze")
+    cfg_path = _write_cfg(tmp_path, cfg)
     args = infer_autogaze.parse_args(
         [
             "--config",
-            str(_cfg("A2_modified_siglip_nvila_on.yaml")),
+            str(cfg_path),
             "--video-path",
             "dummy",
             "--output-dir",
@@ -385,10 +415,14 @@ def test_qwen_official_processor_path_with_available_factory(monkeypatch: pytest
 
 def test_real_loading_blocked_does_not_fall_back_to_stub_tokens(tmp_path: Path) -> None:
     output_dir = tmp_path / "blocked"
+    cfg = load_config(_cfg("E1_vjepa2_encoder.yaml"))
+    cfg["vision_encoder"]["checkpoint_path"] = str(tmp_path / "missing_vjepa2")
+    cfg["vision_encoder"]["processor_path"] = str(tmp_path / "missing_vjepa2")
+    cfg_path = _write_cfg(tmp_path, cfg)
     args = infer_full.parse_args(
         [
             "--config",
-            str(_cfg("E1_vjepa2_encoder.yaml")),
+            str(cfg_path),
             "--video-path",
             "dummy",
             "--query-text",
@@ -469,8 +503,7 @@ def test_infer_full_qwen_real_official_processor_integration(monkeypatch: pytest
             "prompt_template": "Question: {prompt}",
         }
     )
-    cfg_path = tmp_path / "qwen_real.yaml"
-    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+    cfg_path = _write_cfg(tmp_path, cfg, "qwen_real.yaml")
     output_dir = tmp_path / "qwen"
     args = infer_full.parse_args(
         [
@@ -502,6 +535,8 @@ def test_infer_full_qwen_real_official_processor_integration(monkeypatch: pytest
     assert summary["status"] == "completed"
     answer = json.loads((output_dir / "predictions" / "answer.json").read_text(encoding="utf-8"))
     assert answer["answer"] == "qwen full answer"
+    assert answer["adapter_statuses"]["vision_encoder"]["status"] == "skipped"
     assert answer["adapter_statuses"]["mllm"]["status"] == "real"
     metrics = json.loads((output_dir / "logs" / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["adapter_statuses"]["vision_encoder"]["status"] == "skipped"
     assert metrics["adapter_statuses"]["mllm"]["metadata"]["official_processor_path"] is True

@@ -23,9 +23,24 @@ Extension presets:
 | `configs/poc_inference/E2_qwen_mllm.yaml` | Qwen-family MLLM path using the official processor first |
 | `configs/poc_inference/E3_vjepa2_qwen.yaml` | V-JEPA2 + Qwen extension path with input-level AutoGaze selection |
 
-Checkpoint/model path fields are present but default to `null`. Set local paths or model IDs in the config, then pass `--allow-real-model-loading` when you want the scripts to try real model loading. Without that flag, stages are marked `stub` or `blocked` and are not presented as real inference.
+Checkpoint/model path fields are configured for this workspace's local `weights/` cache when a matching checkpoint is present. Pass `--allow-real-model-loading` when you want the scripts to try real model loading. Without that flag, stages are marked `stub` or `blocked` and are not presented as real inference.
 
 When `--allow-real-model-loading` is set, blocked adapters do not fall back to dummy visual tokens or another model type. The run records the blocked adapter under `adapter_statuses` and exits with `status=blocked` when that adapter is required for the requested path.
+
+## Local Checkpoints
+
+The branch now uses these local defaults when available:
+
+| Purpose | Local path | Used by |
+|---|---|---|
+| AutoGaze | `weights/AutoGaze` | A2, A3, E3 AutoGaze stage |
+| SigLIP2 base 224 | `weights/siglip2-base-patch16-224` | A0-A3 vision encoder configs |
+| NVILA-HD-Video | `weights/NVILA-8B-HD-Video` | A0-A3 MLLM configs |
+| V-JEPA2 ViT-L 256 | `weights/vjepa2-vitl-fpc64-256` | E1 and E3 vision encoder configs |
+
+No standalone Qwen checkpoint directory was found under `weights/`. E2 and the Qwen part of E3 therefore remain explicitly unconfigured until `mllm.model_id` or `mllm.checkpoint_path` and `mllm.processor_path` are supplied.
+
+Relative checkpoint paths such as `weights/AutoGaze` are resolved from the repository root, not from the caller's shell directory.
 
 ## AutoGaze-Only
 
@@ -58,7 +73,7 @@ python scripts/infer_autogaze.py \
   --allow-real-model-loading
 ```
 
-If the configured checkpoint is missing, real video runs fail clearly with `status=blocked` in `logs/poc_summary.json` and `logs/metrics.json`.
+This uses `weights/AutoGaze` from the config unless you override the config. If the configured checkpoint is missing, real video runs fail clearly with `status=blocked` in `logs/poc_summary.json` and `logs/metrics.json`.
 
 ## Full Pipeline
 
@@ -106,6 +121,8 @@ python scripts/infer_full.py \
 
 Qwen direct visual token injection is not claimed as supported. The initial Qwen path is official-processor/input-level selection only.
 
+NVILA local loading is configured through `weights/NVILA-8B-HD-Video`, but real NVILA generation is still blocked in this lightweight PoC until a model-specific NVILA generation adapter is implemented. The script reports that adapter blocker instead of silently substituting another MLLM.
+
 ## Priority 2 Real Smoke Commands
 
 These commands are intended for local environments where the listed checkpoints or Hugging Face cache entries already exist. Add `--local-files-only` to avoid network access.
@@ -118,7 +135,7 @@ python scripts/infer_full.py \
   --video-path dummy \
   --query-text "Describe the video." \
   --vision-encoder vjepa2 \
-  --vision-encoder-ckpt facebook/vjepa2-vitl-fpc64-256 \
+  --vision-encoder-ckpt weights/vjepa2-vitl-fpc64-256 \
   --vision-encoder-module transformers \
   --vision-encoder-class AutoModel \
   --allow-real-model-loading \
@@ -164,7 +181,7 @@ python scripts/infer_full.py \
   --video-path dummy \
   --query-text "Describe the video." \
   --vision-encoder vjepa2 \
-  --vision-encoder-ckpt facebook/vjepa2-vitl-fpc64-256 \
+  --vision-encoder-ckpt weights/vjepa2-vitl-fpc64-256 \
   --mllm qwen \
   --model-id Qwen/Qwen2.5-VL-7B-Instruct \
   --processor-path Qwen/Qwen2.5-VL-7B-Instruct \
@@ -260,13 +277,15 @@ Full-pipeline metrics also include:
 - `adapter_statuses.mllm`
 - `vision_encoder_required_for_full_pipeline`
 
-Each adapter status contains `name`, `status`, `reason`, and `metadata`. Valid statuses are `real`, `stub`, and `blocked`.
+Each adapter status contains `name`, `status`, `reason`, and `metadata`. Valid statuses are `real`, `stub`, `skipped`, and `blocked`.
 
 Encoder-side acceleration is only marked when real AutoGaze execution is used with an AutoGaze-enabled config.
 
 ## Known Stubs And Blockers
 
-- V-JEPA2 real loading uses the configured `module_path` and `class_name`, defaulting to `transformers.AutoModel`; a processor can be configured but tensor input is allowed when no processor is provided.
+- V-JEPA2 real loading uses the configured `module_path` and `class_name`, defaulting to `transformers.AutoModel`; this workspace config points at `weights/vjepa2-vitl-fpc64-256`.
 - Qwen real loading requires both model and official processor availability.
+- No local Qwen checkpoint was found under `weights/`, so Qwen remains blocked unless a real path/model ID is provided.
 - Qwen direct visual token injection is unsupported.
+- NVILA checkpoints are configured locally, but real NVILA generation needs a dedicated adapter before it can be marked supported.
 - Dummy video runs generate explicit stub AutoGaze metadata. They are useful for smoke tests and visualization checks, but are not real model outputs.

@@ -21,6 +21,7 @@ from poc_infer_utils import (
     write_summary_and_metrics,
     write_visualizations,
 )
+from poc_model_adapters import AdapterStatus
 from poc_model_registry import build_mllm, build_vision_encoder
 
 
@@ -133,31 +134,38 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     mllm_name = str(nested_get(cfg, "mllm.name", "generic_mllm"))
     vision_required = bool(nested_get(cfg, "vision_encoder.required_for_full_pipeline", mllm_name != "qwen"))
     vision = build_vision_encoder(vision_name, nested_get(cfg, "vision_encoder", {}))
-    vision_status = vision.load(allow_real_model_loading=allow_real, device=device, dtype=dtype)
     visual_tokens = None
     actual_vision_encoder = vision.name
     blocked_stages: list[str] = []
     if not vision_required:
+        vision_status = AdapterStatus(
+            vision.name,
+            "skipped",
+            f"{vision.name} skipped because {mllm_name} uses the official processor vision path",
+        )
+        vision.status = vision_status
         skipped.append(
             {
                 "stage": "vision_encoder",
-                "reason": f"{vision.name} skipped because {mllm_name} uses the official processor vision path",
+                "reason": vision_status.reason or "vision encoder skipped",
             }
         )
-    elif allow_real and vision_status.status != "real":
-        skipped.append({"stage": "vision_encoder", "reason": vision_status.reason or f"{vision.name} real loading unavailable"})
-        blocked_stages.append("vision_encoder")
     else:
-        autogaze_payload = None if not gaze.autogaze_enabled or gaze.status == "blocked" else {"per_frame": gaze.per_frame}
-        try:
-            vision_output = vision.forward(prepared.processed_video, autogaze=autogaze_payload)
-            visual_tokens = vision_output.get("visual_tokens")
-            if vision_status.status != "real":
-                skipped.append({"stage": "vision_encoder", "reason": vision_status.reason or f"{vision.name} used stub output"})
-        except Exception as exc:
-            skipped.append({"stage": "vision_encoder", "reason": f"vision encoder failed: {exc}"})
-            if allow_real and vision_required:
-                blocked_stages.append("vision_encoder")
+        vision_status = vision.load(allow_real_model_loading=allow_real, device=device, dtype=dtype)
+        if allow_real and vision_status.status != "real":
+            skipped.append({"stage": "vision_encoder", "reason": vision_status.reason or f"{vision.name} real loading unavailable"})
+            blocked_stages.append("vision_encoder")
+        else:
+            autogaze_payload = None if not gaze.autogaze_enabled or gaze.status == "blocked" else {"per_frame": gaze.per_frame}
+            try:
+                vision_output = vision.forward(prepared.processed_video, autogaze=autogaze_payload)
+                visual_tokens = vision_output.get("visual_tokens")
+                if vision_status.status != "real":
+                    skipped.append({"stage": "vision_encoder", "reason": vision_status.reason or f"{vision.name} used stub output"})
+            except Exception as exc:
+                skipped.append({"stage": "vision_encoder", "reason": f"vision encoder failed: {exc}"})
+                if allow_real and vision_required:
+                    blocked_stages.append("vision_encoder")
 
     mllm = build_mllm(mllm_name, nested_get(cfg, "mllm", {}))
     mllm_status = mllm.load(allow_real_model_loading=allow_real, device=device, dtype=dtype)
