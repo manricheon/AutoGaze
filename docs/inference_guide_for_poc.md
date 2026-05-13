@@ -1,6 +1,6 @@
 # PoC Inference Guide
 
-This branch is now scoped to the lightweight PoC inference surface only. It keeps the runnable inference entry points, A0-A3 and E1-E4 configs, local model adapters, flat visualizations, and metrics output. Broader benchmark, HF dataset, profiling, and all-in-one NVILA-HD experiment code were removed from this branch.
+This branch is now scoped to the lightweight PoC inference surface only. It keeps the runnable inference entry points, A0-A3, E1-E4, and Q0-Q1 configs, local model adapters, flat visualizations, and metrics output. Broader benchmark, HF dataset, profiling, and all-in-one NVILA-HD experiment code were removed from this branch.
 
 ## Kept Files
 
@@ -25,6 +25,8 @@ configs/poc_inference/E1_vjepa2_encoder.yaml
 configs/poc_inference/E2_qwen_mllm.yaml
 configs/poc_inference/E3_vjepa2_qwen.yaml
 configs/poc_inference/E4_qwen_autogaze_vision_mask.yaml
+configs/poc_inference/Q0_qwen_autogaze_off.yaml
+configs/poc_inference/Q1_qwen_autogaze_on.yaml
 ```
 
 Tests:
@@ -55,6 +57,8 @@ docs/inference_guide_for_poc.md
 | `E2_qwen_mllm.yaml` | off | skipped/generic | Qwen | Qwen official processor smoke |
 | `E3_vjepa2_qwen.yaml` | on | V-JEPA2 | Qwen | extension smoke with explicit blockers |
 | `E4_qwen_autogaze_vision_mask.yaml` | on | Qwen-owned vision | Qwen | AutoGaze masks Qwen-native vision patches |
+| `Q0_qwen_autogaze_off.yaml` | off | Qwen-owned vision | Qwen | explicit Qwen baseline for ON/OFF comparison |
+| `Q1_qwen_autogaze_on.yaml` | on | Qwen-owned vision | Qwen | explicit Qwen AutoGaze-mask comparison |
 
 Local defaults point at this workspace cache:
 
@@ -197,9 +201,11 @@ Qwen uses the official Qwen2.5-VL processor path: build a chat-template message 
 
 The local default config points at `weights/Qwen2.5-VL-7B-Instruct`. The adapter uses `qwen_vl_utils.process_vision_info` when that optional package is installed and the input is a real video path. If `qwen_vl_utils` is not installed, it uses the Hugging Face Qwen processor directly with an explicit `vision_preprocess_path: processor_direct_video_payload` entry in `predictions/answer.json` and `logs/metrics.json`; this is not silent fallback.
 
+AutoGaze OFF baseline:
+
 ```bash
 python scripts/infer_full.py \
-  --config configs/poc_inference/E2_qwen_mllm.yaml \
+  --config configs/poc_inference/Q0_qwen_autogaze_off.yaml \
   --video-path /path/to/video.mp4 \
   --query-text "What is happening in this video?" \
   --mllm qwen \
@@ -211,17 +217,17 @@ python scripts/infer_full.py \
   --dtype float32 \
   --mllm-dtype bfloat16 \
   --max-new-tokens 32 \
-  --output-dir outputs/poc_inference/e2_qwen_real \
+  --output-dir outputs/poc_inference/q0_qwen_autogaze_off_real \
   --json
 ```
 
 If any shard referenced by `model.safetensors.index.json` is missing, loading blocks with the missing filenames.
 
-Qwen + AutoGaze vision-mask smoke:
+AutoGaze ON comparison with Qwen-native vision patch masking:
 
 ```bash
 python scripts/infer_full.py \
-  --config configs/poc_inference/E4_qwen_autogaze_vision_mask.yaml \
+  --config configs/poc_inference/Q1_qwen_autogaze_on.yaml \
   --video-path /path/to/video.mp4 \
   --query-text "What is happening in this video?" \
   --mllm qwen \
@@ -237,7 +243,7 @@ python scripts/infer_full.py \
   --scaling-mode resize \
   --resolution 224 \
   --max-new-tokens 32 \
-  --output-dir outputs/poc_inference/e4_qwen_autogaze_mask_real \
+  --output-dir outputs/poc_inference/q1_qwen_autogaze_on_real \
   --json
 ```
 
@@ -247,7 +253,7 @@ Dummy Qwen processor smoke, useful for checking wiring without a local video fil
 
 ```bash
 python scripts/infer_full.py \
-  --config configs/poc_inference/E2_qwen_mllm.yaml \
+  --config configs/poc_inference/Q0_qwen_autogaze_off.yaml \
   --video-path dummy \
   --query-text "What is visible?" \
   --mllm qwen \
@@ -261,17 +267,20 @@ python scripts/infer_full.py \
   --scaling-mode resize \
   --resolution 224 \
   --max-new-tokens 16 \
-  --output-dir outputs/poc_inference/e2_qwen_dummy_real \
+  --output-dir outputs/poc_inference/q0_qwen_dummy_real \
   --json
 ```
+
+`E2_qwen_mllm.yaml` and `E4_qwen_autogaze_vision_mask.yaml` remain supported legacy names for the same two Qwen concepts. Use `Q0` and `Q1` when running a direct Qwen AutoGaze OFF/ON comparison.
 
 MLLM switching summary:
 
 | MLLM | Config | Supported generation path | Direct AutoGaze visual tokens |
 |---|---|---|---|
 | NVILA | `A0`-`A3` | official NVILA processor, with AutoGaze processor controls in A2/A3 | not directly injected by this PoC |
-| Qwen | `E2_qwen_mllm.yaml` | official Qwen2.5-VL chat-template processor | unsupported |
-| Qwen + AutoGaze mask | `E4_qwen_autogaze_vision_mask.yaml` | official Qwen2.5-VL processor plus Qwen-native vision patch masking | unsupported; selected patches are masked inside Qwen vision, not injected as external tokens |
+| Qwen AutoGaze off | `Q0_qwen_autogaze_off.yaml` | official Qwen2.5-VL chat-template processor | unsupported |
+| Qwen AutoGaze on | `Q1_qwen_autogaze_on.yaml` | official Qwen2.5-VL processor plus Qwen-native vision patch masking | unsupported; selected patches are masked inside Qwen vision, not injected as external tokens |
+| Qwen legacy names | `E2_qwen_mllm.yaml`, `E4_qwen_autogaze_vision_mask.yaml` | same Qwen off/on concepts as Q0/Q1 | unsupported |
 | Generic | `E1_vjepa2_encoder.yaml` | stub/status reporting only | unsupported until a model-specific adapter is added |
 
 ## V-JEPA2 Smoke

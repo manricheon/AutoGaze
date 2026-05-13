@@ -31,6 +31,8 @@ POC_CONFIGS = [
     "E2_qwen_mllm.yaml",
     "E3_vjepa2_qwen.yaml",
     "E4_qwen_autogaze_vision_mask.yaml",
+    "Q0_qwen_autogaze_off.yaml",
+    "Q1_qwen_autogaze_on.yaml",
 ]
 
 
@@ -53,7 +55,7 @@ def test_priority1_configs_load_and_name_required_models() -> None:
         assert cfg["mllm"]["name"] in {"nvila", "qwen", "generic_mllm"}
         assert "checkpoint_path" in cfg["vision_encoder"]
         assert "processor_path" in cfg["mllm"]
-    assert seen == {"A0", "A1", "A2", "A3", "E1", "E2", "E3", "E4"}
+    assert seen == {"A0", "A1", "A2", "A3", "E1", "E2", "E3", "E4", "Q0", "Q1"}
 
 
 def test_configs_reference_local_weight_cache_when_available() -> None:
@@ -94,6 +96,20 @@ def test_configs_reference_local_weight_cache_when_available() -> None:
     assert e4["vision_encoder"]["required_for_full_pipeline"] is False
     assert e2["mllm"]["prompt_template"] == "Question: {prompt}"
     assert e2["mllm"]["processor_from_pretrained_kwargs"]["use_fast"] is False
+
+    q0 = load_config(_cfg("Q0_qwen_autogaze_off.yaml"))
+    q1 = load_config(_cfg("Q1_qwen_autogaze_on.yaml"))
+    assert q0["experiment"]["id"] == "Q0"
+    assert q1["experiment"]["id"] == "Q1"
+    assert q0["autogaze"]["enabled"] is False
+    assert q1["autogaze"]["enabled"] is True
+    assert q0["mllm"]["name"] == "qwen"
+    assert q1["mllm"]["name"] == "qwen"
+    assert q0["mllm"]["autogaze_integration"] == "none"
+    assert q1["mllm"]["autogaze_integration"] == "qwen_vision_mask"
+    assert q0["mllm"]["checkpoint_path"] == q1["mllm"]["checkpoint_path"] == "weights/Qwen2.5-VL-7B-Instruct"
+    assert q0["mllm"]["official_processor_owns_vision"] is True
+    assert q1["mllm"]["official_processor_owns_vision"] is True
 
 
 def test_cli_parsing_and_model_overrides() -> None:
