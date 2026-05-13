@@ -219,7 +219,7 @@ def test_frame_selection_scaling_and_chop_metadata() -> None:
     assert chopped.frame_records[2]["chop_index"] == 1
 
     long_cfg = load_config(_cfg("A2_modified_siglip_nvila_on.yaml"))
-    long_cfg["input"] = {"dummy_frames": 28, "dummy_resolution": 64}
+    long_cfg["input"] = {"dummy_frames": 28, "dummy_resolution": 128}
     long_chopped = prepare_video(
         long_cfg,
         video_path="dummy",
@@ -240,6 +240,32 @@ def test_frame_selection_scaling_and_chop_metadata() -> None:
     assert long_chopped.frame_selection.windows[1].effective_num_frames == 12
     assert long_chopped.processed_video.shape == (4, 16, 3, 32, 32)
     assert long_chopped.scaling_metadata["temporal_pad_last_applied"] is True
+
+    hybrid_chopped = prepare_video(
+        long_cfg,
+        video_path="dummy",
+        frame_selection_mode="sample",
+        num_frames=2,
+        frame_interval=1,
+        max_windows=1,
+        scaling_mode="resize_then_chop",
+        resolution=32,
+        chop_size=32,
+        chop_overlap=0,
+        max_chops=None,
+        chop_merge_mode="metadata_only",
+        resize_before_chop_threshold=100,
+        resize_before_chop_factor=0.5,
+    )
+    hybrid_window = hybrid_chopped.chop_metadata["windows"][0]
+    assert hybrid_chopped.processed_video.shape == (4, 2, 3, 32, 32)
+    assert hybrid_window["source_resolution"] == [128, 128]
+    assert hybrid_window["chop_input_resolution"] == [64, 64]
+    assert hybrid_window["pre_resize_before_chop"]["applied"] is True
+    assert hybrid_window["records"][0]["chop_input_box"] == [0, 0, 32, 32]
+    assert hybrid_window["records"][0]["x1"] == 64
+    assert hybrid_chopped.frame_records[0]["source_box"] == [0, 0, 64, 64]
+    assert hybrid_chopped.frame_records[0]["chop_input_box"] == [0, 0, 32, 32]
 
 
 def test_chop_mode_expands_processed_frames_and_token_counts(tmp_path: Path) -> None:

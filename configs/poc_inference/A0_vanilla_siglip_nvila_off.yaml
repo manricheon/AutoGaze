@@ -64,6 +64,8 @@ scaling:
   chop_overlap: 0
   max_chops: null
   chop_merge_mode: metadata_only
+  resize_before_chop_threshold: 1024
+  resize_before_chop_factor: 0.5
 
 runtime:
   device: cpu

@@ -275,9 +275,12 @@ Supported scaling modes:
 | `fit_long_side` | aspect-preserving long-side resize |
 | `quickstart` | guarded 224/392-style policy from `QUICK_START.md` |
 | `chop` | spatially chops selected source frames into real crop tensors, then keeps outputs flat over processed crop-frames |
+| `resize_then_chop` | if the max side is above `--resize-before-chop-threshold`, resize by `--resize-before-chop-factor`, then chop and resize each crop |
 | `none` | no resize |
 
 `chop` follows the intent of the original `QUICK_START.md` any-resolution guidance: high-resolution frames are split into spatial crops before AutoGaze/ViT processing instead of being represented by one resized frame. For a 1k-ish frame with `--chop-size 224`, the number of processed crop-frames is roughly the number of spatial crops times the selected source frames. Each crop-frame still has the normal per-crop token layout, but aggregate source-frame token counts increase with the crop count.
+
+Use `resize_then_chop` for very large frames when pure chop creates too many crops. The default policy is `--resize-before-chop-threshold 1024` and `--resize-before-chop-factor 0.5`, so full-HD frames are first reduced to half resolution before chopping. This reduces crop count and memory while preserving more local detail than a single whole-frame resize. The crop metadata stores original-frame `source_box` values for visualization and `chop_input_box` values for the actual resized crop coordinates.
 
 For large and long videos, chop mode applies two separate operations. Spatially, each source frame is chopped into crops and each crop is resized to `--resolution`. Temporally, `all`/`chunk` modes split the video into `--num-frames` windows; the last incomplete chop window is padded by repeating its last real frame so every processed crop tensor has the same temporal length. Padded frame records are marked with `is_padded: true`, and `scaling/scaling_metadata.json` records `temporal_pad_last_applied`.
 

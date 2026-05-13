@@ -506,6 +506,8 @@ def prepare_video(
     chop_overlap: int,
     max_chops: int | None,
     chop_merge_mode: str,
+    resize_before_chop_threshold: int = 1024,
+    resize_before_chop_factor: float = 0.5,
 ) -> PreparedVideo:
     dummy_frames = int(nested_get(cfg, "input.dummy_frames", max(num_frames, 8)))
     dummy_resolution = int(nested_get(cfg, "input.dummy_resolution", max(resolution, 64)))
@@ -520,7 +522,7 @@ def prepare_video(
         frame_selection_mode=frame_selection_mode,
         frame_interval=frame_interval,
         max_windows=max_windows,
-        pad_last=scaling_mode == "chop",
+        pad_last=scaling_mode in {"chop", "resize_then_chop"},
         original_fps=fps,
     )
 
@@ -539,6 +541,8 @@ def prepare_video(
             chop_overlap=chop_overlap,
             max_chops=max_chops,
             chop_merge_mode=chop_merge_mode,
+            resize_before_chop_threshold=resize_before_chop_threshold,
+            resize_before_chop_factor=resize_before_chop_factor,
         )
         processed_windows.append(scaled)
         scaling_record["window"] = window.to_dict()
@@ -571,6 +575,7 @@ def prepare_video(
                                 int(chop_record["x1"]),
                                 int(chop_record["y1"]),
                             ],
+                            "chop_input_box": chop_record.get("chop_input_box"),
                         }
                     )
                     processed_index += 1
@@ -588,7 +593,7 @@ def prepare_video(
                 )
                 processed_index += 1
 
-    if processed_windows and scaling_mode == "chop":
+    if processed_windows and scaling_mode in {"chop", "resize_then_chop"}:
         processed_video = torch.cat(processed_windows, dim=0)
     else:
         processed_video = torch.cat(processed_windows, dim=1) if processed_windows else source_video[:0].unsqueeze(0)
@@ -597,7 +602,7 @@ def prepare_video(
         "resolution": resolution,
         "number_of_windows": len(selection.windows),
         "first_processed_shape": [int(dim) for dim in processed_video.shape],
-        "temporal_pad_last_applied": bool(scaling_mode == "chop" and any(window.is_padded for window in selection.windows)),
+        "temporal_pad_last_applied": bool(scaling_mode in {"chop", "resize_then_chop"} and any(window.is_padded for window in selection.windows)),
         "windows": scaling_windows,
     }
     return PreparedVideo(
@@ -621,6 +626,8 @@ def scale_video(
     chop_overlap: int,
     max_chops: int | None,
     chop_merge_mode: str,
+    resize_before_chop_threshold: int = 1024,
+    resize_before_chop_factor: float = 0.5,
 ) -> tuple[torch.Tensor, dict[str, Any], dict[str, Any] | None]:
     if video.ndim != 5:
         raise ValueError(f"expected video shape [B,T,C,H,W], got {tuple(video.shape)}")
@@ -647,24 +654,49 @@ def scale_video(
             raise NotImplementedError("quickstart scaling is implemented only for 224 and 392 resolution policies")
         output = _resize_video_hw(video, resolution, resolution)
         notes.append("QUICK_START-compatible square resize policy was applied.")
-    elif mode == "chop":
+    elif mode in {"chop", "resize_then_chop"}:
+        chop_input = video
+        chop_input_h, chop_input_w = height, width
+        pre_resize_applied = False
+        if mode == "resize_then_chop" and max(height, width) > int(resize_before_chop_threshold):
+            if resize_before_chop_factor <= 0:
+                raise ValueError("resize_before_chop_factor must be > 0")
+            chop_input_h = max(1, round(height * float(resize_before_chop_factor)))
+            chop_input_w = max(1, round(width * float(resize_before_chop_factor)))
+            chop_input = _resize_video_hw(video, chop_input_h, chop_input_w)
+            pre_resize_applied = True
         chop_metadata = generate_chop_metadata(
-            height=height,
-            width=width,
+            height=chop_input_h,
+            width=chop_input_w,
             frames=frames,
             chop_size=chop_size,
             chop_overlap=chop_overlap,
             max_chops=max_chops,
             merge_mode=chop_merge_mode,
         )
+        _annotate_chop_records_for_source_coordinates(
+            chop_metadata,
+            source_height=height,
+            source_width=width,
+            chop_input_height=chop_input_h,
+            chop_input_width=chop_input_w,
+            pre_resize_applied=pre_resize_applied,
+            resize_before_chop_threshold=int(resize_before_chop_threshold),
+            resize_before_chop_factor=float(resize_before_chop_factor),
+        )
         chunks: list[torch.Tensor] = []
         for record in chop_metadata["records"]:
-            crop = video[:, :, :, int(record["y0"]) : int(record["y1"]), int(record["x0"]) : int(record["x1"])]
+            input_box = record.get("chop_input_box") or [record["x0"], record["y0"], record["x1"], record["y1"]]
+            x0, y0, x1, y1 = [int(value) for value in input_box]
+            crop = chop_input[:, :, :, y0:y1, x0:x1]
             chunks.append(_resize_video_hw(crop, resolution, resolution))
         output = torch.cat(chunks, dim=0) if chunks else video[:0]
-        notes.append("Frames were spatially chopped into real model inputs, then each crop was resized to the target resolution.")
+        if pre_resize_applied:
+            notes.append("Frames were resized before spatial chopping, then each crop was resized to the target resolution.")
+        else:
+            notes.append("Frames were spatially chopped into real model inputs, then each crop was resized to the target resolution.")
     else:
-        raise ValueError("scaling_mode must be one of resize, fit_short_side, fit_long_side, chop, quickstart, none")
+        raise ValueError("scaling_mode must be one of resize, fit_short_side, fit_long_side, chop, resize_then_chop, quickstart, none")
 
     processed_h, processed_w = int(output.shape[-2]), int(output.shape[-1])
     record = {
@@ -749,6 +781,40 @@ def generate_chop_metadata(
         "merge_mode": merge_mode,
         "records": records,
     }
+
+
+def _annotate_chop_records_for_source_coordinates(
+    chop_metadata: dict[str, Any],
+    *,
+    source_height: int,
+    source_width: int,
+    chop_input_height: int,
+    chop_input_width: int,
+    pre_resize_applied: bool,
+    resize_before_chop_threshold: int,
+    resize_before_chop_factor: float,
+) -> None:
+    scale_x = chop_input_width / float(source_width)
+    scale_y = chop_input_height / float(source_height)
+    chop_metadata["source_resolution"] = [source_height, source_width]
+    chop_metadata["chop_input_resolution"] = [chop_input_height, chop_input_width]
+    chop_metadata["pre_resize_before_chop"] = {
+        "applied": bool(pre_resize_applied),
+        "threshold": int(resize_before_chop_threshold),
+        "factor": float(resize_before_chop_factor),
+        "scale_x": scale_x,
+        "scale_y": scale_y,
+    }
+    for record in chop_metadata["records"]:
+        input_box = [int(record["x0"]), int(record["y0"]), int(record["x1"]), int(record["y1"])]
+        record["chop_input_box"] = input_box
+        if not pre_resize_applied:
+            continue
+        x0, y0, x1, y1 = input_box
+        record["x0"] = max(0, min(source_width, round(x0 / scale_x)))
+        record["y0"] = max(0, min(source_height, round(y0 / scale_y)))
+        record["x1"] = max(0, min(source_width, round(x1 / scale_x)))
+        record["y1"] = max(0, min(source_height, round(y1 / scale_y)))
 
 
 def run_autogaze_stage(

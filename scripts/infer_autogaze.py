@@ -37,12 +37,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--frame-interval", type=int, default=None)
     parser.add_argument("--max-windows", type=int, default=None, help="maximum frame windows to process; 0 means unlimited")
 
-    parser.add_argument("--scaling-mode", choices=["resize", "fit_short_side", "fit_long_side", "chop", "quickstart", "none"], default=None)
+    parser.add_argument("--scaling-mode", choices=["resize", "fit_short_side", "fit_long_side", "chop", "resize_then_chop", "quickstart", "none"], default=None)
     parser.add_argument("--resolution", type=int, default=None)
     parser.add_argument("--chop-size", type=int, default=None)
     parser.add_argument("--chop-overlap", type=int, default=None)
     parser.add_argument("--max-chops", type=int, default=None)
     parser.add_argument("--chop-merge-mode", choices=["none", "metadata_only", "overlay_union"], default=None)
+    parser.add_argument("--resize-before-chop-threshold", type=int, default=None)
+    parser.add_argument("--resize-before-chop-factor", type=float, default=None)
 
     parser.add_argument("--gaze-ratio", type=float, default=None)
     parser.add_argument("--task-loss-requirement", type=float, default=None)
@@ -102,6 +104,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         chop_overlap=int(cli_or_config(args.chop_overlap, cfg, "scaling.chop_overlap", 0)),
         max_chops=cli_or_config(args.max_chops, cfg, "scaling.max_chops", None),
         chop_merge_mode=str(cli_or_config(args.chop_merge_mode, cfg, "scaling.chop_merge_mode", "metadata_only")),
+        resize_before_chop_threshold=int(cli_or_config(args.resize_before_chop_threshold, cfg, "scaling.resize_before_chop_threshold", 1024)),
+        resize_before_chop_factor=float(cli_or_config(args.resize_before_chop_factor, cfg, "scaling.resize_before_chop_factor", 0.5)),
     )
     preprocessing_latency_ms = (time.perf_counter() - preprocessing_start) * 1000
     allow_real = bool(args.allow_real_model_loading or nested_get(cfg, "runtime.allow_real_model_loading", False))
