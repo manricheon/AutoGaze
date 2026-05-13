@@ -29,6 +29,12 @@ class AutoGazeVisualizer(BaseVisualizer):
         (244, 114, 182),  # pink
         (168, 85, 247),  # purple
     ]
+    _SCALE_ID_FACTORS = {
+        0: 1.0 / 7.0,
+        1: 2.0 / 7.0,
+        2: 0.5,
+        3: 1.0,
+    }
 
     def visualize_selected_patches(
         self,
@@ -443,12 +449,14 @@ class AutoGazeVisualizer(BaseVisualizer):
         multi_scale_overlay: bool = True,
         scale_color_mode: str = "gradient",
         info_panel_mode: str = "external",
+        scale_values_for_layout: list[int] | None = None,
     ) -> list[Image.Image]:
         grid_h, grid_w = self._validate_patch_grid(patch_grid)
         frame_count = int(frames.shape[0])
         sampled = sampled_frame_indices or list(range(frame_count))
         selected_by_frame = self._patches_by_frame(selected_patch_indices, frame_count=frame_count, patch_grid=(grid_h, grid_w))
         scales_by_frame = self._scales_by_frame(scales, selected_by_frame)
+        scale_values_for_layout = scale_values_for_layout or sorted({scale for row in scales_by_frame for scale in row})
         scale_color_map = self._build_scale_color_map(
             scales_by_frame,
             multi_scale_overlay=multi_scale_overlay,
@@ -460,17 +468,20 @@ class AutoGazeVisualizer(BaseVisualizer):
             image = self._frame_to_image(frame).convert("RGB")
             overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
             draw = ImageDraw.Draw(overlay)
-            cell_w = image.width / grid_w
-            cell_h = image.height / grid_h
             patches = selected_by_frame[frame_idx]
             frame_scales = scales_by_frame[frame_idx]
             for i, patch_idx in enumerate(patches):
                 if patch_idx < 0 or patch_idx >= grid_h * grid_w:
                     raise ValueError("selected_patch_indices contain values outside patch_grid")
-                row, col = divmod(patch_idx, grid_w)
-                x0, y0 = col * cell_w, row * cell_h
-                x1, y1 = x0 + cell_w, y0 + cell_h
                 scale_value = frame_scales[i] if i < len(frame_scales) else None
+                x0n, y0n, x1n, y1n = self._scale_aware_patch_box(
+                    patch_idx,
+                    (grid_h, grid_w),
+                    scale_value,
+                    scale_values_for_layout=scale_values_for_layout,
+                )
+                x0, y0 = x0n * image.width, y0n * image.height
+                x1, y1 = x1n * image.width, y1n * image.height
                 color = self._color_for_scale(scale_value, scale_color_map=scale_color_map)
                 fill = (*color, int(255 * overlay_alpha)) if overlay_style in {"mask", "both"} else None
                 outline = (*color, 255) if overlay_style in {"box", "both"} else None
@@ -550,6 +561,7 @@ class AutoGazeVisualizer(BaseVisualizer):
                 multi_scale_overlay=multi_scale_overlay,
                 scale_color_mode=scale_color_mode,
                 info_panel_mode=info_panel_mode,
+                scale_values_for_layout=scale_values,
             )
             for image in panel:
                 draw = ImageDraw.Draw(image)
@@ -586,12 +598,14 @@ class AutoGazeVisualizer(BaseVisualizer):
         multi_scale_overlay: bool = True,
         scale_color_mode: str = "gradient",
         info_panel_mode: str = "external",
+        scale_values_for_layout: list[int] | None = None,
     ) -> list[Image.Image]:
         grid_h, grid_w = self._validate_patch_grid(patch_grid)
         frame_count = int(original_frames.shape[0])
         sampled = sampled_frame_indices or list(range(frame_count))
         selected_by_frame = self._patches_by_frame(selected_patch_indices, frame_count=frame_count, patch_grid=(grid_h, grid_w))
         scales_by_frame = self._scales_by_frame(scales, selected_by_frame)
+        scale_values_for_layout = scale_values_for_layout or sorted({scale for row in scales_by_frame for scale in row})
         scale_color_map = self._build_scale_color_map(
             scales_by_frame,
             multi_scale_overlay=multi_scale_overlay,
@@ -606,21 +620,20 @@ class AutoGazeVisualizer(BaseVisualizer):
             image = self._frame_to_image(frame).convert("RGB")
             overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
             draw = ImageDraw.Draw(overlay)
-            cell_w = processed_w / grid_w
-            cell_h = processed_h / grid_h
-            scale_x = image.width / float(processed_w)
-            scale_y = image.height / float(processed_h)
             patches = selected_by_frame[frame_idx]
             frame_scales = scales_by_frame[frame_idx]
             for i, patch_idx in enumerate(patches):
                 if patch_idx < 0 or patch_idx >= grid_h * grid_w:
                     raise ValueError("selected_patch_indices contain values outside patch_grid")
-                row, col = divmod(patch_idx, grid_w)
-                x0 = col * cell_w * scale_x
-                y0 = row * cell_h * scale_y
-                x1 = (col + 1) * cell_w * scale_x
-                y1 = (row + 1) * cell_h * scale_y
                 scale_value = frame_scales[i] if i < len(frame_scales) else None
+                x0n, y0n, x1n, y1n = self._scale_aware_patch_box(
+                    patch_idx,
+                    (grid_h, grid_w),
+                    scale_value,
+                    scale_values_for_layout=scale_values_for_layout,
+                )
+                x0, y0 = x0n * image.width, y0n * image.height
+                x1, y1 = x1n * image.width, y1n * image.height
                 color = self._color_for_scale(scale_value, scale_color_map=scale_color_map)
                 fill = (*color, int(255 * overlay_alpha)) if overlay_style in {"mask", "both"} else None
                 outline = (*color, 255) if overlay_style in {"box", "both"} else None
@@ -829,6 +842,79 @@ class AutoGazeVisualizer(BaseVisualizer):
                 for scale, color in color_map.items()
             },
         }
+
+    @classmethod
+    def _scale_aware_patch_box(
+        cls,
+        patch_idx: int,
+        patch_grid: tuple[int, int],
+        scale_value: int | None,
+        *,
+        scale_values_for_layout: list[int] | None = None,
+    ) -> tuple[float, float, float, float]:
+        grid_h, grid_w = patch_grid
+        row, col = divmod(int(patch_idx), grid_w)
+        scale_h, scale_w = cls._scale_grid_for_value(
+            scale_value,
+            patch_grid,
+            scale_values_for_layout=scale_values_for_layout,
+        )
+        if scale_h == grid_h and scale_w == grid_w:
+            return col / grid_w, row / grid_h, (col + 1) / grid_w, (row + 1) / grid_h
+
+        scale_row = min(scale_h - 1, int(row * scale_h / grid_h))
+        scale_col = min(scale_w - 1, int(col * scale_w / grid_w))
+        return (
+            scale_col / scale_w,
+            scale_row / scale_h,
+            (scale_col + 1) / scale_w,
+            (scale_row + 1) / scale_h,
+        )
+
+    @classmethod
+    def _scale_grid_for_value(
+        cls,
+        scale_value: int | None,
+        patch_grid: tuple[int, int],
+        *,
+        scale_values_for_layout: list[int] | None = None,
+    ) -> tuple[int, int]:
+        grid_h, grid_w = patch_grid
+        factor = cls._scale_factor_for_value(scale_value, scale_values_for_layout=scale_values_for_layout)
+        if factor is None:
+            return grid_h, grid_w
+        return max(1, int(round(grid_h * factor))), max(1, int(round(grid_w * factor)))
+
+    @classmethod
+    def _scale_factor_for_value(
+        cls,
+        scale_value: int | None,
+        *,
+        scale_values_for_layout: list[int] | None = None,
+    ) -> float | None:
+        if scale_value is None:
+            return None
+        scale = int(scale_value)
+        context = sorted({int(value) for value in scale_values_for_layout or []})
+        if context and max(context) <= 3 and scale in cls._SCALE_ID_FACTORS:
+            return cls._SCALE_ID_FACTORS[scale]
+        if context and max(context) > 3 and scale in context:
+            context_set = set(context)
+            canonical_scales = {32, 64, 112, 224}
+            quickstart_scales = {56, 112, 196, 392}
+            if context_set.issubset(canonical_scales) and scale in canonical_scales:
+                return scale / 224.0
+            if context_set.issubset(quickstart_scales) and scale in quickstart_scales:
+                return scale / 392.0
+            max_scale = max(context)
+            return scale / float(max_scale) if max_scale > 0 else None
+        if scale in cls._SCALE_ID_FACTORS:
+            return cls._SCALE_ID_FACTORS[scale]
+        if scale in {32, 64, 112, 224}:
+            return scale / 224.0
+        if scale in {56, 196, 392}:
+            return scale / 392.0
+        return None
 
     def _build_scale_color_map(
         self,

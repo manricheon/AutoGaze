@@ -133,6 +133,43 @@ def test_autogaze_scale_panel_video_export(tmp_path) -> None:
     assert metadata["info_panel_mode"] == "external"
 
 
+def test_autogaze_scale_panel_masks_use_scale_aware_box_sizes(tmp_path) -> None:
+    visualizer = AutoGazeVisualizer(output_root=tmp_path, exp_name="exp")
+    frame = torch.zeros(1, 3, 28, 28)
+
+    panel = visualizer._render_scale_panel_frames(
+        frame,
+        selected_patch_indices=[[98, 195]],
+        patch_grid=(14, 14),
+        scales=[[0, 3]],
+        overlay_style="mask",
+        overlay_alpha=0.7,
+        info_panel_mode="none",
+    )[0]
+
+    assert AutoGazeVisualizer._scale_aware_patch_box(98, (14, 14), 0, scale_values_for_layout=[0, 1, 2, 3]) == (
+        0.0,
+        0.5,
+        0.5,
+        1.0,
+    )
+    assert AutoGazeVisualizer._scale_aware_patch_box(195, (14, 14), 3, scale_values_for_layout=[0, 1, 2, 3]) == (
+        13 / 14,
+        13 / 14,
+        1.0,
+        1.0,
+    )
+    assert AutoGazeVisualizer._scale_aware_patch_box(98, (14, 14), 32, scale_values_for_layout=[32, 64]) == (
+        0.0,
+        0.5,
+        0.5,
+        1.0,
+    )
+    assert sum(panel.getpixel((10, 24))) > 0
+    assert sum(panel.getpixel((28 + 24, 24))) == 0
+    assert sum(panel.getpixel((28 + 27, 27))) > 0
+
+
 def test_multiscale_metadata_uses_gradient_palette(tmp_path) -> None:
     visualizer = AutoGazeVisualizer(output_root=tmp_path, exp_name="exp")
 
