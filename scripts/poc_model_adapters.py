@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -50,9 +51,20 @@ class VisionEncoderAdapter:
         if not checkpoint:
             self.status = AdapterStatus(self.name, "blocked", f"{self.name} checkpoint_path or model_id is required for real loading")
             return self.status
-        if _looks_like_local_path(str(checkpoint)) and not _resolve_local_path(checkpoint).exists():
-            self.status = AdapterStatus(self.name, "blocked", f"{self.name} checkpoint path does not exist: {checkpoint}")
-            return self.status
+        if _looks_like_local_path(str(checkpoint)):
+            local_checkpoint = _resolve_local_path(checkpoint)
+            if not local_checkpoint.exists():
+                self.status = AdapterStatus(self.name, "blocked", f"{self.name} checkpoint path does not exist: {checkpoint}")
+                return self.status
+            missing_shards = _missing_sharded_checkpoint_files(local_checkpoint)
+            if missing_shards:
+                self.status = AdapterStatus(
+                    self.name,
+                    "blocked",
+                    f"{self.name} checkpoint is incomplete; missing shard files: {', '.join(missing_shards[:8])}",
+                    metadata={"checkpoint": checkpoint, "resolved_checkpoint": str(local_checkpoint), "missing_shards": missing_shards},
+                )
+                return self.status
         checkpoint_ref = _model_reference_for_loading(checkpoint)
         try:
             factory = getattr(importlib.import_module(str(module_path)), str(class_name))
@@ -292,9 +304,20 @@ class MLLMAdapter:
         if not checkpoint:
             self.status = AdapterStatus(self.name, "blocked", f"{self.name} checkpoint_path or model_id is required for real loading")
             return self.status
-        if _looks_like_local_path(str(checkpoint)) and not _resolve_local_path(checkpoint).exists():
-            self.status = AdapterStatus(self.name, "blocked", f"{self.name} checkpoint path does not exist: {checkpoint}")
-            return self.status
+        if _looks_like_local_path(str(checkpoint)):
+            local_checkpoint = _resolve_local_path(checkpoint)
+            if not local_checkpoint.exists():
+                self.status = AdapterStatus(self.name, "blocked", f"{self.name} checkpoint path does not exist: {checkpoint}")
+                return self.status
+            missing_shards = _missing_sharded_checkpoint_files(local_checkpoint)
+            if missing_shards:
+                self.status = AdapterStatus(
+                    self.name,
+                    "blocked",
+                    f"{self.name} checkpoint is incomplete; missing shard files: {', '.join(missing_shards[:8])}",
+                    metadata={"checkpoint": checkpoint, "resolved_checkpoint": str(local_checkpoint), "missing_shards": missing_shards},
+                )
+                return self.status
         checkpoint_ref = _model_reference_for_loading(checkpoint)
         try:
             factory = getattr(importlib.import_module(str(module_path)), str(class_name))
@@ -522,6 +545,21 @@ def _model_reference_for_loading(value: Any) -> str:
     if _looks_like_local_path(text):
         return str(_resolve_local_path(text))
     return text
+
+
+def _missing_sharded_checkpoint_files(path: Path) -> list[str]:
+    index_path = path / "model.safetensors.index.json" if path.is_dir() else None
+    if index_path is None or not index_path.exists():
+        return []
+    try:
+        data = json.loads(index_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    weight_map = data.get("weight_map")
+    if not isinstance(weight_map, Mapping):
+        return []
+    expected = sorted({str(name) for name in weight_map.values()})
+    return [name for name in expected if not (path / name).exists()]
 
 
 def _from_pretrained_kwargs(config: Mapping[str, Any], *, dtype: str) -> dict[str, Any]:

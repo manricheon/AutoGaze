@@ -70,8 +70,8 @@ def test_configs_reference_local_weight_cache_when_available() -> None:
 
     e2 = load_config(_cfg("E2_qwen_mllm.yaml"))
     assert e2["mllm"]["name"] == "qwen"
-    assert e2["mllm"]["checkpoint_path"] is None
-    assert e2["mllm"]["processor_path"] is None
+    assert e2["mllm"]["checkpoint_path"] == "weights/Qwen2.5-VL-7B-Instruct"
+    assert e2["mllm"]["processor_path"] == "weights/Qwen2.5-VL-7B-Instruct"
 
 
 def test_cli_parsing_and_model_overrides() -> None:
@@ -411,6 +411,36 @@ def test_qwen_official_processor_path_with_available_factory(monkeypatch: pytest
     assert result["status"] == "real"
     assert result["answer"] == "official qwen answer"
     assert result["official_processor_path"] is True
+
+
+def test_qwen_incomplete_local_shards_block_before_loading(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "qwen"
+    checkpoint.mkdir()
+    (checkpoint / "model-00002-of-00002.safetensors").write_bytes(b"stub")
+    (checkpoint / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "metadata": {"total_size": 10},
+                "weight_map": {
+                    "model.embed_tokens.weight": "model-00001-of-00002.safetensors",
+                    "lm_head.weight": "model-00002-of-00002.safetensors",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    adapter = QwenAdapter(
+        {
+            "module_path": "missing_module_should_not_import",
+            "class_name": "AutoModelForVision2Seq",
+            "checkpoint_path": str(checkpoint),
+            "processor_path": str(checkpoint),
+        }
+    )
+    status = adapter.load(allow_real_model_loading=True, device="cpu", dtype="float32")
+    assert status.status == "blocked"
+    assert "checkpoint is incomplete" in str(status.reason)
+    assert status.metadata["missing_shards"] == ["model-00001-of-00002.safetensors"]
 
 
 def test_real_loading_blocked_does_not_fall_back_to_stub_tokens(tmp_path: Path) -> None:

@@ -33,10 +33,10 @@ vision_encoder:
 mllm:
   name: qwen
   model_id: null
-  checkpoint_path: null
+  checkpoint_path: weights/Qwen2.5-VL-7B-Instruct
   config_path: null
-  processor_path: null
-  tokenizer_path: null
+  processor_path: weights/Qwen2.5-VL-7B-Instruct
+  tokenizer_path: weights/Qwen2.5-VL-7B-Instruct
   module_path: transformers
   class_name: AutoModelForVision2Seq
   processor_module_path: transformers
@@ -44,6 +44,7 @@ mllm:
   official_processor_path: true
   official_processor_owns_vision: false
   direct_visual_token_injection: unsupported
+  prompt_template: "{video_token}\nQuestion: {prompt}"
   trust_remote_code: true
   local_files_only: true
 

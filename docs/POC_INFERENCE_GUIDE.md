@@ -37,8 +37,9 @@ The branch now uses these local defaults when available:
 | SigLIP2 base 224 | `weights/siglip2-base-patch16-224` | A0-A3 vision encoder configs |
 | NVILA-HD-Video | `weights/NVILA-8B-HD-Video` | A0-A3 MLLM configs |
 | V-JEPA2 ViT-L 256 | `weights/vjepa2-vitl-fpc64-256` | E1 and E3 vision encoder configs |
+| Qwen2.5-VL-7B-Instruct | `weights/Qwen2.5-VL-7B-Instruct` | E2 and E3 MLLM configs |
 
-No standalone Qwen checkpoint directory was found under `weights/`. E2 and the Qwen part of E3 therefore remain explicitly unconfigured until `mllm.model_id` or `mllm.checkpoint_path` and `mllm.processor_path` are supplied.
+The local Qwen directory is wired into E2/E3, but it must contain every shard referenced by `model.safetensors.index.json`. If any shard is missing, the adapter reports `status=blocked` with the missing filenames before attempting model construction.
 
 Relative checkpoint paths such as `weights/AutoGaze` are resolved from the repository root, not from the caller's shell directory.
 
@@ -114,8 +115,6 @@ python scripts/infer_full.py \
   --video-path dummy \
   --query-text "What is happening in this video?" \
   --mllm qwen \
-  --model-id /path/or/hf/id \
-  --processor-path /path/to/processor \
   --output-dir /tmp/autogaze_e2_dummy
 ```
 
@@ -157,10 +156,10 @@ python scripts/infer_full.py \
   --video-path dummy \
   --query-text "What is happening in this video?" \
   --mllm qwen \
-  --model-id Qwen/Qwen2.5-VL-7B-Instruct \
+  --model-id weights/Qwen2.5-VL-7B-Instruct \
   --mllm-module transformers \
   --mllm-class AutoModelForVision2Seq \
-  --processor-path Qwen/Qwen2.5-VL-7B-Instruct \
+  --processor-path weights/Qwen2.5-VL-7B-Instruct \
   --allow-real-model-loading \
   --local-files-only \
   --device cuda \
@@ -183,8 +182,8 @@ python scripts/infer_full.py \
   --vision-encoder vjepa2 \
   --vision-encoder-ckpt weights/vjepa2-vitl-fpc64-256 \
   --mllm qwen \
-  --model-id Qwen/Qwen2.5-VL-7B-Instruct \
-  --processor-path Qwen/Qwen2.5-VL-7B-Instruct \
+  --model-id weights/Qwen2.5-VL-7B-Instruct \
+  --processor-path weights/Qwen2.5-VL-7B-Instruct \
   --allow-real-model-loading \
   --local-files-only \
   --device cuda \
@@ -285,7 +284,7 @@ Encoder-side acceleration is only marked when real AutoGaze execution is used wi
 
 - V-JEPA2 real loading uses the configured `module_path` and `class_name`, defaulting to `transformers.AutoModel`; this workspace config points at `weights/vjepa2-vitl-fpc64-256`.
 - Qwen real loading requires both model and official processor availability.
-- No local Qwen checkpoint was found under `weights/`, so Qwen remains blocked unless a real path/model ID is provided.
+- Qwen is configured to use `weights/Qwen2.5-VL-7B-Instruct`; if any shard referenced by `model.safetensors.index.json` is missing, the adapter blocks before model construction and reports the missing filenames.
 - Qwen direct visual token injection is unsupported.
 - NVILA checkpoints are configured locally, but real NVILA generation needs a dedicated adapter before it can be marked supported.
 - Dummy video runs generate explicit stub AutoGaze metadata. They are useful for smoke tests and visualization checks, but are not real model outputs.
