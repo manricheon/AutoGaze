@@ -1,0 +1,74 @@
+experiment:
+  id: A2
+  description: AutoGaze ON + modified SigLIP ViT + NVILA canonical path
+
+autogaze:
+  enabled: true
+  checkpoint_path: null
+  processor_path: null
+  module_path: autogaze.models.autogaze
+  class_name: AutoGaze
+  gaze_ratio: 0.75
+  task_loss_requirement: 0.7
+  strict_params: false
+
+vision_encoder:
+  name: modified_siglip
+  checkpoint_path: null
+  config_path: null
+  processor_path: null
+  module_path: autogaze.vision_encoders.siglip.modeling_siglip
+  class_name: SiglipVisionModel
+  patch_size: 16
+  resolution: 224
+  output_dim: 768
+
+mllm:
+  name: nvila
+  checkpoint_path: null
+  config_path: null
+  processor_path: null
+  tokenizer_path: null
+  module_path: transformers
+  class_name: AutoModel
+  official_processor_path: true
+
+frame_selection:
+  mode: sample
+  num_frames: 16
+  frame_interval: 1
+  max_windows: 1
+
+scaling:
+  mode: resize
+  resolution: 224
+  patch_size: 16
+  chop_size: 224
+  chop_overlap: 0
+  max_chops: null
+  chop_merge_mode: metadata_only
+
+runtime:
+  device: cpu
+  dtype: float32
+  allow_real_model_loading: false
+
+generation:
+  max_new_tokens: 32
+
+visualization:
+  overlay_style: mask
+  overlay_alpha: 0.35
+  multi_scale_overlay: true
+  show_patch_index: false
+  show_scale_label: false
+  metadata_placement: outside
+  info_panel_position: bottom
+  save_overlay_video: false
+  save_side_by_side_video: false
+  save_scale_panel_video: false
+  video_export_mode: sampled_only
+  video_fps: 4.0
+
+output:
+  output_dir: outputs/poc_inference/A2
