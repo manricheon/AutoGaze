@@ -48,6 +48,7 @@ mllm:
     device_map: auto
     max_batch_size_siglip: 32
   processor_from_pretrained_kwargs:
+    autogaze_model_id: weights/AutoGaze
     max_batch_size_autogaze: 16
 
 frame_selection:

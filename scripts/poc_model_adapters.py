@@ -743,6 +743,16 @@ def _processor_from_pretrained_kwargs(config: Mapping[str, Any]) -> dict[str, An
 
 def _nvila_processor_from_pretrained_kwargs(config: Mapping[str, Any]) -> dict[str, Any]:
     kwargs = _processor_from_pretrained_kwargs(config)
+    autogaze_model_id = (
+        kwargs.get("autogaze_model_id")
+        or config.get("autogaze_model_id")
+        or config.get("poc_autogaze_processor_path")
+        or config.get("poc_autogaze_checkpoint_path")
+    )
+    if autogaze_model_id is None and _resolve_local_path("weights/AutoGaze").exists():
+        autogaze_model_id = "weights/AutoGaze"
+    if autogaze_model_id is not None:
+        kwargs["autogaze_model_id"] = _model_reference_for_loading(autogaze_model_id)
     if not bool(config.get("sync_autogaze_controls_from_config", False)):
         return kwargs
 

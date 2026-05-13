@@ -66,6 +66,8 @@ Local defaults point at this workspace cache:
 
 Relative paths are resolved from the repo root.
 
+For NVILA, the local `weights/NVILA-8B-HD-Video/preprocessor_config.json` may still contain the upstream default `autogaze_model_id: bfshi/AutoGaze`. The PoC configs override that processor argument to `weights/AutoGaze`, and the adapter resolves it to an absolute local path before loading. This avoids offline failures such as `bfshi/AutoGaze is not a local folder and is not a valid model`.
+
 ## Real Loading Policy
 
 By default, scripts do not load heavy checkpoints. They run guarded smoke paths and record `stub`, `skipped`, or `blocked` adapter status.

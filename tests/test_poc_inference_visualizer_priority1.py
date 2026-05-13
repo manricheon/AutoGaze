@@ -60,6 +60,7 @@ def test_configs_reference_local_weight_cache_when_available() -> None:
     assert a2["vision_encoder"]["checkpoint_path"] == "weights/siglip2-base-patch16-224"
     assert a2["vision_encoder"]["from_pretrained_kwargs"]["scales"] == "32+64+112+224"
     assert a2["mllm"]["checkpoint_path"] == "weights/NVILA-8B-HD-Video"
+    assert a2["mllm"]["processor_from_pretrained_kwargs"]["autogaze_model_id"] == "weights/AutoGaze"
     assert a2["mllm"]["local_files_only"] is True
     assert a2["mllm"]["trust_remote_code"] is True
     assert a2["mllm"]["class_name"] == "AutoModel"
@@ -512,11 +513,13 @@ def test_nvila_official_processor_path_and_autogaze_controls(monkeypatch: pytest
             "poc_autogaze_enabled": False,
             "poc_gaze_ratio": 0.75,
             "poc_task_loss_requirement": 0.7,
+            "poc_autogaze_checkpoint_path": "weights/AutoGaze",
         }
     )
     status = adapter.load(allow_real_model_loading=True, device="cpu", dtype="float32")
     assert status.status == "real"
     assert status.metadata["processor_status"] == "real"
+    assert status.metadata["processor_autogaze_controls"]["autogaze_model_id"].endswith("weights/AutoGaze")
     assert status.metadata["processor_autogaze_controls"]["gazing_ratio_tile"] is None
     assert status.metadata["processor_autogaze_controls"]["gazing_ratio_thumbnail"] is None
     result = adapter.generate(

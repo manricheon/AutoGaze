@@ -348,6 +348,8 @@ def _sync_mllm_with_poc_autogaze_controls(cfg: dict[str, Any], gaze: Any) -> Non
     mllm["poc_autogaze_status"] = getattr(gaze, "status", None)
     mllm["poc_gaze_ratio"] = nested_get(cfg, "autogaze.gaze_ratio")
     mllm["poc_task_loss_requirement"] = nested_get(cfg, "autogaze.task_loss_requirement")
+    mllm["poc_autogaze_checkpoint_path"] = nested_get(cfg, "autogaze.checkpoint_path")
+    mllm["poc_autogaze_processor_path"] = nested_get(cfg, "autogaze.processor_path")
 
 
 def _failure_reason_for_blocked_stages(skipped: list[dict[str, str]], blocked_stages: list[str]) -> str | None:
