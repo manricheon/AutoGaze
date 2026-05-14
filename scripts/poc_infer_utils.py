@@ -2872,6 +2872,8 @@ def add_streaming_window_result(
     autogaze_stage_latency_ms = float(autogaze_latency_ms or 0.0)
     autogaze_total_latency_ms = float(preprocessing_latency_ms or 0.0) + autogaze_stage_latency_ms
     frame_records = [_offset_record(record, processed_offset) for record in prepared.frame_records]
+    source_frame_count = _source_frame_count(frame_records)
+    processed_frame_count = len(frame_records)
     per_frame = [_offset_record(record, processed_offset) for record in gaze.per_frame]
     aggregate["frame_records"].extend(frame_records)
     aggregate["per_frame"].extend(per_frame)
@@ -2898,7 +2900,8 @@ def add_streaming_window_result(
             "window_id": stream_window.window_id,
             "source_frame_indices": list(stream_window.frame_indices),
             "effective_num_frames": stream_window.effective_num_frames,
-            "processed_frame_count": len(frame_records),
+            "source_frame_count": source_frame_count,
+            "processed_frame_count": processed_frame_count,
             "visualization_frame_count": visualization_count,
             "original_token_count": gaze.original_token_count,
             "selected_token_count": gaze.selected_token_count,
@@ -2907,6 +2910,19 @@ def add_streaming_window_result(
             "autogaze_preprocessing_latency_ms": preprocessing_latency_ms,
             "autogaze_latency_ms": autogaze_total_latency_ms,
             "autogaze_latency_includes_preprocessing": True,
+            "autogaze_latency_scope": "preprocessing_plus_autogaze_stage_over_processed_frames",
+            "autogaze_latency_source_frame_count": source_frame_count,
+            "autogaze_latency_processed_frame_count": processed_frame_count,
+            "autogaze_latency_per_source_frame_ms": _safe_latency_per_item(autogaze_total_latency_ms, source_frame_count),
+            "autogaze_latency_per_processed_frame_ms": _safe_latency_per_item(autogaze_total_latency_ms, processed_frame_count),
+            "autogaze_preprocessing_latency_per_processed_frame_ms": _safe_latency_per_item(
+                preprocessing_latency_ms,
+                processed_frame_count,
+            ),
+            "autogaze_stage_latency_per_processed_frame_ms": _safe_latency_per_item(
+                autogaze_stage_latency_ms,
+                processed_frame_count,
+            ),
             "autogaze_model_forward_latency_ms": gaze.runtime_metadata.get("autogaze_model_forward_latency_ms"),
             "autogaze_result_build_latency_ms": gaze.runtime_metadata.get("autogaze_result_build_latency_ms"),
             "autogaze_stage_latency_ms": gaze.runtime_metadata.get("autogaze_stage_latency_ms", autogaze_stage_latency_ms),
@@ -3080,6 +3096,11 @@ def build_streaming_metrics(
     real_stub_blocked_status = gaze_statuses[0] if len(set(gaze_statuses)) <= 1 and gaze_statuses else "mixed"
     runtime_metadata = dict(aggregate.get("runtime_metadata") or {})
     nvila_hd = nvila_hd_effective_settings(cfg)
+    source_frame_count = _source_frame_count(list(aggregate["frame_records"]))
+    processed_frame_count = int(aggregate["processed_frame_count"])
+    autogaze_preprocessing_latency_ms = _sum_optional_metric(aggregate["per_window_metrics"], "autogaze_preprocessing_latency_ms")
+    autogaze_stage_latency_ms = sum(float(item["autogaze_stage_latency_ms"] or 0.0) for item in aggregate["per_window_metrics"])
+    autogaze_total_latency_ms = sum(float(item["autogaze_latency_ms"] or 0.0) for item in aggregate["per_window_metrics"])
     return {
         "mode": mode,
         "config_path": cfg.get("_config_path"),
@@ -3091,7 +3112,7 @@ def build_streaming_metrics(
         "processed_frame_count": aggregate["processed_frame_count"],
         "number_of_frames": aggregate["processed_frame_count"],
         "number_of_processed_frames": aggregate["processed_frame_count"],
-        "number_of_source_frames": len({int(item.get("source_frame_index", idx)) for idx, item in enumerate(aggregate["frame_records"])}),
+        "number_of_source_frames": source_frame_count,
         "number_of_windows": len(aggregate["windows"]),
         "spatial_chops_per_window": {
             str(window.get("window_id", idx)): int(window.get("spatial_chop_count", len(window.get("records", []))))
@@ -3157,11 +3178,24 @@ def build_streaming_metrics(
         "vision_encoder_latency_per_window_ms": [item["vision_encoder_latency_ms"] for item in aggregate["per_window_metrics"]],
         "mllm_latency_per_window_ms": [item["mllm_generation_latency_ms"] for item in aggregate["per_window_metrics"]],
         "autogaze_latency_includes_preprocessing": True,
-        "autogaze_preprocessing_latency_ms": _sum_optional_metric(aggregate["per_window_metrics"], "autogaze_preprocessing_latency_ms"),
-        "autogaze_latency_ms": sum(float(item["autogaze_latency_ms"] or 0.0) for item in aggregate["per_window_metrics"]),
+        "autogaze_latency_scope": "preprocessing_plus_autogaze_stage_over_processed_frames",
+        "autogaze_latency_source_frame_count": source_frame_count,
+        "autogaze_latency_processed_frame_count": processed_frame_count,
+        "autogaze_latency_per_source_frame_ms": _safe_latency_per_item(autogaze_total_latency_ms, source_frame_count),
+        "autogaze_latency_per_processed_frame_ms": _safe_latency_per_item(autogaze_total_latency_ms, processed_frame_count),
+        "autogaze_preprocessing_latency_per_processed_frame_ms": _safe_latency_per_item(
+            autogaze_preprocessing_latency_ms,
+            processed_frame_count,
+        ),
+        "autogaze_stage_latency_per_processed_frame_ms": _safe_latency_per_item(
+            autogaze_stage_latency_ms,
+            processed_frame_count,
+        ),
+        "autogaze_preprocessing_latency_ms": autogaze_preprocessing_latency_ms,
+        "autogaze_latency_ms": autogaze_total_latency_ms,
         "autogaze_model_forward_latency_ms": _sum_optional_metric(aggregate["per_window_metrics"], "autogaze_model_forward_latency_ms"),
         "autogaze_result_build_latency_ms": _sum_optional_metric(aggregate["per_window_metrics"], "autogaze_result_build_latency_ms"),
-        "autogaze_stage_latency_ms": sum(float(item["autogaze_stage_latency_ms"] or 0.0) for item in aggregate["per_window_metrics"]),
+        "autogaze_stage_latency_ms": autogaze_stage_latency_ms,
         "mllm_generation_latency_ms": sum(
             float(item["mllm_generation_latency_ms"] or 0.0) for item in aggregate["per_window_metrics"]
         ),
@@ -3210,6 +3244,8 @@ def build_metrics(
     autogaze_stage_latency_ms = float(gaze.runtime_metadata.get("autogaze_stage_latency_ms") or gaze.latency_ms or 0.0)
     autogaze_preprocessing_latency_ms = float(preprocessing_latency_ms or 0.0)
     autogaze_total_latency_ms = autogaze_preprocessing_latency_ms + autogaze_stage_latency_ms
+    source_frame_count = _source_frame_count(prepared.frame_records)
+    processed_frame_count = len(prepared.frame_records)
     nvila_hd = nvila_hd_effective_settings(cfg)
     return {
         "mode": mode,
@@ -3218,9 +3254,9 @@ def build_metrics(
         "query_text": query_text,
         "frame_selection_mode": prepared.frame_selection.mode,
         "frame_interval": prepared.frame_selection.frame_interval,
-        "number_of_frames": len(prepared.frame_records),
-        "number_of_processed_frames": len(prepared.frame_records),
-        "number_of_source_frames": _source_frame_count(prepared.frame_records),
+        "number_of_frames": processed_frame_count,
+        "number_of_processed_frames": processed_frame_count,
+        "number_of_source_frames": source_frame_count,
         "number_of_windows": len(prepared.frame_selection.windows),
         "scaling_mode": prepared.scaling_metadata["scaling_mode"],
         "resolution": prepared.scaling_metadata["resolution"],
@@ -3262,6 +3298,19 @@ def build_metrics(
         "autogaze_preprocessing_latency_ms": preprocessing_latency_ms,
         "autogaze_latency_ms": autogaze_total_latency_ms,
         "autogaze_latency_includes_preprocessing": True,
+        "autogaze_latency_scope": "preprocessing_plus_autogaze_stage_over_processed_frames",
+        "autogaze_latency_source_frame_count": source_frame_count,
+        "autogaze_latency_processed_frame_count": processed_frame_count,
+        "autogaze_latency_per_source_frame_ms": _safe_latency_per_item(autogaze_total_latency_ms, source_frame_count),
+        "autogaze_latency_per_processed_frame_ms": _safe_latency_per_item(autogaze_total_latency_ms, processed_frame_count),
+        "autogaze_preprocessing_latency_per_processed_frame_ms": _safe_latency_per_item(
+            autogaze_preprocessing_latency_ms,
+            processed_frame_count,
+        ),
+        "autogaze_stage_latency_per_processed_frame_ms": _safe_latency_per_item(
+            autogaze_stage_latency_ms,
+            processed_frame_count,
+        ),
         "autogaze_model_forward_latency_ms": gaze.runtime_metadata.get("autogaze_model_forward_latency_ms"),
         "autogaze_result_build_latency_ms": gaze.runtime_metadata.get("autogaze_result_build_latency_ms"),
         "autogaze_stage_latency_ms": autogaze_stage_latency_ms,
@@ -3292,6 +3341,12 @@ def _sum_optional_metric(items: list[Mapping[str, Any]], key: str) -> float | No
     if not any(value is not None for value in values):
         return None
     return sum(float(value or 0.0) for value in values)
+
+
+def _safe_latency_per_item(latency_ms: float | None, count: int | None) -> float | None:
+    if latency_ms is None or count is None or int(count) <= 0:
+        return None
+    return float(latency_ms) / float(count)
 
 
 def _prepared_tile_count(prepared: PreparedVideo, nvila_hd: Mapping[str, Any]) -> int | None:

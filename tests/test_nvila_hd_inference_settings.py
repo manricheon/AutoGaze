@@ -245,9 +245,14 @@ def test_infer_full_full_mode_comparison_visualizations(tmp_path: Path) -> None:
 
         metrics = json.loads((output_dir / "logs" / "metrics.json").read_text(encoding="utf-8"))
         assert metrics["autogaze_latency_includes_preprocessing"] is True
+        assert metrics["autogaze_latency_scope"] == "preprocessing_plus_autogaze_stage_over_processed_frames"
         assert metrics["autogaze_preprocessing_latency_ms"] == metrics["preprocessing_latency_ms"]
         assert metrics["autogaze_latency_ms"] >= metrics["autogaze_stage_latency_ms"] >= metrics["autogaze_result_build_latency_ms"] >= 0.0
         assert metrics["autogaze_latency_ms"] >= metrics["autogaze_preprocessing_latency_ms"] >= 0.0
+        assert metrics["autogaze_latency_source_frame_count"] == expected_frames
+        assert metrics["autogaze_latency_processed_frame_count"] == (expected_crop_frames or expected_frames)
+        assert metrics["autogaze_latency_per_source_frame_ms"] is not None
+        assert metrics["autogaze_latency_per_processed_frame_ms"] is not None
         assert metrics["module_processing_latency_ms"] >= metrics["autogaze_latency_ms"]
         if expected_crop_frames is not None:
             assert metrics["number_of_processed_frames"] == expected_crop_frames

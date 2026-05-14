@@ -138,6 +138,8 @@ Supported frame modes:
 - `interval`: keeps frames matching `frame_interval` into bounded windows.
 - `sample`: uses frame-count metadata to choose target indices; if metadata is unavailable it fails clearly instead of silently full-loading the video.
 
+Latency metrics use the same scope across `sample`, `chunk`, `interval`, and `all`: `autogaze_latency_ms` includes input preprocessing plus the AutoGaze stage over all processed frames/crops. Use `autogaze_latency_source_frame_count`, `autogaze_latency_processed_frame_count`, `autogaze_latency_per_source_frame_ms`, and `autogaze_latency_per_processed_frame_ms` to compare interval and chop runs.
+
 Full pipeline streaming uses `window_independent_generation` by default. It writes one answer record per window to `predictions/window_answers.json` and a combined list-style `predictions/answer.json`. `aggregate_window_answers` is intentionally not implemented yet. `first_window_only` is available for quick checks, and `blocked_multi_window_generation` allows streaming AutoGaze while skipping MLLM generation.
 
 Visualization in streaming mode writes frame images immediately and uses incremental MP4 writers for `sampled_only` exports. `full_length` video export is blocked until it can be implemented without storing all frames.

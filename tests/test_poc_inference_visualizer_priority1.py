@@ -359,6 +359,71 @@ def test_frame_selection_scaling_and_chop_metadata() -> None:
     assert hybrid_chopped.frame_records[0]["chop_input_box"] == [0, 0, 32, 32]
 
 
+def test_full_interval_resize_then_chop_latency_counts_all_interval_frames(tmp_path: Path) -> None:
+    cfg = load_config(_cfg("A2_modified_siglip_nvila_on.yaml"))
+    cfg["input"] = {"dummy_frames": 188, "dummy_resolution": 128}
+    cfg["frame_selection"] = {
+        "mode": "interval",
+        "num_frames": 16,
+        "frame_interval": 4,
+        "max_windows": None,
+    }
+    cfg["scaling"] = {
+        **cfg["scaling"],
+        "mode": "resize_then_chop",
+        "resolution": 32,
+        "chop_size": 32,
+        "max_chops": 2,
+        "resize_before_chop_threshold": 1,
+        "resize_before_chop_factor": 0.5,
+    }
+    cfg["runtime"] = {**cfg["runtime"], "warmup_runs": 0}
+    cfg["visualization"] = {
+        **cfg["visualization"],
+        "save_frame_images": False,
+        "save_overlay_video": False,
+        "save_side_by_side_video": False,
+        "save_scale_panel_video": False,
+    }
+    cfg_path = _write_cfg(tmp_path, cfg)
+    output_dir = tmp_path / "interval_chop"
+
+    summary = infer_full.run(
+        infer_full.parse_args(
+            [
+                "--config",
+                str(cfg_path),
+                "--video-path",
+                "dummy",
+                "--query-text",
+                "Describe the video.",
+                "--output-dir",
+                str(output_dir),
+                "--allow-dummy-weights",
+                "--no-progress",
+            ]
+        )
+    )
+
+    assert summary["status"] in {"partial", "ok"}
+    metrics = json.loads((output_dir / "logs" / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["frame_selection_mode"] == "interval"
+    assert metrics["frame_interval"] == 4
+    assert metrics["number_of_windows"] == 3
+    assert metrics["number_of_source_frames"] == 47
+    assert metrics["number_of_processed_frames"] == 96
+    assert metrics["mllm_input_frame_count"] == 96
+    assert metrics["autogaze_latency_includes_preprocessing"] is True
+    assert metrics["autogaze_latency_scope"] == "preprocessing_plus_autogaze_stage_over_processed_frames"
+    assert metrics["autogaze_latency_source_frame_count"] == 47
+    assert metrics["autogaze_latency_processed_frame_count"] == 96
+    assert metrics["autogaze_latency_ms"] >= metrics["autogaze_stage_latency_ms"] >= 0.0
+    assert metrics["autogaze_latency_per_source_frame_ms"] is not None
+    assert metrics["autogaze_latency_per_processed_frame_ms"] is not None
+    assert metrics["autogaze_preprocessing_latency_per_processed_frame_ms"] is not None
+    assert metrics["autogaze_stage_latency_per_processed_frame_ms"] is not None
+
+
 def test_chop_mode_expands_processed_frames_and_token_counts(tmp_path: Path) -> None:
     output_dir = tmp_path / "autogaze_chop"
     args = infer_autogaze.parse_args(
