@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
+import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -12,6 +14,7 @@ if str(SCRIPTS) not in sys.path:
 
 import infer_autogaze
 import infer_full
+from poc_model_adapters import NVILAAdapter
 from poc_infer_utils import apply_nvila_hd_overrides, load_config, nvila_hd_effective_settings
 
 
@@ -359,6 +362,57 @@ def test_infer_full_chop_mode_saves_latency_memory_metrics(tmp_path: Path) -> No
     assert metrics["module_processing_latency_ms"] >= metrics["autogaze_latency_ms"]
     assert isinstance(metrics["memory_snapshots"], list)
     assert metrics["process_peak_rss_mib"] is not None
+
+
+def test_nvila_adapter_reports_processor_and_model_generate_latency() -> None:
+    class FakeTokenizer:
+        video_token = "<video>"
+
+    class FakeProcessor:
+        tokenizer = FakeTokenizer()
+
+        def __call__(self, **kwargs):
+            assert kwargs["text"].startswith("<video>")
+            time.sleep(0.001)
+            return {
+                "input_ids": torch.tensor([[1, 2]], dtype=torch.long),
+                "pixel_values": torch.zeros((1, 3, 8, 8), dtype=torch.float32),
+            }
+
+        def batch_decode(self, values, skip_special_tokens: bool = True):
+            return ["ok"]
+
+    class FakeModel:
+        device = torch.device("cpu")
+
+        def generate(self, **kwargs):
+            time.sleep(0.001)
+            return torch.tensor([[1, 2, 3]], dtype=torch.long)
+
+    adapter = NVILAAdapter(
+        {
+            "prompt_template": "{video_token}\n\n{prompt}",
+            "processor_from_pretrained_kwargs": {
+                "num_video_frames": 16,
+                "autogaze_model_id": "weights/AutoGaze",
+            },
+        }
+    )
+    adapter.processor = FakeProcessor()
+    adapter.model = FakeModel()
+    result = adapter.generate(
+        query_text="Describe.",
+        video=torch.zeros((1, 16, 3, 8, 8), dtype=torch.float32),
+        max_new_tokens=1,
+    )
+    metadata = result["metadata"]
+    assert result["status"] == "real"
+    assert metadata["mllm_processor_latency_ms"] > 0.0
+    assert metadata["mllm_input_move_latency_ms"] >= 0.0
+    assert metadata["mllm_model_generate_latency_ms"] > 0.0
+    assert metadata["mllm_generation_timed_scope"] == "official_processor_plus_input_move_plus_model_generate"
+    assert metadata["nvila_processor_internal_autogaze_timing_status"] == "not_isolated"
+    assert "AutoGaze tile/thumbnail selection when enabled in the NVILA processor" in metadata["nvila_processor_latency_may_include"]
 
 
 def test_infer_autogaze_main_prints_concise_latency_summary(tmp_path: Path, capsys) -> None:

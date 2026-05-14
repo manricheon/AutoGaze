@@ -555,6 +555,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     metrics["mllm_processor_video_input_kind"] = generation_metadata.get("video_input_kind")
     metrics["mllm_target_frame_count"] = generation_metadata.get("target_frame_count")
+    metrics["mllm_processor_latency_ms"] = generation_metadata.get("mllm_processor_latency_ms")
+    metrics["mllm_input_move_latency_ms"] = generation_metadata.get("mllm_input_move_latency_ms")
+    metrics["mllm_model_generate_latency_ms"] = generation_metadata.get("mllm_model_generate_latency_ms")
+    metrics["mllm_generation_timed_scope"] = generation_metadata.get("mllm_generation_timed_scope")
+    metrics["nvila_processor_internal_autogaze_timing_status"] = generation_metadata.get(
+        "nvila_processor_internal_autogaze_timing_status"
+    )
+    metrics["nvila_processor_latency_may_include"] = generation_metadata.get("nvila_processor_latency_may_include")
     metrics["mllm_chop_tensor_attempted"] = bool(generation_metadata.get("chop_tensor_attempted", prepared.chop_metadata is not None))
     metrics["mllm_chop_source_fallback_used"] = bool(generation_metadata.get("chop_source_fallback_used", False))
     metrics["gazing_info_passed_to_vision_encoder"] = bool(gaze.gazing_info_for_vit is not None and vision_required)
@@ -952,6 +960,7 @@ def _run_streaming_full(args: argparse.Namespace, *, cfg: dict[str, Any], output
             visualization_latency_ms=visualization_latency_ms,
             generation_status=generation_status,
             output_text=generation.get("answer"),
+            generation_metadata=generation.get("metadata") if isinstance(generation.get("metadata"), dict) else None,
             skipped_stages=window_skipped,
         )
         total_module_latency += (

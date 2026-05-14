@@ -559,6 +559,8 @@ def format_concise_summary(summary: Mapping[str, Any]) -> str:
             f"ag_build={_fmt_ms(metrics.get('autogaze_result_build_latency_ms'))} "
             f"autogaze={_fmt_ms(metrics.get('autogaze_latency_ms'))} "
             f"vision={_fmt_ms(metrics.get('vision_encoder_latency_ms'))} "
+            f"mllm_prep={_fmt_ms(metrics.get('mllm_processor_latency_ms'))} "
+            f"mllm_model={_fmt_ms(metrics.get('mllm_model_generate_latency_ms'))} "
             f"mllm={_fmt_ms(metrics.get('mllm_generation_latency_ms'))} "
             f"module={_fmt_ms(metrics.get('module_processing_latency_ms'))} "
             f"viz={_fmt_ms(metrics.get('visualization_latency_ms'))} "
@@ -3313,6 +3315,7 @@ def add_streaming_window_result(
     visualization_latency_ms: float | None = None,
     generation_status: str | None = None,
     output_text: str | None = None,
+    generation_metadata: Mapping[str, Any] | None = None,
     skipped_stages: list[dict[str, str]] | None = None,
 ) -> tuple[int, int]:
     processed_offset = int(aggregate["processed_frame_count"])
@@ -3324,6 +3327,7 @@ def add_streaming_window_result(
     source_frame_count = _source_frame_count(frame_records)
     processed_frame_count = len(frame_records)
     window_memory_metrics = prepared_video_memory_metrics(prepared)
+    generation_metadata = dict(generation_metadata or {})
     per_frame = [_offset_record(record, processed_offset) for record in gaze.per_frame]
     aggregate["frame_records"].extend(frame_records)
     aggregate["per_frame"].extend(per_frame)
@@ -3389,6 +3393,13 @@ def add_streaming_window_result(
             "autogaze_result_build_latency_ms": gaze.runtime_metadata.get("autogaze_result_build_latency_ms"),
             "autogaze_stage_latency_ms": gaze.runtime_metadata.get("autogaze_stage_latency_ms", autogaze_stage_latency_ms),
             "vision_encoder_latency_ms": vision_encoder_latency_ms,
+            "mllm_processor_latency_ms": generation_metadata.get("mllm_processor_latency_ms"),
+            "mllm_input_move_latency_ms": generation_metadata.get("mllm_input_move_latency_ms"),
+            "mllm_model_generate_latency_ms": generation_metadata.get("mllm_model_generate_latency_ms"),
+            "mllm_generation_timed_scope": generation_metadata.get("mllm_generation_timed_scope"),
+            "nvila_processor_internal_autogaze_timing_status": generation_metadata.get(
+                "nvila_processor_internal_autogaze_timing_status"
+            ),
             "mllm_generation_latency_ms": mllm_generation_latency_ms,
             "visualization_latency_ms": visualization_latency_ms,
             "generation_status": generation_status,
@@ -3692,6 +3703,15 @@ def build_streaming_metrics(
             item.get("autogaze_stage_latency_ms") for item in aggregate["per_window_metrics"]
         ],
         "vision_encoder_latency_per_window_ms": [item["vision_encoder_latency_ms"] for item in aggregate["per_window_metrics"]],
+        "mllm_processor_latency_per_window_ms": [
+            item.get("mllm_processor_latency_ms") for item in aggregate["per_window_metrics"]
+        ],
+        "mllm_input_move_latency_per_window_ms": [
+            item.get("mllm_input_move_latency_ms") for item in aggregate["per_window_metrics"]
+        ],
+        "mllm_model_generate_latency_per_window_ms": [
+            item.get("mllm_model_generate_latency_ms") for item in aggregate["per_window_metrics"]
+        ],
         "mllm_latency_per_window_ms": [item["mllm_generation_latency_ms"] for item in aggregate["per_window_metrics"]],
         "autogaze_latency_includes_preprocessing": True,
         "autogaze_latency_scope": "preprocessing_plus_autogaze_stage_over_processed_frames",
@@ -3733,6 +3753,25 @@ def build_streaming_metrics(
         "autogaze_non_forward_latency_ms": autogaze_non_forward_latency_ms,
         "mllm_generation_latency_ms": sum(
             float(item["mllm_generation_latency_ms"] or 0.0) for item in aggregate["per_window_metrics"]
+        ),
+        "mllm_processor_latency_ms": _sum_optional_metric(aggregate["per_window_metrics"], "mllm_processor_latency_ms"),
+        "mllm_input_move_latency_ms": _sum_optional_metric(aggregate["per_window_metrics"], "mllm_input_move_latency_ms"),
+        "mllm_model_generate_latency_ms": _sum_optional_metric(aggregate["per_window_metrics"], "mllm_model_generate_latency_ms"),
+        "mllm_generation_timed_scope": next(
+            (
+                item.get("mllm_generation_timed_scope")
+                for item in aggregate["per_window_metrics"]
+                if item.get("mllm_generation_timed_scope")
+            ),
+            None,
+        ),
+        "nvila_processor_internal_autogaze_timing_status": next(
+            (
+                item.get("nvila_processor_internal_autogaze_timing_status")
+                for item in aggregate["per_window_metrics"]
+                if item.get("nvila_processor_internal_autogaze_timing_status")
+            ),
+            None,
         ),
         "visualization_write_latency_ms": visualization_latency_ms,
         "visualization_latency_ms": visualization_latency_ms,

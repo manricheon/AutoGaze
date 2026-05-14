@@ -5,6 +5,7 @@ import importlib
 import json
 import logging
 import math
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1030,15 +1031,28 @@ class NVILAAdapter(MLLMAdapter):
                 target_frame_count=target_frame_count,
                 batch_pil_frames=True,
             )
+            _sync_for_timing(self.device)
+            processor_start = time.perf_counter()
             inputs = self.processor(text=prompt, videos=video_input, return_tensors="pt")
+            _sync_for_timing(self.device)
+            processor_latency_ms = (time.perf_counter() - processor_start) * 1000
+            input_move_latency_ms = 0.0
             if isinstance(inputs, Mapping):
                 model_device = getattr(self.model, "device", self.device)
+                _sync_for_timing(model_device)
+                input_move_start = time.perf_counter()
                 inputs = {
                     key: value.to(model_device) if isinstance(value, torch.Tensor) else value
                     for key, value in inputs.items()
                 }
+                _sync_for_timing(model_device)
+                input_move_latency_ms = (time.perf_counter() - input_move_start) * 1000
+            _sync_for_timing(getattr(self.model, "device", self.device))
+            generate_start = time.perf_counter()
             with torch.inference_mode():
                 outputs = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
+            _sync_for_timing(getattr(self.model, "device", self.device))
+            model_generate_latency_ms = (time.perf_counter() - generate_start) * 1000
             input_ids = inputs.get("input_ids") if isinstance(inputs, Mapping) else None
             decode_input = outputs[:, input_ids.shape[1] :] if isinstance(outputs, torch.Tensor) and isinstance(input_ids, torch.Tensor) else outputs
             decoded = self.processor.batch_decode(decode_input, skip_special_tokens=True)
@@ -1058,10 +1072,22 @@ class NVILAAdapter(MLLMAdapter):
                     "processor_autogaze_controls": _jsonable_processor_kwargs(processor_kwargs),
                     "target_frame_count": target_frame_count,
                     "autogaze_visual_tokens_injected": False,
+                    "mllm_processor_latency_ms": processor_latency_ms,
+                    "mllm_input_move_latency_ms": input_move_latency_ms,
+                    "mllm_model_generate_latency_ms": model_generate_latency_ms,
+                    "mllm_generation_timed_scope": "official_processor_plus_input_move_plus_model_generate",
+                    "nvila_processor_internal_autogaze_timing_status": "not_isolated",
+                    "nvila_processor_latency_may_include": [
+                        "official video preprocessing",
+                        "AutoGaze tile/thumbnail selection when enabled in the NVILA processor",
+                        "processor-side vision input construction",
+                    ],
                     "note": (
                         "NVILA generation uses the official processor video path. "
                         "The separate PoC AutoGaze stage is retained for visualization and metrics; "
-                        "direct visual-token injection into NVILA is not claimed."
+                        "direct visual-token injection into NVILA is not claimed. "
+                        "If the official processor runs AutoGaze internally, that time is included in "
+                        "mllm_processor_latency_ms and is not isolated as autogaze_model_forward_latency_ms."
                     ),
                 },
             }
@@ -2676,6 +2702,12 @@ def _jsonable_processor_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
         else:
             result[key] = str(value)
     return result
+
+
+def _sync_for_timing(device: Any) -> None:
+    text = str(device or "")
+    if text.startswith("cuda") and torch.cuda.is_available():
+        torch.cuda.synchronize()
 
 
 def _torch_dtype(dtype: str) -> torch.dtype | None:
