@@ -302,6 +302,8 @@ def test_infer_full_main_prints_concise_latency_summary(tmp_path: Path, capsys) 
     assert "Frames:" in captured.out
     assert "Tokens:" in captured.out
     assert "Latency ms:" in captured.out
+    assert "ag_forward=0.00(not_run)" in captured.out
+    assert "ag_build=" in captured.out
     assert "Per-item ms:" in captured.out
     assert "Memory:" in captured.out
 
@@ -348,6 +350,10 @@ def test_infer_full_chop_mode_saves_latency_memory_metrics(tmp_path: Path) -> No
     assert metrics["autogaze_latency_includes_preprocessing"] is True
     assert metrics["autogaze_latency_source_frame_count"] == 4
     assert metrics["autogaze_latency_processed_frame_count"] == 16
+    assert metrics["autogaze_model_forward_status"] == "not_run"
+    assert metrics["autogaze_model_forward_latency_ms"] is None
+    assert metrics["autogaze_model_forward_reason"]
+    assert metrics["autogaze_non_forward_latency_ms"] == metrics["autogaze_result_build_latency_ms"]
     assert metrics["autogaze_latency_per_source_frame_ms"] is not None
     assert metrics["autogaze_latency_per_processed_frame_ms"] is not None
     assert metrics["module_processing_latency_ms"] >= metrics["autogaze_latency_ms"]
@@ -376,6 +382,8 @@ def test_infer_autogaze_main_prints_concise_latency_summary(tmp_path: Path, caps
     assert "Frames:" in captured.out
     assert "Tokens:" in captured.out
     assert "Latency ms:" in captured.out
+    assert "ag_forward=0.00(not_run)" in captured.out
+    assert "ag_build=" in captured.out
     assert "Memory:" in captured.out
 
 

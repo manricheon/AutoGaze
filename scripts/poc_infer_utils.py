@@ -555,8 +555,9 @@ def format_concise_summary(summary: Mapping[str, Any]) -> str:
         (
             "Latency ms: "
             f"pre={_fmt_ms(metrics.get('autogaze_preprocessing_latency_ms'))} "
+            f"ag_forward={_fmt_forward_latency(metrics)} "
+            f"ag_build={_fmt_ms(metrics.get('autogaze_result_build_latency_ms'))} "
             f"autogaze={_fmt_ms(metrics.get('autogaze_latency_ms'))} "
-            f"ag_forward={_fmt_ms(metrics.get('autogaze_model_forward_latency_ms'))} "
             f"vision={_fmt_ms(metrics.get('vision_encoder_latency_ms'))} "
             f"mllm={_fmt_ms(metrics.get('mllm_generation_latency_ms'))} "
             f"module={_fmt_ms(metrics.get('module_processing_latency_ms'))} "
@@ -599,6 +600,15 @@ def _fmt_ms(value: Any) -> str:
     if value is None:
         return "n/a"
     return f"{float(value):.2f}"
+
+
+def _fmt_forward_latency(metrics: Mapping[str, Any]) -> str:
+    value = metrics.get("autogaze_model_forward_latency_ms")
+    if value is not None:
+        return _fmt_ms(value)
+    if metrics.get("autogaze_model_forward_status") == "not_run":
+        return "0.00(not_run)"
+    return "n/a"
 
 
 def _fmt_mib(value: Any) -> str:
@@ -3309,6 +3319,7 @@ def add_streaming_window_result(
     visualization_offset = int(aggregate["visualization_frame_count"])
     autogaze_stage_latency_ms = float(autogaze_latency_ms or 0.0)
     autogaze_total_latency_ms = float(preprocessing_latency_ms or 0.0) + autogaze_stage_latency_ms
+    model_forward_latency_ms = gaze.runtime_metadata.get("autogaze_model_forward_latency_ms")
     frame_records = [_offset_record(record, processed_offset) for record in prepared.frame_records]
     source_frame_count = _source_frame_count(frame_records)
     processed_frame_count = len(frame_records)
@@ -3363,7 +3374,12 @@ def add_streaming_window_result(
                 autogaze_stage_latency_ms,
                 processed_frame_count,
             ),
-            "autogaze_model_forward_latency_ms": gaze.runtime_metadata.get("autogaze_model_forward_latency_ms"),
+            "autogaze_model_forward_latency_ms": model_forward_latency_ms,
+            "autogaze_model_forward_status": "measured" if model_forward_latency_ms is not None else "not_run",
+            "autogaze_model_forward_reason": None if model_forward_latency_ms is not None else (gaze.reason or gaze.status),
+            "autogaze_non_forward_latency_ms": (
+                autogaze_stage_latency_ms - float(model_forward_latency_ms or 0.0)
+            ),
             "autogaze_model_forward_call_count": gaze.runtime_metadata.get("autogaze_model_forward_call_count"),
             "autogaze_model_forward_micro_batch_size": gaze.runtime_metadata.get("autogaze_model_forward_micro_batch_size"),
             "autogaze_model_forward_batch_latencies_ms": gaze.runtime_metadata.get("autogaze_model_forward_batch_latencies_ms"),
@@ -3547,6 +3563,8 @@ def build_streaming_metrics(
     autogaze_preprocessing_latency_ms = _sum_optional_metric(aggregate["per_window_metrics"], "autogaze_preprocessing_latency_ms")
     autogaze_stage_latency_ms = sum(float(item["autogaze_stage_latency_ms"] or 0.0) for item in aggregate["per_window_metrics"])
     autogaze_total_latency_ms = sum(float(item["autogaze_latency_ms"] or 0.0) for item in aggregate["per_window_metrics"])
+    autogaze_model_forward_latency_ms = _sum_optional_metric(aggregate["per_window_metrics"], "autogaze_model_forward_latency_ms")
+    autogaze_non_forward_latency_ms = _sum_optional_metric(aggregate["per_window_metrics"], "autogaze_non_forward_latency_ms")
     source_tensor_bytes_per_window = [item.get("source_video_tensor_bytes") for item in aggregate["per_window_metrics"]]
     processed_tensor_bytes_per_window = [item.get("processed_video_tensor_bytes") for item in aggregate["per_window_metrics"]]
     processed_expansion_per_window = [item.get("processed_to_source_frame_expansion_ratio") for item in aggregate["per_window_metrics"]]
@@ -3658,6 +3676,15 @@ def build_streaming_metrics(
         "autogaze_model_forward_processed_frame_count_per_window": [
             item.get("autogaze_model_forward_processed_frame_count") for item in aggregate["per_window_metrics"]
         ],
+        "autogaze_model_forward_status_per_window": [
+            item.get("autogaze_model_forward_status") for item in aggregate["per_window_metrics"]
+        ],
+        "autogaze_model_forward_reason_per_window": [
+            item.get("autogaze_model_forward_reason") for item in aggregate["per_window_metrics"]
+        ],
+        "autogaze_non_forward_latency_per_window_ms": [
+            item.get("autogaze_non_forward_latency_ms") for item in aggregate["per_window_metrics"]
+        ],
         "autogaze_result_build_latency_per_window_ms": [
             item.get("autogaze_result_build_latency_ms") for item in aggregate["per_window_metrics"]
         ],
@@ -3682,7 +3709,20 @@ def build_streaming_metrics(
         ),
         "autogaze_preprocessing_latency_ms": autogaze_preprocessing_latency_ms,
         "autogaze_latency_ms": autogaze_total_latency_ms,
-        "autogaze_model_forward_latency_ms": _sum_optional_metric(aggregate["per_window_metrics"], "autogaze_model_forward_latency_ms"),
+        "autogaze_model_forward_latency_ms": autogaze_model_forward_latency_ms,
+        "autogaze_model_forward_status": "measured" if autogaze_model_forward_latency_ms is not None else "not_run",
+        "autogaze_model_forward_reason": (
+            None
+            if autogaze_model_forward_latency_ms is not None
+            else next(
+                (
+                    item.get("autogaze_model_forward_reason")
+                    for item in aggregate["per_window_metrics"]
+                    if item.get("autogaze_model_forward_reason")
+                ),
+                real_stub_blocked_status,
+            )
+        ),
         "autogaze_model_forward_call_count": _sum_optional_count(aggregate["per_window_metrics"], "autogaze_model_forward_call_count"),
         "autogaze_model_forward_processed_frame_count": _sum_optional_count(
             aggregate["per_window_metrics"],
@@ -3690,6 +3730,7 @@ def build_streaming_metrics(
         ),
         "autogaze_result_build_latency_ms": _sum_optional_metric(aggregate["per_window_metrics"], "autogaze_result_build_latency_ms"),
         "autogaze_stage_latency_ms": autogaze_stage_latency_ms,
+        "autogaze_non_forward_latency_ms": autogaze_non_forward_latency_ms,
         "mllm_generation_latency_ms": sum(
             float(item["mllm_generation_latency_ms"] or 0.0) for item in aggregate["per_window_metrics"]
         ),
@@ -3738,6 +3779,7 @@ def build_metrics(
     autogaze_stage_latency_ms = float(gaze.runtime_metadata.get("autogaze_stage_latency_ms") or gaze.latency_ms or 0.0)
     autogaze_preprocessing_latency_ms = float(preprocessing_latency_ms or 0.0)
     autogaze_total_latency_ms = autogaze_preprocessing_latency_ms + autogaze_stage_latency_ms
+    model_forward_latency_ms = gaze.runtime_metadata.get("autogaze_model_forward_latency_ms")
     source_frame_count = _source_frame_count(prepared.frame_records)
     processed_frame_count = len(prepared.frame_records)
     nvila_hd = nvila_hd_effective_settings(cfg)
@@ -3807,7 +3849,10 @@ def build_metrics(
             autogaze_stage_latency_ms,
             processed_frame_count,
         ),
-        "autogaze_model_forward_latency_ms": gaze.runtime_metadata.get("autogaze_model_forward_latency_ms"),
+        "autogaze_model_forward_latency_ms": model_forward_latency_ms,
+        "autogaze_model_forward_status": "measured" if model_forward_latency_ms is not None else "not_run",
+        "autogaze_model_forward_reason": None if model_forward_latency_ms is not None else (gaze.reason or gaze.status),
+        "autogaze_non_forward_latency_ms": autogaze_stage_latency_ms - float(model_forward_latency_ms or 0.0),
         "autogaze_model_forward_call_count": gaze.runtime_metadata.get("autogaze_model_forward_call_count"),
         "autogaze_model_forward_micro_batch_size": gaze.runtime_metadata.get("autogaze_model_forward_micro_batch_size"),
         "autogaze_model_forward_batch_latencies_ms": gaze.runtime_metadata.get("autogaze_model_forward_batch_latencies_ms"),
