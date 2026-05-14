@@ -27,6 +27,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--max-new-tokens", type=int, default=16)
     parser.add_argument("--num-frames", type=int, default=None)
+    parser.add_argument("--max-batch-size-autogaze", type=int, default=None)
+    parser.add_argument("--max-batch-size-siglip", type=int, default=None)
     parser.add_argument("--warmup-runs", type=int, default=None)
     parser.add_argument("--no-progress", action="store_true")
     parser.add_argument("--device", choices=["cpu", "cuda", "mps"], default="cpu")
@@ -153,6 +155,10 @@ def _real_smoke(
             infer_argv.extend(["--query-text", str(query_text)])
         if args.num_frames is not None:
             infer_argv.extend(["--num-frames", str(args.num_frames)])
+        if args.max_batch_size_autogaze is not None:
+            infer_argv.extend(["--max-batch-size-autogaze", str(args.max_batch_size_autogaze)])
+        if args.max_batch_size_siglip is not None:
+            infer_argv.extend(["--max-batch-size-siglip", str(args.max_batch_size_siglip)])
         if args.warmup_runs is not None:
             infer_argv.extend(["--warmup-runs", str(args.warmup_runs)])
         if args.no_progress:

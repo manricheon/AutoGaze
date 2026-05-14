@@ -328,6 +328,13 @@ def test_selected_tier1_dummy_weight_smoke_runs_without_real_checkpoint(tmp_path
     assert answer["generation_metadata"]["real_checkpoint_loaded"] is False
 
 
+def test_smoke_runner_exposes_nvila_hd_batch_size_cli() -> None:
+    result = run_cmd(["scripts/run_external_model_smoke.py", "--help"])
+    assert result.returncode == 0
+    assert "--max-batch-size-autogaze" in result.stdout
+    assert "--max-batch-size-siglip" in result.stdout
+
+
 def test_infer_full_zero_mask_metrics_do_not_claim_encoder_acceleration(tmp_path: Path) -> None:
     args = infer_full.parse_args(
         [
