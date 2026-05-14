@@ -58,6 +58,15 @@ def test_infer_full_full_mode_comparison_configs_load() -> None:
         assert cfg["memory"]["fail_on_full_video_load"] is False
         assert cfg["mllm"]["name"] == "nvila"
         assert cfg["mllm"]["video_input_source"] == "processed_tensor"
+        assert cfg["autogaze"]["enabled"] is True
+        assert cfg["autogaze"]["gaze_ratio"] == 0.75
+        assert cfg["autogaze"]["task_loss_requirement"] == 0.7
+        assert cfg["mllm"]["sync_autogaze_controls_from_config"] is True
+        assert cfg["mllm"]["from_pretrained_kwargs"]["max_batch_size_siglip"] == 32
+        assert cfg["mllm"]["processor_from_pretrained_kwargs"]["num_video_frames_thumbnail"] == 16
+        assert cfg["mllm"]["processor_from_pretrained_kwargs"]["max_batch_size_autogaze"] == 16
+        assert "gazing_ratio_tile" not in cfg["mllm"]["processor_from_pretrained_kwargs"]
+        assert "task_loss_requirement_tile" not in cfg["mllm"]["processor_from_pretrained_kwargs"]
 
     assert resize_short["scaling"]["mode"] == "resize"
     assert chop_short["scaling"]["mode"] == "resize_then_chop"
@@ -185,6 +194,59 @@ def test_infer_full_saves_nvila_hd_metrics_in_dummy_mode(tmp_path: Path) -> None
     answer = json.loads((output_dir / "predictions" / "answer.json").read_text(encoding="utf-8"))
     assert answer["query_text"] == "Describe the video."
     assert answer["query_text_used"] is True
+
+
+def test_infer_full_full_mode_comparison_visualizations(tmp_path: Path) -> None:
+    cases = [
+        ("infer_full_full_resize_short.yaml", "processed_frames", 16, None),
+        ("infer_full_full_resize_then_chop_short.yaml", "merged_chop_source_frames", 16, 64),
+        ("infer_full_full_resize_long.yaml", "processed_frames", 96, None),
+        ("infer_full_full_resize_then_chop_long.yaml", "merged_chop_source_frames", 96, 384),
+    ]
+    for config_name, expected_mode, expected_frames, expected_crop_frames in cases:
+        output_dir = tmp_path / config_name.removesuffix(".yaml")
+        args = [
+            "--config",
+            str(_cfg(config_name)),
+            "--video-path",
+            "dummy",
+            "--query-text",
+            "Describe the video.",
+            "--output-dir",
+            str(output_dir),
+            "--device",
+            "cpu",
+            "--dtype",
+            "float32",
+            "--mllm-dtype",
+            "float32",
+            "--resolution",
+            "32",
+            "--allow-dummy-weights",
+            "--save-overlay-video",
+            "--save-side-by-side-video",
+            "--save-scale-panel-video",
+            "--no-progress",
+        ]
+        if "resize_then_chop" in config_name:
+            args.extend(["--chop-size", "32", "--max-chops", "4"])
+
+        summary = infer_full.run(infer_full.parse_args(args))
+        assert summary["status"] in {"partial", "ok"}
+
+        metadata_path = output_dir / "visualizations" / "autogaze" / "metadata" / "visualization_metadata.json"
+        viz = json.loads(metadata_path.read_text(encoding="utf-8"))
+        assert viz["visualization_mode"] == expected_mode
+        assert viz["frame_count"] == expected_frames
+        assert viz["rendered_frame_count"] == expected_frames
+        assert viz["video_errors"] == {}
+        if expected_crop_frames is not None:
+            assert viz["processed_crop_frame_count"] == expected_crop_frames
+
+        videos_dir = output_dir / "visualizations" / "autogaze" / "videos"
+        assert (videos_dir / "autogaze_overlay.mp4").exists()
+        assert (videos_dir / "autogaze_side_by_side.mp4").exists()
+        assert (videos_dir / "autogaze_scale_panels.mp4").exists()
 
 
 def test_a1_a2_share_nvila_processor_shape_settings_except_autogaze_flag() -> None:

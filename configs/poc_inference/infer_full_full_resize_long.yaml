@@ -1,6 +1,6 @@
 experiment:
   id: INFER_FULL_FULL_RESIZE_LONG
-  description: infer_full full-read resize comparison config for a capped long-video run.
+  description: A2-derived infer_full full-read resize comparison config for a capped long-video run.
 
 autogaze:
   enabled: true
@@ -8,8 +8,8 @@ autogaze:
   processor_path: weights/AutoGaze
   module_path: autogaze.models.autogaze
   class_name: AutoGaze
-  gaze_ratio: 0.25
-  task_loss_requirement: 0.6
+  gaze_ratio: 0.75
+  task_loss_requirement: 0.7
   strict_params: false
 
 vision_encoder:
@@ -37,29 +37,29 @@ mllm:
   official_processor_owns_vision: true
   generation_input_mode: official_processor
   video_input_source: processed_tensor
+  sync_autogaze_controls_from_config: true
   prompt_template: "{video_token}\n\n{prompt}"
   trust_remote_code: true
   local_files_only: true
   from_pretrained_kwargs:
     device_map: auto
-    max_batch_size_siglip: 8
+    max_batch_size_siglip: 32
   processor_from_pretrained_kwargs:
     use_fast: false
     autogaze_model_id: weights/AutoGaze
     num_video_frames: 96
-    num_video_frames_thumbnail: 32
-    max_tiles_video: 24
-    gazing_ratio_tile: [0.2, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06]
-    task_loss_requirement_tile: 0.6
-    gazing_ratio_thumbnail: 1.0
-    task_loss_requirement_thumbnail: null
-    max_batch_size_autogaze: 4
+    num_video_frames_thumbnail: 16
+    max_batch_size_autogaze: 16
 
 frame_selection:
   mode: all
   num_frames: 16
   frame_interval: 1
   max_windows: null
+
+input:
+  dummy_frames: 96
+  dummy_resolution: 64
 
 video_input:
   read_mode: full
