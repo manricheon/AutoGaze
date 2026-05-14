@@ -29,6 +29,8 @@ vision_encoder:
   required_for_full_pipeline: true
   local_files_only: true
   trust_remote_code: true
+  allow_tensor_input_without_processor: true
+  skip_predictor: true
   status: runnable_if_assets_exist
 
 decoder:

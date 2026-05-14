@@ -15,8 +15,8 @@ This plan prioritizes external AutoGaze integration while protecting the canonic
 
 | Slot | Selection | Reason | Status |
 |---|---|---|---|
-| Selected Tier 1 MLLM | LongVILA-R1 / `longvila_r1` | Closest VILA/SigLIP-family candidate to the NVILA-style path. Native/light sparse integration is plausible enough to inspect after assets are present. | `blocked_missing_assets` |
-| Selected V-JEPA2 target | V-JEPA2 feature extraction + temporal pooling probe | Local V-JEPA2 assets are verified; feature extraction is the safest no-training decoder branch. | `runnable_if_assets_exist` for dry-run; real smoke still requires explicit `--allow-real-model-loading` |
+| Selected Tier 1 MLLM | LongVILA-R1 / `longvila_r1` | Closest VILA/SigLIP-family candidate to the NVILA-style path. Native/light sparse integration is plausible enough to inspect after assets are present. | `BLOCKED` for real loading because LLM shards are incomplete; explicit dummy-weight smoke is `PARTIAL` |
+| Selected V-JEPA2 target | V-JEPA2 feature extraction + temporal pooling probe | Local V-JEPA2 assets are verified; feature extraction is the safest no-training decoder branch. | `PASS` for local dense feature extraction smoke |
 
 `configs/poc_inference/external/selected_tier1_smoke.yaml` points to LongVILA-R1 and uses `autogaze_zero_mask` as the first safe fallback mode. `configs/poc_inference/external/selected_vjepa2_smoke.yaml` points to V-JEPA2 feature extraction and keeps MLLM projection blocked.
 

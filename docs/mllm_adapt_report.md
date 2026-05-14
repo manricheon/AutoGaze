@@ -229,6 +229,8 @@ This section covers V-JEPA2 as a non-SigLIP video encoder for AutoGaze-guided Po
 
 V-JEPA2 input is treated as dense video tensor data, conceptually `[B,T,C,H,W]`, before processor/model-specific layout handling. The nominal dense token grid for the local checkpoint is `32` temporal tubelets by `16 x 16` spatial patches. AutoGaze can map selected patch boxes into this dense grid for zero-mask probing, but physically passing only selected tubelets requires source-level confirmation that patchify, 3D-RoPE position assignment, attention masks, and any predictor masks remain correct with holes.
 
+Selected real smoke evidence: `configs/poc_inference/external/selected_vjepa2_smoke.yaml` was run on `assets/example_input.mp4` with 4 sampled frames and `skip_predictor=True`. The local V-JEPA2 model loaded from `weights/vjepa2-vitl-fpc64-256` and produced feature shape `[1, 512, 1024]` with mean-pooled shape `[1, 1024]`. This validates dense local feature extraction only. It does not validate sparse tubelet execution, context-mask compute reduction, or MLLM projector compatibility.
+
 Important compute statement: `context_mask` / `target_mask` may be useful for a JEPA-style probe only after source inspection. This branch does not claim that either mask reduces encoder compute. Until verified, `context_mask` is documented as a probe/masking path, not selected-token acceleration.
 
 ### V-JEPA2 Integration Modes

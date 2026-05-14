@@ -310,6 +310,15 @@ class VJEPA2Adapter(VisionEncoderAdapter):
             status.metadata["processor_module_path"] = processor_module
             status.metadata["processor_class_name"] = processor_class
         except Exception as exc:
+            if bool(self.config.get("allow_tensor_input_without_processor", True)):
+                status.metadata["processor_status"] = "unavailable_tensor_input_allowed"
+                status.metadata["processor_error"] = str(exc)
+                status.metadata["processor_path"] = processor_path
+                status.metadata["resolved_processor_path"] = _model_reference_for_loading(processor_path)
+                status.metadata["processor_module_path"] = processor_module
+                status.metadata["processor_class_name"] = processor_class
+                self.status = status
+                return status
             self.status = AdapterStatus(
                 self.name,
                 "blocked",
@@ -328,6 +337,56 @@ class VJEPA2Adapter(VisionEncoderAdapter):
             "metadata": {
                 "semantics": "[B,T,C,H,W]",
                 "note": "AutoGaze patch indices are not assumed to map directly to V-JEPA2 tokens.",
+            },
+        }
+
+    def _forward_real(self, video: torch.Tensor, autogaze: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        if video.ndim != 5:
+            raise ValueError(f"expected video shape [B,T,C,H,W], got {tuple(video.shape)}")
+        model_input = video.to(self.device) if hasattr(video, "to") else video
+        skip_predictor = bool(self.config.get("skip_predictor", True))
+        call_errors: list[str] = []
+        with torch.inference_mode():
+            for call_name, call in (
+                (
+                    "pixel_values_videos+skip_predictor",
+                    lambda: self.model(pixel_values_videos=model_input, skip_predictor=skip_predictor),
+                ),
+                ("pixel_values_videos", lambda: self.model(pixel_values_videos=model_input)),
+                ("pixel_values", lambda: self.model(pixel_values=model_input)),
+                ("videos", lambda: self.model(videos=model_input)),
+                ("positional", lambda: self.model(model_input)),
+            ):
+                try:
+                    output = call()
+                    forward_call = call_name
+                    break
+                except TypeError as exc:
+                    call_errors.append(f"{call_name}: {exc}")
+            else:
+                raise RuntimeError("V-JEPA2 real forward failed for known input signatures: " + " | ".join(call_errors))
+        tokens = getattr(output, "last_hidden_state", output)
+        if isinstance(tokens, Mapping):
+            tokens = tokens.get("last_hidden_state") or tokens.get("hidden_states")
+        if isinstance(tokens, (list, tuple)):
+            tokens = tokens[0]
+        if not isinstance(tokens, torch.Tensor):
+            raise RuntimeError("V-JEPA2 real forward did not return last_hidden_state tensor")
+        pooled = tokens.mean(dim=1) if tokens.ndim >= 3 else None
+        return {
+            "status": "real",
+            "visual_tokens": tokens,
+            "pooled_features": pooled,
+            "metadata": {
+                "adapter": self.name,
+                "status": self.status.to_dict(),
+                "input_shape": [int(dim) for dim in video.shape],
+                "feature_shape": [int(dim) for dim in tokens.shape],
+                "pooled_feature_shape": [int(dim) for dim in pooled.shape] if isinstance(pooled, torch.Tensor) else None,
+                "forward_call": forward_call,
+                "skip_predictor": skip_predictor,
+                "autogaze_tokens_used": False,
+                "mllm_projection": self.supports_mllm_projection(),
             },
         }
 

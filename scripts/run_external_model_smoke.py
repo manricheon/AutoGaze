@@ -26,6 +26,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--max-new-tokens", type=int, default=16)
+    parser.add_argument("--num-frames", type=int, default=None)
+    parser.add_argument("--warmup-runs", type=int, default=None)
+    parser.add_argument("--no-progress", action="store_true")
     parser.add_argument("--device", choices=["cpu", "cuda", "mps"], default="cpu")
     parser.add_argument("--dtype", choices=["float32", "float16", "bfloat16"], default="float32")
     parser.add_argument("--manifest", default="configs/poc_inference/model_asset_manifest.yaml")
@@ -145,8 +148,15 @@ def _real_smoke(
             infer_argv.append("--allow-real-model-loading")
         if args.video_path:
             infer_argv.extend(["--video-path", args.video_path])
-        if args.query_text:
-            infer_argv.extend(["--query-text", args.query_text])
+        query_text = args.query_text or nested_get(cfg, "generation.query_text", None)
+        if query_text:
+            infer_argv.extend(["--query-text", str(query_text)])
+        if args.num_frames is not None:
+            infer_argv.extend(["--num-frames", str(args.num_frames)])
+        if args.warmup_runs is not None:
+            infer_argv.extend(["--warmup-runs", str(args.warmup_runs)])
+        if args.no_progress:
+            infer_argv.append("--no-progress")
         if args.output_dir:
             infer_argv.extend(["--output-dir", args.output_dir])
         if local_files_only:
@@ -165,9 +175,10 @@ def _real_smoke(
 
 def _write_smoke_outputs(output_dir: Path, *, model_name: str, cfg: dict[str, Any], summary: dict[str, Any]) -> None:
     write_json(output_dir / "logs" / "poc_summary.json", summary)
+    summary_metrics = summary.get("metrics") if isinstance(summary.get("metrics"), dict) else None
     write_json(
         output_dir / "logs" / "metrics.json",
-        {
+        summary_metrics or {
             "status": summary.get("status"),
             "model": model_name,
             "run_type": summary.get("run_type"),
@@ -178,13 +189,21 @@ def _write_smoke_outputs(output_dir: Path, *, model_name: str, cfg: dict[str, An
         },
     )
     if model_name == "vjepa2":
+        metrics = summary_metrics or {}
         write_json(
             output_dir / "features" / "vjepa2_feature_summary.json",
             {
                 "status": summary.get("status"),
                 "feature_extraction": "not_run_in_dry_run" if summary.get("run_type") == "dry_run" else "see_logs",
-                "feature_shape": None if summary.get("run_type") == "dry_run" else "see_full_pipeline_summary",
-                "pooled_feature_shape": None if summary.get("run_type") == "dry_run" else "see_full_pipeline_summary",
+                "input_tensor_shape": metrics.get("processed_video_shape"),
+                "feature_shape": None if summary.get("run_type") == "dry_run" else metrics.get("feature_shape"),
+                "pooled_feature_shape": None if summary.get("run_type") == "dry_run" else metrics.get("pooled_feature_shape"),
+                "pooling_method": metrics.get("pooling_method"),
+                "latency_ms": metrics.get("vision_encoder_latency_ms"),
+                "memory": {
+                    "peak_vram": metrics.get("peak_vram"),
+                    "memory_unavailable": metrics.get("memory_unavailable"),
+                },
                 "mllm_projection": "blocked_without_verified_frozen_projector",
                 "decoder_type": nested_get(cfg, "vision_encoder.decoder_type", nested_get(cfg, "decoder.type", None)),
                 "autogaze_used": bool(nested_get(cfg, "autogaze.enabled", False)),

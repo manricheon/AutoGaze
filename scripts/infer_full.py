@@ -183,6 +183,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     vision_name = str(nested_get(cfg, "vision_encoder.name", "generic_vit"))
     mllm_name = str(nested_get(cfg, "mllm.name", "generic_mllm"))
+    encoder_only_feature_run = _is_encoder_only_feature_run(cfg, vision_name=vision_name, mllm_name=mllm_name)
     _sync_mllm_with_poc_autogaze_controls(cfg, gaze)
     mllm_owns_vision = bool(nested_get(cfg, "mllm.official_processor_owns_vision", mllm_name == "qwen"))
     generation_input_mode = _normalize_generation_input_mode(str(nested_get(cfg, "mllm.generation_input_mode", "official_processor")))
@@ -233,11 +234,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     blocked_stages.append("vision_encoder")
 
     mllm = build_mllm(mllm_name, nested_get(cfg, "mllm", {}))
-    mllm_status = (
-        mllm.load_dummy_weights(device=device, dtype=mllm_dtype)
-        if use_dummy_weights
-        else mllm.load(allow_real_model_loading=allow_real, device=device, dtype=mllm_dtype)
-    )
+    if encoder_only_feature_run:
+        mllm_status = AdapterStatus(
+            mllm.name,
+            "skipped",
+            "encoder-only feature extraction run; no MLLM generation requested",
+        )
+        mllm.status = mllm_status
+    else:
+        mllm_status = (
+            mllm.load_dummy_weights(device=device, dtype=mllm_dtype)
+            if use_dummy_weights
+            else mllm.load(allow_real_model_loading=allow_real, device=device, dtype=mllm_dtype)
+        )
     max_new_tokens = int(cli_or_config(args.max_new_tokens, cfg, "generation.max_new_tokens", 32))
     mllm_autogaze_payload = _mllm_autogaze_payload(cfg, gaze)
     zero_mask_metadata: dict[str, Any] | None = None
@@ -266,7 +275,21 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         artifacts["rope_sparse_mapping_metadata"] = str(output_dir / "autogaze" / "rope_sparse_mapping_metadata.json")
         write_json(output_dir / "autogaze" / "rope_sparse_mapping_metadata.json", rope_sparse_metadata)
     mllm_generation_latency_ms: float | None = None
-    if allow_real and mllm_status.status != "real":
+    if encoder_only_feature_run:
+        generation = {
+            "status": "skipped",
+            "answer": None,
+            "reason": "encoder-only feature extraction run; MLLM generation skipped",
+            "query_text_used": False,
+            "metadata": {
+                "encoder_only_feature_extraction": True,
+                "integration_mode": str(nested_get(cfg, "vision_encoder.integration_mode", "vjepa2_feature_extraction")),
+                "mllm_projector_status": nested_get(cfg, "mllm.mllm_projector_status", "blocked_without_verified_frozen_projector"),
+            },
+        }
+        mllm_generation_latency_ms = 0.0
+        skipped.append({"stage": "mllm_generation", "reason": generation["reason"]})
+    elif allow_real and mllm_status.status != "real":
         blocked_stages.append("mllm_generation")
         generation = {
             "status": "blocked",
@@ -323,7 +346,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
     generation_status = str(generation.get("status", "unknown"))
     output_text = generation.get("answer")
-    if generation_status != "real":
+    if generation_status != "real" and not (encoder_only_feature_run and generation_status == "skipped"):
         skipped.append({"stage": "mllm_generation", "reason": str(generation.get("reason") or mllm_status.reason or "generation unavailable")})
     answer_path = output_dir / "predictions" / "answer.json"
     write_json(
@@ -402,7 +425,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     metrics["vision_encoder_dtype"] = vision_dtype
     metrics["mllm_dtype"] = mllm_dtype
     metrics["dummy_weights_enabled"] = use_dummy_weights
+    if isinstance(prepared.processed_video, torch.Tensor):
+        metrics["processed_video_shape"] = [int(dim) for dim in prepared.processed_video.shape]
     metrics["vision_encoder_required_for_full_pipeline"] = vision_required
+    if isinstance(visual_tokens, torch.Tensor):
+        metrics["visual_tokens_shape"] = [int(dim) for dim in visual_tokens.shape]
+        metrics["visual_tokens_dtype"] = str(visual_tokens.dtype).replace("torch.", "")
+        if visual_tokens.ndim >= 3:
+            metrics["feature_shape"] = [int(dim) for dim in visual_tokens.shape]
+            metrics["pooled_feature_shape"] = [int(visual_tokens.shape[0]), int(visual_tokens.shape[-1])]
+            metrics["pooling_method"] = "mean_over_visual_tokens"
+        else:
+            metrics["feature_shape"] = [int(dim) for dim in visual_tokens.shape]
+            metrics["pooled_feature_shape"] = None
+            metrics["pooling_method"] = None
     metrics["generation_input_mode"] = generation_input_mode
     generation_metadata = generation.get("metadata") if isinstance(generation.get("metadata"), dict) else {}
     if zero_mask_metadata is not None:
@@ -466,6 +502,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         metrics["failure_reason"] = None
     status = "blocked" if blocked_stages else "partial"
     if generation_status == "real" and not blocked_stages:
+        status = "completed"
+    if encoder_only_feature_run and not blocked_stages and vision_status.status == "real":
         status = "completed"
     summary = {
         "mode": "full_pipeline",
@@ -539,6 +577,20 @@ def _normalize_generation_input_mode(value: str) -> str:
     if mode not in MLLM_GENERATION_INPUT_MODES:
         raise ValueError(f"mllm.generation_input_mode must be one of {sorted(MLLM_GENERATION_INPUT_MODES)}; got {value!r}")
     return mode
+
+
+def _is_encoder_only_feature_run(cfg: dict[str, Any], *, vision_name: str, mllm_name: str) -> bool:
+    if vision_name != "vjepa2":
+        return False
+    if str(nested_get(cfg, "vision_encoder.integration_mode", "")) not in {
+        "vjepa2_feature_extraction",
+        "vjepa2_official_dense",
+        "vjepa2_video_classification",
+    }:
+        return False
+    target = str(nested_get(cfg, "mllm.target", "") or "")
+    projector_status = str(nested_get(cfg, "mllm.mllm_projector_status", "") or "")
+    return mllm_name in {"generic_mllm", "none", ""} or target == "none" or projector_status.startswith("blocked_")
 
 
 def _generate_mllm_with_video_policy(
