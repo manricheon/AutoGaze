@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import torch
+
 from poc_infer_utils import (
     ProgressReporter,
     build_metrics,
@@ -26,6 +28,21 @@ from poc_infer_utils import (
 )
 from poc_model_adapters import AdapterStatus
 from poc_model_registry import build_mllm, build_vision_encoder
+
+
+MLLM_GENERATION_INPUT_MODES = {
+    "official_processor",
+    "autogaze_frame_selection",
+    "autogaze_chop_selection",
+    "autogaze_zero_mask",
+    "siglip_sparse_patch",
+    "native_sparse_patch",
+    "light_modified_sparse",
+    "rope_sparse_patch",
+    "post_encoder_zero_mask",
+    "post_encoder_pruning",
+    "direct_visual_token_injection",
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -57,6 +74,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--task-loss-requirement", type=float, default=None)
     parser.add_argument("--strict-autogaze-params", action="store_true")
     parser.add_argument("--allow-real-model-loading", action="store_true")
+    parser.add_argument("--zero-mask-stage", choices=["pixel", "patch_embedding", "post_encoder"], default=None)
+    parser.add_argument("--zero-mask-value", choices=["zero", "mean"], default=None)
+    parser.add_argument("--save-zero-mask-visualization", action="store_true")
     parser.add_argument("--warmup-runs", type=int, default=None)
     parser.add_argument("--no-progress", action="store_true")
 
@@ -84,6 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mllm-config", default=None)
     parser.add_argument("--mllm-module", default=None)
     parser.add_argument("--mllm-class", default=None)
+    parser.add_argument("--integration-mode", choices=sorted(MLLM_GENERATION_INPUT_MODES), default=None)
     parser.add_argument("--model-id", default=None)
     parser.add_argument("--processor-path", default=None)
     parser.add_argument("--tokenizer-path", default=None)
@@ -161,8 +182,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     mllm_name = str(nested_get(cfg, "mllm.name", "generic_mllm"))
     _sync_mllm_with_poc_autogaze_controls(cfg, gaze)
     mllm_owns_vision = bool(nested_get(cfg, "mllm.official_processor_owns_vision", mllm_name == "qwen"))
-    generation_input_mode = str(nested_get(cfg, "mllm.generation_input_mode", "official_processor"))
-    direct_visual_token_mode = generation_input_mode == "direct_visual_tokens"
+    generation_input_mode = _normalize_generation_input_mode(str(nested_get(cfg, "mllm.generation_input_mode", "official_processor")))
+    direct_visual_token_mode = generation_input_mode == "direct_visual_token_injection"
     vision_required = bool(nested_get(cfg, "vision_encoder.required_for_full_pipeline", direct_visual_token_mode))
     vision = build_vision_encoder(vision_name, nested_get(cfg, "vision_encoder", {}))
     visual_tokens = None
@@ -208,6 +229,31 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     mllm_status = mllm.load(allow_real_model_loading=allow_real, device=device, dtype=mllm_dtype)
     max_new_tokens = int(cli_or_config(args.max_new_tokens, cfg, "generation.max_new_tokens", 32))
     mllm_autogaze_payload = _mllm_autogaze_payload(cfg, gaze)
+    zero_mask_metadata: dict[str, Any] | None = None
+    video_for_mllm = prepared.processed_video
+    if generation_input_mode == "autogaze_zero_mask":
+        video_for_mllm, zero_mask_metadata = _prepare_zero_mask_video(
+            video=prepared.processed_video,
+            gaze=gaze,
+            stage=str(cli_or_config(args.zero_mask_stage, cfg, "zero_mask.stage", "pixel")),
+            value=str(cli_or_config(args.zero_mask_value, cfg, "zero_mask.value", "zero")),
+        )
+        artifacts["zero_mask_metadata"] = str(output_dir / "autogaze" / "zero_mask_metadata.json")
+        write_json(output_dir / "autogaze" / "zero_mask_metadata.json", zero_mask_metadata)
+        if bool(args.save_zero_mask_visualization or nested_get(cfg, "zero_mask.save_visualization", False)):
+            write_json(
+                output_dir / "visualizations" / "zero_mask" / "zero_mask_visualization_metadata.json",
+                {
+                    "status": "metadata_only",
+                    "reason": "zero-mask image export is intentionally lightweight here; dense input masking metadata was saved",
+                    **zero_mask_metadata,
+                },
+            )
+    rope_sparse_metadata: dict[str, Any] | None = None
+    if generation_input_mode == "rope_sparse_patch":
+        rope_sparse_metadata = _build_rope_sparse_mapping_metadata(gaze=gaze, model_name=mllm.name, mllm=mllm)
+        artifacts["rope_sparse_mapping_metadata"] = str(output_dir / "autogaze" / "rope_sparse_mapping_metadata.json")
+        write_json(output_dir / "autogaze" / "rope_sparse_mapping_metadata.json", rope_sparse_metadata)
     mllm_generation_latency_ms: float | None = None
     if allow_real and mllm_status.status != "real":
         blocked_stages.append("mllm_generation")
@@ -242,17 +288,28 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             return _generate_mllm_with_video_policy(
                 mllm,
                 query_text=args.query_text,
-                video=prepared.processed_video,
+                video=video_for_mllm,
                 visual_tokens=visual_tokens if mllm.supports_direct_visual_tokens() else None,
                 max_new_tokens=max_new_tokens,
                 video_path=mllm_video_path,
                 has_chop_metadata=prepared.chop_metadata is not None,
                 autogaze=mllm_autogaze_payload,
+                integration_mode=generation_input_mode,
             )
 
         if allow_real and mllm_status.status == "real":
             progress.warmup("MLLM", mllm_generate_once, runs=warmup_runs, device=device)
         generation, mllm_generation_latency_ms = progress.timed("MLLM", mllm_generate_once, device=device)
+    if zero_mask_metadata is not None:
+        generation = _with_generation_metadata(generation, zero_mask_metadata)
+    if rope_sparse_metadata is not None:
+        generation = _with_generation_metadata(
+            generation,
+            {
+                "rope_sparse_mapping_status": rope_sparse_metadata.get("support_status"),
+                "rope_sparse_mapping_metadata_path": str(output_dir / "autogaze" / "rope_sparse_mapping_metadata.json"),
+            },
+        )
     generation_status = str(generation.get("status", "unknown"))
     output_text = generation.get("answer")
     if generation_status != "real":
@@ -334,8 +391,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     metrics["vision_encoder_dtype"] = vision_dtype
     metrics["mllm_dtype"] = mllm_dtype
     metrics["vision_encoder_required_for_full_pipeline"] = vision_required
-    metrics["generation_input_mode"] = "direct_visual_tokens" if direct_visual_token_mode else "official_processor"
+    metrics["generation_input_mode"] = generation_input_mode
     generation_metadata = generation.get("metadata") if isinstance(generation.get("metadata"), dict) else {}
+    if zero_mask_metadata is not None:
+        generation_metadata = {**generation_metadata, **zero_mask_metadata}
+    if rope_sparse_metadata is not None:
+        generation_metadata = {**generation_metadata, "rope_sparse_mapping_status": rope_sparse_metadata.get("support_status")}
     metrics["mllm_video_input_source"] = generation_metadata.get(
         "actual_video_input_source",
         "processed_chop_tensor" if prepared.chop_metadata is not None else "processed_tensor",
@@ -352,6 +413,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     metrics["qwen_encoder_side_acceleration_claimed"] = bool(
         generation_metadata.get("qwen_encoder_side_acceleration_claimed", False)
     )
+    metrics["zero_mask_stage"] = generation_metadata.get("zero_mask_stage")
+    metrics["zero_mask_value"] = generation_metadata.get("zero_mask_value")
+    metrics["zero_mask_dense_token_count_processed"] = generation_metadata.get("zero_mask_dense_token_count_processed")
+    metrics["zero_mask_selected_token_count"] = generation_metadata.get("zero_mask_selected_token_count")
+    metrics["zero_mask_selected_token_ratio"] = generation_metadata.get("zero_mask_selected_token_ratio")
+    metrics["zero_mask_masked_token_ratio"] = generation_metadata.get("zero_mask_masked_token_ratio")
+    metrics["zero_mask_encoder_compute_reduction"] = bool(generation_metadata.get("zero_mask_encoder_compute_reduction", False))
+    metrics["zero_mask_expected_speedup"] = generation_metadata.get("zero_mask_expected_speedup")
+    metrics["rope_sparse_mapping_status"] = generation_metadata.get("rope_sparse_mapping_status")
     for key in (
         "qwen_visual_tokens_before",
         "qwen_visual_tokens_kept_by_mask",
@@ -427,6 +497,8 @@ def _with_model_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> dict
         mllm["module_path"] = args.mllm_module
     if args.mllm_class:
         mllm["class_name"] = args.mllm_class
+    if args.integration_mode:
+        mllm["generation_input_mode"] = args.integration_mode
     if args.model_id:
         mllm["model_id"] = args.model_id
         if not args.mllm_ckpt:
@@ -448,6 +520,15 @@ def _with_model_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> dict
     return updated
 
 
+def _normalize_generation_input_mode(value: str) -> str:
+    mode = value.strip()
+    if mode == "direct_visual_tokens":
+        mode = "direct_visual_token_injection"
+    if mode not in MLLM_GENERATION_INPUT_MODES:
+        raise ValueError(f"mllm.generation_input_mode must be one of {sorted(MLLM_GENERATION_INPUT_MODES)}; got {value!r}")
+    return mode
+
+
 def _generate_mllm_with_video_policy(
     mllm: Any,
     *,
@@ -458,16 +539,26 @@ def _generate_mllm_with_video_policy(
     video_path: str | None,
     has_chop_metadata: bool,
     autogaze: dict[str, Any] | None = None,
+    integration_mode: str = "official_processor",
 ) -> dict[str, Any]:
-    result = _call_mllm_generate(
-        mllm,
-        query_text=query_text,
-        video=video,
-        visual_tokens=visual_tokens,
-        max_new_tokens=max_new_tokens,
-        video_path=video_path,
-        autogaze=autogaze,
-    )
+    try:
+        result = _call_mllm_integration_mode(
+            mllm,
+            integration_mode=integration_mode,
+            query_text=query_text,
+            video=video,
+            visual_tokens=visual_tokens,
+            max_new_tokens=max_new_tokens,
+            video_path=video_path,
+            autogaze=autogaze,
+        )
+    except NotImplementedError as exc:
+        result = {
+            "status": "blocked",
+            "answer": None,
+            "reason": str(exc),
+            "query_text_used": True,
+        }
     if video_path:
         actual_source = "source_video_path"
     elif has_chop_metadata:
@@ -480,7 +571,56 @@ def _generate_mllm_with_video_policy(
             "actual_video_input_source": actual_source,
             "chop_tensor_attempted": bool(has_chop_metadata and not video_path),
             "chop_source_fallback_used": False,
+            "integration_mode": integration_mode,
         },
+    )
+
+
+def _call_mllm_integration_mode(
+    mllm: Any,
+    *,
+    integration_mode: str,
+    query_text: str,
+    video: Any,
+    visual_tokens: Any,
+    max_new_tokens: int,
+    video_path: str | None,
+    autogaze: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if integration_mode in {"official_processor", "direct_visual_token_injection"}:
+        return _call_mllm_generate(
+            mllm,
+            query_text=query_text,
+            video=video,
+            visual_tokens=visual_tokens,
+            max_new_tokens=max_new_tokens,
+            video_path=video_path,
+            autogaze=autogaze,
+        )
+    method_name = {
+        "autogaze_frame_selection": "run_autogaze_frame_selection_path",
+        "autogaze_chop_selection": "run_autogaze_chop_selection_path",
+        "autogaze_zero_mask": "run_autogaze_zero_mask_path",
+        "siglip_sparse_patch": "run_siglip_sparse_patch_path",
+        "native_sparse_patch": "run_native_sparse_patch_path",
+        "light_modified_sparse": "run_light_modified_sparse_path",
+        "rope_sparse_patch": "run_rope_sparse_patch_path",
+        "post_encoder_zero_mask": "run_post_encoder_zero_mask_path",
+        "post_encoder_pruning": "run_post_encoder_pruning_path",
+    }[integration_mode]
+    method = getattr(mllm, method_name, None)
+    if method is None:
+        raise NotImplementedError(
+            f"{mllm.name} does not implement {integration_mode}. "
+            "No fallback to another MLLM or vision encoder is allowed."
+        )
+    return method(
+        query_text=query_text,
+        video=video,
+        visual_tokens=visual_tokens,
+        max_new_tokens=max_new_tokens,
+        video_path=video_path,
+        autogaze=autogaze,
     )
 
 
@@ -517,7 +657,9 @@ def _generate_accepts_kwarg(mllm: Any, name: str) -> bool:
 
 
 def _mllm_autogaze_payload(cfg: dict[str, Any], gaze: Any) -> dict[str, Any] | None:
-    if str(nested_get(cfg, "mllm.autogaze_integration", "none")) != "qwen_vision_mask":
+    if str(nested_get(cfg, "mllm.autogaze_integration", "none")) != "qwen_vision_mask" and str(
+        nested_get(cfg, "mllm.generation_input_mode", "official_processor")
+    ) not in {"autogaze_zero_mask", "rope_sparse_patch"}:
         return None
     return {
         "autogaze_enabled": bool(getattr(gaze, "autogaze_enabled", False)),
@@ -532,6 +674,149 @@ def _mllm_autogaze_payload(cfg: dict[str, Any], gaze: Any) -> dict[str, Any] | N
         "per_frame": list(getattr(gaze, "per_frame", []) or []),
         "runtime_metadata": dict(getattr(gaze, "runtime_metadata", {}) or {}),
     }
+
+
+def _prepare_zero_mask_video(
+    *,
+    video: torch.Tensor,
+    gaze: Any,
+    stage: str,
+    value: str,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    original = int(getattr(gaze, "original_token_count", 0) or 0)
+    selected = int(getattr(gaze, "selected_token_count", 0) or 0)
+    selected_ratio = None if original <= 0 else selected / float(original)
+    metadata: dict[str, Any] = {
+        "integration_mode": "autogaze_zero_mask",
+        "zero_mask_stage": stage,
+        "zero_mask_value": value,
+        "zero_mask_dense_token_count_processed": original,
+        "zero_mask_selected_token_count": selected,
+        "zero_mask_selected_token_ratio": selected_ratio,
+        "zero_mask_masked_token_ratio": None if selected_ratio is None else 1.0 - selected_ratio,
+        "zero_mask_encoder_compute_reduction": False,
+        "zero_mask_expected_speedup": "none",
+        "zero_mask_dense_positional_layout_preserved": True,
+        "zero_mask_training_required": False,
+    }
+    if stage != "pixel":
+        return video, {
+            **metadata,
+            "zero_mask_applied": False,
+            "zero_mask_support_status": "prepared_metadata_only",
+            "reason": f"{stage} zero-mask requires model-specific hooks; dense video was not changed",
+        }
+    if not isinstance(video, torch.Tensor) or video.ndim != 5:
+        return video, {
+            **metadata,
+            "zero_mask_applied": False,
+            "zero_mask_support_status": "blocked",
+            "reason": f"pixel zero-mask expects [B,T,C,H,W] tensor, got {getattr(video, 'shape', None)}",
+        }
+    mask = torch.zeros((1, int(video.shape[1]), 1, int(video.shape[-2]), int(video.shape[-1])), dtype=video.dtype, device=video.device)
+    boxes_mapped = 0
+    for frame_idx, frame_record in enumerate(list(getattr(gaze, "per_frame", []) or [])[: int(video.shape[1])]):
+        frame_mask = mask[0, frame_idx, 0]
+        for patch_record in list(frame_record.get("selected_patch_records") or []):
+            box = patch_record.get("normalized_box") if isinstance(patch_record, dict) else None
+            if not isinstance(box, (list, tuple)) or len(box) != 4:
+                continue
+            if _mark_box_on_mask(frame_mask, box):
+                boxes_mapped += 1
+        if float(frame_mask.sum().item()) <= 0:
+            frame_mask.fill_(1.0)
+    if value == "mean":
+        fill = video.mean(dim=(-2, -1), keepdim=True)
+    else:
+        fill = torch.zeros_like(video)
+    masked = video * mask + fill * (1.0 - mask)
+    return masked, {
+        **metadata,
+        "zero_mask_applied": True,
+        "zero_mask_support_status": "implemented_pixel_dense_probe",
+        "zero_mask_boxes_mapped": boxes_mapped,
+        "zero_mask_shape": list(mask.shape),
+        "reason": "pixel-space zero-mask preserves dense layout and does not claim encoder acceleration",
+    }
+
+
+def _mark_box_on_mask(mask: torch.Tensor, box: Any) -> bool:
+    x0, y0, x1, y1 = [float(item) for item in box]
+    x0, x1 = sorted((max(0.0, min(1.0, x0)), max(0.0, min(1.0, x1))))
+    y0, y1 = sorted((max(0.0, min(1.0, y0)), max(0.0, min(1.0, y1))))
+    if x1 <= x0 or y1 <= y0:
+        return False
+    height, width = int(mask.shape[0]), int(mask.shape[1])
+    col0 = max(0, min(width - 1, int(x0 * width)))
+    col1 = max(col0 + 1, min(width, int(x1 * width + 0.999999)))
+    row0 = max(0, min(height - 1, int(y0 * height)))
+    row1 = max(row0 + 1, min(height, int(y1 * height + 0.999999)))
+    mask[row0:row1, col0:col1] = 1.0
+    return True
+
+
+def _build_rope_sparse_mapping_metadata(*, gaze: Any, model_name: str, mllm: Any) -> dict[str, Any]:
+    token_rows: list[dict[str, Any]] = []
+    for frame_idx, frame_record in enumerate(list(getattr(gaze, "per_frame", []) or [])):
+        for patch_record in list(frame_record.get("selected_patch_records") or []):
+            if not isinstance(patch_record, dict):
+                continue
+            scale_grid = patch_record.get("scale_grid") or [None, None]
+            token_rows.append(
+                {
+                    "frame_index": int(frame_record.get("processed_frame_index", frame_idx)),
+                    "scale": int(patch_record.get("scale", 0)),
+                    "row": _patch_row(patch_record),
+                    "column": _patch_col(patch_record),
+                    "scale_grid": scale_grid,
+                    "selected_patch_index": int(patch_record.get("local_token_index", patch_record.get("scale_patch_index", 0))),
+                    "normalized_box": patch_record.get("normalized_box"),
+                }
+            )
+    token_rows = sorted(token_rows, key=lambda item: (item["frame_index"], item["scale"], item["row"], item["column"]))
+    position_ids = [[item["frame_index"], item["row"], item["column"]] for item in token_rows]
+    selected_count = len(token_rows)
+    dense_grid_dependency = getattr(mllm, "dense_grid_dependency", "unknown")
+    window_dependency = "unknown"
+    positional_type = getattr(mllm, "positional_encoding_type", "unknown")
+    if "window" in str(positional_type).lower():
+        window_dependency = True
+    elif dense_grid_dependency is False:
+        window_dependency = False
+    support_status = "implemented" if getattr(mllm, "supports_rope_sparse_patch", lambda: False)() else "needs_source_inspection"
+    if dense_grid_dependency is True:
+        support_status = "blocked"
+    return {
+        "model_name": model_name,
+        "vision_encoder_type": getattr(mllm, "encoder_type", "unknown"),
+        "positional_encoding_type": positional_type,
+        "patch_grid": list(getattr(gaze, "patch_grid", []) or []),
+        "tubelet_grid": None,
+        "selected_patch_indices": [item["selected_patch_index"] for item in token_rows],
+        "selected_scale_ids": [item["scale"] for item in token_rows],
+        "generated_t_h_w_coordinates": position_ids,
+        "generated_position_ids": position_ids,
+        "token_order": "frame,time_then_scale_then_row_then_column",
+        "attention_mask_shape": [selected_count, selected_count],
+        "visual_token_count": selected_count,
+        "placeholder_count": selected_count if getattr(mllm, "visual_placeholder_dynamic", False) is True else None,
+        "dense_grid_dependency_detected": dense_grid_dependency,
+        "window_attention_detected": window_dependency,
+        "projector_supports_variable_token_count": getattr(mllm, "variable_visual_token_support", "unknown"),
+        "support_status": support_status,
+    }
+
+
+def _patch_row(patch_record: dict[str, Any]) -> int:
+    grid = patch_record.get("scale_grid") or [1, 1]
+    width = max(1, int(grid[1] if len(grid) > 1 else 1))
+    return int(patch_record.get("scale_patch_index", 0)) // width
+
+
+def _patch_col(patch_record: dict[str, Any]) -> int:
+    grid = patch_record.get("scale_grid") or [1, 1]
+    width = max(1, int(grid[1] if len(grid) > 1 else 1))
+    return int(patch_record.get("scale_patch_index", 0)) % width
 
 
 def _with_generation_metadata(generation: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:

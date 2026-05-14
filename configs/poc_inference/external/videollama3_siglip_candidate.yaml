@@ -1,0 +1,56 @@
+experiment:
+  id: external_videollama3_candidate
+  description: VideoLLaMA3 SigLIP-NaViT sparse candidate, blocked until NaViT merge/compression mapping is verified
+
+autogaze:
+  enabled: true
+  checkpoint_path: weights/AutoGaze
+  processor_path: weights/AutoGaze
+  gaze_ratio: 0.75
+  task_loss_requirement: 0.7
+
+vision_encoder:
+  name: generic_vit
+  required_for_full_pipeline: false
+  external_vision_encoder_type: VL3-SigLIP-NaViT patch14
+
+mllm:
+  name: videollama3
+  model_id: DAMO-NLP-SG/VideoLLaMA3-7B
+  checkpoint_path: null
+  processor_path: null
+  mllm_type: Qwen2.5-7B
+  official_processor_path: true
+  official_processor_owns_vision: true
+  generation_input_mode: siglip_sparse_patch
+  vision_encoder_type: SigLIP-NaViT
+  direct_visual_token_injection_supported: unknown
+  positional_encoding_compatibility_status: needs_code_inspection
+  token_mapping_status: blocked_until_navit_spatial_merge_and_token_compression_are_verified
+  status: future work
+
+frame_selection:
+  mode: sample
+  num_frames: 16
+  frame_interval: 1
+  max_windows: 1
+
+scaling:
+  mode: resize
+  resolution: 384
+  patch_size: 14
+  chop_size: 384
+  chop_overlap: 0
+  max_chops: null
+
+runtime:
+  device: cpu
+  dtype: float32
+  allow_real_model_loading: false
+
+generation:
+  max_new_tokens: 32
+
+output:
+  output_dir: outputs/poc_inference/external/videollama3_candidate
+

@@ -1,0 +1,80 @@
+experiment:
+  id: first_vjepa2_smoke
+  description: First V-JEPA2 smoke scaffold using local dense feature extraction with temporal-pooling decoder stub
+
+autogaze:
+  enabled: false
+  integration_role: disabled_for_first_dense_feature_smoke
+
+vision_encoder:
+  name: vjepa2
+  model_id: weights/vjepa2-vitl-fpc64-256
+  checkpoint_path: weights/vjepa2-vitl-fpc64-256
+  processor_path: weights/vjepa2-vitl-fpc64-256
+  model_type: video_encoder
+  integration_mode: vjepa2_feature_extraction
+  decoder_type: temporal_pooling_feature_probe_stub
+  patch_size: 16
+  crop_size: 256
+  frames_per_clip: 64
+  tubelet_size: 2
+  output_dim: 1024
+  positional_encoding_status: 3d_rope_dense_official_path_only
+  required_for_full_pipeline: true
+  local_files_only: true
+  trust_remote_code: true
+  status: stub-only
+
+mllm:
+  name: generic_mllm
+  model_id: null
+  official_processor_path: false
+  official_processor_owns_vision: false
+  generation_input_mode: official_processor
+  direct_visual_token_injection_supported: false
+  target: none
+  compatibility_status: not_applicable_for_feature_extraction_smoke
+  training_required: false
+  status: stub-only
+
+frame_selection:
+  mode: sample
+  num_frames: 64
+  frame_interval: 1
+  max_windows: 1
+
+scaling:
+  mode: resize
+  resolution: 256
+  patch_size: 16
+  chop_size: 256
+  chop_overlap: 0
+  max_chops: null
+
+zero_mask:
+  enabled: false
+
+runtime:
+  device: cpu
+  dtype: float32
+  vision_dtype: float32
+  allow_real_model_loading: false
+  warmup_runs: 1
+  progress: true
+
+generation:
+  query_text: Extract visual features for this clip.
+  max_new_tokens: 1
+
+visualization:
+  overlay_style: mask
+  overlay_alpha: 0.35
+  multi_scale_overlay: true
+  save_frame_images: false
+  save_overlay_video: false
+  save_side_by_side_video: false
+  save_scale_panel_video: false
+
+output:
+  output_dir: outputs/poc_inference/external/first_vjepa2_smoke
+  status: stub-only

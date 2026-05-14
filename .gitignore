@@ -10,6 +10,7 @@ wandb/
 hf_cache/
 videos/
 tools/
+weights/
 
 
 # Byte-compiled / optimized / DLL files

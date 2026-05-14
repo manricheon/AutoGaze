@@ -1,0 +1,90 @@
+experiment:
+  id: selected_vjepa2_feature_pooling_smoke
+  description: Selected V-JEPA2 smoke scaffold for feature extraction plus temporal-pooling probe
+
+selection:
+  tier: tier1b
+  selected_model: vjepa2
+  reason: Local V-JEPA2 assets are verified and feature extraction is the safest no-training decoder branch.
+
+autogaze:
+  enabled: false
+  integration_role: disabled_for_first_dense_feature_extraction_smoke
+
+vision_encoder:
+  name: vjepa2
+  model_id: facebook/vjepa2-vitl-fpc64-256
+  checkpoint_path: weights/vjepa2-vitl-fpc64-256
+  processor_path: weights/vjepa2-vitl-fpc64-256
+  adapter: VJEPA2Adapter
+  model_type: video_encoder
+  integration_mode: vjepa2_feature_extraction
+  decoder_type: temporal_pooling_feature_probe
+  patch_size: 16
+  crop_size: 256
+  frames_per_clip: 64
+  tubelet_size: 2
+  output_dim: 1024
+  positional_encoding_status: 3d_rope_dense_official_path_only_sparse_tubelet_blocked
+  required_for_full_pipeline: true
+  local_files_only: true
+  trust_remote_code: true
+  status: runnable_if_assets_exist
+
+decoder:
+  type: temporal_pooling_feature_probe
+  training_required: false
+  expected_outputs:
+    - feature_shape
+    - pooled_feature_shape
+    - latency
+    - memory_if_available
+
+mllm:
+  name: generic_mllm
+  model_id: null
+  official_processor_path: false
+  official_processor_owns_vision: false
+  generation_input_mode: official_processor
+  target: none
+  mllm_projector_status: blocked_without_verified_frozen_projector
+  direct_visual_token_injection_supported: false
+  training_required: false
+  status: stub_only
+
+frame_selection:
+  mode: sample
+  num_frames: 64
+  frame_interval: 1
+  max_windows: 1
+
+scaling:
+  mode: resize
+  resolution: 256
+  patch_size: 16
+  chop_size: 256
+  chop_overlap: 0
+  max_chops: null
+
+zero_mask:
+  enabled: false
+  stage: pixel
+  value: zero
+  encoder_compute_reduction_claimed: false
+
+runtime:
+  device: cpu
+  dtype: float32
+  vision_dtype: float32
+  local_files_only: true
+  allow_real_model_loading: false
+  warmup_runs: 1
+  progress: true
+
+generation:
+  query_text: Extract visual features for this clip.
+  max_new_tokens: 1
+
+output:
+  output_dir: outputs/poc_inference/external/selected_vjepa2_feature_pooling_smoke
+  status: runnable_if_assets_exist

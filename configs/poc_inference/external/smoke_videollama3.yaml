@@ -1,0 +1,70 @@
+experiment:
+  id: smoke_videollama3
+  description: VideoLLaMA3 smoke scaffold; official processor with AutoGaze input-level frame selection
+
+autogaze:
+  enabled: true
+  checkpoint_path: weights/AutoGaze
+  processor_path: weights/AutoGaze
+  gaze_ratio: 0.75
+  task_loss_requirement: 0.7
+  integration_role: input_selection_only
+
+vision_encoder:
+  name: generic_vit
+  required_for_full_pipeline: false
+  external_vision_encoder_type: videollama3_official_processor_owned
+  fallback_adapter: null
+
+mllm:
+  name: videollama3
+  model_id: DAMO-NLP-SG/VideoLLaMA3-7B
+  checkpoint_path: weights/videollama3
+  processor_path: weights/videollama3
+  tokenizer_path: weights/videollama3
+  adapter: VideoLLaMA3Adapter
+  mllm_type: Qwen2.5-7B
+  official_processor_path: true
+  official_processor_owns_vision: true
+  generation_input_mode: autogaze_frame_selection
+  vision_encoder_type: VL3-SigLIP-NaViT video encoder
+  direct_visual_token_injection_supported: false
+  positional_encoding_compatibility_status: needs_code_inspection_navit_compression
+  token_mapping_status: input_selection_only_until_verified
+  local_files_only: true
+  trust_remote_code: true
+  status: blocked_missing_assets
+
+frame_selection:
+  mode: sample
+  num_frames: 16
+  frame_interval: 1
+  max_windows: 1
+
+scaling:
+  mode: resize
+  resolution: 336
+  patch_size: 14
+  chop_size: 336
+  chop_overlap: 0
+  max_chops: null
+  zero_mask:
+    enabled: false
+    mode: image_space_only
+
+runtime:
+  device: cpu
+  dtype: float32
+  mllm_dtype: float32
+  local_files_only: true
+  allow_real_model_loading: false
+  warmup_runs: 1
+  progress: true
+
+generation:
+  query_text: Describe the main action in the video.
+  max_new_tokens: 32
+
+output:
+  output_dir: outputs/poc_inference/external/smoke_videollama3
+  status: blocked_missing_assets

@@ -1,0 +1,46 @@
+experiment:
+  id: external_vjepa2_feature_extraction
+  description: Frozen V-JEPA2 feature-extraction smoke plan; no MLLM projection
+
+autogaze:
+  enabled: false
+
+vision_encoder:
+  name: vjepa2
+  model_id: weights/vjepa2-vitl-fpc64-256
+  checkpoint_path: weights/vjepa2-vitl-fpc64-256
+  processor_path: weights/vjepa2-vitl-fpc64-256
+  model_type: video_encoder
+  integration_mode: vjepa2_feature_extraction
+  decoder_type: frozen_feature_extraction
+  patch_size: 16
+  crop_size: 256
+  frames_per_clip: 64
+  tubelet_size: 2
+  positional_encoding_status: 3d_rope_dense_official_path_only
+  status: stub-only
+
+frame_selection:
+  mode: all
+  num_frames: 64
+
+scaling:
+  mode: resize
+  resolution: 256
+  patch_size: 16
+
+zero_mask:
+  enabled: false
+
+mllm:
+  target: none
+  compatibility_status: not_applicable
+  training_required: false
+
+runtime:
+  device: cpu
+  dtype: float32
+  allow_real_model_loading: false
+
+output:
+  output_dir: outputs/poc_inference/external/vjepa2_feature_extraction

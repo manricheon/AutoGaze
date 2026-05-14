@@ -1,0 +1,83 @@
+experiment:
+  id: selected_tier1_longvila_r1_smoke
+  description: Selected Tier 1 smoke scaffold for LongVILA-R1 with AutoGaze zero-mask fallback
+
+selection:
+  tier: tier1
+  selected_model: longvila_r1
+  reason: Highest-priority VILA/SigLIP-family external candidate; sparse path is plausible but blocked until assets and VILA media/projector code are inspected.
+
+autogaze:
+  enabled: true
+  checkpoint_path: weights/AutoGaze
+  processor_path: weights/AutoGaze
+  gaze_ratio: 0.75
+  task_loss_requirement: 0.7
+  integration_role: zero_mask_probe_and_input_selection
+
+vision_encoder:
+  name: generic_vit
+  required_for_full_pipeline: false
+  external_vision_encoder_type: longvila_r1_official_processor_owned
+  fallback_adapter: null
+
+mllm:
+  name: longvila_r1
+  model_id: Efficient-Large-Model/LongVILA-R1-7B
+  checkpoint_path: weights/longvila_r1
+  processor_path: weights/longvila_r1
+  tokenizer_path: weights/longvila_r1
+  adapter: LongVILAAdapter
+  mllm_type: Qwen2-7B
+  official_processor_path: true
+  official_processor_owns_vision: true
+  generation_input_mode: autogaze_zero_mask
+  vision_encoder_type: VILA-family SigLIP SO400M/TSP video pipeline
+  direct_visual_token_injection_supported: false
+  native_sparse_patch_status: needs_source_inspection
+  light_modified_sparse_status: needs_source_inspection
+  rope_sparse_patch_status: not_applicable_for_current_siglip_path
+  positional_encoding_compatibility_status: needs_code_inspection_vila_siglip_tsp
+  token_mapping_status: input_selection_or_zero_mask_until_verified
+  local_files_only: true
+  trust_remote_code: true
+  status: blocked_missing_assets
+
+frame_selection:
+  mode: sample
+  num_frames: 16
+  frame_interval: 1
+  max_windows: 1
+
+scaling:
+  mode: resize
+  resolution: 448
+  patch_size: 14
+  chop_size: 448
+  chop_overlap: 0
+  max_chops: null
+
+zero_mask:
+  enabled: true
+  stage: pixel
+  value: zero
+  save_visualization: false
+  encoder_compute_reduction_claimed: false
+  expected_speedup: none
+
+runtime:
+  device: cpu
+  dtype: float32
+  mllm_dtype: float32
+  local_files_only: true
+  allow_real_model_loading: false
+  warmup_runs: 1
+  progress: true
+
+generation:
+  query_text: Describe the main action in the video.
+  max_new_tokens: 32
+
+output:
+  output_dir: outputs/poc_inference/external/selected_tier1_longvila_r1_smoke
+  status: blocked_missing_assets

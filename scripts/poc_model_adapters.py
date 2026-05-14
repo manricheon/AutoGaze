@@ -119,6 +119,9 @@ class VisionEncoderAdapter:
     def preprocess_or_accept_features(self, video: torch.Tensor, autogaze: Mapping[str, Any] | None = None) -> dict[str, Any]:
         return {"video": video, "autogaze": autogaze}
 
+    def prepare_video_inputs(self, video: torch.Tensor, autogaze: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        return self.preprocess_or_accept_features(video, autogaze=autogaze)
+
     def forward(self, video: torch.Tensor, autogaze: Mapping[str, Any] | None = None) -> dict[str, Any]:
         if video.ndim != 5:
             raise ValueError(f"expected video shape [B,T,C,H,W], got {tuple(video.shape)}")
@@ -220,6 +223,15 @@ class VisionEncoderAdapter:
     def _checkpoint(self) -> Any:
         return self.config.get("checkpoint_path") or self.config.get("model_id")
 
+    def status_report(self) -> dict[str, Any]:
+        return {
+            **self.status.to_dict(),
+            "adapter": self.name,
+            "supports_autogaze_tokens": self.supports_autogaze_tokens(),
+            "supports_chop_mode": self.supports_chop_mode(),
+            "output_dim": self.output_dim(),
+        }
+
 
 class ModifiedSiglipAdapter(VisionEncoderAdapter):
     name = "modified_siglip"
@@ -302,9 +314,221 @@ class VJEPA2Adapter(VisionEncoderAdapter):
             },
         }
 
+    def output_dim(self) -> int:
+        return self._config_int("hidden_size", self.config.get("output_dim", 1024))
+
+    def patch_grid(self, resolution: tuple[int, int] | None = None) -> tuple[int, int]:
+        patch_size = self._config_int("patch_size", 16)
+        if resolution is None:
+            crop_size = self._config_int("crop_size", self.config.get("image_size", 256))
+            resolution = (crop_size, crop_size)
+        return max(1, int(resolution[0]) // patch_size), max(1, int(resolution[1]) // patch_size)
+
+    def supports_chop_mode(self) -> bool:
+        return True
+
+    def supports_autogaze_tokens(self) -> bool:
+        return False
+
+    def run_official_dense(self, *, video: torch.Tensor | None = None, **_: Any) -> dict[str, Any]:
+        if self.model is not None and video is not None:
+            result = self.forward(video)
+            result["metadata"] = {**dict(result.get("metadata") or {}), **self._vjepa2_report("vjepa2_official_dense", generation_ran=False)}
+            return result
+        return self._vjepa2_mode_status(
+            "vjepa2_official_dense",
+            "V-JEPA2 dense official path is registered; real feature extraction requires explicit model loading and video input.",
+        )
+
+    def run_autogaze_frame_selection(self, **_: Any) -> dict[str, Any]:
+        return self._vjepa2_mode_status(
+            "autogaze_frame_selection_vjepa2",
+            "AutoGaze frame/window selection can feed dense selected clips to the V-JEPA2 official processor; no sparse tubelet injection is claimed.",
+        )
+
+    def run_autogaze_chop_selection(self, **_: Any) -> dict[str, Any]:
+        return self._vjepa2_mode_status(
+            "autogaze_chop_selection_vjepa2",
+            "AutoGaze crop/chop selection can feed dense selected crops or clips to V-JEPA2; no encoder-side sparse acceleration is claimed.",
+        )
+
+    def run_autogaze_zero_mask(self, **_: Any) -> dict[str, Any]:
+        return self._vjepa2_mode_status(
+            "autogaze_zero_mask_vjepa2",
+            "AutoGaze zero-mask mode can preserve the dense V-JEPA2 input grid while masking unselected image regions; this is a probing mode, not encoder acceleration.",
+        )
+
+    def run_context_mask_probe(self, **_: Any) -> dict[str, Any]:
+        raise NotImplementedError(
+            "vjepa2_context_mask_probe needs source inspection: context_mask/target_mask semantics and compute impact are not verified. "
+            "No fallback to SigLIP, NVILA, or trainable projection adapter is allowed."
+        )
+
+    def run_sparse_tubelet(self, **_: Any) -> dict[str, Any]:
+        raise NotImplementedError(
+            "vjepa2_sparse_tubelet is blocked until V-JEPA2 patchify/forward accepts selected tubelets with correct 3D-RoPE positions. "
+            "No fallback to SigLIP, NVILA, or trainable projection adapter is allowed."
+        )
+
+    def run_video_classification(self, **_: Any) -> dict[str, Any]:
+        return self._vjepa2_mode_status(
+            "vjepa2_video_classification",
+            "Use an official VJEPA2ForVideoClassification checkpoint for action-recognition smoke tests; the local base encoder checkpoint is not treated as a trained classifier.",
+        )
+
+    def run_feature_extraction(self, *, video: torch.Tensor | None = None, **_: Any) -> dict[str, Any]:
+        if self.model is not None and video is not None:
+            return self.forward(video)
+        return self._vjepa2_mode_status(
+            "vjepa2_feature_extraction",
+            "Frozen V-JEPA2 feature extraction is a safe PoC path after explicit real model loading.",
+        )
+
+    def get_patch_grid(self, resolution: tuple[int, int] | None = None) -> tuple[int, int]:
+        return self.patch_grid(resolution)
+
+    def get_tubelet_grid(self) -> tuple[int, int, int]:
+        frames = self._config_int("frames_per_clip", 64)
+        tubelet = self._config_int("tubelet_size", 2)
+        grid_h, grid_w = self.patch_grid()
+        return max(1, frames // max(1, tubelet)), grid_h, grid_w
+
+    def get_position_encoding_status(self) -> dict[str, Any]:
+        return {
+            "positional_encoding_type": "3d_rope",
+            "patch_structure": "tubelet",
+            "patch_size": self._config_int("patch_size", 16),
+            "crop_size": self._config_int("crop_size", self.config.get("image_size", 256)),
+            "frames_per_clip": self._config_int("frames_per_clip", 64),
+            "tubelet_size": self._config_int("tubelet_size", 2),
+            "deterministic_sparse_position_status": "needs_source_inspection",
+            "context_mask_status": "needs_source_inspection",
+            "sparse_tubelet_status": "blocked_without_forward_patchification_verification",
+        }
+
+    def get_output_dim(self) -> int:
+        return self.output_dim()
+
+    def supports_mllm_projection(self, target_mllm: str | None = None) -> dict[str, Any]:
+        verified = bool(self.config.get("compatible_frozen_projector_verified", False))
+        return {
+            "target_mllm": target_mllm or self.config.get("target_mllm") or "unspecified",
+            "supported": verified,
+            "status": "verified_frozen_projector" if verified else "blocked_without_training",
+            "requires_training": not verified,
+            "reason": (
+                "A compatible frozen projector was explicitly marked verified."
+                if verified
+                else "V-JEPA2 hidden size/features are not a drop-in replacement for reviewed MLLM vision projectors."
+            ),
+        }
+
+    def recommend_decoder(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "decoder": "VJEPA2ForVideoClassification",
+                "priority": "high",
+                "training_needed": "no if using an already trained classification checkpoint; yes for new labels",
+                "supports_query_text": False,
+                "recommended_status": "feasible",
+            },
+            {
+                "decoder": "frozen_feature_extraction_plus_probe",
+                "priority": "high",
+                "training_needed": "optional small non-MLLM probe; no trainable MLLM adapter",
+                "supports_query_text": False,
+                "recommended_status": "feasible",
+            },
+            {
+                "decoder": "temporal_pooling_retrieval",
+                "priority": "medium",
+                "training_needed": False,
+                "supports_query_text": "only with an external text embedding/retrieval setup",
+                "recommended_status": "feasible_input_only",
+            },
+            {
+                "decoder": "qformer_perceiver_or_mllm_connector",
+                "priority": "low",
+                "training_needed": True,
+                "supports_query_text": True,
+                "recommended_status": "blocked_without_training",
+            },
+        ]
+
+    def status_report(self) -> dict[str, Any]:
+        return {
+            **super().status_report(),
+            "model_type": "video_encoder",
+            "patch_structure": "tubelet",
+            "input_tensor_format": "[B,T,C,H,W]",
+            "position_encoding": self.get_position_encoding_status(),
+            "tubelet_grid": self.get_tubelet_grid(),
+            "supports_official_dense": True,
+            "supports_autogaze_frame_selection": True,
+            "supports_autogaze_chop_selection": True,
+            "supports_autogaze_zero_mask": True,
+            "supports_context_mask_probe": "unknown",
+            "supports_sparse_tubelet": "unknown",
+            "supports_direct_mllm_projection": False,
+            "local_asset_status": "local_exists_if_weights/vjepa2-vitl-fpc64-256_is_present",
+            "official_processor_support_status": "registered_dense_feature_path",
+            "input_selection_support_status": "supported_as_dense_clip_or_chop_selection_only",
+            "zero_mask_support_status": "supported_as_image_space_probe_only_no_encoder_acceleration",
+            "mllm_projection": self.supports_mllm_projection(),
+            "decoder_recommendations": self.recommend_decoder(),
+        }
+
+    def _vjepa2_mode_status(self, integration_mode: str, reason: str) -> dict[str, Any]:
+        return {
+            "status": "stub-only",
+            "reason": reason,
+            "metadata": self._vjepa2_report(integration_mode, generation_ran=False),
+        }
+
+    def _vjepa2_report(self, integration_mode: str, *, generation_ran: bool) -> dict[str, Any]:
+        checkpoint = self._checkpoint() or "weights/vjepa2-vitl-fpc64-256"
+        return {
+            "requested_model": checkpoint,
+            "actual_model_loaded": checkpoint if self.status.status == "real" else None,
+            "adapter": self.name,
+            "integration_mode": integration_mode,
+            "real_checkpoint_loaded": self.status.status == "real",
+            "generation_ran": generation_ran,
+            "model_type": "video_encoder",
+            "positional_encoding_type": "3d_rope",
+            "patch_structure": "tubelet",
+            "patch_size": self._config_int("patch_size", 16),
+            "crop_size": self._config_int("crop_size", self.config.get("image_size", 256)),
+            "frames_per_clip": self._config_int("frames_per_clip", 64),
+            "tubelet_size": self._config_int("tubelet_size", 2),
+            "output_dim": self.output_dim(),
+            "mllm_projection_supported": self.supports_mllm_projection()["supported"],
+        }
+
+    def _config_int(self, key: str, default: Any) -> int:
+        try:
+            return int(self.config.get(key, default))
+        except (TypeError, ValueError):
+            return int(default)
+
 
 class GenericVitAdapter(VisionEncoderAdapter):
     name = "generic_vit"
+
+
+class ExternalVisionEncoderAdapter(VisionEncoderAdapter):
+    name = "external"
+
+    def load(self, *, allow_real_model_loading: bool = False, device: str = "cpu", dtype: str = "float32") -> AdapterStatus:
+        if not allow_real_model_loading:
+            self.status = AdapterStatus(
+                self.name,
+                "stub-only",
+                "external vision encoder loading disabled; no fallback to modified_siglip",
+                metadata={"fallback_adapter": None},
+            )
+            return self.status
+        return super().load(allow_real_model_loading=allow_real_model_loading, device=device, dtype=dtype)
 
 
 class MLLMAdapter:
@@ -424,8 +648,91 @@ class MLLMAdapter:
     def supports_direct_visual_tokens(self) -> bool:
         return False
 
+    def supports_native_sparse_patch(self) -> bool:
+        return False
+
+    def supports_light_modified_sparse(self) -> bool:
+        return False
+
+    def supports_rope_sparse_patch(self) -> bool:
+        return False
+
+    def supports_direct_visual_token_injection(self) -> bool:
+        return self.supports_direct_visual_tokens()
+
     def supports_official_processor_path(self) -> bool:
         return False
+
+    def inspect_vision_encoder(self) -> dict[str, Any]:
+        return {
+            "adapter": self.name,
+            "vision_encoder_type": getattr(self, "encoder_type", "unknown"),
+            "siglip_based": getattr(self, "siglip_based", "unknown"),
+            "patch_grid_accessible": getattr(self, "patch_grid_accessible", "unknown"),
+            "dense_grid_dependency": getattr(self, "dense_grid_dependency", "unknown"),
+        }
+
+    def inspect_positional_encoding(self) -> dict[str, Any]:
+        return {
+            "adapter": self.name,
+            "positional_encoding_type": getattr(self, "positional_encoding_type", "unknown"),
+            "positional_encoding_status": getattr(self, "positional_encoding_status", "unknown"),
+            "deterministic_position_adaptation": getattr(self, "deterministic_position_adaptation", "unknown"),
+        }
+
+    def inspect_projector(self) -> dict[str, Any]:
+        return {
+            "adapter": self.name,
+            "projector_status": getattr(self, "projector_status", "unknown"),
+            "variable_visual_token_support": getattr(self, "variable_visual_token_support", "unknown"),
+            "requires_training_or_trainable_adapter": getattr(self, "requires_training_or_trainable_adapter", "unknown"),
+        }
+
+    def inspect_placeholder_handling(self) -> dict[str, Any]:
+        return {
+            "adapter": self.name,
+            "visual_placeholder_dynamic": getattr(self, "visual_placeholder_dynamic", "unknown"),
+            "placeholder_status": getattr(self, "placeholder_status", "unknown"),
+        }
+
+    def supports_direct_sparse_autogaze(self) -> bool:
+        return getattr(self, "direct_sparse_autogaze_supported", False) is True
+
+    def supports_input_level_selection(self) -> bool:
+        return False
+
+    def supports_autogaze_zero_mask(self) -> bool:
+        return False
+
+    def supports_post_encoder_zero_mask(self) -> bool:
+        return False
+
+    def supports_post_encoder_pruning(self) -> bool:
+        return False
+
+    def run_autogaze_zero_mask_path(self, **_: Any) -> dict[str, Any]:
+        raise NotImplementedError(
+            f"{self.name} does not support autogaze_zero_mask. "
+            "No fallback to NVILA, modified SigLIP, or trainable projection adapter is allowed."
+        )
+
+    def run_native_sparse_patch_path(self, **_: Any) -> dict[str, Any]:
+        raise NotImplementedError(
+            f"{self.name} does not support native_sparse_patch. "
+            "No fallback to NVILA, modified SigLIP, or trainable projection adapter is allowed."
+        )
+
+    def run_light_modified_sparse_path(self, **_: Any) -> dict[str, Any]:
+        raise NotImplementedError(
+            f"{self.name} does not support light_modified_sparse. "
+            "No fallback to NVILA, modified SigLIP, or trainable projection adapter is allowed."
+        )
+
+    def run_post_encoder_zero_mask_path(self, **_: Any) -> dict[str, Any]:
+        raise NotImplementedError(
+            f"{self.name} does not support post_encoder_zero_mask. "
+            "No fallback to NVILA, modified SigLIP, or trainable projection adapter is allowed."
+        )
 
     def default_module_path(self) -> str | None:
         return None
@@ -435,6 +742,27 @@ class MLLMAdapter:
 
     def _checkpoint(self) -> Any:
         return self.config.get("checkpoint_path") or self.config.get("model_id")
+
+    def status_report(self) -> dict[str, Any]:
+        return {
+            **self.status.to_dict(),
+            "adapter": self.name,
+            "supports_direct_visual_tokens": self.supports_direct_visual_tokens(),
+            "supports_native_sparse_patch": self.supports_native_sparse_patch(),
+            "supports_light_modified_sparse": self.supports_light_modified_sparse(),
+            "supports_rope_sparse_patch": self.supports_rope_sparse_patch(),
+            "supports_direct_visual_token_injection": self.supports_direct_visual_token_injection(),
+            "supports_official_processor_path": self.supports_official_processor_path(),
+            "inspect_vision_encoder": self.inspect_vision_encoder(),
+            "inspect_positional_encoding": self.inspect_positional_encoding(),
+            "inspect_projector": self.inspect_projector(),
+            "inspect_placeholder_handling": self.inspect_placeholder_handling(),
+            "supports_direct_sparse_autogaze": self.supports_direct_sparse_autogaze(),
+            "supports_input_level_selection": self.supports_input_level_selection(),
+            "supports_autogaze_zero_mask": self.supports_autogaze_zero_mask(),
+            "supports_post_encoder_zero_mask": self.supports_post_encoder_zero_mask(),
+            "supports_post_encoder_pruning": self.supports_post_encoder_pruning(),
+        }
 
 
 class NVILAAdapter(MLLMAdapter):
@@ -1001,6 +1329,913 @@ class QwenAdapter(MLLMAdapter):
 
 class GenericMLLMAdapter(MLLMAdapter):
     name = "generic_mllm"
+
+
+class ExternalMLLMAdapter(MLLMAdapter):
+    default_model_id = ""
+    encoder_type = "unknown"
+    llm_type = "unknown"
+    supported_integration_modes: tuple[str, ...] = (
+        "official_processor",
+        "autogaze_frame_selection",
+        "autogaze_chop_selection",
+        "autogaze_zero_mask",
+    )
+    direct_token_injection_supported: bool | str = False
+    native_sparse_patch_supported: bool | str = False
+    light_modified_sparse_supported: bool | str = False
+    rope_sparse_patch_supported: bool | str = False
+    autogaze_zero_mask_supported: bool | str = True
+    post_encoder_zero_mask_supported: bool | str = "unknown"
+    input_selection_only_supported: bool | str = True
+    native_sparse_patch_supported: bool | str = False
+    light_modified_sparse_supported: bool | str = False
+    rope_sparse_patch_supported: bool | str = False
+    autogaze_zero_mask_supported: bool | str = True
+    post_encoder_zero_mask_supported: bool | str = "unknown"
+    input_selection_only_supported: bool | str = True
+    siglip_based: bool | str = "unknown"
+    positional_encoding_status = "needs_code_inspection"
+    token_count_compatibility = "needs_code_inspection"
+    positional_encoding_type = "unknown"
+    dense_grid_dependency: bool | str = "unknown"
+    variable_visual_token_support: bool | str = "unknown"
+    visual_placeholder_dynamic: bool | str = "unknown"
+    direct_sparse_autogaze_supported: bool | str = "unknown"
+    patch_grid_accessible: bool | str = "unknown"
+    deterministic_position_adaptation: bool | str = "unknown"
+    projector_status = "needs_code_inspection"
+    placeholder_status = "needs_code_inspection"
+    requires_official_processor = True
+    requires_training_or_trainable_adapter: bool | str = False
+    recommended_mode = "autogaze_frame_selection"
+    recommended_first_smoke_mode = "autogaze_frame_selection"
+    risk_level = "high"
+    compatibility_status = "needs_code_inspection"
+    local_asset_status = "not_checked"
+    official_processor_support_status = "stub_until_assets_verified"
+    input_selection_support_status = "supported_as_input_level_selection_only"
+    zero_mask_support_status = "supported_as_image_space_probe_only"
+    unsupported_mode_reasons: dict[str, str] = {}
+
+    def load(self, *, allow_real_model_loading: bool = False, device: str = "cpu", dtype: str = "float32") -> AdapterStatus:
+        self.device = device
+        metadata = self._adapter_report(integration_mode="load", generation_ran=False)
+        if not allow_real_model_loading:
+            self.status = AdapterStatus(
+                self.name,
+                "stub-only",
+                f"{self.name} external MLLM adapter is metadata/stub-only; real loading disabled",
+                metadata=metadata,
+            )
+            return self.status
+        checkpoint = self._checkpoint()
+        if not checkpoint:
+            self.status = AdapterStatus(
+                self.name,
+                "blocked",
+                f"{self.name} real loading requires an explicit model_id or checkpoint_path; default model IDs are metadata only",
+                metadata=metadata,
+            )
+            return self.status
+        if _looks_like_local_path(str(checkpoint)):
+            local_checkpoint = _resolve_local_path(checkpoint)
+            if not local_checkpoint.exists():
+                self.status = AdapterStatus(self.name, "blocked", f"{self.name} checkpoint path does not exist: {checkpoint}", metadata=metadata)
+                return self.status
+            missing_shards = _missing_sharded_checkpoint_files(local_checkpoint)
+            if missing_shards:
+                self.status = AdapterStatus(
+                    self.name,
+                    "blocked",
+                    f"{self.name} checkpoint is incomplete; missing shard files: {', '.join(missing_shards[:8])}",
+                    metadata={**metadata, "missing_shards": missing_shards},
+                )
+                return self.status
+        checkpoint_ref = _model_reference_for_loading(checkpoint)
+        processor_path = self.config.get("processor_path") or checkpoint
+        processor_ref = _model_reference_for_loading(processor_path)
+        module_path = self.config.get("module_path") or "transformers"
+        class_candidates = self._model_class_candidates()
+        processor_module = self.config.get("processor_module_path") or "transformers"
+        processor_class_name = self.config.get("processor_class_name") or self.config.get("processor_class_or_factory") or "AutoProcessor"
+        errors: list[str] = []
+        try:
+            module = importlib.import_module(str(module_path))
+            load_kwargs = _from_pretrained_kwargs(self.config, dtype=dtype)
+            with _suppress_transformers_torch_dtype_warning():
+                for class_name in class_candidates:
+                    try:
+                        factory = getattr(module, str(class_name))
+                        self.model = factory.from_pretrained(checkpoint_ref, **load_kwargs)
+                        metadata["model_class_name"] = class_name
+                        break
+                    except Exception as exc:  # pragma: no cover - environment/model dependent.
+                        errors.append(f"{class_name}: {exc}")
+                else:
+                    self.status = AdapterStatus(
+                        self.name,
+                        "blocked",
+                        f"{self.name} real model loading failed for candidate classes: {' | '.join(errors)}",
+                        metadata=metadata,
+                    )
+                    return self.status
+            if hasattr(self.model, "to") and "device_map" not in load_kwargs:
+                self.model.to(device)
+            if hasattr(self.model, "eval"):
+                self.model.eval()
+            processor_factory = getattr(importlib.import_module(str(processor_module)), str(processor_class_name))
+            with _suppress_transformers_torch_dtype_warning():
+                self.processor = processor_factory.from_pretrained(processor_ref, **_processor_from_pretrained_kwargs(self.config))
+            self.status = AdapterStatus(
+                self.name,
+                "real",
+                metadata={
+                    **metadata,
+                    "checkpoint": checkpoint,
+                    "resolved_checkpoint": checkpoint_ref,
+                    "processor_path": processor_path,
+                    "resolved_processor_path": processor_ref,
+                    "module_path": module_path,
+                    "processor_module_path": processor_module,
+                    "processor_class_name": processor_class_name,
+                    "local_files_only": bool(self.config.get("local_files_only", False)),
+                    "trust_remote_code": bool(self.config.get("trust_remote_code", False)),
+                    "official_processor_path": True,
+                },
+            )
+        except Exception as exc:  # pragma: no cover - real model path is environment-dependent.
+            self.status = AdapterStatus(self.name, "blocked", f"{self.name} official processor/model loading failed: {exc}", metadata=metadata)
+        return self.status
+
+    def _model_class_candidates(self) -> tuple[str, ...]:
+        configured = self.config.get("class_name") or self.config.get("class_or_factory")
+        if configured:
+            return (str(configured),)
+        return ("AutoModelForVision2Seq", "AutoModelForCausalLM", "AutoModel")
+
+    def supports_official_processor_path(self) -> bool:
+        return "official_processor" in self.supported_integration_modes
+
+    def supports_direct_visual_tokens(self) -> bool:
+        return self.direct_token_injection_supported is True
+
+    def supports_native_sparse_patch(self) -> bool:
+        return self.native_sparse_patch_supported is True
+
+    def supports_light_modified_sparse(self) -> bool:
+        return self.light_modified_sparse_supported is True
+
+    def supports_rope_sparse_patch(self) -> bool:
+        return self.rope_sparse_patch_supported is True
+
+    def supports_direct_visual_token_injection(self) -> bool:
+        return self.supports_direct_visual_tokens()
+
+    def supports_direct_sparse_autogaze(self) -> bool:
+        return self.direct_sparse_autogaze_supported is True
+
+    def supports_input_level_selection(self) -> bool:
+        return bool({"autogaze_frame_selection", "autogaze_chop_selection"} & set(self.supported_integration_modes))
+
+    def supports_autogaze_zero_mask(self) -> bool:
+        return self.autogaze_zero_mask_supported is True
+
+    def supports_post_encoder_zero_mask(self) -> bool:
+        return self.post_encoder_zero_mask_supported is True
+
+    def supports_post_encoder_pruning(self) -> bool:
+        return "post_encoder_pruning" in self.supported_integration_modes
+
+    def run_official_processor_path(self, **_: Any) -> dict[str, Any]:
+        if self.model is not None and self.processor is not None:
+            return self.generate(**_)
+        return self._mode_status("official_processor")
+
+    def run_autogaze_frame_selection_path(self, **_: Any) -> dict[str, Any]:
+        if self.model is not None and self.processor is not None:
+            return self._generate_with_selection_mode("autogaze_frame_selection", **_)
+        return self._mode_status("autogaze_frame_selection")
+
+    def run_autogaze_chop_selection_path(self, **_: Any) -> dict[str, Any]:
+        if self.model is not None and self.processor is not None:
+            return self._generate_with_selection_mode("autogaze_chop_selection", **_)
+        return self._mode_status("autogaze_chop_selection")
+
+    def run_autogaze_zero_mask_path(self, **_: Any) -> dict[str, Any]:
+        if self.model is not None and self.processor is not None:
+            return self._generate_with_selection_mode("autogaze_zero_mask", **_)
+        return self._mode_status("autogaze_zero_mask")
+
+    def run_siglip_sparse_patch_path(self, **_: Any) -> dict[str, Any]:
+        return self._mode_status("siglip_sparse_patch")
+
+    def run_native_sparse_patch_path(self, **_: Any) -> dict[str, Any]:
+        return self._mode_status("native_sparse_patch")
+
+    def run_light_modified_sparse_path(self, **_: Any) -> dict[str, Any]:
+        return self._mode_status("light_modified_sparse")
+
+    def run_rope_sparse_patch_path(self, **_: Any) -> dict[str, Any]:
+        return self._mode_status("rope_sparse_patch")
+
+    def run_post_encoder_pruning_path(self, **_: Any) -> dict[str, Any]:
+        return self._mode_status("post_encoder_pruning")
+
+    def run_post_encoder_zero_mask_path(self, **_: Any) -> dict[str, Any]:
+        return self._mode_status("post_encoder_zero_mask")
+
+    def run_direct_visual_token_injection_path(self, **_: Any) -> dict[str, Any]:
+        return self._mode_status("direct_visual_token_injection")
+
+    def _mode_status(self, integration_mode: str) -> dict[str, Any]:
+        if integration_mode not in self.supported_integration_modes or integration_mode == "direct_visual_token_injection":
+            reason = self.unsupported_mode_reasons.get(
+                integration_mode,
+                f"{integration_mode} is not verified for {self.name}",
+            )
+            raise NotImplementedError(self._unsupported_message(integration_mode, reason))
+        return {
+            "status": "stub-only",
+            "answer": None,
+            "reason": (
+                f"{self.name} {integration_mode} is registered as a lightweight plan/stub. "
+                "Implement the model official processor path and run a real smoke test before marking it runnable."
+            ),
+            "query_text_used": True,
+            "metadata": self._adapter_report(integration_mode=integration_mode, generation_ran=False),
+        }
+
+    def generate(
+        self,
+        *,
+        query_text: str,
+        video: torch.Tensor,
+        visual_tokens: torch.Tensor | None = None,
+        max_new_tokens: int = 32,
+        video_path: str | None = None,
+        autogaze: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if visual_tokens is not None:
+            return {
+                "status": "blocked",
+                "answer": None,
+                "reason": f"{self.name} direct visual token injection is not verified; use official_processor or input-selection modes",
+                "query_text_used": True,
+                "metadata": self._adapter_report(
+                    integration_mode="direct_visual_token_injection",
+                    generation_ran=False,
+                    unsupported_reason="direct visual token injection is not verified",
+                ),
+            }
+        if self.model is not None and self.processor is not None:
+            return self._generate_with_standard_processor(
+                query_text=query_text,
+                video=video,
+                video_path=video_path,
+                max_new_tokens=max_new_tokens,
+                integration_mode="official_processor",
+            )
+        return super().generate(
+            query_text=query_text,
+            video=video,
+            visual_tokens=visual_tokens,
+            max_new_tokens=max_new_tokens,
+            video_path=video_path,
+            autogaze=autogaze,
+        )
+
+    def _generate_with_selection_mode(self, integration_mode: str, **kwargs: Any) -> dict[str, Any]:
+        result = self.generate(**kwargs)
+        metadata = dict(result.get("metadata") or {})
+        metadata["integration_mode"] = integration_mode
+        metadata["autogaze_input_selection_mode"] = integration_mode
+        metadata["autogaze_visual_tokens_injected"] = False
+        result["metadata"] = metadata
+        return result
+
+    def _generate_with_standard_processor(
+        self,
+        *,
+        query_text: str,
+        video: torch.Tensor,
+        video_path: str | None,
+        max_new_tokens: int,
+        integration_mode: str,
+    ) -> dict[str, Any]:
+        if not query_text:
+            return {"status": "blocked", "answer": None, "reason": "query text is required", "query_text_used": False}
+        try:
+            prompt_template = str(self.config.get("prompt_template") or "{prompt}")
+            prompt_text = prompt_template.format(prompt=query_text, query=query_text, video_token="<video>").strip()
+            video_input, video_input_kind = _official_video_input(video=video, video_path=video_path)
+            call_kwargs = dict(self.config.get("processor_call_kwargs") or {})
+            inputs, input_metadata = self._prepare_standard_processor_inputs(
+                prompt_text=prompt_text,
+                video_input=video_input,
+                video_input_kind=video_input_kind,
+                call_kwargs=call_kwargs,
+            )
+            if input_metadata.get("status") == "blocked":
+                return {
+                    "status": "blocked",
+                    "answer": None,
+                    "reason": str(input_metadata.get("reason")),
+                    "query_text_used": True,
+                    "metadata": {
+                        **self._adapter_report(integration_mode=integration_mode, generation_ran=False),
+                        **input_metadata,
+                    },
+                }
+            if isinstance(inputs, Mapping):
+                model_device = getattr(self.model, "device", self.device)
+                inputs = {
+                    key: value.to(model_device) if isinstance(value, torch.Tensor) else value
+                    for key, value in inputs.items()
+                }
+            with torch.inference_mode():
+                outputs = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
+            input_ids = inputs.get("input_ids") if isinstance(inputs, Mapping) else None
+            decode_input = outputs[:, input_ids.shape[1] :] if isinstance(outputs, torch.Tensor) and isinstance(input_ids, torch.Tensor) else outputs
+            decoded = self.processor.batch_decode(decode_input, skip_special_tokens=True) if hasattr(self.processor, "batch_decode") else [str(decode_input)]
+            answer = str(decoded[0]).strip() if decoded else ""
+            return {
+                "status": "real",
+                "answer": answer,
+                "reason": None,
+                "query_text_used": True,
+                "official_processor_path": True,
+                "metadata": {
+                    **self._adapter_report(integration_mode=integration_mode, generation_ran=True),
+                    **input_metadata,
+                    "prompt_template": prompt_template,
+                    "prompt_text": prompt_text,
+                    "video_input_kind": video_input_kind,
+                    "max_new_tokens": max_new_tokens,
+                    "autogaze_visual_tokens_injected": False,
+                },
+            }
+        except Exception as exc:  # pragma: no cover - real model path is environment-dependent.
+            return {
+                "status": "blocked",
+                "answer": None,
+                "reason": f"{self.name} official processor generation failed: {exc}",
+                "query_text_used": True,
+                "official_processor_path": True,
+                "metadata": self._adapter_report(integration_mode=integration_mode, generation_ran=False),
+            }
+
+    def _prepare_standard_processor_inputs(
+        self,
+        *,
+        prompt_text: str,
+        video_input: Any,
+        video_input_kind: str,
+        call_kwargs: Mapping[str, Any],
+    ) -> tuple[Any, dict[str, Any]]:
+        metadata: dict[str, Any] = {
+            "video_input_kind": video_input_kind,
+            "processor_call_kwargs": _jsonable_processor_kwargs(call_kwargs),
+            "processor_input_attempts": [],
+        }
+        if hasattr(self.processor, "apply_chat_template"):
+            message_video_ref = _qwen_message_video_reference(video_input, video_input_kind)
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "video", "video": message_video_ref},
+                        {"type": "text", "text": prompt_text},
+                    ],
+                }
+            ]
+            try:
+                text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                metadata["chat_template_path"] = True
+            except Exception as exc:
+                return None, {**metadata, "status": "blocked", "reason": f"{self.name} chat template failed: {exc}"}
+        else:
+            text = prompt_text
+            metadata["chat_template_path"] = False
+
+        video_payload = _qwen_processor_video_payload(video_input)
+        attempts = (
+            ("batched_text_videos", {"text": [text], "videos": video_payload, "return_tensors": "pt", **dict(call_kwargs)}),
+            ("single_text_videos", {"text": text, "videos": video_input, "return_tensors": "pt", **dict(call_kwargs)}),
+            ("batched_text_images", {"text": [text], "images": video_payload, "return_tensors": "pt", **dict(call_kwargs)}),
+        )
+        errors: list[str] = []
+        for label, kwargs in attempts:
+            metadata["processor_input_attempts"].append(label)
+            try:
+                return self.processor(**kwargs), metadata
+            except Exception as exc:
+                errors.append(f"{label}: {exc}")
+        return None, {
+            **metadata,
+            "status": "blocked",
+            "reason": f"{self.name} official processor input preparation failed: {' | '.join(errors)}",
+        }
+
+    def _unsupported_message(self, integration_mode: str, reason: str) -> str:
+        return (
+            f"{self.name} does not support {integration_mode}: {reason}. "
+            "No fallback to NVILA, modified SigLIP, or trainable projection adapter is allowed."
+        )
+
+    def _adapter_report(
+        self,
+        *,
+        integration_mode: str,
+        generation_ran: bool,
+        unsupported_reason: str | None = None,
+    ) -> dict[str, Any]:
+        requested_model = self.config.get("model_id") or self.config.get("checkpoint_path") or self.default_model_id
+        return {
+            "requested_model": requested_model,
+            "actual_model_loaded": requested_model if self.status.status == "real" else None,
+            "adapter": self.name,
+            "integration_mode": integration_mode,
+            "real_checkpoint_loaded": self.status.status == "real",
+            "generation_ran": generation_ran,
+            "unsupported_reason": unsupported_reason,
+            "encoder_type": self.encoder_type,
+            "llm_type": self.llm_type,
+            "supported_integration_modes": list(self.supported_integration_modes),
+            "direct_token_injection_supported": self.direct_token_injection_supported,
+            "native_sparse_patch_supported": self.native_sparse_patch_supported,
+            "light_modified_sparse_supported": self.light_modified_sparse_supported,
+            "rope_sparse_patch_supported": self.rope_sparse_patch_supported,
+            "autogaze_zero_mask_supported": self.autogaze_zero_mask_supported,
+            "post_encoder_zero_mask_supported": self.post_encoder_zero_mask_supported,
+            "input_selection_only_supported": self.input_selection_only_supported,
+            "siglip_based": self.siglip_based,
+            "positional_encoding_compatibility": self.positional_encoding_status,
+            "positional_encoding_type": self.positional_encoding_type,
+            "dense_grid_dependency": self.dense_grid_dependency,
+            "variable_visual_token_support": self.variable_visual_token_support,
+            "visual_placeholder_dynamic": self.visual_placeholder_dynamic,
+            "direct_sparse_autogaze_supported": self.direct_sparse_autogaze_supported,
+            "patch_grid_accessible": self.patch_grid_accessible,
+            "deterministic_position_adaptation": self.deterministic_position_adaptation,
+            "projector_status": self.projector_status,
+            "placeholder_status": self.placeholder_status,
+            "token_count_compatibility": self.token_count_compatibility,
+            "requires_official_processor": self.requires_official_processor,
+            "requires_training_or_trainable_adapter": self.requires_training_or_trainable_adapter,
+            "recommended_mode": self.recommended_mode,
+            "recommended_first_smoke_mode": self.recommended_first_smoke_mode,
+            "risk_level": self.risk_level,
+            "compatibility_status": self.compatibility_status,
+            "local_asset_status": self.local_asset_status,
+            "official_processor_support_status": self.official_processor_support_status,
+            "input_selection_support_status": self.input_selection_support_status,
+            "zero_mask_support_status": self.zero_mask_support_status,
+        }
+
+
+class LlavaOVAdapter(ExternalMLLMAdapter):
+    name = "llava_ov"
+    default_model_id = "llava-hf/llava-onevision-qwen2-7b-ov-hf"
+    encoder_type = "SigLIP vision encoder, patch14, anyres/video pooling"
+    llm_type = "Qwen2-7B"
+    supported_integration_modes = (
+        "official_processor",
+        "autogaze_frame_selection",
+        "autogaze_chop_selection",
+        "autogaze_zero_mask",
+        "post_encoder_pruning",
+    )
+    direct_token_injection_supported = "unknown"
+    siglip_based = True
+    positional_encoding_type = "absolute_2d_siglip_plus_qwen2_rope"
+    dense_grid_dependency = True
+    variable_visual_token_support = "unknown"
+    visual_placeholder_dynamic = "unknown"
+    direct_sparse_autogaze_supported = "unknown"
+    patch_grid_accessible = "unknown"
+    deterministic_position_adaptation = "unknown"
+    projector_status = "needs_code_inspection: projector after anyres/video pooling"
+    placeholder_status = "needs_code_inspection: image/video token placeholders must match packed token count"
+    positional_encoding_status = "needs_code_inspection: anyres/newline and video pooling must be preserved"
+    token_count_compatibility = "needs_code_inspection: video path pools to fixed per-frame sequence"
+    recommended_mode = "autogaze_frame_selection"
+    recommended_first_smoke_mode = "autogaze_frame_selection"
+    risk_level = "medium"
+    compatibility_status = "siglip_candidate"
+    unsupported_mode_reasons = {
+        "siglip_sparse_patch": "candidate only; anyres/video pooling, positional remapping, projector, and placeholder counts are not verified",
+        "rope_sparse_patch": "LLaVA-OneVision sparse RoPE path is not verified; video pooling and placeholder counts still require dense/packed tokens",
+        "direct_visual_token_injection": "placeholder count, pooled video token count, and position IDs have not been verified",
+    }
+
+
+class LongVAAdapter(ExternalMLLMAdapter):
+    name = "longva"
+    default_model_id = "lmms-lab/LongVA-7B"
+    encoder_type = "CLIP ViT-L/14-336 vision tower with anyres/unires processing"
+    llm_type = "Qwen2-7B"
+    supported_integration_modes = ("official_processor", "autogaze_frame_selection", "autogaze_chop_selection", "autogaze_zero_mask", "post_encoder_pruning")
+    direct_token_injection_supported = False
+    siglip_based = False
+    positional_encoding_type = "clip_absolute_2d_plus_qwen2_rope"
+    dense_grid_dependency = True
+    variable_visual_token_support = "unknown"
+    visual_placeholder_dynamic = "unknown"
+    direct_sparse_autogaze_supported = False
+    patch_grid_accessible = "unknown"
+    deterministic_position_adaptation = False
+    projector_status = "blocked_for_direct_sparse: CLIP/unires projector contract is model-specific"
+    placeholder_status = "needs_code_inspection: LLaVA-style placeholder expansion"
+    positional_encoding_status = "blocked_for_direct_sparse: CLIP/anyres token layout differs from AutoGaze SigLIP path"
+    token_count_compatibility = "blocked_for_direct_sparse: unires pooling/projector contract needs model-specific code"
+    recommended_mode = "autogaze_frame_selection"
+    recommended_first_smoke_mode = "autogaze_frame_selection"
+    risk_level = "medium"
+    compatibility_status = "input_selection_only"
+    unsupported_mode_reasons = {
+        "siglip_sparse_patch": "LongVA-7B config uses a CLIP vision tower, not SigLIP",
+        "rope_sparse_patch": "LongVA direct sparse RoPE path is not verified and still depends on CLIP dense/anyres visual tokens",
+        "direct_visual_token_injection": "visual token placeholder and projector compatibility are not verified",
+    }
+
+
+class LongVILAAdapter(ExternalMLLMAdapter):
+    name = "longvila_r1"
+    default_model_id = "Efficient-Large-Model/LongVILA-R1-7B"
+    encoder_type = "VILA SigLIP SO400M patch14-448 with TSP video encoder"
+    llm_type = "Qwen2-7B"
+    supported_integration_modes = (
+        "official_processor",
+        "autogaze_frame_selection",
+        "autogaze_chop_selection",
+        "autogaze_zero_mask",
+        "post_encoder_pruning",
+    )
+    direct_token_injection_supported = "unknown"
+    siglip_based = True
+    positional_encoding_type = "siglip_absolute_2d_interpolation_plus_tsp_video_pooling_and_qwen2_rope"
+    dense_grid_dependency = "unknown"
+    variable_visual_token_support = "unknown"
+    visual_placeholder_dynamic = "unknown"
+    direct_sparse_autogaze_supported = "unknown"
+    patch_grid_accessible = "unknown"
+    deterministic_position_adaptation = "unknown"
+    projector_status = "needs_code_inspection: VILA projector/TSP pipeline"
+    placeholder_status = "needs_code_inspection: VILA _embed media placeholder alignment"
+    positional_encoding_status = "needs_code_inspection: VILA SigLIP interpolation and TSP video pooling must be preserved"
+    token_count_compatibility = "needs_code_inspection: projector/placeholder behavior must match sparse token count"
+    recommended_mode = "autogaze_frame_selection"
+    recommended_first_smoke_mode = "autogaze_frame_selection"
+    risk_level = "medium"
+    compatibility_status = "native_candidate"
+    unsupported_mode_reasons = {
+        "siglip_sparse_patch": "candidate only; VILA SigLIP grid mapping, TSP pooling, projector, and placeholder alignment are not verified",
+        "rope_sparse_patch": "LongVILA sparse RoPE path is not verified; SigLIP/TSP media pipeline should be inspected first",
+        "direct_visual_token_injection": "VILA _embed/projector placeholder alignment has not been verified for externally selected tokens",
+    }
+
+
+class ApolloAdapter(ExternalMLLMAdapter):
+    name = "apollo"
+    default_model_id = "GoodiesHere/Apollo-LMMs-Apollo-7B-t32"
+    encoder_type = "hybrid SigLIP SO400M plus InternVideo2 vision tower with Perceiver connector"
+    llm_type = "Qwen2-7B"
+    supported_integration_modes = ("official_processor", "autogaze_frame_selection", "autogaze_chop_selection", "autogaze_zero_mask", "post_encoder_pruning")
+    direct_token_injection_supported = False
+    siglip_based = "partial"
+    positional_encoding_type = "hybrid_siglip_absolute_2d_plus_internvideo_temporal_plus_perceiver_latents"
+    dense_grid_dependency = True
+    variable_visual_token_support = False
+    visual_placeholder_dynamic = "unknown"
+    direct_sparse_autogaze_supported = False
+    patch_grid_accessible = "partial"
+    deterministic_position_adaptation = False
+    projector_status = "blocked_for_direct_sparse: Perceiver connector emits fixed resampled tokens"
+    placeholder_status = "blocked_until_connector_output_and_placeholders_are_verified"
+    positional_encoding_status = "blocked_for_direct_sparse: hybrid tower and Perceiver resampler hide a simple SigLIP grid"
+    token_count_compatibility = "blocked_for_direct_sparse: connector emits fixed resampled token counts"
+    recommended_mode = "autogaze_chop_selection"
+    recommended_first_smoke_mode = "autogaze_chop_selection"
+    risk_level = "high"
+    compatibility_status = "post_encoder_only"
+    unsupported_mode_reasons = {
+        "siglip_sparse_patch": "Apollo uses a hybrid SigLIP/InternVideo2 tower and Perceiver connector; isolated SigLIP sparse path is not verified",
+        "rope_sparse_patch": "Apollo does not expose a verified explicit sparse spatial/temporal RoPE path before its hybrid connector",
+        "direct_visual_token_injection": "fixed connector output and placeholders are not verified for arbitrary selected tokens",
+    }
+
+
+class VideoLLaMA3Adapter(ExternalMLLMAdapter):
+    name = "videollama3"
+    default_model_id = "DAMO-NLP-SG/VideoLLaMA3-7B"
+    encoder_type = "VL3-SigLIP-NaViT patch14 tuned vision encoder"
+    llm_type = "Qwen2.5-7B"
+    supported_integration_modes = (
+        "official_processor",
+        "autogaze_frame_selection",
+        "autogaze_chop_selection",
+        "autogaze_zero_mask",
+        "post_encoder_pruning",
+    )
+    direct_token_injection_supported = "unknown"
+    siglip_based = True
+    positional_encoding_type = "siglip_navit_positioning_plus_qwen2_5_rope"
+    dense_grid_dependency = "unknown"
+    variable_visual_token_support = "unknown"
+    visual_placeholder_dynamic = "unknown"
+    direct_sparse_autogaze_supported = "unknown"
+    patch_grid_accessible = "unknown"
+    deterministic_position_adaptation = "unknown"
+    projector_status = "needs_code_inspection: spatial merge/compression and projector"
+    placeholder_status = "needs_code_inspection: token compression and placeholder count"
+    positional_encoding_status = "needs_code_inspection: NaViT layout, spatial merge, and token compression must be preserved"
+    token_count_compatibility = "needs_code_inspection: mm_max_length/spatial_merge/compression controls token budget"
+    recommended_mode = "autogaze_frame_selection"
+    recommended_first_smoke_mode = "autogaze_frame_selection"
+    risk_level = "high"
+    compatibility_status = "siglip_candidate"
+    unsupported_mode_reasons = {
+        "siglip_sparse_patch": "candidate only; NaViT layout, spatial merge, token compression, and placeholders are not verified",
+        "rope_sparse_patch": "VideoLLaMA3 sparse RoPE path is not verified; NaViT packing and compression may require dense layout",
+        "direct_visual_token_injection": "VideoLLaMA3 projector, token compression, and placeholder alignment have not been verified",
+    }
+
+
+class VideoChatFlashAdapter(ExternalMLLMAdapter):
+    name = "videochat_flash"
+    default_model_id = "OpenGVLab/VideoChat-Flash-Qwen2-7B_res448"
+    encoder_type = "UMT-L or UMT-HD-L video tower with hierarchical compression"
+    llm_type = "Qwen2-7B"
+    supported_integration_modes = ("official_processor", "autogaze_frame_selection", "autogaze_chop_selection", "autogaze_zero_mask")
+    direct_token_injection_supported = False
+    siglip_based = False
+    positional_encoding_type = "umt_hierarchical_temporal_spatial_positions_plus_qwen_rope"
+    dense_grid_dependency = True
+    variable_visual_token_support = False
+    visual_placeholder_dynamic = "unknown"
+    direct_sparse_autogaze_supported = False
+    patch_grid_accessible = False
+    deterministic_position_adaptation = False
+    projector_status = "blocked_for_direct_sparse: hierarchical compressor produces low fixed token counts"
+    placeholder_status = "blocked_until_compressed_token_placeholders_are_verified"
+    positional_encoding_status = "blocked_for_direct_sparse: UMT hierarchy and compression do not expose AutoGaze SigLIP grid"
+    token_count_compatibility = "blocked_for_direct_sparse: model compresses to configured per-frame tokens"
+    recommended_mode = "autogaze_frame_selection"
+    recommended_first_smoke_mode = "autogaze_frame_selection"
+    risk_level = "high"
+    compatibility_status = "input_selection_only"
+    unsupported_mode_reasons = {
+        "siglip_sparse_patch": "VideoChat-Flash uses UMT-family encoders, not SigLIP",
+        "rope_sparse_patch": "VideoChat-Flash does not expose a verified explicit sparse RoPE path before hierarchical compression",
+        "post_encoder_pruning": "hierarchical compression already changes token layout; pruning semantics need code inspection",
+        "direct_visual_token_injection": "hierarchical token compressor and placeholder contract are not verified",
+    }
+
+
+class InternVL35Adapter(ExternalMLLMAdapter):
+    name = "internvl3_5"
+    default_model_id = "OpenGVLab/InternVL3_5-8B"
+    encoder_type = "InternViT with dynamic tiling and pixel shuffle compression"
+    llm_type = "Qwen3-8B"
+    supported_integration_modes = ("official_processor", "autogaze_frame_selection", "autogaze_chop_selection", "autogaze_zero_mask")
+    direct_token_injection_supported = False
+    siglip_based = False
+    positional_encoding_type = "internvit_absolute_or_dynamic_tile_positions_plus_qwen3_rope"
+    dense_grid_dependency = True
+    variable_visual_token_support = "unknown"
+    visual_placeholder_dynamic = "unknown"
+    direct_sparse_autogaze_supported = False
+    patch_grid_accessible = False
+    deterministic_position_adaptation = False
+    projector_status = "blocked_for_direct_sparse: pixel shuffle/downsample contract is dense-tile specific"
+    placeholder_status = "blocked_until_dynamic_tile_placeholders_are_verified"
+    positional_encoding_status = "blocked_for_direct_sparse: dynamic tiles and pixel shuffle change token layout"
+    token_count_compatibility = "blocked_for_direct_sparse: image_seq_length/downsample contract is model-specific"
+    recommended_mode = "autogaze_chop_selection"
+    recommended_first_smoke_mode = "autogaze_chop_selection"
+    risk_level = "high"
+    compatibility_status = "input_selection_only"
+    unsupported_mode_reasons = {
+        "siglip_sparse_patch": "InternVL3.5 uses InternViT, not SigLIP",
+        "rope_sparse_patch": "InternVL3.5 direct sparse RoPE path is not verified and dynamic tiling/pixel shuffle require dense tile layout",
+        "post_encoder_pruning": "pixel-shuffle and dynamic patch routing must be mapped before pruning",
+        "direct_visual_token_injection": "dynamic tile counts, pixel shuffle, and image placeholder expansion are not verified",
+    }
+
+
+class Qwen25VLAdapter(QwenAdapter):
+    name = "qwen2_5_vl"
+    default_model_id = "Qwen/Qwen2.5-VL-7B-Instruct"
+    encoder_type = "Qwen2.5 native dynamic-resolution ViT"
+    llm_type = "Qwen2.5-7B"
+    supported_integration_modes: tuple[str, ...] = ("official_processor", "autogaze_frame_selection", "autogaze_chop_selection", "autogaze_zero_mask", "post_encoder_pruning")
+    direct_token_injection_supported: bool | str = False
+    native_sparse_patch_supported: bool | str = False
+    light_modified_sparse_supported: bool | str = False
+    rope_sparse_patch_supported: bool | str = False
+    autogaze_zero_mask_supported: bool | str = True
+    post_encoder_zero_mask_supported: bool | str = False
+    input_selection_only_supported: bool | str = True
+    siglip_based: bool | str = False
+    positional_encoding_type = "qwen2_5_vl_mrope_window_attention"
+    dense_grid_dependency: bool | str = True
+    variable_visual_token_support: bool | str = "processor_dynamic_only"
+    visual_placeholder_dynamic: bool | str = "processor_dynamic_only"
+    direct_sparse_autogaze_supported: bool | str = False
+    patch_grid_accessible: bool | str = "processor_grid_thw_only"
+    deterministic_position_adaptation: bool | str = False
+    projector_status = "blocked_for_direct_injection: visual merger expects official grid_thw path"
+    placeholder_status = "blocked_for_direct_injection: placeholders are processor-generated"
+    positional_encoding_status = "blocked_for_direct_injection: M-RoPE, temporal IDs, and window attention depend on official grid_thw"
+    token_count_compatibility = "blocked_for_direct_injection: visual merger and placeholder counts are processor-generated"
+    requires_official_processor = True
+    requires_training_or_trainable_adapter: bool | str = False
+    recommended_mode = "autogaze_frame_selection"
+    recommended_first_smoke_mode = "autogaze_frame_selection"
+    risk_level = "high"
+    compatibility_status = "input_selection_only"
+    local_asset_status = "local_exists_if_weights/Qwen2.5-VL-7B-Instruct_is_present"
+    official_processor_support_status = "implemented_when_local_assets_and_transformers_are_available"
+    input_selection_support_status = "supported_as_input_level_selection_only"
+    zero_mask_support_status = "supported_as_image_space_or_patch_embed_probe_only_no_encoder_acceleration"
+    unsupported_mode_reasons = {
+        "siglip_sparse_patch": "Qwen2.5-VL does not use SigLIP",
+        "rope_sparse_patch": "Qwen2.5-VL M-RoPE/grid_thw/window attention sparse path is not verified for holes",
+        "direct_visual_token_injection": "M-RoPE position IDs, attention masks, visual merger, and placeholder counts are not verified for selected-token injection",
+    }
+
+    def load(self, *, allow_real_model_loading: bool = False, device: str = "cpu", dtype: str = "float32") -> AdapterStatus:
+        if not allow_real_model_loading:
+            self.status = AdapterStatus(
+                self.name,
+                "stub-only",
+                "real Qwen2.5-VL loading disabled",
+                metadata=self._adapter_report(integration_mode="load", generation_ran=False),
+            )
+            return self.status
+        return super().load(allow_real_model_loading=allow_real_model_loading, device=device, dtype=dtype)
+
+    def supports_direct_visual_tokens(self) -> bool:
+        return False
+
+    def supports_native_sparse_patch(self) -> bool:
+        return False
+
+    def supports_light_modified_sparse(self) -> bool:
+        return False
+
+    def supports_rope_sparse_patch(self) -> bool:
+        return False
+
+    def supports_direct_visual_token_injection(self) -> bool:
+        return False
+
+    def supports_input_level_selection(self) -> bool:
+        return True
+
+    def supports_autogaze_zero_mask(self) -> bool:
+        return True
+
+    def supports_post_encoder_zero_mask(self) -> bool:
+        return False
+
+    def supports_post_encoder_pruning(self) -> bool:
+        return True
+
+    def run_official_processor_path(self, **kwargs: Any) -> dict[str, Any]:
+        if self.model is not None and self.processor is not None:
+            return self.generate(**kwargs)
+        return self._mode_status("official_processor")
+
+    def run_autogaze_frame_selection_path(self, **_: Any) -> dict[str, Any]:
+        if self.model is not None and self.processor is not None:
+            result = self.generate(**_)
+            metadata = dict(result.get("metadata") or {})
+            metadata["integration_mode"] = "autogaze_frame_selection"
+            metadata["autogaze_input_selection_mode"] = "autogaze_frame_selection"
+            metadata["autogaze_visual_tokens_injected"] = False
+            result["metadata"] = metadata
+            return result
+        return self._mode_status("autogaze_frame_selection")
+
+    def run_autogaze_chop_selection_path(self, **_: Any) -> dict[str, Any]:
+        if self.model is not None and self.processor is not None:
+            result = self.generate(**_)
+            metadata = dict(result.get("metadata") or {})
+            metadata["integration_mode"] = "autogaze_chop_selection"
+            metadata["autogaze_input_selection_mode"] = "autogaze_chop_selection"
+            metadata["autogaze_visual_tokens_injected"] = False
+            result["metadata"] = metadata
+            return result
+        return self._mode_status("autogaze_chop_selection")
+
+    def run_autogaze_zero_mask_path(self, **_: Any) -> dict[str, Any]:
+        if self.model is not None and self.processor is not None:
+            result = self.generate(**_)
+            metadata = dict(result.get("metadata") or {})
+            metadata["integration_mode"] = "autogaze_zero_mask"
+            metadata["autogaze_zero_mask"] = True
+            metadata["autogaze_visual_tokens_injected"] = False
+            metadata["qwen_encoder_side_acceleration_claimed"] = False
+            result["metadata"] = metadata
+            return result
+        return self._mode_status("autogaze_zero_mask")
+
+    def run_siglip_sparse_patch_path(self, **_: Any) -> dict[str, Any]:
+        return self._mode_status("siglip_sparse_patch")
+
+    def run_native_sparse_patch_path(self, **_: Any) -> dict[str, Any]:
+        return self._mode_status("native_sparse_patch")
+
+    def run_light_modified_sparse_path(self, **_: Any) -> dict[str, Any]:
+        return self._mode_status("light_modified_sparse")
+
+    def run_rope_sparse_patch_path(self, **_: Any) -> dict[str, Any]:
+        return self._mode_status("rope_sparse_patch")
+
+    def run_post_encoder_pruning_path(self, **_: Any) -> dict[str, Any]:
+        return self._mode_status("post_encoder_pruning")
+
+    def run_post_encoder_zero_mask_path(self, **_: Any) -> dict[str, Any]:
+        return self._mode_status("post_encoder_zero_mask")
+
+    def run_direct_visual_token_injection_path(self, **_: Any) -> dict[str, Any]:
+        return self._mode_status("direct_visual_token_injection")
+
+    def _mode_status(self, integration_mode: str) -> dict[str, Any]:
+        if integration_mode not in self.supported_integration_modes or integration_mode == "direct_visual_token_injection":
+            reason = self.unsupported_mode_reasons.get(
+                integration_mode,
+                f"{integration_mode} is not verified for {self.name}",
+            )
+            raise NotImplementedError(self._unsupported_message(integration_mode, reason))
+        return {
+            "status": "stub-only",
+            "answer": None,
+            "reason": (
+                f"{self.name} {integration_mode} is registered. "
+                "Use real Qwen official processor loading for generation; input-level AutoGaze selection is not yet implemented here."
+            ),
+            "query_text_used": True,
+            "metadata": self._adapter_report(integration_mode=integration_mode, generation_ran=False),
+        }
+
+    def _unsupported_message(self, integration_mode: str, reason: str) -> str:
+        return (
+            f"{self.name} does not support {integration_mode}: {reason}. "
+            "No fallback to NVILA, modified SigLIP, or trainable projection adapter is allowed."
+        )
+
+    def _adapter_report(
+        self,
+        *,
+        integration_mode: str,
+        generation_ran: bool,
+        unsupported_reason: str | None = None,
+    ) -> dict[str, Any]:
+        requested_model = self.config.get("model_id") or self.config.get("checkpoint_path") or self.default_model_id
+        return {
+            "requested_model": requested_model,
+            "actual_model_loaded": requested_model if self.status.status == "real" else None,
+            "adapter": self.name,
+            "integration_mode": integration_mode,
+            "real_checkpoint_loaded": self.status.status == "real",
+            "generation_ran": generation_ran,
+            "unsupported_reason": unsupported_reason,
+            "encoder_type": self.encoder_type,
+            "llm_type": self.llm_type,
+            "supported_integration_modes": list(self.supported_integration_modes),
+            "direct_token_injection_supported": self.direct_token_injection_supported,
+            "native_sparse_patch_supported": self.native_sparse_patch_supported,
+            "light_modified_sparse_supported": self.light_modified_sparse_supported,
+            "rope_sparse_patch_supported": self.rope_sparse_patch_supported,
+            "autogaze_zero_mask_supported": self.autogaze_zero_mask_supported,
+            "post_encoder_zero_mask_supported": self.post_encoder_zero_mask_supported,
+            "input_selection_only_supported": self.input_selection_only_supported,
+            "siglip_based": self.siglip_based,
+            "positional_encoding_compatibility": self.positional_encoding_status,
+            "positional_encoding_type": self.positional_encoding_type,
+            "dense_grid_dependency": self.dense_grid_dependency,
+            "variable_visual_token_support": self.variable_visual_token_support,
+            "visual_placeholder_dynamic": self.visual_placeholder_dynamic,
+            "direct_sparse_autogaze_supported": self.direct_sparse_autogaze_supported,
+            "patch_grid_accessible": self.patch_grid_accessible,
+            "deterministic_position_adaptation": self.deterministic_position_adaptation,
+            "projector_status": self.projector_status,
+            "placeholder_status": self.placeholder_status,
+            "token_count_compatibility": self.token_count_compatibility,
+            "requires_official_processor": self.requires_official_processor,
+            "requires_training_or_trainable_adapter": self.requires_training_or_trainable_adapter,
+            "recommended_mode": self.recommended_mode,
+            "recommended_first_smoke_mode": self.recommended_first_smoke_mode,
+            "risk_level": self.risk_level,
+            "compatibility_status": self.compatibility_status,
+            "local_asset_status": self.local_asset_status,
+            "official_processor_support_status": self.official_processor_support_status,
+            "input_selection_support_status": self.input_selection_support_status,
+            "zero_mask_support_status": self.zero_mask_support_status,
+        }
 
 
 def _qwen_patch_mask_from_autogaze(

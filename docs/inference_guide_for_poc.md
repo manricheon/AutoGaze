@@ -283,6 +283,44 @@ MLLM switching summary:
 | Qwen legacy names | `E2_qwen_mllm.yaml`, `E4_qwen_autogaze_vision_mask.yaml` | same Qwen off/on concepts as Q0/Q1 | unsupported |
 | Generic | `E1_vjepa2_encoder.yaml` | stub/status reporting only | unsupported until a model-specific adapter is added |
 
+## External MLLM Adaptation Stubs
+
+The external-MLLM review is maintained in `docs/mllm_adapt_report.md`. The external configs under `configs/poc_inference/external/` are not marked runnable; they are stub/blocker configs for adapter planning and lightweight validation only.
+
+Current external registry keys:
+
+```text
+llava_ov
+longva
+longvila_r1
+apollo
+videollama3
+videochat_flash
+internvl3_5
+qwen2_5_vl
+```
+
+Supported integration mode names are `official_processor`, `autogaze_frame_selection`, `autogaze_chop_selection`, `siglip_sparse_patch`, `post_encoder_pruning`, and `direct_visual_token_injection`. Unsupported modes raise explicit `NotImplementedError`; there is no fallback to NVILA, Qwen, or modified SigLIP. Direct selected-token injection remains disabled unless the adapter verifies positional IDs, attention masks, projector compatibility, visual token count, and placeholder alignment.
+
+`infer_full.py` exposes these through `--integration-mode`. For example, this is a stub-only routing smoke that verifies the requested external adapter is used without loading a checkpoint:
+
+```bash
+python scripts/infer_full.py \
+  --config configs/poc_inference/A2_modified_siglip_nvila_on.yaml \
+  --video-path dummy \
+  --query-text "Describe the video." \
+  --mllm llava_ov \
+  --vision-encoder external \
+  --integration-mode autogaze_frame_selection \
+  --model-id local/llava-ov-test \
+  --num-frames 2 \
+  --resolution 32 \
+  --no-progress \
+  --json
+```
+
+This command is not a real LLaVA-OneVision generation run. It validates additive routing, adapter status reporting, and no silent fallback. Real external loading requires `--allow-real-model-loading` plus an explicit model ID/checkpoint and model-specific dependencies.
+
 ## V-JEPA2 Smoke
 
 ```bash
@@ -378,6 +416,64 @@ The current PoC does not write `visualizations/autogaze/windows/window_*/frames/
 
 Scale panels are scale-aware. A low-resolution selected token such as scale `32` renders as a larger processed-frame footprint than scale `64`, `112`, or `224`. The exact normalized box and scale-local grid are saved in `autogaze/selected_patch_indices.json`.
 
+## External Model Asset Workflow
+
+External MLLM and V-JEPA2 smoke tests use a staged, dry-run-first workflow. The manifest is:
+
+```text
+configs/poc_inference/model_asset_manifest.yaml
+```
+
+Prepare a dry-run report without downloading:
+
+```bash
+python scripts/prepare_external_model_assets.py \
+  --manifest configs/poc_inference/model_asset_manifest.yaml \
+  --model all \
+  --dry-run \
+  --write-report docs/MODEL_ASSET_DOWNLOAD_REPORT.md
+```
+
+Verify local checkpoints without loading full weights:
+
+```bash
+python scripts/verify_external_model_assets.py \
+  --manifest configs/poc_inference/model_asset_manifest.yaml \
+  --model all \
+  --weights-root weights \
+  --local-files-only \
+  --write-report docs/MODEL_ASSET_VERIFY_REPORT.md
+```
+
+Inspect local config files without loading weights:
+
+```bash
+python scripts/inspect_external_model_configs.py \
+  --manifest configs/poc_inference/model_asset_manifest.yaml \
+  --model all \
+  --weights-root weights \
+  --local-files-only \
+  --write-report docs/MODEL_CONFIG_INSPECTION_REPORT.md
+```
+
+Run an external smoke dry-run:
+
+```bash
+python scripts/run_external_model_smoke.py \
+  --config configs/poc_inference/external/smoke_qwen2_5_vl.yaml \
+  --video-path dummy \
+  --query-text "Describe the main action in the video." \
+  --output-dir outputs/poc_inference/external/smoke_qwen2_5_vl_dry \
+  --dry-run \
+  --local-files-only
+```
+
+Real model loading is disabled by default in every external smoke config. To run a real local smoke, pass `--allow-real-model-loading --local-files-only` and point `--video-path` at a real local video.
+
+Direct sparse visual-token injection remains disabled for external models unless patch/grid mapping, positional IDs, attention masks, projector compatibility, and placeholder alignment are verified. Qwen2.5-VL, InternVL3.5, VideoChat-Flash, and V-JEPA2-to-MLLM projector paths remain input-selection/zero-mask or blocked paths by default.
+
+This external workflow is additive. It must not change A0-A3 AutoGaze ON/OFF + NVILA inference, which remains the canonical `official_processor` path documented above.
+
 ## Lightweight Tests
 
 ```bash
@@ -386,7 +482,11 @@ python -m py_compile \
   scripts/infer_full.py \
   scripts/poc_infer_utils.py \
   scripts/poc_model_adapters.py \
-  scripts/poc_model_registry.py
+  scripts/poc_model_registry.py \
+  scripts/prepare_external_model_assets.py \
+  scripts/verify_external_model_assets.py \
+  scripts/inspect_external_model_configs.py \
+  scripts/run_external_model_smoke.py
 
 python -m pytest -q tests/test_poc_inference_visualizer_priority1.py
 ```

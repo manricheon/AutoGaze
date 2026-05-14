@@ -1,0 +1,48 @@
+experiment:
+  id: external_vjepa2_mllm_projector_blocked
+  description: V-JEPA2 to reviewed MLLM projector replacement plan; blocked without compatible frozen projector
+
+autogaze:
+  enabled: true
+  checkpoint_path: weights/AutoGaze
+  processor_path: weights/AutoGaze
+
+vision_encoder:
+  name: vjepa2
+  model_id: weights/vjepa2-vitl-fpc64-256
+  checkpoint_path: weights/vjepa2-vitl-fpc64-256
+  processor_path: weights/vjepa2-vitl-fpc64-256
+  model_type: video_encoder
+  integration_mode: vjepa2_to_mllm_projector
+  decoder_type: existing_mllm_projector
+  patch_size: 16
+  crop_size: 256
+  frames_per_clip: 64
+  tubelet_size: 2
+  positional_encoding_status: blocked_mllm_projectors_expect_native_vision_token_layout
+  status: blocked
+
+frame_selection:
+  mode: sample
+  num_frames: 64
+
+scaling:
+  mode: resize
+  resolution: 256
+  patch_size: 16
+
+zero_mask:
+  enabled: false
+
+mllm:
+  target: nvila
+  compatibility_status: blocked_without_verified_frozen_projector
+  training_required: true_or_unknown
+
+runtime:
+  device: cpu
+  dtype: float32
+  allow_real_model_loading: false
+
+output:
+  output_dir: outputs/poc_inference/external/vjepa2_mllm_projector_blocked

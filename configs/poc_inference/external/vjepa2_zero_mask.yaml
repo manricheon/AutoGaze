@@ -1,0 +1,53 @@
+experiment:
+  id: external_vjepa2_zero_mask
+  description: AutoGaze dense zero-mask V-JEPA2 probing plan; not encoder-side acceleration
+
+autogaze:
+  enabled: true
+  checkpoint_path: weights/AutoGaze
+  processor_path: weights/AutoGaze
+  gaze_ratio: 0.75
+  task_loss_requirement: 0.7
+
+vision_encoder:
+  name: vjepa2
+  model_id: weights/vjepa2-vitl-fpc64-256
+  checkpoint_path: weights/vjepa2-vitl-fpc64-256
+  processor_path: weights/vjepa2-vitl-fpc64-256
+  model_type: video_encoder
+  integration_mode: autogaze_zero_mask_vjepa2
+  decoder_type: frozen_feature_extraction
+  patch_size: 16
+  crop_size: 256
+  frames_per_clip: 64
+  tubelet_size: 2
+  positional_encoding_status: dense_grid_preserved_unselected_regions_masked
+  status: stub-only
+
+frame_selection:
+  mode: all
+  num_frames: 64
+
+scaling:
+  mode: resize
+  resolution: 256
+  patch_size: 16
+
+zero_mask:
+  enabled: true
+  mask_value: 0.0
+  selected_region_source: autogaze_patch_records
+  encoder_side_acceleration_claimed: false
+
+mllm:
+  target: none
+  compatibility_status: not_applicable
+  training_required: false
+
+runtime:
+  device: cpu
+  dtype: float32
+  allow_real_model_loading: false
+
+output:
+  output_dir: outputs/poc_inference/external/vjepa2_zero_mask

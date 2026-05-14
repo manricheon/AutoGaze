@@ -1,0 +1,56 @@
+experiment:
+  id: external_llava_ov_input_selection
+  description: LLaVA-OneVision with AutoGaze input-level frame/chop selection only
+
+autogaze:
+  enabled: true
+  checkpoint_path: weights/AutoGaze
+  processor_path: weights/AutoGaze
+  gaze_ratio: 0.75
+  task_loss_requirement: 0.7
+
+vision_encoder:
+  name: generic_vit
+  required_for_full_pipeline: false
+  external_vision_encoder_type: SigLIP patch14 anyres/video-pooled
+
+mllm:
+  name: llava_ov
+  model_id: llava-hf/llava-onevision-qwen2-7b-ov-hf
+  checkpoint_path: null
+  processor_path: null
+  mllm_type: Qwen2-7B
+  official_processor_path: true
+  official_processor_owns_vision: true
+  generation_input_mode: autogaze_frame_selection
+  vision_encoder_type: SigLIP
+  direct_visual_token_injection_supported: unknown
+  positional_encoding_compatibility_status: needs_code_inspection
+  token_mapping_status: input_selection_safe_sparse_token_injection_unverified
+  status: stub-only
+
+frame_selection:
+  mode: sample
+  num_frames: 16
+  frame_interval: 1
+  max_windows: 1
+
+scaling:
+  mode: resize
+  resolution: 384
+  patch_size: 14
+  chop_size: 384
+  chop_overlap: 0
+  max_chops: null
+
+runtime:
+  device: cpu
+  dtype: float32
+  allow_real_model_loading: false
+
+generation:
+  max_new_tokens: 32
+
+output:
+  output_dir: outputs/poc_inference/external/llava_ov_input_selection
+

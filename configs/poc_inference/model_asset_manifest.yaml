@@ -1,0 +1,306 @@
+manifest_version: 1
+description: External MLLM and V-JEPA2 asset manifest for staged dry-run, download, verification, and config inspection.
+default_output_root: weights
+local_directory_convention: >
+  Use repository-local weights/ directories. Existing local checkpoints keep their actual folder names;
+  missing external candidates use weights/<model_key>.
+tiers:
+  tier1:
+    description: Highest-priority external MLLM candidates; VILA/LLaVA/SigLIP-related.
+    models:
+      - longvila_r1
+      - longva
+      - llava_ov
+      - videollama3
+      - apollo
+  tier1b:
+    description: V-JEPA2 as a separate video encoder/decoder branch.
+    models:
+      - vjepa2
+  tier2:
+    description: Input-selection-first candidates; do not download by default unless explicitly selected.
+    models:
+      - qwen2_5_vl
+      - internvl3_5
+      - videochat_flash
+
+models:
+  llava_ov:
+    tier: tier1
+    priority_rank: 3
+    canonical_model_name: LLaVA-OV / LLaVA-OneVision 8B
+    candidate_model_id: llava-hf/llava-onevision-qwen2-7b-ov-hf
+    official_repo_url: https://github.com/LLaVA-VL/LLaVA-NeXT
+    model_card_url: https://huggingface.co/llava-hf/llava-onevision-qwen2-7b-ov-hf
+    paper_report_url: https://arxiv.org/abs/2408.03326
+    expected_checkpoint_size_gb: unknown
+    gated_private_status: unknown
+    required_token_env_var: HF_TOKEN
+    local_target_directory: weights/llava_ov
+    expected_config_files:
+      - config.json
+    expected_processor_tokenizer_files:
+      - preprocessor_config.json
+      - tokenizer_config.json
+    expected_weight_files: []
+    expected_vision_encoder_type: SigLIP patch14 any-resolution/video pipeline
+    expected_mllm_type: Qwen2-7B
+    expected_adapter_name: llava_ov
+    smoke_config: configs/poc_inference/external/smoke_llava_ov.yaml
+    recommended_integration_modes:
+      - official_processor
+      - autogaze_frame_selection
+      - autogaze_chop_selection
+      - autogaze_zero_mask
+    direct_visual_token_injection_supported: false
+    download_status: not_checked
+    smoke_test_status: not_tested
+
+  longva:
+    tier: tier1
+    priority_rank: 2
+    canonical_model_name: LongVA-7B
+    candidate_model_id: lmms-lab/LongVA-7B
+    official_repo_url: https://github.com/EvolvingLMMs-Lab/LongVA
+    model_card_url: https://huggingface.co/lmms-lab/LongVA-7B
+    paper_report_url: https://arxiv.org/abs/2406.16852
+    expected_checkpoint_size_gb: unknown
+    gated_private_status: unknown
+    required_token_env_var: HF_TOKEN
+    local_target_directory: weights/longva
+    expected_config_files:
+      - config.json
+    expected_processor_tokenizer_files:
+      - tokenizer_config.json
+    expected_weight_files: []
+    expected_vision_encoder_type: CLIP ViT-L/14-336 any-resolution vision tower
+    expected_mllm_type: Qwen2-7B
+    expected_adapter_name: longva
+    smoke_config: configs/poc_inference/external/smoke_longva.yaml
+    recommended_integration_modes:
+      - official_processor
+      - autogaze_frame_selection
+      - autogaze_chop_selection
+      - autogaze_zero_mask
+    direct_visual_token_injection_supported: false
+    download_status: not_checked
+    smoke_test_status: not_tested
+
+  longvila_r1:
+    tier: tier1
+    priority_rank: 1
+    canonical_model_name: LongVILA-R1-7B
+    candidate_model_id: Efficient-Large-Model/LongVILA-R1-7B
+    official_repo_url: https://github.com/NVlabs/VILA
+    model_card_url: https://huggingface.co/Efficient-Large-Model/LongVILA-R1-7B
+    paper_report_url: https://arxiv.org/abs/2408.10188
+    expected_checkpoint_size_gb: unknown
+    gated_private_status: unknown
+    required_token_env_var: HF_TOKEN
+    local_target_directory: weights/longvila_r1
+    expected_config_files:
+      - config.json
+    expected_processor_tokenizer_files:
+      - preprocessor_config.json
+      - tokenizer_config.json
+    expected_weight_files: []
+    expected_vision_encoder_type: VILA-family SigLIP SO400M/TSP video pipeline
+    expected_mllm_type: Qwen2-7B
+    expected_adapter_name: longvila_r1
+    smoke_config: configs/poc_inference/external/smoke_longvila_r1.yaml
+    recommended_integration_modes:
+      - official_processor
+      - autogaze_frame_selection
+      - autogaze_chop_selection
+      - autogaze_zero_mask
+    direct_visual_token_injection_supported: unknown
+    download_status: not_checked
+    smoke_test_status: not_tested
+
+  apollo:
+    tier: tier1
+    priority_rank: 5
+    canonical_model_name: Apollo-7B
+    candidate_model_id: GoodiesHere/Apollo-LMMs-Apollo-7B-t32
+    official_repo_url: https://github.com/Apollo-LMMs/Apollo
+    model_card_url: https://huggingface.co/GoodiesHere/Apollo-LMMs-Apollo-7B-t32
+    paper_report_url: https://arxiv.org/abs/2412.10360
+    expected_checkpoint_size_gb: unknown
+    gated_private_status: unknown
+    required_token_env_var: HF_TOKEN
+    local_target_directory: weights/apollo
+    expected_config_files:
+      - config.json
+    expected_processor_tokenizer_files:
+      - preprocessor_config.json
+      - tokenizer_config.json
+    expected_weight_files: []
+    expected_vision_encoder_type: Hybrid SigLIP plus InternVideo2 with Perceiver connector
+    expected_mllm_type: Qwen2-7B
+    expected_adapter_name: apollo
+    smoke_config: configs/poc_inference/external/smoke_apollo.yaml
+    recommended_integration_modes:
+      - official_processor
+      - autogaze_frame_selection
+      - autogaze_chop_selection
+      - autogaze_zero_mask
+    direct_visual_token_injection_supported: false
+    download_status: not_checked
+    smoke_test_status: not_tested
+
+  videollama3:
+    tier: tier1
+    priority_rank: 4
+    canonical_model_name: VideoLLaMA3-7B
+    candidate_model_id: DAMO-NLP-SG/VideoLLaMA3-7B
+    official_repo_url: https://github.com/DAMO-NLP-SG/VideoLLaMA3
+    model_card_url: https://huggingface.co/DAMO-NLP-SG/VideoLLaMA3-7B
+    paper_report_url: https://arxiv.org/abs/2501.13106
+    expected_checkpoint_size_gb: unknown
+    gated_private_status: unknown
+    required_token_env_var: HF_TOKEN
+    local_target_directory: weights/videollama3
+    expected_config_files:
+      - config.json
+    expected_processor_tokenizer_files:
+      - preprocessor_config.json
+      - tokenizer_config.json
+    expected_weight_files: []
+    expected_vision_encoder_type: VL3-SigLIP-NaViT video encoder
+    expected_mllm_type: Qwen2.5-7B
+    expected_adapter_name: videollama3
+    smoke_config: configs/poc_inference/external/smoke_videollama3.yaml
+    recommended_integration_modes:
+      - official_processor
+      - autogaze_frame_selection
+      - autogaze_chop_selection
+      - autogaze_zero_mask
+    direct_visual_token_injection_supported: unknown
+    download_status: not_checked
+    smoke_test_status: not_tested
+
+  videochat_flash:
+    tier: tier2
+    priority_rank: 9
+    canonical_model_name: VideoChat-Flash
+    candidate_model_id: OpenGVLab/VideoChat-Flash-Qwen2-7B_res448
+    official_repo_url: https://github.com/OpenGVLab/Ask-Anything
+    model_card_url: https://huggingface.co/OpenGVLab/VideoChat-Flash-Qwen2-7B_res448
+    paper_report_url: https://arxiv.org/abs/2412.14880
+    expected_checkpoint_size_gb: unknown
+    gated_private_status: unknown
+    required_token_env_var: HF_TOKEN
+    local_target_directory: weights/videochat_flash
+    expected_config_files:
+      - config.json
+    expected_processor_tokenizer_files:
+      - preprocessor_config.json
+      - tokenizer_config.json
+    expected_weight_files: []
+    expected_vision_encoder_type: UMT-L / UMT-HD-L hierarchical video encoder
+    expected_mllm_type: Qwen2-7B
+    expected_adapter_name: videochat_flash
+    smoke_config: configs/poc_inference/external/smoke_videochat_flash.yaml
+    recommended_integration_modes:
+      - official_processor
+      - autogaze_frame_selection
+      - autogaze_chop_selection
+    direct_visual_token_injection_supported: false
+    download_status: not_checked
+    smoke_test_status: not_tested
+
+  internvl3_5:
+    tier: tier2
+    priority_rank: 8
+    canonical_model_name: InternVL3.5-8B
+    candidate_model_id: OpenGVLab/InternVL3_5-8B
+    official_repo_url: https://github.com/OpenGVLab/InternVL
+    model_card_url: https://huggingface.co/OpenGVLab/InternVL3_5-8B
+    paper_report_url: https://arxiv.org/abs/2510.18265
+    expected_checkpoint_size_gb: unknown
+    gated_private_status: unknown
+    required_token_env_var: HF_TOKEN
+    local_target_directory: weights/internvl3_5
+    expected_config_files:
+      - config.json
+    expected_processor_tokenizer_files:
+      - tokenizer_config.json
+    expected_weight_files: []
+    expected_vision_encoder_type: InternViT dynamic tiling and pixel shuffle
+    expected_mllm_type: Qwen3-8B
+    expected_adapter_name: internvl3_5
+    smoke_config: configs/poc_inference/external/smoke_internvl3_5.yaml
+    recommended_integration_modes:
+      - official_processor
+      - autogaze_frame_selection
+      - autogaze_chop_selection
+      - autogaze_zero_mask
+    direct_visual_token_injection_supported: false
+    download_status: not_checked
+    smoke_test_status: not_tested
+
+  qwen2_5_vl:
+    tier: tier2
+    priority_rank: 7
+    canonical_model_name: Qwen2.5-VL-7B-Instruct
+    candidate_model_id: Qwen/Qwen2.5-VL-7B-Instruct
+    official_repo_url: https://github.com/QwenLM/Qwen2.5-VL
+    model_card_url: https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct
+    paper_report_url: https://arxiv.org/abs/2502.13923
+    expected_checkpoint_size_gb: unknown
+    gated_private_status: public_or_not_checked
+    required_token_env_var: HF_TOKEN
+    local_target_directory: weights/Qwen2.5-VL-7B-Instruct
+    expected_config_files:
+      - config.json
+      - generation_config.json
+    expected_processor_tokenizer_files:
+      - preprocessor_config.json
+      - tokenizer_config.json
+      - tokenizer.json
+      - chat_template.json
+    expected_weight_files:
+      - model.safetensors.index.json
+    expected_vision_encoder_type: Qwen2.5 native dynamic-resolution ViT with M-RoPE/window attention
+    expected_mllm_type: Qwen2.5-7B
+    expected_adapter_name: qwen2_5_vl
+    smoke_config: configs/poc_inference/external/smoke_qwen2_5_vl.yaml
+    recommended_integration_modes:
+      - official_processor
+      - autogaze_frame_selection
+      - autogaze_chop_selection
+      - autogaze_zero_mask
+    direct_visual_token_injection_supported: false
+    download_status: not_checked
+    smoke_test_status: not_tested
+
+  vjepa2:
+    tier: tier1b
+    priority_rank: 1
+    canonical_model_name: V-JEPA2 ViT-L FPC64 256
+    candidate_model_id: facebook/vjepa2-vitl-fpc64-256
+    official_repo_url: https://github.com/facebookresearch/vjepa2
+    model_card_url: https://huggingface.co/facebook/vjepa2-vitl-fpc64-256
+    paper_report_url: https://arxiv.org/abs/2506.09985
+    expected_checkpoint_size_gb: unknown
+    gated_private_status: public_or_not_checked
+    required_token_env_var: HF_TOKEN
+    local_target_directory: weights/vjepa2-vitl-fpc64-256
+    expected_config_files:
+      - config.json
+    expected_processor_tokenizer_files:
+      - video_preprocessor_config.json
+    expected_weight_files:
+      - model.safetensors
+    expected_vision_encoder_type: V-JEPA2 ViT-L tubelet video encoder with 3D-RoPE
+    expected_mllm_type: none; encoder/decoder smoke target
+    expected_adapter_name: vjepa2
+    smoke_config: configs/poc_inference/external/smoke_vjepa2.yaml
+    recommended_integration_modes:
+      - vjepa2_official_dense
+      - vjepa2_feature_extraction
+      - autogaze_frame_selection_vjepa2
+      - autogaze_zero_mask_vjepa2
+    direct_visual_token_injection_supported: false
+    download_status: not_checked
+    smoke_test_status: not_tested

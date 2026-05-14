@@ -1,0 +1,48 @@
+experiment:
+  id: external_vjepa2_sparse_tubelet_experimental
+  description: Experimental V-JEPA2 sparse tubelet plan; blocked until forward/3D-RoPE sparse positions are verified
+
+autogaze:
+  enabled: true
+  checkpoint_path: weights/AutoGaze
+  processor_path: weights/AutoGaze
+
+vision_encoder:
+  name: vjepa2
+  model_id: weights/vjepa2-vitl-fpc64-256
+  checkpoint_path: weights/vjepa2-vitl-fpc64-256
+  processor_path: weights/vjepa2-vitl-fpc64-256
+  model_type: video_encoder
+  integration_mode: vjepa2_sparse_tubelet
+  decoder_type: sparse_tubelet_experimental
+  patch_size: 16
+  crop_size: 256
+  frames_per_clip: 64
+  tubelet_size: 2
+  positional_encoding_status: blocked_until_sparse_3d_rope_positions_verified
+  status: blocked
+
+frame_selection:
+  mode: all
+  num_frames: 64
+
+scaling:
+  mode: resize
+  resolution: 256
+  patch_size: 16
+
+zero_mask:
+  enabled: false
+
+mllm:
+  target: none
+  compatibility_status: not_applicable
+  training_required: false
+
+runtime:
+  device: cpu
+  dtype: float32
+  allow_real_model_loading: false
+
+output:
+  output_dir: outputs/poc_inference/external/vjepa2_sparse_tubelet_experimental
