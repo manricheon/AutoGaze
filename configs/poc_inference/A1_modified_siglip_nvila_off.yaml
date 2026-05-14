@@ -59,14 +59,14 @@ frame_selection:
   max_windows: 1
 
 video_input:
-  read_mode: streaming
+  read_mode: full
   decode_backend: auto
   decode_fps: null
   max_decode_frames: null
   resize_before_buffer: true
 
 streaming:
-  enabled: true
+  enabled: false
   window_size: 16
   overlap: 0
   max_windows: null

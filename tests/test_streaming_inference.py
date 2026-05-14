@@ -189,6 +189,8 @@ def test_infer_autogaze_streaming_dummy_outputs_metrics(tmp_path: Path) -> None:
                 str(output_dir),
                 "--frame-selection-mode",
                 "chunk",
+                "--video-read-mode",
+                "streaming",
                 "--num-frames",
                 "4",
                 "--stream-window-size",
@@ -224,6 +226,8 @@ def test_infer_full_streaming_dummy_window_generation(tmp_path: Path) -> None:
                 str(output_dir),
                 "--frame-selection-mode",
                 "chunk",
+                "--video-read-mode",
+                "streaming",
                 "--num-frames",
                 "4",
                 "--stream-window-size",
@@ -263,7 +267,7 @@ def test_streaming_full_length_export_is_blocked(tmp_path: Path) -> None:
         )
 
 
-def test_canonical_configs_declare_streaming_defaults() -> None:
+def test_canonical_configs_declare_non_streaming_base_defaults() -> None:
     for name in (
         "A0_vanilla_siglip_nvila_off.yaml",
         "A1_modified_siglip_nvila_off.yaml",
@@ -271,6 +275,7 @@ def test_canonical_configs_declare_streaming_defaults() -> None:
         "A3_vanilla_siglip_nvila_on.yaml",
     ):
         cfg = load_config(_cfg(name))
-        assert cfg["video_input"]["read_mode"] == "streaming"
+        assert cfg["video_input"]["read_mode"] == "full"
+        assert cfg["streaming"]["enabled"] is False
         assert cfg["streaming"]["full_pipeline_policy"] == "window_independent_generation"
         assert cfg["memory"]["fail_on_full_video_load"] is True
