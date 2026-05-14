@@ -23,6 +23,7 @@ from poc_infer_utils import (
     prepare_video,
     resolve_frame_selection_max_windows,
     run_autogaze_stage,
+    validate_prepared_video_memory,
     validate_stream_window_memory,
     write_autogaze_artifacts,
     write_json,
@@ -58,6 +59,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--empty-cache-between-windows", action="store_true", default=None)
     parser.add_argument("--max-pixels-per-window", type=int, default=None)
     parser.add_argument("--max-frames-in-memory", type=int, default=None)
+    parser.add_argument("--max-processed-frames-per-window", type=int, default=None)
+    parser.add_argument("--max-processed-pixels-per-window", type=int, default=None)
     parser.add_argument("--fail-on-full-video-load", action="store_true", default=None)
 
     parser.add_argument("--scaling-mode", choices=["resize", "fit_short_side", "fit_long_side", "chop", "resize_then_chop", "quickstart", "none"], default=None)
@@ -140,6 +143,21 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         chop_merge_mode=str(cli_or_config(args.chop_merge_mode, cfg, "scaling.chop_merge_mode", "metadata_only")),
         resize_before_chop_threshold=int(cli_or_config(args.resize_before_chop_threshold, cfg, "scaling.resize_before_chop_threshold", 1024)),
         resize_before_chop_factor=float(cli_or_config(args.resize_before_chop_factor, cfg, "scaling.resize_before_chop_factor", 0.5)),
+    )
+    validate_prepared_video_memory(
+        prepared,
+        max_processed_frames_per_window=cli_or_config(
+            args.max_processed_frames_per_window,
+            cfg,
+            "memory.max_processed_frames_per_window",
+            None,
+        ),
+        max_processed_pixels_per_window=cli_or_config(
+            args.max_processed_pixels_per_window,
+            cfg,
+            "memory.max_processed_pixels_per_window",
+            None,
+        ),
     )
     preprocessing_latency_ms = (time.perf_counter() - preprocessing_start) * 1000
     allow_real = bool(args.allow_real_model_loading or nested_get(cfg, "runtime.allow_real_model_loading", False))
@@ -252,6 +270,18 @@ def _run_streaming(args: argparse.Namespace, *, cfg: dict[str, Any], output_dir:
     decode_fps = cli_or_config(args.decode_fps, cfg, "video_input.decode_fps", None)
     max_pixels_per_window = cli_or_config(args.max_pixels_per_window, cfg, "memory.max_pixels_per_window", None)
     max_frames_in_memory = cli_or_config(args.max_frames_in_memory, cfg, "memory.max_video_frames_in_memory", None)
+    max_processed_frames_per_window = cli_or_config(
+        args.max_processed_frames_per_window,
+        cfg,
+        "memory.max_processed_frames_per_window",
+        None,
+    )
+    max_processed_pixels_per_window = cli_or_config(
+        args.max_processed_pixels_per_window,
+        cfg,
+        "memory.max_processed_pixels_per_window",
+        None,
+    )
     scaling_mode = str(cli_or_config(args.scaling_mode, cfg, "scaling.mode", "resize"))
     resolution = int(cli_or_config(args.resolution, cfg, "scaling.resolution", 224))
     dummy_frames = int(nested_get(cfg, "input.dummy_frames", max(num_frames, 8)))
@@ -323,6 +353,11 @@ def _run_streaming(args: argparse.Namespace, *, cfg: dict[str, Any], output_dir:
             chop_merge_mode=str(cli_or_config(args.chop_merge_mode, cfg, "scaling.chop_merge_mode", "metadata_only")),
             resize_before_chop_threshold=int(cli_or_config(args.resize_before_chop_threshold, cfg, "scaling.resize_before_chop_threshold", 1024)),
             resize_before_chop_factor=float(cli_or_config(args.resize_before_chop_factor, cfg, "scaling.resize_before_chop_factor", 0.5)),
+        )
+        validate_prepared_video_memory(
+            prepared,
+            max_processed_frames_per_window=max_processed_frames_per_window,
+            max_processed_pixels_per_window=max_processed_pixels_per_window,
         )
         preprocessing_latency_ms = (time.perf_counter() - preprocessing_start) * 1000
         gaze = run_autogaze_stage(

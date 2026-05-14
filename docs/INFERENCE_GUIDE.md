@@ -42,6 +42,72 @@ Direct sparse token injection is disabled by default for external models. Use of
 
 The existing A0-A3 AutoGaze ON/OFF + NVILA inference configs remain the canonical path and keep their previous `official_processor` behavior.
 
+## HLVid Evaluation
+
+HLVid multiple-choice evaluation is available through:
+
+```text
+configs/poc_inference/hlvid_nvila_hd_eval.yaml
+scripts/evaluate_hlvid_nvila.py
+```
+
+The config mirrors the processor setup from `docs/nvila-hd-video-readme.md`: `num_video_frames=128`, `num_video_frames_thumbnail=64`, `max_tiles_video=48`, tile gazing ratio `[0.2] + [0.06] * 15`, tile loss requirement `0.6`, thumbnail gazing ratio `1`, `max_batch_size_autogaze=16`, and `max_batch_size_siglip=32`.
+
+Dry-run with a local HLVid-style JSON/JSONL file:
+
+```bash
+python scripts/evaluate_hlvid_nvila.py \
+  --config configs/poc_inference/hlvid_nvila_hd_eval.yaml \
+  --dataset-path /path/to/hlvid.jsonl \
+  --video-root /path/to/video/root \
+  --output-dir outputs/hlvid_nvila_dry_run \
+  --dry-run
+```
+
+Real NVILA-HD evaluation, using local weights only:
+
+```bash
+python scripts/evaluate_hlvid_nvila.py \
+  --config configs/poc_inference/hlvid_nvila_hd_eval.yaml \
+  --dataset-name bfshi/HLVid \
+  --model-path weights/NVILA-8B-HD-Video \
+  --processor-path weights/NVILA-8B-HD-Video \
+  --allow-real-model-loading \
+  --local-files-only \
+  --max-samples 20 \
+  --output-dir outputs/hlvid_nvila_real
+```
+
+Outputs are written to `predictions/hlvid_predictions.json`, `predictions/hlvid_predictions.jsonl`, `logs/poc_summary.json`, and `logs/metrics.json`. Accuracy is exact option-letter match against the HLVid answer field. Direct visual-token injection is not used; NVILA owns the video path through its official processor.
+
+For single-video PoC visualization with `infer_full.py`, use the bounded HLVid-safe configs. These are not canonical HLVid reproduction configs; they are OOM-resistant smoke/ablation presets.
+
+```bash
+python scripts/infer_full.py \
+  --config configs/poc_inference/hlvid_infer_full_resize_safe.yaml \
+  --video-path /path/to/hlvid_video.mp4 \
+  --query-text "Question: ... A. ... B. ... C. ... D. ... Please answer directly with the letter of the correct answer." \
+  --allow-real-model-loading \
+  --local-files-only \
+  --device cuda \
+  --output-dir outputs/hlvid_infer_full_resize_safe
+```
+
+`resize_then_chop` is intentionally capped by `max_chops: 4` and `max_processed_frames_per_window: 64`:
+
+```bash
+python scripts/infer_full.py \
+  --config configs/poc_inference/hlvid_infer_full_resize_then_chop_safe.yaml \
+  --video-path /path/to/hlvid_video.mp4 \
+  --query-text "Question: ... A. ... B. ... C. ... D. ... Please answer directly with the letter of the correct answer." \
+  --allow-real-model-loading \
+  --local-files-only \
+  --device cuda \
+  --output-dir outputs/hlvid_infer_full_resize_then_chop_safe
+```
+
+`infer_full.py` now also has processed-tensor memory guards: `--max-processed-frames-per-window` and `--max-processed-pixels-per-window`. These catch chop expansion before the model/processor path can OOM.
+
 ## Streaming Video Inference
 
 `scripts/infer_autogaze.py` and `scripts/infer_full.py` now default to streaming video input through `video_input.read_mode: streaming`. The full-video loader is still available with `--video-read-mode full`, but real file inputs are blocked by default when `memory.fail_on_full_video_load: true`.

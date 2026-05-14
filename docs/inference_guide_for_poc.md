@@ -195,6 +195,99 @@ python scripts/infer_full.py \
 
 A0/A1 set AutoGaze off. A2/A3 set AutoGaze on. When `sync_autogaze_controls_from_config` is true, the NVILA processor kwargs are aligned with the config and reported in adapter metadata.
 
+## HLVid Evaluation
+
+Use the isolated HLVid evaluator when you want the NVILA-HD processor setup from `docs/nvila-hd-video-readme.md` and exact multiple-choice scoring.
+
+Config:
+
+```text
+configs/poc_inference/hlvid_nvila_hd_eval.yaml
+```
+
+Script:
+
+```text
+scripts/evaluate_hlvid_nvila.py
+```
+
+The default processor settings are the reference HLVid-style values:
+
+```yaml
+num_video_frames: 128
+num_video_frames_thumbnail: 64
+max_tiles_video: 48
+gazing_ratio_tile: [0.2, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06]
+task_loss_requirement_tile: 0.6
+gazing_ratio_thumbnail: 1
+task_loss_requirement_thumbnail: null
+max_batch_size_autogaze: 16
+max_batch_size_siglip: 32
+```
+
+Dry-run with a local HLVid-style JSON/JSONL file:
+
+```bash
+python scripts/evaluate_hlvid_nvila.py \
+  --config configs/poc_inference/hlvid_nvila_hd_eval.yaml \
+  --dataset-path /path/to/hlvid.jsonl \
+  --video-root /path/to/video/root \
+  --max-samples 5 \
+  --output-dir outputs/hlvid_nvila_dry_run \
+  --dry-run
+```
+
+Real local-weight evaluation:
+
+```bash
+python scripts/evaluate_hlvid_nvila.py \
+  --config configs/poc_inference/hlvid_nvila_hd_eval.yaml \
+  --dataset-name bfshi/HLVid \
+  --model-path weights/NVILA-8B-HD-Video \
+  --processor-path weights/NVILA-8B-HD-Video \
+  --allow-real-model-loading \
+  --local-files-only \
+  --max-samples 20 \
+  --output-dir outputs/hlvid_nvila_real
+```
+
+The evaluator formats each record as a multiple-choice prompt ending with `Please answer directly with the letter of the correct answer.`, decodes the generated answer, extracts `A/B/C/D`, and reports exact option-letter accuracy in `logs/metrics.json`. It does not inject AutoGaze-selected visual tokens manually; the official NVILA processor owns video decoding, tiling, AutoGaze controls, SigLIP batching, and generation input construction.
+
+For `infer_full.py` on one HLVid video, avoid large `num_frames` and uncapped `resize_then_chop`; those can expand one window into many processed frames before NVILA generation. Use these bounded configs instead:
+
+```text
+configs/poc_inference/hlvid_infer_full_resize_safe.yaml
+configs/poc_inference/hlvid_infer_full_resize_then_chop_safe.yaml
+```
+
+Safe resize command:
+
+```bash
+python scripts/infer_full.py \
+  --config configs/poc_inference/hlvid_infer_full_resize_safe.yaml \
+  --video-path /path/to/hlvid_video.mp4 \
+  --query-text "Question: ... A. ... B. ... C. ... D. ... Please answer directly with the letter of the correct answer." \
+  --allow-real-model-loading \
+  --local-files-only \
+  --device cuda \
+  --output-dir outputs/hlvid_infer_full_resize_safe
+```
+
+Bounded `resize_then_chop` command:
+
+```bash
+python scripts/infer_full.py \
+  --config configs/poc_inference/hlvid_infer_full_resize_then_chop_safe.yaml \
+  --video-path /path/to/hlvid_video.mp4 \
+  --query-text "Question: ... A. ... B. ... C. ... D. ... Please answer directly with the letter of the correct answer." \
+  --allow-real-model-loading \
+  --local-files-only \
+  --device cuda \
+  --output-dir outputs/hlvid_infer_full_resize_then_chop_safe
+```
+
+The bounded chop preset samples 16 frames, uses at most 4 spatial chops, and blocks if a window expands past 64 processed frames. Override only intentionally with `--max-chops`, `--max-processed-frames-per-window`, or `--max-processed-pixels-per-window`.
+
 ## Qwen Smoke
 
 Qwen uses the official Qwen2.5-VL processor path: build a chat-template message with one video item and one text item, call `processor.apply_chat_template(..., add_generation_prompt=True)`, pass the video through the Qwen processor, call `generate`, and decode. Direct visual-token injection is unsupported in this PoC.

@@ -991,6 +991,38 @@ def validate_stream_window_memory(
         )
 
 
+def validate_prepared_video_memory(
+    prepared: PreparedVideo,
+    *,
+    max_processed_frames_per_window: int | None,
+    max_processed_pixels_per_window: int | None,
+) -> None:
+    processed = prepared.processed_video
+    if processed.ndim != 5:
+        raise RuntimeError(f"processed video memory guard expected shape [B,T,C,H,W], got {tuple(processed.shape)}")
+    batch = int(processed.shape[0])
+    frames = int(processed.shape[1])
+    height = int(processed.shape[-2])
+    width = int(processed.shape[-1])
+    processed_frames = batch * frames
+    if max_processed_frames_per_window is not None and processed_frames > int(max_processed_frames_per_window):
+        raise RuntimeError(
+            "processed video memory guard blocked window: "
+            f"{processed_frames} processed frames exceed "
+            f"max_processed_frames_per_window={max_processed_frames_per_window}. "
+            "This commonly happens when resize_then_chop creates many spatial crops; reduce num_frames, "
+            "set --max-chops, use --scaling-mode resize, or increase the limit intentionally."
+        )
+    processed_pixels = processed_frames * height * width
+    if max_processed_pixels_per_window is not None and processed_pixels > int(max_processed_pixels_per_window):
+        raise RuntimeError(
+            "processed video memory guard blocked window: "
+            f"{processed_pixels} processed frame-pixels exceed "
+            f"max_processed_pixels_per_window={max_processed_pixels_per_window}. "
+            "Use smaller windows, lower resolution, fewer chops, or resize mode."
+        )
+
+
 def prepare_video(
     cfg: Mapping[str, Any],
     *,

@@ -20,6 +20,8 @@ from poc_infer_utils import (
     _iter_sample_stream_window,
     iter_stream_windows,
     load_config,
+    prepare_stream_window,
+    validate_prepared_video_memory,
     validate_stream_window_memory,
 )
 
@@ -129,6 +131,49 @@ def test_streaming_memory_guard_blocks_large_window() -> None:
         validate_stream_window_memory(window, max_frames_in_memory=2, max_pixels_per_window=None)
     with pytest.raises(RuntimeError, match="max_pixels_per_window"):
         validate_stream_window_memory(window, max_frames_in_memory=None, max_pixels_per_window=1)
+
+
+def test_processed_video_memory_guard_blocks_chop_expansion() -> None:
+    cfg = load_config(_cfg("A2_modified_siglip_nvila_on.yaml"))
+    window = next(
+        iter_stream_windows(
+            "dummy",
+            frame_selection_mode="chunk",
+            num_frames=4,
+            frame_interval=1,
+            max_windows=1,
+            stream_window_size=4,
+            stream_overlap=0,
+            max_decode_frames=None,
+            decode_backend="auto",
+            decode_fps=None,
+            dummy_frames=4,
+            dummy_resolution=96,
+        )
+    )
+    prepared = prepare_stream_window(
+        cfg,
+        stream_window=window,
+        frame_selection_mode="chunk",
+        num_frames=4,
+        frame_interval=1,
+        max_windows=1,
+        scaling_mode="resize_then_chop",
+        resolution=32,
+        chop_size=32,
+        chop_overlap=0,
+        max_chops=None,
+        chop_merge_mode="metadata_only",
+        resize_before_chop_threshold=9999,
+        resize_before_chop_factor=1.0,
+    )
+    assert prepared.processed_video.shape[0] == 9
+    with pytest.raises(RuntimeError, match="max_processed_frames_per_window"):
+        validate_prepared_video_memory(
+            prepared,
+            max_processed_frames_per_window=8,
+            max_processed_pixels_per_window=None,
+        )
 
 
 def test_infer_autogaze_streaming_dummy_outputs_metrics(tmp_path: Path) -> None:
