@@ -898,6 +898,33 @@ def test_real_autogaze_forward_latency_sums_all_chop_batches(
     assert sum(item["processed_frame_count"] for item in metrics["autogaze_model_forward_batch_ranges"]) == 6
 
 
+def test_autogaze_forward_merge_keeps_required_variable_length_outputs() -> None:
+    from poc_infer_utils import _merge_autogaze_forward_outputs
+
+    first = {
+        "gazing_pos": torch.tensor([[0, 1, 2]], dtype=torch.long),
+        "if_padded_gazing": torch.tensor([[False, False, True]], dtype=torch.bool),
+        "num_gazing_each_frame": torch.tensor([3], dtype=torch.long),
+        "num_vision_tokens_each_frame": torch.tensor(4, dtype=torch.long),
+        "extra_variable_tensor": torch.zeros((1, 3), dtype=torch.float32),
+    }
+    second = {
+        "gazing_pos": torch.tensor([[4, 5, 6, 7, 8]], dtype=torch.long),
+        "if_padded_gazing": torch.tensor([[False, False, False, True, True]], dtype=torch.bool),
+        "num_gazing_each_frame": torch.tensor([5], dtype=torch.long),
+        "num_vision_tokens_each_frame": torch.tensor(4, dtype=torch.long),
+        "extra_variable_tensor": torch.zeros((1, 5), dtype=torch.float32),
+    }
+
+    merged = _merge_autogaze_forward_outputs([first, second])
+
+    assert merged["gazing_pos"].shape == (2, 5)
+    assert merged["if_padded_gazing"].shape == (2, 5)
+    assert merged["gazing_pos"][0, 3:].tolist() == [0, 0]
+    assert merged["if_padded_gazing"][0, 3:].tolist() == [True, True]
+    assert merged["extra_variable_tensor"].shape == (1, 3)
+
+
 def test_autogaze_selected_tokens_flow_to_modified_siglip_and_generic_mllm(tmp_path: Path) -> None:
     output_dir = tmp_path / "autogaze_tokens_vit_mllm"
     summary = infer_full.run(

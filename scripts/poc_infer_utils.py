@@ -2127,6 +2127,8 @@ def _cat_autogaze_tensors(key: Any, tensors: list[torch.Tensor]) -> torch.Tensor
             padded[row_offset : row_offset + rows, :cols] = tensor
             row_offset += rows
         return padded
+    if str(key) not in {"gazing_pos", "if_padded_gazing", "num_gazing_each_frame", "num_vision_tokens_each_frame"}:
+        return tensors[0]
     return torch.cat(tensors, dim=0)
 
 
