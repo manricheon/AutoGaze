@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -17,7 +18,14 @@ if str(SCRIPTS) not in sys.path:
 
 import infer_autogaze
 import infer_full
-from poc_infer_utils import SCALE_COLORS, load_config, prepare_video, resolve_frame_selection_max_windows, select_frame_windows
+from poc_infer_utils import (
+    SCALE_COLORS,
+    load_config,
+    prepare_video,
+    resolve_frame_selection_max_windows,
+    run_autogaze_stage,
+    select_frame_windows,
+)
 from poc_model_registry import build_mllm, build_vision_encoder
 from poc_model_adapters import NVILAAdapter, QwenAdapter, VJEPA2Adapter
 
@@ -31,6 +39,7 @@ POC_CONFIGS = [
     "E2_qwen_mllm.yaml",
     "E3_vjepa2_qwen.yaml",
     "E4_qwen_autogaze_vision_mask.yaml",
+    "E5_autogaze_tokens_modified_siglip_generic_mllm.yaml",
     "Q0_qwen_autogaze_off.yaml",
     "Q1_qwen_autogaze_on.yaml",
 ]
@@ -55,7 +64,7 @@ def test_priority1_configs_load_and_name_required_models() -> None:
         assert cfg["mllm"]["name"] in {"nvila", "qwen", "generic_mllm"}
         assert "checkpoint_path" in cfg["vision_encoder"]
         assert "processor_path" in cfg["mllm"]
-    assert seen == {"A0", "A1", "A2", "A3", "E1", "E2", "E3", "E4", "Q0", "Q1"}
+    assert seen == {"A0", "A1", "A2", "A3", "E1", "E2", "E3", "E4", "E5", "Q0", "Q1"}
 
 
 def test_configs_reference_local_weight_cache_when_available() -> None:
@@ -678,6 +687,140 @@ def test_autogaze_dummy_run_writes_flat_outputs_and_metrics(tmp_path: Path) -> N
     assert viz["flat_output_structure"] is True
     assert [item["scale_resolution"] for item in viz["scale_layout"]] == [32, 64, 112, 224]
     assert viz["scale_colors"] == {str(key): list(value) for key, value in SCALE_COLORS.items()}
+
+
+def test_real_autogaze_forward_latency_is_split_from_result_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_module = types.ModuleType("autogaze.models.autogaze")
+
+    class AutoGaze:
+        @classmethod
+        def from_pretrained(cls, checkpoint: str):
+            instance = cls()
+            instance.checkpoint = checkpoint
+            return instance
+
+        def to(self, *, device: str, dtype: torch.dtype):
+            self.device = device
+            self.dtype = dtype
+            return self
+
+        def eval(self):
+            return self
+
+        def __call__(self, inputs, **kwargs):
+            video = inputs["video"]
+            _batch, frames = int(video.shape[0]), int(video.shape[1])
+            time.sleep(0.001)
+            counts = torch.full((frames,), 2, dtype=torch.long)
+            positions = []
+            for frame_idx in range(frames):
+                positions.extend([frame_idx * 4, frame_idx * 4 + 1])
+            gazing_pos = torch.tensor([positions], dtype=torch.long)
+            return {
+                "gazing_pos": gazing_pos,
+                "num_gazing_each_frame": counts,
+                "if_padded_gazing": torch.zeros_like(gazing_pos, dtype=torch.bool),
+                "num_vision_tokens_each_frame": torch.tensor(4, dtype=torch.long),
+            }
+
+    fake_module.AutoGaze = AutoGaze
+    monkeypatch.setitem(sys.modules, "autogaze.models.autogaze", fake_module)
+
+    checkpoint = tmp_path / "fake_autogaze"
+    checkpoint.mkdir()
+    cfg = load_config(_cfg("A2_modified_siglip_nvila_on.yaml"))
+    cfg["autogaze"]["checkpoint_path"] = str(checkpoint)
+    cfg["autogaze"]["target_scales"] = [32]
+    cfg["scaling"]["patch_size"] = 16
+    prepared = prepare_video(
+        cfg,
+        video_path="dummy",
+        frame_selection_mode="sample",
+        num_frames=2,
+        frame_interval=1,
+        max_windows=1,
+        scaling_mode="resize",
+        resolution=32,
+        chop_size=32,
+        chop_overlap=0,
+        max_chops=None,
+        chop_merge_mode="metadata_only",
+    )
+
+    gaze = run_autogaze_stage(
+        cfg,
+        prepared,
+        device="cpu",
+        dtype="float32",
+        requested_dtype="float32",
+        gaze_ratio=0.5,
+        task_loss_requirement=None,
+        strict_autogaze_params=False,
+        allow_real_model_loading=True,
+        warmup_runs=0,
+    )
+
+    assert gaze.status == "real"
+    assert gaze.real_model_used is True
+    assert gaze.selected_token_count == 4
+    assert gaze.original_token_count == 8
+    assert gaze.gazing_info_for_vit is not None
+    runtime = gaze.runtime_metadata
+    assert runtime["autogaze_model_forward_latency_ms"] is not None
+    assert runtime["autogaze_model_forward_latency_ms"] > 0.0
+    assert runtime["autogaze_result_build_latency_ms"] >= 0.0
+    assert runtime["autogaze_stage_latency_ms"] >= runtime["autogaze_model_forward_latency_ms"]
+    assert runtime["autogaze_stage_latency_ms"] == pytest.approx(
+        runtime["autogaze_model_forward_latency_ms"] + runtime["autogaze_result_build_latency_ms"],
+        rel=1e-6,
+    )
+    assert gaze.latency_ms == runtime["autogaze_stage_latency_ms"]
+    assert runtime["gazing_info_source"] == "real_autogaze_output"
+
+
+def test_autogaze_selected_tokens_flow_to_modified_siglip_and_generic_mllm(tmp_path: Path) -> None:
+    output_dir = tmp_path / "autogaze_tokens_vit_mllm"
+    summary = infer_full.run(
+        infer_full.parse_args(
+            [
+                "--config",
+                str(_cfg("E5_autogaze_tokens_modified_siglip_generic_mllm.yaml")),
+                "--video-path",
+                "dummy",
+                "--query-text",
+                "Describe selected visual tokens.",
+                "--output-dir",
+                str(output_dir),
+                "--no-progress",
+            ]
+        )
+    )
+
+    assert summary["status"] == "partial"
+    runtime = json.loads((output_dir / "autogaze" / "runtime_metadata.json").read_text(encoding="utf-8"))
+    assert runtime["gazing_info_source"] == "selected_patch_records"
+    assert runtime["gazing_info_shape"]["gazing_pos"] == [1, 532]
+
+    metrics = json.loads((output_dir / "logs" / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["generation_input_mode"] == "direct_visual_token_injection"
+    assert metrics["gazing_info_passed_to_vision_encoder"] is True
+    assert metrics["vision_encoder_autogaze_tokens_used"] is True
+    assert metrics["vision_encoder_gazing_sequence_length"] == 532
+    assert metrics["vision_encoder_gazing_selected_token_count"] == 532
+    assert metrics["visual_tokens_shape"] == [1, 532, 768]
+    assert metrics["direct_visual_token_injection"] is True
+    assert metrics["autogaze_visual_tokens_injected"] is True
+    assert metrics["direct_visual_token_injection_verified"] is False
+    assert metrics["visual_token_count"] == 532
+    assert metrics["mllm_visual_token_saving_claimed"] is False
+
+    answer = json.loads((output_dir / "predictions" / "answer.json").read_text(encoding="utf-8"))
+    assert answer["status"] == "dummy"
+    assert answer["adapter_statuses"]["vision_encoder"]["name"] == "modified_siglip"
+    assert answer["adapter_statuses"]["mllm"]["name"] == "generic_mllm"
 
 
 def test_full_pipeline_preserves_query_and_writes_reports(tmp_path: Path) -> None:

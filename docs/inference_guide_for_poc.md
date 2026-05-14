@@ -1,6 +1,6 @@
 # PoC Inference Guide
 
-This branch is now scoped to the lightweight PoC inference surface only. It keeps the runnable inference entry points, A0-A3, E1-E4, and Q0-Q1 configs, local model adapters, flat visualizations, and metrics output. Broader benchmark, HF dataset, profiling, and all-in-one NVILA-HD experiment code were removed from this branch.
+This branch is now scoped to the lightweight PoC inference surface only. It keeps the runnable inference entry points, A0-A3, E1-E5, and Q0-Q1 configs, local model adapters, flat visualizations, and metrics output. Broader benchmark, HF dataset, profiling, and all-in-one NVILA-HD experiment code were removed from this branch.
 
 ## Kept Files
 
@@ -25,6 +25,7 @@ configs/poc_inference/E1_vjepa2_encoder.yaml
 configs/poc_inference/E2_qwen_mllm.yaml
 configs/poc_inference/E3_vjepa2_qwen.yaml
 configs/poc_inference/E4_qwen_autogaze_vision_mask.yaml
+configs/poc_inference/E5_autogaze_tokens_modified_siglip_generic_mllm.yaml
 configs/poc_inference/Q0_qwen_autogaze_off.yaml
 configs/poc_inference/Q1_qwen_autogaze_on.yaml
 ```
@@ -57,6 +58,7 @@ docs/inference_guide_for_poc.md
 | `E2_qwen_mllm.yaml` | off | skipped/generic | Qwen | Qwen official processor smoke |
 | `E3_vjepa2_qwen.yaml` | on | V-JEPA2 | Qwen | extension smoke with explicit blockers |
 | `E4_qwen_autogaze_vision_mask.yaml` | on | Qwen-owned vision | Qwen | AutoGaze masks Qwen-native vision patches |
+| `E5_autogaze_tokens_modified_siglip_generic_mllm.yaml` | on | modified SigLIP | generic MLLM | dummy smoke for AutoGaze-selected `gazing_info` -> ViT tokens -> direct visual-token adapter route |
 | `Q0_qwen_autogaze_off.yaml` | off | Qwen-owned vision | Qwen | explicit Qwen baseline for ON/OFF comparison |
 | `Q1_qwen_autogaze_on.yaml` | on | Qwen-owned vision | Qwen | explicit Qwen AutoGaze-mask comparison |
 
@@ -170,6 +172,20 @@ python scripts/infer_full.py \
   --max-new-tokens 16 \
   --json
 ```
+
+Dummy AutoGaze-selected-token adapter smoke:
+
+```bash
+python scripts/infer_full.py \
+  --config configs/poc_inference/E5_autogaze_tokens_modified_siglip_generic_mllm.yaml \
+  --video-path dummy \
+  --query-text "Describe selected visual tokens." \
+  --output-dir /tmp/poc_e5_autogaze_tokens \
+  --no-progress \
+  --json
+```
+
+This path synthesizes `gazing_info` from the saved selected patch records when the AutoGaze stage is stubbed, passes it into the modified SigLIP adapter, and sends the resulting dummy visual-token tensor to a generic MLLM dummy direct-token adapter. It is a wiring smoke only, not a verified real MLLM projector path.
 
 The full script always preserves query text in `predictions/answer.json` and `logs/metrics.json`. If generation is unavailable, it records the reason and keeps `query_text_used=true` when the adapter consumed the prompt path.
 
@@ -384,6 +400,7 @@ MLLM switching summary:
 | Qwen AutoGaze off | `Q0_qwen_autogaze_off.yaml` | official Qwen2.5-VL chat-template processor | unsupported |
 | Qwen AutoGaze on | `Q1_qwen_autogaze_on.yaml` | official Qwen2.5-VL processor plus Qwen-native vision patch masking | unsupported; selected patches are masked inside Qwen vision, not injected as external tokens |
 | Qwen legacy names | `E2_qwen_mllm.yaml`, `E4_qwen_autogaze_vision_mask.yaml` | same Qwen off/on concepts as Q0/Q1 | unsupported |
+| Generic direct-token smoke | `E5_autogaze_tokens_modified_siglip_generic_mllm.yaml` | modified SigLIP dummy visual-token path | dummy-only wiring smoke; not a verified real projector |
 | Generic | `E1_vjepa2_encoder.yaml` | stub/status reporting only | unsupported until a model-specific adapter is added |
 
 ## External MLLM Adaptation Stubs

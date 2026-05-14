@@ -148,7 +148,16 @@ class VisionEncoderAdapter:
             return self._forward_real(video, autogaze=autogaze)
         batch, frames, _channels, height, width = [int(dim) for dim in video.shape]
         grid_h, grid_w = self.patch_grid((height, width))
-        token_count = frames * grid_h * grid_w
+        dense_token_count = frames * grid_h * grid_w
+        if isinstance(autogaze, Mapping) and isinstance(autogaze.get("num_vision_tokens_each_frame"), torch.Tensor):
+            dense_token_count = frames * int(autogaze["num_vision_tokens_each_frame"].reshape(-1)[0].item())
+        gazing_metadata = _gazing_info_metadata(autogaze, dense_token_count=dense_token_count)
+        autogaze_tokens_used = bool(gazing_metadata.get("gazing_info_available") and self.supports_autogaze_tokens())
+        token_count = (
+            int(gazing_metadata["gazing_sequence_length"])
+            if autogaze_tokens_used
+            else dense_token_count
+        )
         output_dim = self.output_dim()
         tokens = torch.zeros((batch, token_count, output_dim), dtype=video.dtype)
         return {
@@ -158,7 +167,9 @@ class VisionEncoderAdapter:
                 "adapter": self.name,
                 "stub_status": self.status.status,
                 "reason": self.status.reason,
-                "autogaze_tokens_used": bool(autogaze is not None and self.supports_autogaze_tokens()),
+                "dense_token_count_without_gaze": dense_token_count,
+                **gazing_metadata,
+                "autogaze_tokens_used": autogaze_tokens_used,
             },
         }
 
@@ -212,6 +223,7 @@ class VisionEncoderAdapter:
             "metadata": {
                 "adapter": self.name,
                 "status": self.status.to_dict(),
+                **_gazing_info_metadata(autogaze),
                 "autogaze_tokens_used": bool(autogaze is not None and self.supports_autogaze_tokens()),
             },
         }
@@ -723,6 +735,7 @@ class MLLMAdapter:
                 query_text=query_text,
                 max_new_tokens=max_new_tokens,
                 integration_mode=str(self.config.get("generation_input_mode") or "official_processor"),
+                visual_tokens=visual_tokens,
             )
         if self.model is None:
             return {
@@ -738,10 +751,18 @@ class MLLMAdapter:
             "query_text_used": True,
         }
 
-    def _dummy_generation(self, *, query_text: str, max_new_tokens: int, integration_mode: str) -> dict[str, Any]:
+    def _dummy_generation(
+        self,
+        *,
+        query_text: str,
+        max_new_tokens: int,
+        integration_mode: str,
+        visual_tokens: torch.Tensor | None = None,
+    ) -> dict[str, Any]:
         answer = f"[dummy:{self.name}] placeholder response for: {query_text}"
         if max_new_tokens > 0:
             answer = " ".join(answer.split()[:max_new_tokens])
+        visual_token_shape = [int(dim) for dim in visual_tokens.shape] if isinstance(visual_tokens, torch.Tensor) else None
         return {
             "status": "dummy",
             "answer": answer,
@@ -754,8 +775,12 @@ class MLLMAdapter:
                 "real_checkpoint_loaded": False,
                 "generation_ran": True,
                 "official_processor_path": False,
-                "direct_visual_token_injection": False,
-                "autogaze_visual_tokens_injected": False,
+                "direct_visual_token_injection": visual_tokens is not None,
+                "autogaze_visual_tokens_injected": visual_tokens is not None,
+                "visual_token_shape": visual_token_shape,
+                "visual_token_count": self.count_visual_tokens(visual_tokens),
+                "direct_visual_token_injection_verified": False,
+                "note": "dummy direct visual-token smoke path; not a verified real MLLM projector path",
             },
         }
 
@@ -767,7 +792,12 @@ class MLLMAdapter:
         return int(visual_tokens.shape[-2])
 
     def supports_direct_visual_tokens(self) -> bool:
-        return False
+        return bool(
+            self.config.get(
+                "direct_visual_token_injection_supported",
+                self.config.get("supports_direct_visual_tokens", False),
+            )
+        )
 
     def supports_native_sparse_patch(self) -> bool:
         return False
@@ -2711,6 +2741,33 @@ def _move_tensor_mapping(value: Mapping[str, Any], device: str) -> dict[str, Any
     for key, item in value.items():
         moved[key] = item.to(device) if isinstance(item, torch.Tensor) else item
     return moved
+
+
+def _gazing_info_metadata(autogaze: Mapping[str, Any] | None, *, dense_token_count: int | None = None) -> dict[str, Any]:
+    if autogaze is None:
+        return {
+            "autogaze_tokens_used": False,
+            "gazing_info_available": False,
+            "dense_token_count_without_gaze": dense_token_count,
+        }
+    gazing_pos = autogaze.get("gazing_pos")
+    padded = autogaze.get("if_padded_gazing")
+    counts = autogaze.get("num_gazing_each_frame")
+    sequence_length = int(gazing_pos.shape[-1]) if isinstance(gazing_pos, torch.Tensor) and gazing_pos.ndim >= 1 else None
+    padded_count = int(padded.detach().cpu().sum().item()) if isinstance(padded, torch.Tensor) else None
+    selected_count = sequence_length - padded_count if sequence_length is not None and padded_count is not None else sequence_length
+    frame_count = int(counts.numel()) if isinstance(counts, torch.Tensor) else None
+    return {
+        "gazing_info_available": True,
+        "autogaze_tokens_used": False,
+        "gazing_info_keys": sorted(str(key) for key in autogaze.keys()),
+        "gazing_sequence_length": sequence_length,
+        "gazing_selected_token_count": selected_count,
+        "gazing_padded_token_count": padded_count,
+        "gazing_frame_count": frame_count,
+        "dense_token_count_without_gaze": dense_token_count,
+        "encoder_side_acceleration_claimed": False,
+    }
 
 
 def _video_tensor_to_pil(video: torch.Tensor, *, target_frame_count: int | None = None) -> list[Any]:

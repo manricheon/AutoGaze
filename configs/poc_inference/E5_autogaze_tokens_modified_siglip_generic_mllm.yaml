@@ -1,0 +1,116 @@
+experiment:
+  id: E5
+  description: AutoGaze-selected patch tokens through modified SigLIP adapter into a generic MLLM dummy direct-token smoke path
+
+autogaze:
+  enabled: true
+  checkpoint_path: weights/AutoGaze
+  processor_path: weights/AutoGaze
+  module_path: autogaze.models.autogaze
+  class_name: AutoGaze
+  gaze_ratio: 0.5
+  task_loss_requirement: 0.7
+  strict_params: false
+
+vision_encoder:
+  name: modified_siglip
+  checkpoint_path: weights/siglip2-base-patch16-224
+  config_path: null
+  processor_path: weights/siglip2-base-patch16-224
+  module_path: autogaze.vision_encoders.siglip.modeling_siglip
+  class_name: SiglipVisionModel
+  patch_size: 16
+  resolution: 224
+  output_dim: 768
+  required_for_full_pipeline: true
+  local_files_only: true
+  from_pretrained_kwargs:
+    scales: 32+64+112+224
+    attn_implementation: sdpa
+
+mllm:
+  name: generic_mllm
+  model_id: null
+  checkpoint_path: null
+  config_path: null
+  processor_path: null
+  tokenizer_path: null
+  module_path: null
+  class_name: null
+  generation_input_mode: direct_visual_token_injection
+  direct_visual_token_injection_supported: true
+  official_processor_owns_vision: false
+  trust_remote_code: false
+  local_files_only: true
+
+frame_selection:
+  mode: sample
+  num_frames: 4
+  frame_interval: 1
+  max_windows: 1
+
+video_input:
+  read_mode: full
+  decode_backend: auto
+  decode_fps: null
+  max_decode_frames: null
+  resize_before_buffer: true
+
+streaming:
+  enabled: false
+  window_size: 4
+  overlap: 0
+  max_windows: null
+  output_mode: incremental
+  full_pipeline_policy: window_independent_generation
+  flush_every_window: true
+  cpu_offload_between_windows: true
+  empty_cache_between_windows: false
+  keep_window_outputs_in_memory: false
+
+memory:
+  safe_mode: false
+  max_video_frames_in_memory: null
+  max_pixels_per_window: null
+  fail_on_full_video_load: false
+
+scaling:
+  mode: resize
+  resolution: 64
+  patch_size: 16
+  chop_size: 64
+  chop_overlap: 0
+  max_chops: null
+  chop_merge_mode: metadata_only
+  resize_before_chop_threshold: 1024
+  resize_before_chop_factor: 0.5
+
+runtime:
+  device: cpu
+  dtype: float32
+  mllm_dtype: float32
+  allow_real_model_loading: false
+  allow_dummy_weights: true
+  warmup_runs: 0
+  progress: true
+
+generation:
+  max_new_tokens: 32
+
+visualization:
+  overlay_style: mask
+  overlay_alpha: 0.35
+  multi_scale_overlay: true
+  show_patch_index: false
+  show_scale_label: false
+  metadata_placement: outside
+  info_panel_position: bottom
+  save_frame_images: false
+  save_overlay_video: false
+  save_side_by_side_video: false
+  save_scale_panel_video: false
+  video_export_mode: sampled_only
+  video_fps: 4.0
+
+output:
+  output_dir: outputs/poc_inference/E5

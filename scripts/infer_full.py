@@ -262,6 +262,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     actual_vision_encoder = vision.name
     blocked_stages: list[str] = []
     vision_latency_ms: float | None = None
+    vision_output_metadata: dict[str, Any] = {}
     if not vision_required:
         vision_status = AdapterStatus(
             vision.name,
@@ -294,6 +295,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     progress.warmup("ViT encoder", vision_forward_once, runs=warmup_runs, device=device)
                 vision_output, vision_latency_ms = progress.timed("ViT encoder", vision_forward_once, device=device)
                 visual_tokens = vision_output.get("visual_tokens")
+                if isinstance(vision_output.get("metadata"), dict):
+                    vision_output_metadata = dict(vision_output["metadata"])
                 if vision_status.status != "real":
                     skipped.append({"stage": "vision_encoder", "reason": vision_status.reason or f"{vision.name} used stub output"})
             except Exception as exc:
@@ -498,6 +501,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     metrics["vision_encoder_dtype"] = vision_dtype
     metrics["mllm_dtype"] = mllm_dtype
     metrics["dummy_weights_enabled"] = use_dummy_weights
+    metrics["vision_output_metadata"] = vision_output_metadata
+    metrics["vision_encoder_autogaze_tokens_used"] = bool(vision_output_metadata.get("autogaze_tokens_used", False))
+    metrics["vision_encoder_gazing_sequence_length"] = vision_output_metadata.get("gazing_sequence_length")
+    metrics["vision_encoder_gazing_selected_token_count"] = vision_output_metadata.get("gazing_selected_token_count")
+    metrics["vision_encoder_gazing_padded_token_count"] = vision_output_metadata.get("gazing_padded_token_count")
     if isinstance(prepared.processed_video, torch.Tensor):
         metrics["processed_video_shape"] = [int(dim) for dim in prepared.processed_video.shape]
     metrics["mllm_input_tensor_shape"] = _tensor_shape(video_for_mllm)
@@ -550,6 +558,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     metrics["zero_mask_expected_speedup"] = generation_metadata.get("zero_mask_expected_speedup")
     metrics["rope_sparse_mapping_status"] = generation_metadata.get("rope_sparse_mapping_status")
     for key in (
+        "autogaze_visual_tokens_injected",
+        "direct_visual_token_injection_verified",
+        "visual_token_shape",
+        "visual_token_count",
         "qwen_visual_tokens_before",
         "qwen_visual_tokens_kept_by_mask",
         "qwen_visual_mask_keep_ratio",
@@ -564,6 +576,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             direct_visual_token_mode
             and mllm.supports_direct_visual_tokens()
             and visual_tokens is not None
+            and mllm_status.status == "real"
         )
         or (
             mllm.name == "nvila"
@@ -572,6 +585,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             and bool(nested_get(cfg, "mllm.official_processor_path", False))
             and bool(nested_get(cfg, "mllm.sync_autogaze_controls_from_config", False))
         )
+    )
+    metrics["direct_visual_token_injection"] = bool(
+        direct_visual_token_mode
+        and mllm.supports_direct_visual_tokens()
+        and visual_tokens is not None
     )
     if gaze.status == "blocked":
         blocked_stages.append("autogaze")

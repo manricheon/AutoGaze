@@ -41,6 +41,19 @@ Dummy smoke is not a model-quality test. Its outputs are deliberately labeled as
 
 Direct sparse token injection is disabled by default for external models. Use official processors, AutoGaze input-level frame/chop selection, or zero-mask probes until positional IDs, dense-grid behavior, projector compatibility, and visual placeholders are verified.
 
+The local dummy wiring smoke for AutoGaze-selected tokens through a ViT adapter is:
+
+```bash
+python scripts/infer_full.py \
+  --config configs/poc_inference/E5_autogaze_tokens_modified_siglip_generic_mllm.yaml \
+  --video-path dummy \
+  --query-text "Describe selected visual tokens." \
+  --output-dir outputs/poc_inference/E5_dummy \
+  --no-progress
+```
+
+This uses metadata-derived `gazing_info` and dummy visual tokens only; it does not claim a verified real MLLM projector path.
+
 The existing A0-A3 AutoGaze ON/OFF + NVILA inference configs remain the canonical path and keep their previous `official_processor` behavior.
 
 NVILA-HD-Video README-style inference presets are:

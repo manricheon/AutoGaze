@@ -1826,6 +1826,21 @@ def build_gaze_result(
         required = ("gazing_pos", "num_gazing_each_frame", "if_padded_gazing")
         if all(key in real_outputs for key in required):
             gazing_info_for_vit = {key: real_outputs[key] for key in required}
+            runtime["gazing_info_source"] = "real_autogaze_output"
+    if gazing_info_for_vit is None and autogaze_enabled and status != "blocked":
+        gazing_info_for_vit = _build_gazing_info_for_vit_from_records(
+            per_frame,
+            batch_size=batch_size,
+            frame_count=frame_count,
+            tokens_per_frame=tokens_per_frame,
+        )
+        runtime["gazing_info_source"] = "selected_patch_records"
+        runtime["gazing_info_shape"] = {
+            key: [int(dim) for dim in value.shape]
+            for key, value in gazing_info_for_vit.items()
+            if isinstance(value, torch.Tensor)
+        }
+        runtime["gazing_info_padded_token_count"] = int(gazing_info_for_vit["if_padded_gazing"].sum().item())
     return GazeResult(
         status=status,
         reason=reason,
@@ -1841,6 +1856,56 @@ def build_gaze_result(
         latency_ms=latency_ms,
         gazing_info_for_vit=gazing_info_for_vit,
     )
+
+
+def _build_gazing_info_for_vit_from_records(
+    records: list[Mapping[str, Any]],
+    *,
+    batch_size: int,
+    frame_count: int,
+    tokens_per_frame: int,
+) -> dict[str, torch.Tensor]:
+    selected_by_batch_frame: list[list[list[int]]] = [
+        [[] for _frame_idx in range(frame_count)]
+        for _batch_idx in range(batch_size)
+    ]
+    for batch_idx in range(batch_size):
+        for frame_idx in range(frame_count):
+            record_index = batch_idx * frame_count + frame_idx
+            if record_index >= len(records):
+                continue
+            selected = [
+                max(0, min(tokens_per_frame - 1, int(item)))
+                for item in records[record_index].get("selected_patch_indices", [])
+            ]
+            selected_by_batch_frame[batch_idx][frame_idx] = selected
+
+    counts = [
+        max(len(selected_by_batch_frame[batch_idx][frame_idx]) for batch_idx in range(batch_size))
+        for frame_idx in range(frame_count)
+    ]
+    total_selected_with_padding = sum(counts)
+    if total_selected_with_padding <= 0:
+        counts = [1 for _frame_idx in range(frame_count)]
+        total_selected_with_padding = frame_count
+
+    gazing_pos = torch.zeros((batch_size, total_selected_with_padding), dtype=torch.long)
+    if_padded = torch.ones((batch_size, total_selected_with_padding), dtype=torch.bool)
+    for batch_idx in range(batch_size):
+        offset = 0
+        for frame_idx, count in enumerate(counts):
+            selected = selected_by_batch_frame[batch_idx][frame_idx][:count]
+            for selected_offset, local_index in enumerate(selected):
+                gazing_pos[batch_idx, offset + selected_offset] = frame_idx * tokens_per_frame + int(local_index)
+                if_padded[batch_idx, offset + selected_offset] = False
+            offset += count
+
+    return {
+        "gazing_pos": gazing_pos,
+        "num_gazing_each_frame": torch.tensor(counts, dtype=torch.long),
+        "if_padded_gazing": if_padded,
+        "num_vision_tokens_each_frame": torch.tensor(tokens_per_frame, dtype=torch.long),
+    }
 
 
 def _counts_for_batch(counts: torch.Tensor, *, batch_idx: int, frame_count: int) -> list[int]:
