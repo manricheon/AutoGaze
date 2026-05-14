@@ -212,7 +212,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         skipped.append({"stage": "autogaze", "reason": gaze.reason or "AutoGaze blocked"})
     elif gaze.status.startswith("stub"):
         skipped.append({"stage": "autogaze", "reason": gaze.reason or "stub AutoGaze output"})
-    module_processing_latency_ms = gaze.latency_ms
+    module_processing_latency_ms = float(preprocessing_latency_ms or 0.0) + gaze.latency_ms
     wall_clock_latency_ms = (time.perf_counter() - run_start) * 1000
     metrics = build_metrics(
         mode="autogaze_only",
@@ -412,7 +412,7 @@ def _run_streaming(args: argparse.Namespace, *, cfg: dict[str, Any], output_dir:
             generation_status="not_applicable",
             skipped_stages=window_skipped,
         )
-        total_module_latency += gaze.latency_ms
+        total_module_latency += float(preprocessing_latency_ms or 0.0) + gaze.latency_ms
         if bool(cli_or_config(args.empty_cache_between_windows, cfg, "streaming.empty_cache_between_windows", False)) and device.startswith("cuda"):
             import torch
 

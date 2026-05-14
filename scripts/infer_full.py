@@ -460,7 +460,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     visualization_latency_ms = (time.perf_counter() - visualization_start) * 1000
 
-    module_processing_latency_ms = gaze.latency_ms + float(vision_latency_ms or 0.0) + float(mllm_generation_latency_ms or 0.0)
+    module_processing_latency_ms = (
+        float(preprocessing_latency_ms or 0.0)
+        + gaze.latency_ms
+        + float(vision_latency_ms or 0.0)
+        + float(mllm_generation_latency_ms or 0.0)
+    )
     wall_clock_latency_ms = (time.perf_counter() - run_start) * 1000
     metrics = build_metrics(
         mode="full_pipeline",
@@ -903,7 +908,12 @@ def _run_streaming_full(args: argparse.Namespace, *, cfg: dict[str, Any], output
             output_text=generation.get("answer"),
             skipped_stages=window_skipped,
         )
-        total_module_latency += gaze.latency_ms + float(vision_latency_ms or 0.0) + float(mllm_generation_latency_ms or 0.0)
+        total_module_latency += (
+            float(preprocessing_latency_ms or 0.0)
+            + gaze.latency_ms
+            + float(vision_latency_ms or 0.0)
+            + float(mllm_generation_latency_ms or 0.0)
+        )
         if window_skipped:
             skipped.extend({"stage": f"window_{stream_window.window_id}_{item['stage']}", "reason": item["reason"]} for item in window_skipped)
         if bool(cli_or_config(args.empty_cache_between_windows, cfg, "streaming.empty_cache_between_windows", False)) and device.startswith("cuda"):

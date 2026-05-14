@@ -94,13 +94,13 @@ Inference commands show tqdm-style progress for the timed module stages:
 
 Real module timing uses one warm-up run by default before measurement. The default is configured as `runtime.warmup_runs: 1` and can be overridden with `--warmup-runs 0` or another integer. Warm-up, model loading, artifact writing, and visualization are excluded from the module latency metrics.
 
-The main processing latency in `logs/metrics.json` is `module_processing_latency_ms`, also mirrored to `end_to_end_latency_ms` for compatibility. It is the sum of measured module processing latencies only:
+The main processing latency in `logs/metrics.json` is `module_processing_latency_ms`, also mirrored to `end_to_end_latency_ms` for compatibility. It is the sum of measured preprocessing and module processing latencies only:
 
 ```text
 autogaze_latency_ms + vision_encoder_latency_ms + mllm_generation_latency_ms
 ```
 
-`autogaze_latency_ms` records the full AutoGaze selector/result stage over all processed frames or crops, including selected-token metadata construction for `resize_then_chop`. When real AutoGaze runs, `autogaze_model_forward_latency_ms` and `autogaze_result_build_latency_ms` are also reported separately. `visualization_latency_ms`, `preprocessing_latency_ms`, and `wall_clock_latency_ms` are recorded separately. Use `--no-progress` to disable command-line progress bars while keeping the same timing behavior.
+`autogaze_latency_ms` is inclusive: it records preprocessing needed to build the AutoGaze inputs plus the AutoGaze selector/result stage over all processed frames or crops. For `resize_then_chop`, this includes resize/chop expansion time and the work over all processed crop frames. The split fields `autogaze_preprocessing_latency_ms`, `autogaze_stage_latency_ms`, `autogaze_model_forward_latency_ms`, and `autogaze_result_build_latency_ms` are also reported. `visualization_latency_ms` and `wall_clock_latency_ms` are recorded separately. Use `--no-progress` to disable command-line progress bars while keeping the same timing behavior.
 
 ## Real Loading Policy
 
