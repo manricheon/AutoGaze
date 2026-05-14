@@ -13,17 +13,25 @@ import torch
 
 from poc_infer_utils import (
     ProgressReporter,
+    StreamingVisualizationSink,
+    add_streaming_window_result,
     build_metrics,
+    build_streaming_metrics,
     cli_or_config,
+    iter_stream_windows,
     load_config,
     nested_get,
+    new_streaming_aggregate,
     normalize_device,
+    prepare_stream_window,
     prepare_video,
     resolve_frame_selection_max_windows,
     run_autogaze_stage,
+    validate_stream_window_memory,
     write_autogaze_artifacts,
     write_json,
     write_summary_and_metrics,
+    write_streaming_autogaze_artifacts,
     write_visualizations,
 )
 from poc_model_adapters import AdapterStatus
@@ -60,6 +68,31 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-frames", type=int, default=None)
     parser.add_argument("--frame-interval", type=int, default=None)
     parser.add_argument("--max-windows", type=int, default=None, help="maximum frame windows to process; 0 means unlimited")
+    parser.add_argument("--video-read-mode", choices=["streaming", "full"], default=None)
+    parser.add_argument("--stream-window-size", type=int, default=None)
+    parser.add_argument("--stream-overlap", type=int, default=None)
+    parser.add_argument("--max-stream-windows", type=int, default=None)
+    parser.add_argument("--max-decode-frames", type=int, default=None)
+    parser.add_argument("--decode-backend", choices=["auto", "opencv", "decord", "torchvision"], default=None)
+    parser.add_argument("--decode-fps", type=float, default=None)
+    parser.add_argument("--resize-before-buffer", action="store_true", default=None)
+    parser.add_argument("--streaming-output", action="store_true", default=None)
+    parser.add_argument("--flush-every-window", action="store_true", default=None)
+    parser.add_argument("--cpu-offload-between-windows", action="store_true", default=None)
+    parser.add_argument("--empty-cache-between-windows", action="store_true", default=None)
+    parser.add_argument("--max-pixels-per-window", type=int, default=None)
+    parser.add_argument("--max-frames-in-memory", type=int, default=None)
+    parser.add_argument("--fail-on-full-video-load", action="store_true", default=None)
+    parser.add_argument(
+        "--streaming-full-pipeline-policy",
+        choices=[
+            "window_independent_generation",
+            "aggregate_window_answers",
+            "first_window_only",
+            "blocked_multi_window_generation",
+        ],
+        default=None,
+    )
 
     parser.add_argument("--scaling-mode", choices=["resize", "fit_short_side", "fit_long_side", "chop", "resize_then_chop", "quickstart", "none"], default=None)
     parser.add_argument("--resolution", type=int, default=None)
@@ -132,6 +165,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     output_dir = Path(str(cli_or_config(args.output_dir, cfg, "output.output_dir", "outputs/poc_full"))).expanduser()
     if not output_dir.is_absolute():
         output_dir = Path.cwd() / output_dir
+    video_read_mode = str(cli_or_config(args.video_read_mode, cfg, "video_input.read_mode", "streaming"))
+    if video_read_mode == "streaming":
+        return _run_streaming_full(args, cfg=cfg, output_dir=output_dir, run_start=run_start)
+    fail_on_full = bool(cli_or_config(args.fail_on_full_video_load, cfg, "memory.fail_on_full_video_load", True))
+    if fail_on_full and args.video_path != "dummy":
+        raise RuntimeError(
+            "full video loading is disabled by memory.fail_on_full_video_load; use --video-read-mode streaming "
+            "or set memory.fail_on_full_video_load=false in config for an explicit full-load run"
+        )
 
     preprocessing_start = time.perf_counter()
     frame_selection_mode = str(cli_or_config(args.frame_selection_mode, cfg, "frame_selection.mode", "sample"))
@@ -520,6 +562,412 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "metrics": metrics,
     }
     artifacts.update(write_summary_and_metrics(output_dir, summary=summary, metrics=metrics))
+    return summary
+
+
+def _run_streaming_full(args: argparse.Namespace, *, cfg: dict[str, Any], output_dir: Path, run_start: float) -> dict[str, Any]:
+    policy = str(cli_or_config(args.streaming_full_pipeline_policy, cfg, "streaming.full_pipeline_policy", "window_independent_generation"))
+    if policy == "aggregate_window_answers":
+        raise NotImplementedError("aggregate_window_answers is not implemented; use window_independent_generation or first_window_only")
+    device = normalize_device(str(cli_or_config(args.device, cfg, "runtime.device", "cpu")))
+    requested_dtype = str(cli_or_config(args.dtype, cfg, "runtime.dtype", "float32"))
+    autogaze_dtype = "float32"
+    vision_dtype = str(nested_get(cfg, "runtime.vision_dtype", requested_dtype))
+    mllm_dtype = str(cli_or_config(args.mllm_dtype, cfg, "runtime.mllm_dtype", requested_dtype))
+    warmup_runs = max(0, int(cli_or_config(args.warmup_runs, cfg, "runtime.warmup_runs", 1)))
+    progress = ProgressReporter(enabled=not args.no_progress and bool(nested_get(cfg, "runtime.progress", True)))
+    frame_selection_mode = str(cli_or_config(args.frame_selection_mode, cfg, "frame_selection.mode", "chunk"))
+    num_frames = int(cli_or_config(args.num_frames, cfg, "frame_selection.num_frames", 16))
+    frame_interval = int(cli_or_config(args.frame_interval, cfg, "frame_selection.frame_interval", 1))
+    frame_max_windows = resolve_frame_selection_max_windows(
+        cli_max_windows=args.max_windows,
+        cfg=cfg,
+        frame_selection_mode=frame_selection_mode,
+        cli_frame_selection_mode=args.frame_selection_mode,
+    )
+    stream_window_size_value = (
+        args.stream_window_size
+        if args.stream_window_size is not None
+        else num_frames
+        if args.num_frames is not None
+        else nested_get(cfg, "streaming.window_size", num_frames)
+    )
+    stream_window_size = int(stream_window_size_value)
+    stream_overlap = int(cli_or_config(args.stream_overlap, cfg, "streaming.overlap", 0))
+    max_stream_windows = cli_or_config(args.max_stream_windows, cfg, "streaming.max_windows", frame_max_windows)
+    max_decode_frames = cli_or_config(args.max_decode_frames, cfg, "video_input.max_decode_frames", None)
+    decode_backend = str(cli_or_config(args.decode_backend, cfg, "video_input.decode_backend", "auto"))
+    decode_fps = cli_or_config(args.decode_fps, cfg, "video_input.decode_fps", None)
+    max_pixels_per_window = cli_or_config(args.max_pixels_per_window, cfg, "memory.max_pixels_per_window", None)
+    max_frames_in_memory = cli_or_config(args.max_frames_in_memory, cfg, "memory.max_video_frames_in_memory", None)
+    scaling_mode = str(cli_or_config(args.scaling_mode, cfg, "scaling.mode", "resize"))
+    resolution = int(cli_or_config(args.resolution, cfg, "scaling.resolution", 224))
+    dummy_frames = int(nested_get(cfg, "input.dummy_frames", max(num_frames, 8)))
+    dummy_resolution = int(nested_get(cfg, "input.dummy_resolution", max(resolution, 64)))
+    allow_real = bool(args.allow_real_model_loading or nested_get(cfg, "runtime.allow_real_model_loading", False))
+    allow_dummy = bool(args.allow_dummy_weights or nested_get(cfg, "runtime.allow_dummy_weights", False))
+    use_dummy_weights = bool(allow_dummy and not allow_real)
+
+    vision_name = str(nested_get(cfg, "vision_encoder.name", "generic_vit"))
+    mllm_name = str(nested_get(cfg, "mllm.name", "generic_mllm"))
+    encoder_only_feature_run = _is_encoder_only_feature_run(cfg, vision_name=vision_name, mllm_name=mllm_name)
+    generation_input_mode = _normalize_generation_input_mode(str(nested_get(cfg, "mllm.generation_input_mode", "official_processor")))
+    direct_visual_token_mode = generation_input_mode == "direct_visual_token_injection"
+    mllm_owns_vision = bool(nested_get(cfg, "mllm.official_processor_owns_vision", mllm_name == "qwen"))
+    vision_required = bool(nested_get(cfg, "vision_encoder.required_for_full_pipeline", direct_visual_token_mode))
+    if mllm_owns_vision and not direct_visual_token_mode and not encoder_only_feature_run:
+        vision_required = False
+    vision = build_vision_encoder(vision_name, nested_get(cfg, "vision_encoder", {}))
+    actual_vision_encoder = vision.name
+    if not vision_required:
+        vision_status = AdapterStatus(
+            vision.name,
+            "skipped",
+            f"{vision.name} skipped because {mllm_name} uses the official processor vision path",
+        )
+        vision.status = vision_status
+    else:
+        vision_status = (
+            vision.load_dummy_weights(device=device, dtype=vision_dtype)
+            if use_dummy_weights
+            else vision.load(allow_real_model_loading=allow_real, device=device, dtype=vision_dtype)
+        )
+    if bool(nested_get(cfg, "mllm.sync_autogaze_controls_from_config", False)):
+        mllm_cfg = cfg.setdefault("mllm", {})
+        mllm_cfg["poc_autogaze_enabled"] = bool(nested_get(cfg, "autogaze.enabled", False))
+        mllm_cfg["poc_autogaze_status"] = None
+        mllm_cfg["poc_gaze_ratio"] = nested_get(cfg, "autogaze.gaze_ratio")
+        mllm_cfg["poc_task_loss_requirement"] = nested_get(cfg, "autogaze.task_loss_requirement")
+        mllm_cfg["poc_autogaze_checkpoint_path"] = nested_get(cfg, "autogaze.checkpoint_path")
+        mllm_cfg["poc_autogaze_processor_path"] = nested_get(cfg, "autogaze.processor_path")
+    mllm = build_mllm(mllm_name, nested_get(cfg, "mllm", {}))
+    if encoder_only_feature_run or policy == "blocked_multi_window_generation":
+        mllm_status = AdapterStatus(
+            mllm.name,
+            "skipped",
+            "encoder-only feature extraction or blocked multi-window policy; no MLLM generation requested",
+        )
+        mllm.status = mllm_status
+    else:
+        mllm_status = (
+            mllm.load_dummy_weights(device=device, dtype=mllm_dtype)
+            if use_dummy_weights
+            else mllm.load(allow_real_model_loading=allow_real, device=device, dtype=mllm_dtype)
+        )
+    max_new_tokens = int(cli_or_config(args.max_new_tokens, cfg, "generation.max_new_tokens", 32))
+    aggregate = new_streaming_aggregate(
+        video_read_mode="streaming",
+        decode_backend=decode_backend,
+        frame_selection_mode=frame_selection_mode,
+        stream_window_size=stream_window_size,
+        stream_overlap=stream_overlap,
+        max_stream_windows=max_stream_windows,
+        max_decode_frames=max_decode_frames,
+        decode_fps=decode_fps,
+    )
+    viz_sink = StreamingVisualizationSink(
+        output_dir,
+        overlay_style=str(cli_or_config(args.overlay_style, cfg, "visualization.overlay_style", "mask")),
+        overlay_alpha=float(cli_or_config(args.overlay_alpha, cfg, "visualization.overlay_alpha", 0.35)),
+        multi_scale_overlay=bool(args.multi_scale_overlay or nested_get(cfg, "visualization.multi_scale_overlay", True)),
+        show_patch_index=bool(args.show_patch_index or nested_get(cfg, "visualization.show_patch_index", False)),
+        show_scale_label=bool(args.show_scale_label or nested_get(cfg, "visualization.show_scale_label", False)),
+        metadata_placement=str(cli_or_config(args.metadata_placement, cfg, "visualization.metadata_placement", "outside")),
+        info_panel_position=str(cli_or_config(args.info_panel_position, cfg, "visualization.info_panel_position", "bottom")),
+        save_frame_images=bool(args.save_frame_images or nested_get(cfg, "visualization.save_frame_images", False)),
+        save_overlay_video=bool(args.save_overlay_video or nested_get(cfg, "visualization.save_overlay_video", False)),
+        save_side_by_side_video=bool(args.save_side_by_side_video or nested_get(cfg, "visualization.save_side_by_side_video", False)),
+        save_scale_panel_video=bool(args.save_scale_panel_video or nested_get(cfg, "visualization.save_scale_panel_video", False)),
+        video_fps=float(cli_or_config(args.video_fps, cfg, "visualization.video_fps", 4.0)),
+        video_export_mode=str(cli_or_config(args.video_export_mode, cfg, "visualization.video_export_mode", "sampled_only")),
+        query_text=args.query_text,
+    )
+    skipped: list[dict[str, str]] = []
+    blocked_stages: list[str] = []
+    answers: list[dict[str, Any]] = []
+    total_module_latency = 0.0
+    visualization_latency_total = 0.0
+    for stream_window in iter_stream_windows(
+        args.video_path,
+        frame_selection_mode=frame_selection_mode,
+        num_frames=num_frames,
+        frame_interval=frame_interval,
+        max_windows=max_stream_windows,
+        stream_window_size=stream_window_size,
+        stream_overlap=stream_overlap,
+        max_decode_frames=max_decode_frames,
+        decode_backend=decode_backend,
+        decode_fps=decode_fps,
+        dummy_frames=dummy_frames,
+        dummy_resolution=dummy_resolution,
+    ):
+        validate_stream_window_memory(
+            stream_window,
+            max_frames_in_memory=max_frames_in_memory,
+            max_pixels_per_window=max_pixels_per_window,
+        )
+        preprocessing_start = time.perf_counter()
+        prepared = prepare_stream_window(
+            cfg,
+            stream_window=stream_window,
+            frame_selection_mode=frame_selection_mode,
+            num_frames=num_frames,
+            frame_interval=frame_interval,
+            max_windows=max_stream_windows,
+            scaling_mode=scaling_mode,
+            resolution=resolution,
+            chop_size=int(cli_or_config(args.chop_size, cfg, "scaling.chop_size", 224)),
+            chop_overlap=int(cli_or_config(args.chop_overlap, cfg, "scaling.chop_overlap", 0)),
+            max_chops=cli_or_config(args.max_chops, cfg, "scaling.max_chops", None),
+            chop_merge_mode=str(cli_or_config(args.chop_merge_mode, cfg, "scaling.chop_merge_mode", "metadata_only")),
+            resize_before_chop_threshold=int(cli_or_config(args.resize_before_chop_threshold, cfg, "scaling.resize_before_chop_threshold", 1024)),
+            resize_before_chop_factor=float(cli_or_config(args.resize_before_chop_factor, cfg, "scaling.resize_before_chop_factor", 0.5)),
+        )
+        preprocessing_latency_ms = (time.perf_counter() - preprocessing_start) * 1000
+        gaze = run_autogaze_stage(
+            cfg,
+            prepared,
+            device=device,
+            dtype=autogaze_dtype,
+            requested_dtype=requested_dtype,
+            gaze_ratio=float(cli_or_config(args.gaze_ratio, cfg, "autogaze.gaze_ratio", 0.75)),
+            task_loss_requirement=cli_or_config(args.task_loss_requirement, cfg, "autogaze.task_loss_requirement", 0.7),
+            strict_autogaze_params=bool(args.strict_autogaze_params or nested_get(cfg, "autogaze.strict_params", False)),
+            allow_real_model_loading=allow_real,
+            warmup_runs=warmup_runs if allow_real and stream_window.window_id == 0 else 0,
+            progress=progress,
+        )
+        _sync_mllm_with_poc_autogaze_controls(cfg, gaze)
+        window_skipped: list[dict[str, str]] = []
+        if gaze.status == "blocked":
+            blocked_stages.append("autogaze")
+            window_skipped.append({"stage": "autogaze", "reason": gaze.reason or "AutoGaze blocked"})
+        elif gaze.status.startswith("stub"):
+            window_skipped.append({"stage": "autogaze", "reason": gaze.reason or "stub AutoGaze output"})
+        visual_tokens = None
+        vision_latency_ms: float | None = None
+        if vision_required and (not allow_real or vision_status.status == "real"):
+            autogaze_payload = None if not gaze.autogaze_enabled or gaze.status == "blocked" else gaze.gazing_info_for_vit
+
+            def vision_forward_once() -> dict[str, Any]:
+                return vision.forward(prepared.processed_video, autogaze=autogaze_payload)
+
+            try:
+                if allow_real and vision_status.status == "real" and stream_window.window_id == 0:
+                    progress.warmup("ViT encoder", vision_forward_once, runs=warmup_runs, device=device)
+                vision_output, vision_latency_ms = progress.timed("ViT encoder", vision_forward_once, device=device)
+                visual_tokens = vision_output.get("visual_tokens")
+            except Exception as exc:
+                blocked_stages.append("vision_encoder")
+                window_skipped.append({"stage": "vision_encoder", "reason": f"vision encoder failed: {exc}"})
+        elif vision_required:
+            blocked_stages.append("vision_encoder")
+            window_skipped.append({"stage": "vision_encoder", "reason": vision_status.reason or f"{vision.name} real loading unavailable"})
+
+        zero_mask_metadata: dict[str, Any] | None = None
+        video_for_mllm = prepared.processed_video
+        if generation_input_mode == "autogaze_zero_mask":
+            video_for_mllm, zero_mask_metadata = _prepare_zero_mask_video(
+                video=prepared.processed_video,
+                gaze=gaze,
+                stage=str(cli_or_config(args.zero_mask_stage, cfg, "zero_mask.stage", "pixel")),
+                value=str(cli_or_config(args.zero_mask_value, cfg, "zero_mask.value", "zero")),
+            )
+        mllm_autogaze_payload = _mllm_autogaze_payload(cfg, gaze)
+        mllm_generation_latency_ms: float | None = None
+        if policy == "blocked_multi_window_generation":
+            generation = {
+                "status": "skipped",
+                "answer": None,
+                "reason": "streaming policy blocked_multi_window_generation skips per-window MLLM generation",
+                "query_text_used": False,
+            }
+            window_skipped.append({"stage": "mllm_generation", "reason": generation["reason"]})
+        elif encoder_only_feature_run:
+            generation = {
+                "status": "skipped",
+                "answer": None,
+                "reason": "encoder-only feature extraction run; MLLM generation skipped",
+                "query_text_used": False,
+                "metadata": {"encoder_only_feature_extraction": True},
+            }
+        elif allow_real and mllm_status.status != "real":
+            blocked_stages.append("mllm_generation")
+            generation = {"status": "blocked", "answer": None, "reason": mllm_status.reason or f"{mllm.name} real loading unavailable"}
+        elif direct_visual_token_mode and not mllm.supports_direct_visual_tokens():
+            blocked_stages.append("mllm_generation")
+            generation = {"status": "blocked", "answer": None, "reason": f"{mllm.name} does not support verified direct visual token injection"}
+        else:
+
+            def mllm_generate_once() -> dict[str, Any]:
+                return _generate_mllm_with_video_policy(
+                    mllm,
+                    query_text=args.query_text,
+                    video=video_for_mllm,
+                    visual_tokens=visual_tokens if mllm.supports_direct_visual_tokens() else None,
+                    max_new_tokens=max_new_tokens,
+                    video_path=None,
+                    has_chop_metadata=prepared.chop_metadata is not None,
+                    autogaze=mllm_autogaze_payload,
+                    integration_mode=generation_input_mode,
+                )
+
+            if allow_real and mllm_status.status == "real" and stream_window.window_id == 0:
+                progress.warmup("MLLM", mllm_generate_once, runs=warmup_runs, device=device)
+            generation, mllm_generation_latency_ms = progress.timed("MLLM", mllm_generate_once, device=device)
+        if zero_mask_metadata is not None:
+            generation = _with_generation_metadata(generation, zero_mask_metadata)
+        generation_status = str(generation.get("status", "unknown"))
+        if generation_status not in {"real", "dummy"} and generation.get("reason"):
+            window_skipped.append({"stage": "mllm_generation", "reason": str(generation.get("reason"))})
+        answers.append(
+            {
+                "window_id": stream_window.window_id,
+                "source_frame_indices": stream_window.frame_indices,
+                "status": generation_status,
+                "answer": generation.get("answer"),
+                "reason": generation.get("reason"),
+                "metadata": generation.get("metadata"),
+            }
+        )
+        processed_offset = int(aggregate["processed_frame_count"])
+        visualization_offset = int(aggregate["visualization_frame_count"])
+        visualization_start = time.perf_counter()
+        viz_sink.write_window(
+            prepared,
+            gaze,
+            processed_frame_offset=processed_offset,
+            visualization_frame_offset=visualization_offset,
+            generation_status=generation_status,
+        )
+        visualization_latency_ms = (time.perf_counter() - visualization_start) * 1000
+        visualization_latency_total += visualization_latency_ms
+        add_streaming_window_result(
+            aggregate,
+            stream_window=stream_window,
+            prepared=prepared,
+            gaze=gaze,
+            preprocessing_latency_ms=preprocessing_latency_ms,
+            autogaze_latency_ms=gaze.latency_ms,
+            vision_encoder_latency_ms=vision_latency_ms,
+            mllm_generation_latency_ms=mllm_generation_latency_ms,
+            visualization_latency_ms=visualization_latency_ms,
+            generation_status=generation_status,
+            output_text=generation.get("answer"),
+            skipped_stages=window_skipped,
+        )
+        total_module_latency += gaze.latency_ms + float(vision_latency_ms or 0.0) + float(mllm_generation_latency_ms or 0.0)
+        if window_skipped:
+            skipped.extend({"stage": f"window_{stream_window.window_id}_{item['stage']}", "reason": item["reason"]} for item in window_skipped)
+        if bool(cli_or_config(args.empty_cache_between_windows, cfg, "streaming.empty_cache_between_windows", False)) and device.startswith("cuda"):
+            torch.cuda.empty_cache()
+        if policy == "first_window_only":
+            skipped.append({"stage": "streaming", "reason": "first_window_only policy stopped after the first window"})
+            break
+    artifacts = write_streaming_autogaze_artifacts(
+        output_dir,
+        aggregate,
+        status="blocked" if blocked_stages else "partial" if skipped else "completed",
+        reason=skipped[0]["reason"] if skipped else None,
+    )
+    artifacts.update(viz_sink.close())
+    if blocked_stages:
+        answer_status = "blocked"
+    elif len(answers) == 1:
+        answer_status = str(answers[0]["status"])
+    elif answers and all(item["status"] == "real" for item in answers):
+        answer_status = "real"
+    else:
+        answer_status = "partial"
+    answer_items = [item for item in answers if item.get("answer") is not None]
+    if len(answer_items) == 1:
+        answer_text = str(answer_items[0]["answer"])
+    else:
+        answer_text = "\n".join(f"[window {item['window_id']}] {item['answer']}" for item in answer_items) or None
+    generation_metadata = (
+        answers[0].get("metadata")
+        if len(answers) == 1
+        else {"window_metadata": [item.get("metadata") for item in answers]}
+    )
+    answer_path = output_dir / "predictions" / "answer.json"
+    write_json(
+        answer_path,
+        {
+            "status": answer_status,
+            "answer": answer_text,
+            "query_text": args.query_text,
+            "query_text_used": True,
+            "streaming_full_pipeline_policy": policy,
+            "window_answers": answers,
+            "generation_metadata": generation_metadata,
+            "adapter_statuses": {
+                "vision_encoder": vision_status.to_dict(),
+                "mllm": mllm_status.to_dict(),
+            },
+        },
+    )
+    write_json(output_dir / "predictions" / "window_answers.json", {"windows": answers})
+    artifacts["answer"] = str(answer_path)
+    artifacts["window_answers"] = str(output_dir / "predictions" / "window_answers.json")
+    wall_clock_latency_ms = (time.perf_counter() - run_start) * 1000
+    metrics = build_streaming_metrics(
+        mode="full_pipeline",
+        cfg=cfg,
+        video_path=args.video_path,
+        query_text=args.query_text,
+        aggregate=aggregate,
+        requested_vision_encoder=vision_name,
+        actual_vision_encoder=actual_vision_encoder,
+        requested_mllm=mllm_name,
+        actual_mllm=mllm.name,
+        generation_status=answer_status,
+        output_text=answer_text,
+        skipped_stages=skipped,
+        total_latency_ms=total_module_latency,
+        wall_clock_latency_ms=wall_clock_latency_ms,
+        visualization_latency_ms=visualization_latency_total,
+        warmup_runs=warmup_runs,
+    )
+    metrics["adapter_statuses"] = {
+        "vision_encoder": vision_status.to_dict(),
+        "mllm": mllm_status.to_dict(),
+    }
+    metrics["requested_runtime_dtype"] = requested_dtype
+    metrics["autogaze_dtype"] = autogaze_dtype
+    metrics["vision_encoder_dtype"] = vision_dtype
+    metrics["mllm_dtype"] = mllm_dtype
+    metrics["streaming_full_pipeline_policy"] = policy
+    metrics["dummy_weights_enabled"] = use_dummy_weights
+    metrics["generation_input_mode"] = generation_input_mode
+    metrics["zero_mask_encoder_compute_reduction"] = False
+    metrics["direct_visual_token_injection"] = direct_visual_token_mode and mllm.supports_direct_visual_tokens()
+    if isinstance(generation_metadata, dict):
+        metrics["zero_mask_stage"] = generation_metadata.get("zero_mask_stage")
+        metrics["zero_mask_value"] = generation_metadata.get("zero_mask_value")
+        metrics["zero_mask_dense_token_count_processed"] = generation_metadata.get("zero_mask_dense_token_count_processed")
+        metrics["zero_mask_selected_token_count"] = generation_metadata.get("zero_mask_selected_token_count")
+        metrics["zero_mask_selected_token_ratio"] = generation_metadata.get("zero_mask_selected_token_ratio")
+        metrics["zero_mask_masked_token_ratio"] = generation_metadata.get("zero_mask_masked_token_ratio")
+        metrics["zero_mask_expected_speedup"] = generation_metadata.get("zero_mask_expected_speedup")
+        metrics["zero_mask_encoder_compute_reduction"] = bool(generation_metadata.get("zero_mask_encoder_compute_reduction", False))
+    if blocked_stages:
+        metrics["failure_reason"] = _failure_reason_for_blocked_stages(skipped, blocked_stages)
+    summary = {
+        "mode": "full_pipeline",
+        "status": "blocked" if blocked_stages else "partial" if skipped else "completed",
+        "experiment_id": nested_get(cfg, "experiment.id", "unknown"),
+        "output_dir": str(output_dir),
+        "query_text": args.query_text,
+        "adapter_statuses": {
+            "vision_encoder": vision_status.to_dict(),
+            "mllm": mllm_status.to_dict(),
+        },
+        "blocked_stages": sorted(set(blocked_stages)),
+        "artifacts": artifacts,
+        "metrics": metrics,
+    }
+    artifacts.update(write_summary_and_metrics(output_dir, summary=summary, metrics=metrics))
+    write_json(output_dir / "logs" / "streaming_metrics.json", metrics)
     return summary
 
 

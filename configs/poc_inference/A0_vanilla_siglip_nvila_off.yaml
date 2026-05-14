@@ -57,6 +57,31 @@ frame_selection:
   frame_interval: 1
   max_windows: 1
 
+video_input:
+  read_mode: streaming
+  decode_backend: auto
+  decode_fps: null
+  max_decode_frames: null
+  resize_before_buffer: true
+
+streaming:
+  enabled: true
+  window_size: 16
+  overlap: 0
+  max_windows: null
+  output_mode: incremental
+  full_pipeline_policy: window_independent_generation
+  flush_every_window: true
+  cpu_offload_between_windows: true
+  empty_cache_between_windows: false
+  keep_window_outputs_in_memory: false
+
+memory:
+  safe_mode: true
+  max_video_frames_in_memory: null
+  max_pixels_per_window: null
+  fail_on_full_video_load: true
+
 scaling:
   mode: resize
   resolution: 224

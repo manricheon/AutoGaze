@@ -10,7 +10,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 import torch
 import torch.nn.functional as F
@@ -217,6 +217,24 @@ class PreparedVideo:
     chop_metadata: dict[str, Any] | None
     video_source_kind: str
     original_fps: float | None
+
+
+@dataclass(frozen=True)
+class StreamWindowInput:
+    window_id: int
+    frames: torch.Tensor
+    frame_indices: list[int]
+    padded_frame_mask: list[bool]
+    original_frame_count: int | None
+    original_fps: float | None
+    decoded_frame_count: int
+    video_source_kind: str
+    decode_backend: str
+    frame_count_from_metadata: bool
+
+    @property
+    def effective_num_frames(self) -> int:
+        return len([item for item in self.padded_frame_mask if not item])
 
 
 @dataclass(frozen=True)
@@ -490,6 +508,487 @@ def load_video_frames(video_path: str, *, dummy_frames: int, dummy_resolution: i
     if not frames:
         raise ValueError(f"no frames decoded from video: {path}")
     return torch.stack(frames, dim=0), "file", fps
+
+
+def iter_stream_windows(
+    video_path: str,
+    *,
+    frame_selection_mode: str,
+    num_frames: int,
+    frame_interval: int,
+    max_windows: int | None,
+    stream_window_size: int | None,
+    stream_overlap: int,
+    max_decode_frames: int | None,
+    decode_backend: str,
+    decode_fps: float | None,
+    dummy_frames: int,
+    dummy_resolution: int,
+) -> Iterator[StreamWindowInput]:
+    window_size = int(stream_window_size or num_frames)
+    if window_size <= 0:
+        raise ValueError("stream_window_size must be > 0")
+    if stream_overlap < 0 or stream_overlap >= window_size:
+        raise ValueError("stream_overlap must be >= 0 and < stream_window_size")
+    if frame_interval <= 0:
+        raise ValueError("frame_interval must be > 0")
+    max_window_count = _normalize_max_windows(max_windows)
+    mode = str(frame_selection_mode)
+    if mode not in FrameSelector.SUPPORTED_MODES:
+        raise ValueError(f"Unsupported frame_selection_mode: {mode}")
+
+    if video_path == "dummy":
+        frames = make_dummy_video(dummy_frames, dummy_resolution, dummy_resolution)
+        metadata = {
+            "original_frame_count": int(frames.shape[0]),
+            "original_fps": None,
+            "frame_count_from_metadata": True,
+            "decode_backend": "dummy",
+            "video_source_kind": "dummy",
+        }
+        frame_iter = ((idx, frames[idx]) for idx in range(int(frames.shape[0])))
+    else:
+        path = resolve_path(video_path)
+        if not path.exists():
+            raise FileNotFoundError(f"video file does not exist: {path}")
+        metadata = _stream_video_metadata(path, decode_backend=decode_backend)
+        frame_iter = _iter_decoded_file_frames(
+            path,
+            decode_backend=decode_backend,
+            decode_fps=decode_fps,
+            original_fps=metadata["original_fps"],
+            max_decode_frames=max_decode_frames,
+        )
+
+    if mode == "sample":
+        yield from _iter_sample_stream_window(
+            frame_iter,
+            window_size=window_size,
+            max_windows=max_window_count,
+            metadata=metadata,
+        )
+        return
+
+    yield from _iter_chunk_like_stream_windows(
+        frame_iter,
+        frame_selection_mode=mode,
+        window_size=window_size,
+        stream_overlap=stream_overlap,
+        frame_interval=frame_interval,
+        max_windows=max_window_count,
+        metadata=metadata,
+    )
+
+
+def _stream_video_metadata(path: Path, *, decode_backend: str) -> dict[str, Any]:
+    backend = str(decode_backend)
+    if backend in {"decord", "torchvision"}:
+        raise NotImplementedError(f"streaming decode backend '{backend}' is not implemented; use auto or opencv")
+    if backend == "opencv":
+        try:
+            import cv2
+        except ImportError as exc:
+            raise RuntimeError("OpenCV is required for --decode-backend opencv") from exc
+        capture = cv2.VideoCapture(str(path))
+        try:
+            total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0) or None
+            fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0) or None
+        finally:
+            capture.release()
+        return {
+            "original_frame_count": total,
+            "original_fps": fps,
+            "frame_count_from_metadata": total is not None,
+            "decode_backend": "opencv",
+            "video_source_kind": "file",
+        }
+    try:
+        import av
+    except ImportError:
+        if backend == "auto":
+            return _stream_video_metadata(path, decode_backend="opencv")
+        raise RuntimeError("PyAV is required for --decode-backend auto when OpenCV fallback is unavailable")
+    with av.open(str(path)) as container:
+        stream = container.streams.video[0]
+        total = int(stream.frames or 0) or None
+        fps = float(stream.average_rate) if stream.average_rate else None
+    return {
+        "original_frame_count": total,
+        "original_fps": fps,
+        "frame_count_from_metadata": total is not None,
+        "decode_backend": "pyav",
+        "video_source_kind": "file",
+    }
+
+
+def _iter_decoded_file_frames(
+    path: Path,
+    *,
+    decode_backend: str,
+    decode_fps: float | None,
+    original_fps: float | None,
+    max_decode_frames: int | None,
+) -> Iterator[tuple[int, torch.Tensor]]:
+    backend = str(decode_backend)
+    if backend == "opencv":
+        yield from _iter_decoded_file_frames_opencv(
+            path,
+            decode_fps=decode_fps,
+            original_fps=original_fps,
+            max_decode_frames=max_decode_frames,
+        )
+        return
+    if backend in {"decord", "torchvision"}:
+        raise NotImplementedError(f"streaming decode backend '{backend}' is not implemented; use auto or opencv")
+    try:
+        yield from _iter_decoded_file_frames_pyav(
+            path,
+            decode_fps=decode_fps,
+            original_fps=original_fps,
+            max_decode_frames=max_decode_frames,
+        )
+    except ImportError:
+        if backend == "auto":
+            yield from _iter_decoded_file_frames_opencv(
+                path,
+                decode_fps=decode_fps,
+                original_fps=original_fps,
+                max_decode_frames=max_decode_frames,
+            )
+            return
+        raise
+
+
+def _decode_keep_stride(*, decode_fps: float | None, original_fps: float | None) -> int:
+    if decode_fps is None or decode_fps <= 0 or original_fps is None or original_fps <= 0:
+        return 1
+    return max(1, round(float(original_fps) / float(decode_fps)))
+
+
+def _iter_decoded_file_frames_pyav(
+    path: Path,
+    *,
+    decode_fps: float | None,
+    original_fps: float | None,
+    max_decode_frames: int | None,
+) -> Iterator[tuple[int, torch.Tensor]]:
+    import av
+
+    keep_stride = _decode_keep_stride(decode_fps=decode_fps, original_fps=original_fps)
+    kept = 0
+    with av.open(str(path)) as container:
+        for source_idx, frame in enumerate(container.decode(video=0)):
+            if source_idx % keep_stride != 0:
+                continue
+            array = frame.to_ndarray(format="rgb24")
+            tensor = torch.from_numpy(array).permute(2, 0, 1).float() / 255.0
+            yield source_idx, tensor
+            kept += 1
+            if max_decode_frames is not None and kept >= int(max_decode_frames):
+                break
+
+
+def _iter_decoded_file_frames_opencv(
+    path: Path,
+    *,
+    decode_fps: float | None,
+    original_fps: float | None,
+    max_decode_frames: int | None,
+) -> Iterator[tuple[int, torch.Tensor]]:
+    import cv2
+
+    keep_stride = _decode_keep_stride(decode_fps=decode_fps, original_fps=original_fps)
+    capture = cv2.VideoCapture(str(path))
+    source_idx = 0
+    kept = 0
+    try:
+        while True:
+            ok, frame = capture.read()
+            if not ok:
+                break
+            if source_idx % keep_stride == 0:
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                tensor = torch.from_numpy(rgb).permute(2, 0, 1).float() / 255.0
+                yield source_idx, tensor
+                kept += 1
+                if max_decode_frames is not None and kept >= int(max_decode_frames):
+                    break
+            source_idx += 1
+    finally:
+        capture.release()
+
+
+def _iter_sample_stream_window(
+    frame_iter: Iterator[tuple[int, torch.Tensor]],
+    *,
+    window_size: int,
+    max_windows: int | None,
+    metadata: Mapping[str, Any],
+) -> Iterator[StreamWindowInput]:
+    total = metadata.get("original_frame_count")
+    if total is None:
+        raise NotImplementedError("streaming sample mode requires frame-count metadata; use chunk/all/interval or provide a backend with metadata")
+    if max_windows == 0:
+        return
+    total_int = int(total)
+    if total_int >= window_size:
+        step = (total_int - 1) / float(max(1, window_size - 1))
+        targets = [round(step * idx) for idx in range(window_size)] if window_size > 1 else [0]
+    else:
+        targets = list(range(total_int))
+    target_set = set(targets)
+    selected: list[torch.Tensor] = []
+    selected_indices: list[int] = []
+    decoded_count = 0
+    for source_idx, frame in frame_iter:
+        decoded_count += 1
+        if source_idx in target_set:
+            selected.append(frame)
+            selected_indices.append(source_idx)
+        if selected_indices and selected_indices[-1] >= targets[-1]:
+            break
+    if not selected:
+        raise ValueError("no frames decoded for streaming sample window")
+    padded_mask = [False] * len(selected)
+    while len(selected) < window_size:
+        selected.append(selected[-1])
+        selected_indices.append(selected_indices[-1])
+        padded_mask.append(True)
+    yield StreamWindowInput(
+        window_id=0,
+        frames=torch.stack(selected, dim=0),
+        frame_indices=selected_indices,
+        padded_frame_mask=padded_mask,
+        original_frame_count=total_int,
+        original_fps=metadata.get("original_fps"),
+        decoded_frame_count=decoded_count,
+        video_source_kind=str(metadata.get("video_source_kind", "file")),
+        decode_backend=str(metadata.get("decode_backend", "auto")),
+        frame_count_from_metadata=bool(metadata.get("frame_count_from_metadata", False)),
+    )
+
+
+def _iter_chunk_like_stream_windows(
+    frame_iter: Iterator[tuple[int, torch.Tensor]],
+    *,
+    frame_selection_mode: str,
+    window_size: int,
+    stream_overlap: int,
+    frame_interval: int,
+    max_windows: int | None,
+    metadata: Mapping[str, Any],
+) -> Iterator[StreamWindowInput]:
+    buffer_frames: list[torch.Tensor] = []
+    buffer_indices: list[int] = []
+    decoded_count = 0
+    emitted = 0
+    effective_mode = "chunk" if frame_selection_mode == "all" else frame_selection_mode
+    for source_idx, frame in frame_iter:
+        decoded_count += 1
+        if effective_mode == "interval" and source_idx % frame_interval != 0:
+            continue
+        buffer_frames.append(frame)
+        buffer_indices.append(source_idx)
+        if len(buffer_frames) < window_size:
+            continue
+        yield _make_stream_window(
+            window_id=emitted,
+            frames=buffer_frames,
+            indices=buffer_indices,
+            padded_count=0,
+            decoded_count=decoded_count,
+            metadata=metadata,
+        )
+        emitted += 1
+        if max_windows is not None and emitted >= max_windows:
+            return
+        if stream_overlap:
+            buffer_frames = buffer_frames[-stream_overlap:]
+            buffer_indices = buffer_indices[-stream_overlap:]
+        else:
+            buffer_frames = []
+            buffer_indices = []
+    if buffer_frames and (max_windows is None or emitted < max_windows):
+        yield _make_stream_window(
+            window_id=emitted,
+            frames=buffer_frames,
+            indices=buffer_indices,
+            padded_count=0,
+            decoded_count=decoded_count,
+            metadata=metadata,
+        )
+
+
+def _make_stream_window(
+    *,
+    window_id: int,
+    frames: list[torch.Tensor],
+    indices: list[int],
+    padded_count: int,
+    decoded_count: int,
+    metadata: Mapping[str, Any],
+) -> StreamWindowInput:
+    padded_mask = [False] * len(frames)
+    if padded_count:
+        padded_mask[-padded_count:] = [True] * padded_count
+    return StreamWindowInput(
+        window_id=window_id,
+        frames=torch.stack(frames, dim=0),
+        frame_indices=[int(item) for item in indices],
+        padded_frame_mask=padded_mask,
+        original_frame_count=metadata.get("original_frame_count"),
+        original_fps=metadata.get("original_fps"),
+        decoded_frame_count=int(decoded_count),
+        video_source_kind=str(metadata.get("video_source_kind", "file")),
+        decode_backend=str(metadata.get("decode_backend", "auto")),
+        frame_count_from_metadata=bool(metadata.get("frame_count_from_metadata", False)),
+    )
+
+
+def prepare_stream_window(
+    cfg: Mapping[str, Any],
+    *,
+    stream_window: StreamWindowInput,
+    frame_selection_mode: str,
+    num_frames: int,
+    frame_interval: int,
+    max_windows: int | None,
+    scaling_mode: str,
+    resolution: int,
+    chop_size: int,
+    chop_overlap: int,
+    max_chops: int | None,
+    chop_merge_mode: str,
+    resize_before_chop_threshold: int = 1024,
+    resize_before_chop_factor: float = 0.5,
+) -> PreparedVideo:
+    source_video = stream_window.frames
+    window = FrameWindow(
+        window_id=int(stream_window.window_id),
+        frame_indices=list(stream_window.frame_indices),
+        is_padded=any(stream_window.padded_frame_mask),
+        padded_frame_mask=list(stream_window.padded_frame_mask),
+        original_frame_count=int(stream_window.original_frame_count or stream_window.decoded_frame_count),
+        effective_num_frames=stream_window.effective_num_frames,
+    )
+    selection = FrameSelectionResult(
+        mode=frame_selection_mode,
+        effective_mode="chunk" if frame_selection_mode == "all" else frame_selection_mode,
+        num_frames=int(num_frames),
+        frame_interval=int(frame_interval),
+        max_windows=_normalize_max_windows(max_windows),
+        drop_last=False,
+        pad_last=any(stream_window.padded_frame_mask),
+        original_frame_count=int(stream_window.original_frame_count or stream_window.decoded_frame_count),
+        original_fps=stream_window.original_fps,
+        windows=[window],
+        unsupported_visualization_modes=["hold_last"],
+    )
+    scaled, scaling_record, window_chops = scale_video(
+        source_video.unsqueeze(0),
+        scaling_mode=scaling_mode,
+        resolution=resolution,
+        chop_size=chop_size,
+        chop_overlap=chop_overlap,
+        max_chops=max_chops,
+        chop_merge_mode=chop_merge_mode,
+        resize_before_chop_threshold=resize_before_chop_threshold,
+        resize_before_chop_factor=resize_before_chop_factor,
+    )
+    scaling_record["window"] = window.to_dict()
+    scaling_record["stream_window_id"] = int(stream_window.window_id)
+    frame_records: list[dict[str, Any]] = []
+    processed_index = 0
+    chop_metadata: dict[str, Any] | None = None
+    if window_chops is not None:
+        chop_metadata = {
+            "mode": "chop",
+            "chop_size": chop_size,
+            "chop_overlap": chop_overlap,
+            "chop_merge_mode": chop_merge_mode,
+            "windows": [{"window_id": int(stream_window.window_id), **window_chops}],
+        }
+        for chop_record in window_chops["records"]:
+            for position, source_index in enumerate(window.frame_indices):
+                frame_records.append(
+                    {
+                        "processed_frame_index": processed_index,
+                        "source_frame_index": int(source_index),
+                        "window_id": int(stream_window.window_id),
+                        "stream_window_id": int(stream_window.window_id),
+                        "position_in_window": int(position),
+                        "anchor_frame_index": None,
+                        "is_padded": bool(window.padded_frame_mask[position]),
+                        "chop_index": int(chop_record["chop_index"]),
+                        "source_box": [
+                            int(chop_record["x0"]),
+                            int(chop_record["y0"]),
+                            int(chop_record["x1"]),
+                            int(chop_record["y1"]),
+                        ],
+                        "chop_input_box": chop_record.get("chop_input_box"),
+                    }
+                )
+                processed_index += 1
+    else:
+        for position, source_index in enumerate(window.frame_indices):
+            frame_records.append(
+                {
+                    "processed_frame_index": processed_index,
+                    "source_frame_index": int(source_index),
+                    "window_id": int(stream_window.window_id),
+                    "stream_window_id": int(stream_window.window_id),
+                    "position_in_window": int(position),
+                    "anchor_frame_index": None,
+                    "is_padded": bool(window.padded_frame_mask[position]),
+                }
+            )
+            processed_index += 1
+    scaling_metadata = {
+        "scaling_mode": scaling_mode,
+        "resolution": resolution,
+        "number_of_windows": 1,
+        "first_processed_shape": [int(dim) for dim in scaled.shape],
+        "temporal_pad_last_applied": bool(any(stream_window.padded_frame_mask)),
+        "temporal_drop_last_applied": False,
+        "selected_source_frame_count": stream_window.effective_num_frames,
+        "video_read_mode": "streaming",
+        "decode_backend": stream_window.decode_backend,
+        "decoded_frame_count_so_far": stream_window.decoded_frame_count,
+        "windows": [scaling_record],
+    }
+    return PreparedVideo(
+        source_video=source_video,
+        processed_video=scaled,
+        frame_selection=selection,
+        frame_records=frame_records,
+        scaling_metadata=scaling_metadata,
+        chop_metadata=chop_metadata,
+        video_source_kind=stream_window.video_source_kind,
+        original_fps=stream_window.original_fps,
+    )
+
+
+def validate_stream_window_memory(
+    stream_window: StreamWindowInput,
+    *,
+    max_frames_in_memory: int | None,
+    max_pixels_per_window: int | None,
+) -> None:
+    frame_count = int(stream_window.frames.shape[0])
+    height = int(stream_window.frames.shape[-2])
+    width = int(stream_window.frames.shape[-1])
+    if max_frames_in_memory is not None and frame_count > int(max_frames_in_memory):
+        raise RuntimeError(
+            f"streaming memory guard blocked window {stream_window.window_id}: "
+            f"{frame_count} frames exceed max_frames_in_memory={max_frames_in_memory}"
+        )
+    pixels = frame_count * height * width
+    if max_pixels_per_window is not None and pixels > int(max_pixels_per_window):
+        raise RuntimeError(
+            f"streaming memory guard blocked window {stream_window.window_id}: "
+            f"{pixels} frame-pixels exceed max_pixels_per_window={max_pixels_per_window}"
+        )
 
 
 def prepare_video(
@@ -1790,6 +2289,592 @@ def pad_to_even_image(image: Image.Image) -> Image.Image:
     padded = Image.new("RGB", (new_w, new_h), (0, 0, 0))
     padded.paste(image.convert("RGB"), (0, 0))
     return padded
+
+
+class IncrementalVideoWriter:
+    def __init__(self, path: Path, *, fps: float) -> None:
+        self.path = path
+        self.fps = fps
+        self._writer: Any = None
+        self.error: str | None = None
+        self.frame_count = 0
+
+    def append(self, image: Image.Image) -> None:
+        if self.error:
+            return
+        try:
+            import imageio.v2 as imageio
+
+            if self._writer is None:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    self._writer = imageio.get_writer(str(self.path), fps=self.fps, codec="libx264")
+                except Exception:
+                    self._writer = imageio.get_writer(str(self.path), fps=self.fps)
+            frame = pad_to_even_image(image).convert("RGB")
+            self._writer.append_data(np.asarray(frame))
+            self.frame_count += 1
+        except Exception as exc:  # pragma: no cover - backend availability varies.
+            self.error = str(exc)
+
+    def close(self) -> str | None:
+        if self._writer is not None:
+            try:
+                self._writer.close()
+            except Exception as exc:  # pragma: no cover - backend availability varies.
+                self.error = self.error or str(exc)
+        if self.frame_count == 0 and self.error is None:
+            self.error = "no frames available"
+        return self.error
+
+
+class StreamingVisualizationSink:
+    def __init__(
+        self,
+        output_dir: Path,
+        *,
+        overlay_style: str,
+        overlay_alpha: float,
+        multi_scale_overlay: bool,
+        show_patch_index: bool,
+        show_scale_label: bool,
+        metadata_placement: str,
+        info_panel_position: str,
+        save_frame_images: bool,
+        save_overlay_video: bool,
+        save_side_by_side_video: bool,
+        save_scale_panel_video: bool,
+        video_fps: float,
+        video_export_mode: str,
+        query_text: str | None = None,
+    ) -> None:
+        if video_export_mode == "full_length" and (save_overlay_video or save_side_by_side_video or save_scale_panel_video):
+            raise NotImplementedError(
+                "full_length video export is not supported in streaming mode yet; use sampled_only or disable video export"
+            )
+        self.output_dir = output_dir
+        self.base = output_dir / "visualizations" / "autogaze"
+        self.frames_dir = self.base / "frames"
+        self.panels_dir = self.base / "scale_panels"
+        self.videos_dir = self.base / "videos"
+        self.metadata_dir = self.base / "metadata"
+        self.overlay_style = overlay_style
+        self.overlay_alpha = overlay_alpha
+        self.multi_scale_overlay = multi_scale_overlay
+        self.show_patch_index = show_patch_index
+        self.show_scale_label = show_scale_label
+        self.metadata_placement = metadata_placement
+        self.info_panel_position = info_panel_position
+        self.save_frame_images = save_frame_images
+        self.save_overlay_video = save_overlay_video
+        self.save_side_by_side_video = save_side_by_side_video
+        self.save_scale_panel_video = save_scale_panel_video
+        self.video_fps = video_fps
+        self.video_export_mode = video_export_mode
+        self.query_text = query_text
+        self.records: list[dict[str, Any]] = []
+        self.processed_records: list[dict[str, Any]] = []
+        self.video_errors: dict[str, str] = {}
+        self.rendered_frame_count = 0
+        self.saw_chop = False
+        self.scale_layout: Any = None
+        for directory in (self.metadata_dir,):
+            directory.mkdir(parents=True, exist_ok=True)
+        if save_frame_images:
+            self.frames_dir.mkdir(parents=True, exist_ok=True)
+            self.panels_dir.mkdir(parents=True, exist_ok=True)
+        if save_overlay_video or save_side_by_side_video or save_scale_panel_video:
+            self.videos_dir.mkdir(parents=True, exist_ok=True)
+        self.overlay_writer = (
+            IncrementalVideoWriter(self.videos_dir / "autogaze_overlay.mp4", fps=video_fps)
+            if save_overlay_video
+            else None
+        )
+        self.side_by_side_writer = (
+            IncrementalVideoWriter(self.videos_dir / "autogaze_side_by_side.mp4", fps=video_fps)
+            if save_side_by_side_video
+            else None
+        )
+        self.scale_panel_writer = (
+            IncrementalVideoWriter(self.videos_dir / "autogaze_scale_panels.mp4", fps=video_fps)
+            if save_scale_panel_video
+            else None
+        )
+
+    def write_window(
+        self,
+        prepared: PreparedVideo,
+        gaze: GazeResult,
+        *,
+        processed_frame_offset: int,
+        visualization_frame_offset: int,
+        generation_status: str | None = None,
+    ) -> int:
+        render_needed = self.save_frame_images or self.save_overlay_video or self.save_side_by_side_video or self.save_scale_panel_video
+        processed_records = [_offset_record(record, processed_frame_offset) for record in prepared.frame_records]
+        self.processed_records.extend(processed_records)
+        if self.scale_layout is None:
+            self.scale_layout = gaze.runtime_metadata.get("scale_layout")
+        if prepared.chop_metadata is not None:
+            self.saw_chop = True
+            grouped_records = _group_chop_records([_offset_record(record, processed_frame_offset) for record in gaze.per_frame])
+            for local_idx, records in enumerate(grouped_records):
+                global_idx = visualization_frame_offset + local_idx
+                merged_record = _merged_chop_record(records, global_idx)
+                merged_record["stream_window_id"] = int(records[0].get("stream_window_id", records[0].get("window_id", 0)))
+                self.records.append(merged_record)
+                if not render_needed:
+                    continue
+                source_pos = max(0, min(int(records[0].get("position_in_window", 0)), int(prepared.source_video.shape[0]) - 1))
+                base_image = tensor_to_image(prepared.source_video.detach().cpu()[source_pos])
+                overlay = render_chop_merged_overlay(
+                    base_image,
+                    records,
+                    overlay_style=self.overlay_style,
+                    overlay_alpha=self.overlay_alpha,
+                    multi_scale_overlay=self.multi_scale_overlay,
+                    show_patch_index=self.show_patch_index,
+                    show_scale_label=self.show_scale_label,
+                )
+                overlay_with_panel = add_info_panel(
+                    overlay,
+                    merged_record,
+                    gaze,
+                    scaling_mode=prepared.scaling_metadata["scaling_mode"],
+                    metadata_placement=self.metadata_placement,
+                    info_panel_position=self.info_panel_position,
+                    query_text=self.query_text,
+                    generation_status=generation_status,
+                )
+                scale_panel = render_chop_merged_scale_panel(base_image, records)
+                side_by_side = combine_side_by_side(base_image, overlay)
+                self._write_visual_frame(global_idx, overlay_with_panel, side_by_side, scale_panel)
+            return len(grouped_records)
+
+        frames = flatten_video_frames(prepared.processed_video).detach().cpu()
+        written = 0
+        for local_idx, frame in enumerate(frames):
+            global_idx = processed_frame_offset + local_idx
+            record = _offset_record(gaze.per_frame[local_idx], processed_frame_offset)
+            record["stream_window_id"] = int(record.get("stream_window_id", record.get("window_id", 0)))
+            self.records.append(record)
+            if render_needed:
+                base_image = tensor_to_image(frame)
+                overlay = render_overlay(
+                    base_image,
+                    record,
+                    gaze.patch_grid,
+                    overlay_style=self.overlay_style,
+                    overlay_alpha=self.overlay_alpha,
+                    multi_scale_overlay=self.multi_scale_overlay,
+                    show_patch_index=self.show_patch_index,
+                    show_scale_label=self.show_scale_label,
+                )
+                overlay_with_panel = add_info_panel(
+                    overlay,
+                    record,
+                    gaze,
+                    scaling_mode=prepared.scaling_metadata["scaling_mode"],
+                    metadata_placement=self.metadata_placement,
+                    info_panel_position=self.info_panel_position,
+                    query_text=self.query_text,
+                    generation_status=generation_status,
+                )
+                scale_panel = render_scale_panel(base_image, record, gaze.patch_grid)
+                side_by_side = combine_side_by_side(base_image, overlay)
+                self._write_visual_frame(global_idx, overlay_with_panel, side_by_side, scale_panel)
+            written += 1
+        return written
+
+    def _write_visual_frame(self, global_idx: int, overlay: Image.Image, side_by_side: Image.Image, scale_panel: Image.Image) -> None:
+        if self.save_frame_images:
+            overlay.save(self.frames_dir / f"frame_{global_idx:06d}_overlay.png")
+            scale_panel.save(self.panels_dir / f"frame_{global_idx:06d}_scale_panel.png")
+        if self.overlay_writer is not None:
+            self.overlay_writer.append(overlay.convert("RGB"))
+        if self.side_by_side_writer is not None:
+            self.side_by_side_writer.append(side_by_side.convert("RGB"))
+        if self.scale_panel_writer is not None:
+            self.scale_panel_writer.append(scale_panel.convert("RGB"))
+        self.rendered_frame_count += 1
+
+    def close(self) -> dict[str, str]:
+        artifacts: dict[str, str] = {}
+        if self.save_frame_images:
+            artifacts["frames_dir"] = str(self.frames_dir)
+            artifacts["scale_panels_dir"] = str(self.panels_dir)
+        for key, writer, path in (
+            ("overlay_video", self.overlay_writer, self.videos_dir / "autogaze_overlay.mp4"),
+            ("side_by_side_video", self.side_by_side_writer, self.videos_dir / "autogaze_side_by_side.mp4"),
+            ("scale_panel_video", self.scale_panel_writer, self.videos_dir / "autogaze_scale_panels.mp4"),
+        ):
+            if writer is None:
+                continue
+            error = writer.close()
+            artifacts[key] = str(path) if error is None else f"failed: {error}"
+            if error:
+                self.video_errors[key] = error
+        write_json(
+            self.metadata_dir / "visualization_metadata.json",
+            {
+                "status": "ready",
+                "streaming_output": True,
+                "flat_output_structure": True,
+                "visualization_mode": "merged_chop_source_frames" if self.saw_chop else "processed_frames",
+                "streaming_visualization": True,
+                "video_export_mode": self.video_export_mode,
+                "frame_images_saved": bool(self.save_frame_images),
+                "rendered_frame_count": self.rendered_frame_count,
+                "frame_count": len(self.records),
+                "processed_crop_frame_count": len(self.processed_records) if self.saw_chop else None,
+                "frame_records": self.records,
+                "processed_frame_records": self.processed_records,
+                "scale_colors": {str(key): value for key, value in SCALE_COLORS.items()},
+                "scale_layout": self.scale_layout,
+                "video_errors": self.video_errors,
+                "paths": artifacts,
+            },
+        )
+        artifacts["visualization_metadata"] = str(self.metadata_dir / "visualization_metadata.json")
+        return artifacts
+
+
+def _offset_record(record: Mapping[str, Any], processed_frame_offset: int) -> dict[str, Any]:
+    item = dict(record)
+    if "processed_frame_index" in item:
+        item["processed_frame_index"] = int(item["processed_frame_index"]) + int(processed_frame_offset)
+    return item
+
+
+def new_streaming_aggregate(
+    *,
+    video_read_mode: str,
+    decode_backend: str,
+    frame_selection_mode: str,
+    stream_window_size: int,
+    stream_overlap: int,
+    max_stream_windows: int | None,
+    max_decode_frames: int | None,
+    decode_fps: float | None,
+) -> dict[str, Any]:
+    return {
+        "video_read_mode": video_read_mode,
+        "decode_backend": decode_backend,
+        "frame_selection_mode": frame_selection_mode,
+        "stream_window_size": stream_window_size,
+        "stream_overlap": stream_overlap,
+        "max_stream_windows": max_stream_windows,
+        "max_decode_frames": max_decode_frames,
+        "decode_fps": decode_fps,
+        "windows": [],
+        "frame_records": [],
+        "per_frame": [],
+        "scaling_windows": [],
+        "chop_windows": [],
+        "per_window_metrics": [],
+        "original_token_count": 0,
+        "selected_token_count": 0,
+        "processed_frame_count": 0,
+        "visualization_frame_count": 0,
+        "decoded_frame_count": 0,
+        "original_frame_count": None,
+        "original_fps": None,
+        "frame_count_from_metadata": False,
+        "source_kind": None,
+        "runtime_metadata": {},
+        "gaze_statuses": [],
+    }
+
+
+def add_streaming_window_result(
+    aggregate: dict[str, Any],
+    *,
+    stream_window: StreamWindowInput,
+    prepared: PreparedVideo,
+    gaze: GazeResult,
+    preprocessing_latency_ms: float,
+    autogaze_latency_ms: float,
+    vision_encoder_latency_ms: float | None = None,
+    mllm_generation_latency_ms: float | None = None,
+    visualization_latency_ms: float | None = None,
+    generation_status: str | None = None,
+    output_text: str | None = None,
+    skipped_stages: list[dict[str, str]] | None = None,
+) -> tuple[int, int]:
+    processed_offset = int(aggregate["processed_frame_count"])
+    visualization_offset = int(aggregate["visualization_frame_count"])
+    frame_records = [_offset_record(record, processed_offset) for record in prepared.frame_records]
+    per_frame = [_offset_record(record, processed_offset) for record in gaze.per_frame]
+    aggregate["frame_records"].extend(frame_records)
+    aggregate["per_frame"].extend(per_frame)
+    aggregate["windows"].extend([window.to_dict() for window in prepared.frame_selection.windows])
+    aggregate["scaling_windows"].extend(prepared.scaling_metadata.get("windows", []))
+    if prepared.chop_metadata is not None:
+        aggregate["chop_windows"].extend(prepared.chop_metadata.get("windows", []))
+        visualization_count = len(_group_chop_records(per_frame))
+    else:
+        visualization_count = len(per_frame)
+    aggregate["original_token_count"] += int(gaze.original_token_count)
+    aggregate["selected_token_count"] += int(gaze.selected_token_count)
+    aggregate["processed_frame_count"] += len(frame_records)
+    aggregate["visualization_frame_count"] += visualization_count
+    aggregate["decoded_frame_count"] = max(int(aggregate["decoded_frame_count"]), int(stream_window.decoded_frame_count))
+    aggregate["original_frame_count"] = stream_window.original_frame_count
+    aggregate["original_fps"] = stream_window.original_fps
+    aggregate["frame_count_from_metadata"] = stream_window.frame_count_from_metadata
+    aggregate["source_kind"] = stream_window.video_source_kind
+    aggregate["runtime_metadata"] = dict(gaze.runtime_metadata)
+    aggregate["gaze_statuses"].append(gaze.status)
+    aggregate["per_window_metrics"].append(
+        {
+            "window_id": stream_window.window_id,
+            "source_frame_indices": list(stream_window.frame_indices),
+            "effective_num_frames": stream_window.effective_num_frames,
+            "processed_frame_count": len(frame_records),
+            "visualization_frame_count": visualization_count,
+            "original_token_count": gaze.original_token_count,
+            "selected_token_count": gaze.selected_token_count,
+            "token_reduction_ratio": gaze.token_reduction_ratio,
+            "preprocessing_latency_ms": preprocessing_latency_ms,
+            "autogaze_latency_ms": autogaze_latency_ms,
+            "vision_encoder_latency_ms": vision_encoder_latency_ms,
+            "mllm_generation_latency_ms": mllm_generation_latency_ms,
+            "visualization_latency_ms": visualization_latency_ms,
+            "generation_status": generation_status,
+            "output_text": output_text,
+            "skipped_stages": skipped_stages or [],
+        }
+    )
+    return processed_offset, visualization_offset
+
+
+def write_streaming_autogaze_artifacts(output_dir: Path, aggregate: Mapping[str, Any], *, status: str, reason: str | None = None) -> dict[str, str]:
+    artifacts: dict[str, str] = {}
+    autogaze_dir = output_dir / "autogaze"
+    token_reduction_ratio = (
+        None
+        if int(aggregate["original_token_count"]) == 0
+        else 1.0 - (int(aggregate["selected_token_count"]) / float(int(aggregate["original_token_count"])))
+    )
+    frame_selection_metadata = {
+        "mode": aggregate["frame_selection_mode"],
+        "effective_mode": "chunk" if aggregate["frame_selection_mode"] == "all" else aggregate["frame_selection_mode"],
+        "num_frames": aggregate["stream_window_size"],
+        "frame_interval": None,
+        "max_windows": aggregate["max_stream_windows"],
+        "drop_last": False,
+        "pad_last": any(bool(window.get("is_padded")) for window in aggregate["windows"]),
+        "video_read_mode": aggregate["video_read_mode"],
+        "decode_backend": aggregate["decode_backend"],
+        "original_frame_count": aggregate["original_frame_count"],
+        "original_fps": aggregate["original_fps"],
+        "decoded_frame_count": aggregate["decoded_frame_count"],
+        "processed_frame_count": aggregate["processed_frame_count"],
+        "frame_selection_mode": aggregate["frame_selection_mode"],
+        "stream_window_size": aggregate["stream_window_size"],
+        "stream_overlap": aggregate["stream_overlap"],
+        "number_of_windows": len(aggregate["windows"]),
+        "window_frame_indices": [window["frame_indices"] for window in aggregate["windows"]],
+        "frame_count_from_metadata": aggregate["frame_count_from_metadata"],
+        "dropped_or_padded": any(bool(window.get("is_padded")) for window in aggregate["windows"]),
+        "windows": aggregate["windows"],
+    }
+    write_json(autogaze_dir / "frame_selection_metadata.json", frame_selection_metadata)
+    write_json(
+        autogaze_dir / "runtime_metadata.json",
+        {**dict(aggregate.get("runtime_metadata") or {}), "status": status, "reason": reason, "streaming": True},
+    )
+    write_json(
+        autogaze_dir / "token_counts_summary.json",
+        {
+            "original_token_count": aggregate["original_token_count"],
+            "selected_token_count": aggregate["selected_token_count"],
+            "token_reduction_ratio": token_reduction_ratio,
+            "status": status,
+            "reason": reason,
+        },
+    )
+    write_json(
+        autogaze_dir / "selected_patch_indices.json",
+        {
+            "frames": [
+                {
+                    k: item[k]
+                    for k in (
+                        "processed_frame_index",
+                        "source_frame_index",
+                        "window_id",
+                        "stream_window_id",
+                        "position_in_window",
+                        "chop_index",
+                        "source_box",
+                        "selected_patch_indices",
+                        "selected_patch_records",
+                        "global_patch_indices",
+                    )
+                    if k in item
+                }
+                for item in aggregate["per_frame"]
+            ]
+        },
+    )
+    write_json(
+        autogaze_dir / "selected_scales.json",
+        {
+            "frames": [
+                {
+                    k: item[k]
+                    for k in ("processed_frame_index", "source_frame_index", "stream_window_id", "selected_scales")
+                    if k in item
+                }
+                for item in aggregate["per_frame"]
+            ]
+        },
+    )
+    write_json(
+        autogaze_dir / "per_frame_token_counts.json",
+        {
+            "frames": [
+                {
+                    "processed_frame_index": item["processed_frame_index"],
+                    "source_frame_index": item["source_frame_index"],
+                    "stream_window_id": item.get("stream_window_id"),
+                    "original_token_count": item["original_token_count"],
+                    "selected_token_count": item["selected_token_count"],
+                    "token_reduction_ratio": item["token_reduction_ratio"],
+                    "selected_patch_count_by_scale": item["selected_patch_count_by_scale"],
+                }
+                for item in aggregate["per_frame"]
+            ]
+        },
+    )
+    write_json(
+        output_dir / "scaling" / "scaling_metadata.json",
+        {
+            "video_read_mode": aggregate["video_read_mode"],
+            "scaling_mode": aggregate["scaling_windows"][0]["scaling_mode"] if aggregate["scaling_windows"] else None,
+            "number_of_windows": len(aggregate["scaling_windows"]),
+            "windows": aggregate["scaling_windows"],
+        },
+    )
+    if aggregate["chop_windows"]:
+        write_json(
+            output_dir / "chops" / "chop_metadata.json",
+            {
+                "mode": "chop",
+                "streaming": True,
+                "windows": aggregate["chop_windows"],
+            },
+        )
+    for name in (
+        "frame_selection_metadata",
+        "runtime_metadata",
+        "token_counts_summary",
+        "selected_patch_indices",
+        "selected_scales",
+        "per_frame_token_counts",
+    ):
+        artifacts[name] = str(autogaze_dir / f"{name}.json")
+    artifacts["scaling_metadata"] = str(output_dir / "scaling" / "scaling_metadata.json")
+    if aggregate["chop_windows"]:
+        artifacts["chop_metadata"] = str(output_dir / "chops" / "chop_metadata.json")
+    return artifacts
+
+
+def build_streaming_metrics(
+    *,
+    mode: str,
+    cfg: Mapping[str, Any],
+    video_path: str,
+    query_text: str | None,
+    aggregate: Mapping[str, Any],
+    requested_vision_encoder: str | None,
+    actual_vision_encoder: str | None,
+    requested_mllm: str | None,
+    actual_mllm: str | None,
+    generation_status: str | None,
+    output_text: str | None,
+    skipped_stages: list[dict[str, str]],
+    total_latency_ms: float,
+    wall_clock_latency_ms: float,
+    visualization_latency_ms: float | None,
+    warmup_runs: int,
+) -> dict[str, Any]:
+    original = int(aggregate["original_token_count"])
+    selected = int(aggregate["selected_token_count"])
+    token_reduction_ratio = None if original == 0 else 1.0 - (selected / float(original))
+    gaze_statuses = list(aggregate.get("gaze_statuses") or [])
+    real_stub_blocked_status = gaze_statuses[0] if len(set(gaze_statuses)) <= 1 and gaze_statuses else "mixed"
+    runtime_metadata = dict(aggregate.get("runtime_metadata") or {})
+    return {
+        "mode": mode,
+        "config_path": cfg.get("_config_path"),
+        "video_path": video_path,
+        "query_text": query_text,
+        "video_read_mode": aggregate["video_read_mode"],
+        "decode_backend": aggregate["decode_backend"],
+        "decoded_frame_count": aggregate["decoded_frame_count"],
+        "processed_frame_count": aggregate["processed_frame_count"],
+        "number_of_frames": aggregate["processed_frame_count"],
+        "number_of_processed_frames": aggregate["processed_frame_count"],
+        "number_of_source_frames": len({int(item.get("source_frame_index", idx)) for idx, item in enumerate(aggregate["frame_records"])}),
+        "number_of_windows": len(aggregate["windows"]),
+        "spatial_chops_per_window": {
+            str(window.get("window_id", idx)): int(window.get("spatial_chop_count", len(window.get("records", []))))
+            for idx, window in enumerate(aggregate.get("chop_windows") or [])
+        }
+        or None,
+        "window_size": aggregate["stream_window_size"],
+        "stream_window_size": aggregate["stream_window_size"],
+        "stream_overlap": aggregate["stream_overlap"],
+        "max_resident_frames_in_memory": aggregate["stream_window_size"],
+        "frame_selection_mode": aggregate["frame_selection_mode"],
+        "scaling_mode": aggregate["scaling_windows"][0]["scaling_mode"] if aggregate["scaling_windows"] else None,
+        "autogaze_enabled": bool(nested_get(cfg, "autogaze.enabled", False)),
+        "requested_vision_encoder": requested_vision_encoder,
+        "actual_vision_encoder": actual_vision_encoder,
+        "requested_mllm": requested_mllm,
+        "actual_mllm": actual_mllm,
+        "generation_status": generation_status,
+        "real_stub_blocked_status": real_stub_blocked_status,
+        "requested_runtime_dtype": runtime_metadata.get("requested_dtype"),
+        "autogaze_dtype": runtime_metadata.get("autogaze_execution_dtype"),
+        "autogaze_forced_float32": runtime_metadata.get("autogaze_forced_float32"),
+        "gaze_ratio": runtime_metadata.get("gaze_ratio"),
+        "task_loss_requirement": runtime_metadata.get("task_loss_requirement"),
+        "original_token_count": original,
+        "selected_token_count": selected,
+        "token_reduction_ratio": token_reduction_ratio,
+        "full_processed_visual_token_count": original,
+        "autogaze_selected_visual_token_count": selected,
+        "estimated_visual_token_savings_ratio": token_reduction_ratio,
+        "selected_patches_per_window": [item["selected_token_count"] for item in aggregate["per_window_metrics"]],
+        "original_token_count_per_window": [item["original_token_count"] for item in aggregate["per_window_metrics"]],
+        "token_reduction_ratio_per_window": [item["token_reduction_ratio"] for item in aggregate["per_window_metrics"]],
+        "preprocessing_latency_per_window_ms": [item["preprocessing_latency_ms"] for item in aggregate["per_window_metrics"]],
+        "autogaze_latency_per_window_ms": [item["autogaze_latency_ms"] for item in aggregate["per_window_metrics"]],
+        "vision_encoder_latency_per_window_ms": [item["vision_encoder_latency_ms"] for item in aggregate["per_window_metrics"]],
+        "mllm_latency_per_window_ms": [item["mllm_generation_latency_ms"] for item in aggregate["per_window_metrics"]],
+        "autogaze_latency_ms": sum(float(item["autogaze_latency_ms"] or 0.0) for item in aggregate["per_window_metrics"]),
+        "mllm_generation_latency_ms": sum(
+            float(item["mllm_generation_latency_ms"] or 0.0) for item in aggregate["per_window_metrics"]
+        ),
+        "visualization_write_latency_ms": visualization_latency_ms,
+        "visualization_latency_ms": visualization_latency_ms,
+        "video_writer_latency_ms": visualization_latency_ms,
+        "module_processing_latency_ms": total_latency_ms,
+        "wall_clock_latency_ms": wall_clock_latency_ms,
+        "end_to_end_latency_ms": total_latency_ms,
+        "warmup_runs": warmup_runs,
+        "peak_vram": torch.cuda.max_memory_allocated() if torch.cuda.is_available() else None,
+        "memory_unavailable": not torch.cuda.is_available(),
+        "output_text": output_text,
+        "skipped_stages": skipped_stages,
+        "skipped_windows": [],
+        "failure_reason": skipped_stages[0]["reason"] if skipped_stages else None,
+        "encoder_side_acceleration_claimed": False,
+        "per_window_metrics": aggregate["per_window_metrics"],
+    }
 
 
 def build_metrics(
