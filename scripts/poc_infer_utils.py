@@ -155,9 +155,16 @@ class FrameSelector:
         return self._short_window(0, list(range(total)), total)
 
     def _interval(self, total: int) -> list[FrameWindow]:
-        indices = [idx * self.frame_interval for idx in range(self.num_frames)]
-        indices = [idx for idx in indices if idx < total]
-        return self._short_window(0, indices, total)
+        selected = list(range(0, total, self.frame_interval))
+        windows: list[FrameWindow] = []
+        window_id = 0
+        for start in range(0, len(selected), self.num_frames):
+            indices = selected[start : start + self.num_frames]
+            maybe_window = self._short_window(window_id, indices, total)
+            if maybe_window:
+                windows.extend(maybe_window)
+                window_id += 1
+        return windows
 
     def _chunk(self, total: int) -> list[FrameWindow]:
         windows: list[FrameWindow] = []
@@ -2808,6 +2815,7 @@ def new_streaming_aggregate(
     video_read_mode: str,
     decode_backend: str,
     frame_selection_mode: str,
+    frame_interval: int,
     stream_window_size: int,
     stream_overlap: int,
     max_stream_windows: int | None,
@@ -2818,6 +2826,7 @@ def new_streaming_aggregate(
         "video_read_mode": video_read_mode,
         "decode_backend": decode_backend,
         "frame_selection_mode": frame_selection_mode,
+        "frame_interval": int(frame_interval),
         "stream_window_size": stream_window_size,
         "stream_overlap": stream_overlap,
         "max_stream_windows": max_stream_windows,
@@ -2924,7 +2933,7 @@ def write_streaming_autogaze_artifacts(output_dir: Path, aggregate: Mapping[str,
         "mode": aggregate["frame_selection_mode"],
         "effective_mode": "chunk" if aggregate["frame_selection_mode"] == "all" else aggregate["frame_selection_mode"],
         "num_frames": aggregate["stream_window_size"],
-        "frame_interval": None,
+        "frame_interval": aggregate.get("frame_interval"),
         "max_windows": aggregate["max_stream_windows"],
         "drop_last": False,
         "pad_last": any(bool(window.get("is_padded")) for window in aggregate["windows"]),
@@ -3094,6 +3103,7 @@ def build_streaming_metrics(
         "stream_overlap": aggregate["stream_overlap"],
         "max_resident_frames_in_memory": aggregate["stream_window_size"],
         "frame_selection_mode": aggregate["frame_selection_mode"],
+        "frame_interval": aggregate.get("frame_interval"),
         "scaling_mode": aggregate["scaling_windows"][0]["scaling_mode"] if aggregate["scaling_windows"] else None,
         "autogaze_enabled": bool(nested_get(cfg, "autogaze.enabled", False)),
         "requested_vision_encoder": requested_vision_encoder,
@@ -3207,6 +3217,7 @@ def build_metrics(
         "video_path": video_path,
         "query_text": query_text,
         "frame_selection_mode": prepared.frame_selection.mode,
+        "frame_interval": prepared.frame_selection.frame_interval,
         "number_of_frames": len(prepared.frame_records),
         "number_of_processed_frames": len(prepared.frame_records),
         "number_of_source_frames": _source_frame_count(prepared.frame_records),

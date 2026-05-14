@@ -299,6 +299,7 @@ def _run_streaming(args: argparse.Namespace, *, cfg: dict[str, Any], output_dir:
         video_read_mode="streaming",
         decode_backend=decode_backend,
         frame_selection_mode=frame_selection_mode,
+        frame_interval=frame_interval,
         stream_window_size=stream_window_size,
         stream_overlap=stream_overlap,
         max_stream_windows=max_stream_windows,

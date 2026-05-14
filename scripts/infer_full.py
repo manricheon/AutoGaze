@@ -500,6 +500,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     metrics["dummy_weights_enabled"] = use_dummy_weights
     if isinstance(prepared.processed_video, torch.Tensor):
         metrics["processed_video_shape"] = [int(dim) for dim in prepared.processed_video.shape]
+    metrics["mllm_input_tensor_shape"] = _tensor_shape(video_for_mllm)
+    metrics["mllm_input_frame_count"] = _video_tensor_frame_count(video_for_mllm)
+    metrics["mllm_input_batch_size"] = int(video_for_mllm.shape[0]) if isinstance(video_for_mllm, torch.Tensor) and video_for_mllm.ndim == 5 else None
+    metrics["mllm_input_frames_per_batch"] = int(video_for_mllm.shape[1]) if isinstance(video_for_mllm, torch.Tensor) and video_for_mllm.ndim == 5 else None
     metrics["vision_encoder_required_for_full_pipeline"] = vision_required
     if isinstance(visual_tokens, torch.Tensor):
         metrics["visual_tokens_shape"] = [int(dim) for dim in visual_tokens.shape]
@@ -522,6 +526,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "actual_video_input_source",
         "processed_chop_tensor" if prepared.chop_metadata is not None else "processed_tensor",
     )
+    metrics["mllm_processor_video_input_kind"] = generation_metadata.get("video_input_kind")
+    metrics["mllm_target_frame_count"] = generation_metadata.get("target_frame_count")
     metrics["mllm_chop_tensor_attempted"] = bool(generation_metadata.get("chop_tensor_attempted", prepared.chop_metadata is not None))
     metrics["mllm_chop_source_fallback_used"] = bool(generation_metadata.get("chop_source_fallback_used", False))
     metrics["gazing_info_passed_to_vision_encoder"] = bool(gaze.gazing_info_for_vit is not None and vision_required)
@@ -702,6 +708,7 @@ def _run_streaming_full(args: argparse.Namespace, *, cfg: dict[str, Any], output
         video_read_mode="streaming",
         decode_backend=decode_backend,
         frame_selection_mode=frame_selection_mode,
+        frame_interval=frame_interval,
         stream_window_size=stream_window_size,
         stream_overlap=stream_overlap,
         max_stream_windows=max_stream_windows,
@@ -1415,6 +1422,18 @@ def _failure_reason_for_blocked_stages(skipped: list[dict[str, str]], blocked_st
         stage = item.get("stage")
         if stage in blocked or (stage == "mllm_generation" and "mllm_generation" in blocked):
             return item.get("reason")
+    return None
+
+
+def _tensor_shape(value: Any) -> list[int] | None:
+    if isinstance(value, torch.Tensor):
+        return [int(dim) for dim in value.shape]
+    return None
+
+
+def _video_tensor_frame_count(value: Any) -> int | None:
+    if isinstance(value, torch.Tensor) and value.ndim == 5:
+        return int(value.shape[0]) * int(value.shape[1])
     return None
 
 

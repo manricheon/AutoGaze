@@ -17,7 +17,7 @@ if str(SCRIPTS) not in sys.path:
 
 import infer_autogaze
 import infer_full
-from poc_infer_utils import SCALE_COLORS, load_config, prepare_video, resolve_frame_selection_max_windows
+from poc_infer_utils import SCALE_COLORS, load_config, prepare_video, resolve_frame_selection_max_windows, select_frame_windows
 from poc_model_registry import build_mllm, build_vision_encoder
 from poc_model_adapters import NVILAAdapter, QwenAdapter, VJEPA2Adapter
 
@@ -204,6 +204,18 @@ def test_frame_selection_scaling_and_chop_metadata() -> None:
         )
         assert prepared.frame_selection.mode == mode
         assert prepared.processed_video.shape[-2:] == (32, 32)
+
+    interval_selection = select_frame_windows(
+        original_frame_count=188,
+        num_frames=16,
+        frame_selection_mode="interval",
+        frame_interval=4,
+    )
+    assert len(interval_selection.windows) == 3
+    assert interval_selection.windows[0].frame_indices == list(range(0, 64, 4))
+    assert interval_selection.windows[1].frame_indices == list(range(64, 128, 4))
+    assert interval_selection.windows[2].frame_indices == list(range(128, 188, 4))
+    assert sum(window.effective_num_frames for window in interval_selection.windows) == 47
 
     for scaling_mode in ("fit_short_side", "fit_long_side"):
         prepared = prepare_video(
