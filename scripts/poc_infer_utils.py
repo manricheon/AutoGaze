@@ -8,7 +8,7 @@ import math
 import sys
 import time
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
@@ -1592,6 +1592,7 @@ def run_autogaze_stage(
     if not autogaze_enabled:
         status = "disabled_full_token_path"
         reason = "AutoGaze is disabled by config; all visual tokens are retained."
+        build_start = time.perf_counter()
         result = build_gaze_result(
             prepared,
             autogaze_enabled=False,
@@ -1603,12 +1604,13 @@ def run_autogaze_stage(
             runtime_metadata=runtime,
             latency_ms=0.0,
         )
-        return result
+        return _finalize_gaze_latency(result, build_start=build_start)
 
     has_checkpoint = checkpoint_exists(checkpoint)
     if allow_real_model_loading and not has_checkpoint:
         reason = f"AutoGaze checkpoint/model is missing: {checkpoint}"
-        return build_gaze_result(
+        build_start = time.perf_counter()
+        result = build_gaze_result(
             prepared,
             autogaze_enabled=True,
             status="blocked",
@@ -1619,6 +1621,7 @@ def run_autogaze_stage(
             runtime_metadata=runtime,
             latency_ms=0.0,
         )
+        return _finalize_gaze_latency(result, build_start=build_start)
     if allow_real_model_loading and has_checkpoint:
         try:
             result = _run_real_autogaze(
@@ -1639,7 +1642,8 @@ def run_autogaze_stage(
 
     if prepared.video_source_kind == "dummy":
         reason = reason or "dummy video requested; using explicit stub AutoGaze metadata, not real model output"
-        return build_gaze_result(
+        build_start = time.perf_counter()
+        result = build_gaze_result(
             prepared,
             autogaze_enabled=True,
             status="stub_dummy_autogaze",
@@ -1650,12 +1654,14 @@ def run_autogaze_stage(
             runtime_metadata=runtime,
             latency_ms=0.0,
         )
+        return _finalize_gaze_latency(result, build_start=build_start)
 
     if not has_checkpoint:
         reason = f"AutoGaze checkpoint/model is missing: {checkpoint}"
     elif not allow_real_model_loading:
         reason = "real AutoGaze loading is disabled; pass --allow-real-model-loading to execute checkpoints"
-    return build_gaze_result(
+    build_start = time.perf_counter()
+    result = build_gaze_result(
         prepared,
         autogaze_enabled=True,
         status="blocked",
@@ -1666,6 +1672,7 @@ def run_autogaze_stage(
         runtime_metadata=runtime,
         latency_ms=0.0,
     )
+    return _finalize_gaze_latency(result, build_start=build_start)
 
 
 def _run_real_autogaze(
@@ -1698,7 +1705,8 @@ def _run_real_autogaze(
 
     progress.warmup("AutoGaze", forward_once, runs=warmup_runs, device=device)
     outputs, latency_ms = progress.timed("AutoGaze", forward_once, device=device)
-    return build_gaze_result(
+    build_start = time.perf_counter()
+    result = build_gaze_result(
         prepared,
         autogaze_enabled=True,
         status="real",
@@ -1710,6 +1718,28 @@ def _run_real_autogaze(
         latency_ms=latency_ms,
         real_outputs=outputs,
     )
+    return _finalize_gaze_latency(result, build_start=build_start, forward_latency_ms=latency_ms)
+
+
+def _finalize_gaze_latency(
+    result: GazeResult,
+    *,
+    build_start: float,
+    forward_latency_ms: float | None = None,
+) -> GazeResult:
+    build_latency_ms = (time.perf_counter() - build_start) * 1000
+    model_forward_latency_ms = float(forward_latency_ms) if forward_latency_ms is not None else None
+    stage_latency_ms = float(model_forward_latency_ms or 0.0) + float(build_latency_ms)
+    runtime_metadata = dict(result.runtime_metadata)
+    runtime_metadata.update(
+        {
+            "autogaze_stage_latency_ms": stage_latency_ms,
+            "autogaze_model_forward_latency_ms": model_forward_latency_ms,
+            "autogaze_result_build_latency_ms": build_latency_ms,
+            "autogaze_processed_frame_count": len(result.per_frame),
+        }
+    )
+    return replace(result, runtime_metadata=runtime_metadata, latency_ms=stage_latency_ms)
 
 
 def build_gaze_result(
@@ -2864,6 +2894,9 @@ def add_streaming_window_result(
             "token_reduction_ratio": gaze.token_reduction_ratio,
             "preprocessing_latency_ms": preprocessing_latency_ms,
             "autogaze_latency_ms": autogaze_latency_ms,
+            "autogaze_model_forward_latency_ms": gaze.runtime_metadata.get("autogaze_model_forward_latency_ms"),
+            "autogaze_result_build_latency_ms": gaze.runtime_metadata.get("autogaze_result_build_latency_ms"),
+            "autogaze_stage_latency_ms": gaze.runtime_metadata.get("autogaze_stage_latency_ms"),
             "vision_encoder_latency_ms": vision_encoder_latency_ms,
             "mllm_generation_latency_ms": mllm_generation_latency_ms,
             "visualization_latency_ms": visualization_latency_ms,
@@ -3095,9 +3128,21 @@ def build_streaming_metrics(
         "token_reduction_ratio_per_window": [item["token_reduction_ratio"] for item in aggregate["per_window_metrics"]],
         "preprocessing_latency_per_window_ms": [item["preprocessing_latency_ms"] for item in aggregate["per_window_metrics"]],
         "autogaze_latency_per_window_ms": [item["autogaze_latency_ms"] for item in aggregate["per_window_metrics"]],
+        "autogaze_model_forward_latency_per_window_ms": [
+            item.get("autogaze_model_forward_latency_ms") for item in aggregate["per_window_metrics"]
+        ],
+        "autogaze_result_build_latency_per_window_ms": [
+            item.get("autogaze_result_build_latency_ms") for item in aggregate["per_window_metrics"]
+        ],
+        "autogaze_stage_latency_per_window_ms": [
+            item.get("autogaze_stage_latency_ms") for item in aggregate["per_window_metrics"]
+        ],
         "vision_encoder_latency_per_window_ms": [item["vision_encoder_latency_ms"] for item in aggregate["per_window_metrics"]],
         "mllm_latency_per_window_ms": [item["mllm_generation_latency_ms"] for item in aggregate["per_window_metrics"]],
         "autogaze_latency_ms": sum(float(item["autogaze_latency_ms"] or 0.0) for item in aggregate["per_window_metrics"]),
+        "autogaze_model_forward_latency_ms": _sum_optional_metric(aggregate["per_window_metrics"], "autogaze_model_forward_latency_ms"),
+        "autogaze_result_build_latency_ms": _sum_optional_metric(aggregate["per_window_metrics"], "autogaze_result_build_latency_ms"),
+        "autogaze_stage_latency_ms": sum(float(item["autogaze_stage_latency_ms"] or 0.0) for item in aggregate["per_window_metrics"]),
         "mllm_generation_latency_ms": sum(
             float(item["mllm_generation_latency_ms"] or 0.0) for item in aggregate["per_window_metrics"]
         ),
@@ -3192,6 +3237,9 @@ def build_metrics(
         "selected_patches_per_scale": _sum_scale_counts(gaze.per_frame),
         "preprocessing_latency_ms": preprocessing_latency_ms,
         "autogaze_latency_ms": gaze.latency_ms,
+        "autogaze_model_forward_latency_ms": gaze.runtime_metadata.get("autogaze_model_forward_latency_ms"),
+        "autogaze_result_build_latency_ms": gaze.runtime_metadata.get("autogaze_result_build_latency_ms"),
+        "autogaze_stage_latency_ms": gaze.runtime_metadata.get("autogaze_stage_latency_ms"),
         "vision_encoder_latency_ms": vision_encoder_latency_ms,
         "mllm_prefill_latency_ms": None,
         "mllm_decode_latency_ms": mllm_generation_latency_ms,
@@ -3212,6 +3260,13 @@ def build_metrics(
 
 def _source_frame_count(frame_records: list[Mapping[str, Any]]) -> int:
     return len({int(item.get("source_frame_index", idx)) for idx, item in enumerate(frame_records) if not bool(item.get("is_padded", False))})
+
+
+def _sum_optional_metric(items: list[Mapping[str, Any]], key: str) -> float | None:
+    values = [item.get(key) for item in items]
+    if not any(value is not None for value in values):
+        return None
+    return sum(float(value or 0.0) for value in values)
 
 
 def _prepared_tile_count(prepared: PreparedVideo, nvila_hd: Mapping[str, Any]) -> int | None:

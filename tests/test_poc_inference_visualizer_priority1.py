@@ -582,7 +582,10 @@ def test_autogaze_dummy_run_writes_flat_outputs_and_metrics(tmp_path: Path) -> N
     assert metrics["real_stub_blocked_status"] == "stub_dummy_autogaze"
     assert metrics["gaze_ratio"] == 0.25
     assert metrics["warmup_runs"] == 1
-    assert metrics["autogaze_latency_ms"] == 0.0
+    assert metrics["autogaze_latency_ms"] >= 0.0
+    assert metrics["autogaze_stage_latency_ms"] == metrics["autogaze_latency_ms"]
+    assert metrics["autogaze_result_build_latency_ms"] >= 0.0
+    assert metrics["autogaze_model_forward_latency_ms"] is None
     assert metrics["module_processing_latency_ms"] == metrics["end_to_end_latency_ms"]
     assert metrics["visualization_latency_ms"] is not None
     assert metrics["wall_clock_latency_ms"] >= metrics["module_processing_latency_ms"]
