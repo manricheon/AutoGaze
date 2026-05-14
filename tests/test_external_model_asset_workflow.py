@@ -299,6 +299,35 @@ def test_selected_tier1_zero_mask_dry_run_does_not_claim_acceleration(tmp_path: 
     assert metrics["zero_mask_expected_speedup"] == "none"
 
 
+def test_selected_tier1_dummy_weight_smoke_runs_without_real_checkpoint(tmp_path: Path) -> None:
+    output_dir = tmp_path / "selected_tier1_dummy"
+    result = run_cmd(
+        [
+            "scripts/run_external_model_smoke.py",
+            "--config",
+            "configs/poc_inference/external/selected_tier1_smoke.yaml",
+            "--video-path",
+            "dummy",
+            "--query-text",
+            "Describe the video.",
+            "--output-dir",
+            str(output_dir),
+            "--allow-dummy-weights",
+            "--local-files-only",
+            "--max-new-tokens",
+            "8",
+        ]
+    )
+    assert result.returncode == 0, result.stderr
+    summary = json.loads((output_dir / "logs" / "poc_summary.json").read_text(encoding="utf-8"))
+    answer = json.loads((output_dir / "predictions" / "answer.json").read_text(encoding="utf-8"))
+    assert summary["adapter_statuses"]["mllm"]["status"] == "dummy"
+    assert summary["metrics"]["dummy_weights_enabled"] is True
+    assert answer["status"] == "dummy"
+    assert answer["answer"].startswith("[dummy:longvila_r1]")
+    assert answer["generation_metadata"]["real_checkpoint_loaded"] is False
+
+
 def test_infer_full_zero_mask_metrics_do_not_claim_encoder_acceleration(tmp_path: Path) -> None:
     args = infer_full.parse_args(
         [

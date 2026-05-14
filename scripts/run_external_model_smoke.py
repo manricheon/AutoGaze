@@ -22,6 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--query-text", default=None)
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--allow-real-model-loading", action="store_true")
+    parser.add_argument("--allow-dummy-weights", action="store_true")
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--max-new-tokens", type=int, default=16)
@@ -45,8 +46,9 @@ def main() -> int:
     local_status = validate_local_assets(entry)
     adapter_status = _adapter_route_status(model_name, cfg)
     allow_real = bool(args.allow_real_model_loading)
+    allow_dummy = bool(args.allow_dummy_weights or nested_get(cfg, "runtime.allow_dummy_weights", False))
     local_files_only = bool(args.local_files_only or nested_get(cfg, "runtime.local_files_only", False))
-    dry_run = bool(args.dry_run or not allow_real)
+    dry_run = bool(args.dry_run or (not allow_real and not allow_dummy))
 
     if dry_run:
         summary = _dry_run_summary(
@@ -56,9 +58,17 @@ def main() -> int:
             local_status=local_status,
             adapter_status=adapter_status,
             local_files_only=local_files_only,
+            allow_dummy=allow_dummy,
         )
     else:
-        summary = _real_smoke(args=args, cfg=cfg, model_name=model_name, local_status=local_status, local_files_only=local_files_only)
+        summary = _real_smoke(
+            args=args,
+            cfg=cfg,
+            model_name=model_name,
+            local_status=local_status,
+            local_files_only=local_files_only,
+            allow_dummy=allow_dummy,
+        )
     _write_smoke_outputs(output_dir, model_name=model_name, cfg=cfg, summary=summary)
     print(f"Wrote smoke report: {output_dir / 'logs' / 'poc_summary.json'}")
     return 2 if summary.get("status") == "blocked" and not args.dry_run else 0
@@ -72,6 +82,7 @@ def _dry_run_summary(
     local_status: dict[str, Any],
     adapter_status: dict[str, Any],
     local_files_only: bool,
+    allow_dummy: bool,
 ) -> dict[str, Any]:
     assets_ready = local_status.get("download_status") == "local_exists"
     return {
@@ -81,6 +92,7 @@ def _dry_run_summary(
         "config": args.config,
         "integration_mode": _integration_mode(cfg),
         "allow_real_model_loading": False,
+        "allow_dummy_weights": allow_dummy,
         "local_files_only": local_files_only,
         "assets": local_status,
         "adapter_route": adapter_status,
@@ -102,8 +114,9 @@ def _real_smoke(
     model_name: str,
     local_status: dict[str, Any],
     local_files_only: bool,
+    allow_dummy: bool,
 ) -> dict[str, Any]:
-    if local_status.get("download_status") != "local_exists":
+    if local_status.get("download_status") != "local_exists" and not allow_dummy:
         return {
             "status": "blocked",
             "run_type": "real_smoke",
@@ -125,8 +138,11 @@ def _real_smoke(
             args.dtype,
             "--max-new-tokens",
             str(args.max_new_tokens),
-            "--allow-real-model-loading",
         ]
+        if allow_dummy and not args.allow_real_model_loading:
+            infer_argv.append("--allow-dummy-weights")
+        else:
+            infer_argv.append("--allow-real-model-loading")
         if args.video_path:
             infer_argv.extend(["--video-path", args.video_path])
         if args.query_text:
@@ -143,6 +159,7 @@ def _real_smoke(
             "model": model_name,
             "reason": f"real smoke failed: {exc}",
             "local_files_only": local_files_only,
+            "allow_dummy_weights": allow_dummy,
         }
 
 
@@ -156,6 +173,7 @@ def _write_smoke_outputs(output_dir: Path, *, model_name: str, cfg: dict[str, An
             "run_type": summary.get("run_type"),
             "integration_mode": summary.get("integration_mode") or _integration_mode(cfg),
             "real_model_loaded": bool(summary.get("adapter", {}).get("real_checkpoint_loaded", False)),
+            "dummy_weights": _summary_uses_dummy_weights(summary),
             **_zero_mask_metrics(summary.get("zero_mask") if isinstance(summary.get("zero_mask"), dict) else _zero_mask_metadata(args=None, cfg=cfg)),
         },
     )
@@ -248,6 +266,20 @@ def _zero_mask_metrics(metadata: dict[str, Any] | None) -> dict[str, Any]:
         "zero_mask_encoder_compute_reduction": False,
         "zero_mask_expected_speedup": "none",
     }
+
+
+def _summary_uses_dummy_weights(summary: dict[str, Any]) -> bool:
+    if bool(summary.get("allow_dummy_weights")):
+        return True
+    statuses = summary.get("adapter_statuses")
+    if isinstance(statuses, dict):
+        for status in statuses.values():
+            if isinstance(status, dict) and status.get("status") == "dummy":
+                return True
+    metrics = summary.get("metrics")
+    if isinstance(metrics, dict):
+        return bool(metrics.get("dummy_weights_enabled", False))
+    return False
 
 
 if __name__ == "__main__":

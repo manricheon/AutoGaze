@@ -71,6 +71,8 @@ runtime:
   mllm_dtype: float32
   local_files_only: true
   allow_real_model_loading: false
+  allow_dummy_weights: true
+  dummy_weight_smoke: true
   warmup_runs: 1
   progress: true
 
@@ -80,4 +82,4 @@ generation:
 
 output:
   output_dir: outputs/poc_inference/external/selected_tier1_longvila_r1_smoke
-  status: blocked_missing_assets
+  status: dummy_runnable_real_blocked_missing_assets

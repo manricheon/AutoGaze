@@ -116,6 +116,23 @@ class VisionEncoderAdapter:
             self.status = AdapterStatus(self.name, "blocked", f"real vision loading failed: {exc}")
         return self.status
 
+    def load_dummy_weights(self, *, device: str = "cpu", dtype: str = "float32") -> AdapterStatus:
+        self.device = device
+        self.model = None
+        self.status = AdapterStatus(
+            self.name,
+            "dummy",
+            "explicit dummy-weight smoke mode; no real vision checkpoint was loaded",
+            metadata={
+                "dummy_weights": True,
+                "real_checkpoint_loaded": False,
+                "device": device,
+                "dtype": dtype,
+                "checkpoint": self._checkpoint(),
+            },
+        )
+        return self.status
+
     def preprocess_or_accept_features(self, video: torch.Tensor, autogaze: Mapping[str, Any] | None = None) -> dict[str, Any]:
         return {"video": video, "autogaze": autogaze}
 
@@ -595,6 +612,24 @@ class MLLMAdapter:
             self.status = AdapterStatus(self.name, "blocked", f"real MLLM loading failed: {exc}")
         return self.status
 
+    def load_dummy_weights(self, *, device: str = "cpu", dtype: str = "float32") -> AdapterStatus:
+        self.device = device
+        self.model = None
+        self.processor = None
+        self.status = AdapterStatus(
+            self.name,
+            "dummy",
+            "explicit dummy-weight smoke mode; no real MLLM checkpoint was loaded",
+            metadata={
+                "dummy_weights": True,
+                "real_checkpoint_loaded": False,
+                "device": device,
+                "dtype": dtype,
+                "checkpoint": self._checkpoint(),
+            },
+        )
+        return self.status
+
     def prepare_inputs(
         self,
         *,
@@ -624,6 +659,12 @@ class MLLMAdapter:
     ) -> dict[str, Any]:
         if not query_text:
             return {"status": "blocked", "answer": None, "reason": "query text is required"}
+        if self.status.status == "dummy":
+            return self._dummy_generation(
+                query_text=query_text,
+                max_new_tokens=max_new_tokens,
+                integration_mode=str(self.config.get("generation_input_mode") or "official_processor"),
+            )
         if self.model is None:
             return {
                 "status": self.status.status,
@@ -636,6 +677,27 @@ class MLLMAdapter:
             "answer": None,
             "reason": f"real generation is not implemented for {self.name}; add a model-specific generation adapter",
             "query_text_used": True,
+        }
+
+    def _dummy_generation(self, *, query_text: str, max_new_tokens: int, integration_mode: str) -> dict[str, Any]:
+        answer = f"[dummy:{self.name}] placeholder response for: {query_text}"
+        if max_new_tokens > 0:
+            answer = " ".join(answer.split()[:max_new_tokens])
+        return {
+            "status": "dummy",
+            "answer": answer,
+            "reason": "dummy-weight smoke generation; output is not a model prediction",
+            "query_text_used": True,
+            "metadata": {
+                "adapter": self.name,
+                "integration_mode": integration_mode,
+                "dummy_weights": True,
+                "real_checkpoint_loaded": False,
+                "generation_ran": True,
+                "official_processor_path": False,
+                "direct_visual_token_injection": False,
+                "autogaze_visual_tokens_injected": False,
+            },
         }
 
     def count_visual_tokens(self, visual_tokens: torch.Tensor | None) -> int | None:
@@ -1510,51 +1572,57 @@ class ExternalMLLMAdapter(MLLMAdapter):
     def run_official_processor_path(self, **_: Any) -> dict[str, Any]:
         if self.model is not None and self.processor is not None:
             return self.generate(**_)
-        return self._mode_status("official_processor")
+        return self._mode_status("official_processor", **_)
 
     def run_autogaze_frame_selection_path(self, **_: Any) -> dict[str, Any]:
         if self.model is not None and self.processor is not None:
             return self._generate_with_selection_mode("autogaze_frame_selection", **_)
-        return self._mode_status("autogaze_frame_selection")
+        return self._mode_status("autogaze_frame_selection", **_)
 
     def run_autogaze_chop_selection_path(self, **_: Any) -> dict[str, Any]:
         if self.model is not None and self.processor is not None:
             return self._generate_with_selection_mode("autogaze_chop_selection", **_)
-        return self._mode_status("autogaze_chop_selection")
+        return self._mode_status("autogaze_chop_selection", **_)
 
     def run_autogaze_zero_mask_path(self, **_: Any) -> dict[str, Any]:
         if self.model is not None and self.processor is not None:
             return self._generate_with_selection_mode("autogaze_zero_mask", **_)
-        return self._mode_status("autogaze_zero_mask")
+        return self._mode_status("autogaze_zero_mask", **_)
 
     def run_siglip_sparse_patch_path(self, **_: Any) -> dict[str, Any]:
-        return self._mode_status("siglip_sparse_patch")
+        return self._mode_status("siglip_sparse_patch", **_)
 
     def run_native_sparse_patch_path(self, **_: Any) -> dict[str, Any]:
-        return self._mode_status("native_sparse_patch")
+        return self._mode_status("native_sparse_patch", **_)
 
     def run_light_modified_sparse_path(self, **_: Any) -> dict[str, Any]:
-        return self._mode_status("light_modified_sparse")
+        return self._mode_status("light_modified_sparse", **_)
 
     def run_rope_sparse_patch_path(self, **_: Any) -> dict[str, Any]:
-        return self._mode_status("rope_sparse_patch")
+        return self._mode_status("rope_sparse_patch", **_)
 
     def run_post_encoder_pruning_path(self, **_: Any) -> dict[str, Any]:
-        return self._mode_status("post_encoder_pruning")
+        return self._mode_status("post_encoder_pruning", **_)
 
     def run_post_encoder_zero_mask_path(self, **_: Any) -> dict[str, Any]:
-        return self._mode_status("post_encoder_zero_mask")
+        return self._mode_status("post_encoder_zero_mask", **_)
 
     def run_direct_visual_token_injection_path(self, **_: Any) -> dict[str, Any]:
-        return self._mode_status("direct_visual_token_injection")
+        return self._mode_status("direct_visual_token_injection", **_)
 
-    def _mode_status(self, integration_mode: str) -> dict[str, Any]:
+    def _mode_status(self, integration_mode: str, **kwargs: Any) -> dict[str, Any]:
         if integration_mode not in self.supported_integration_modes or integration_mode == "direct_visual_token_injection":
             reason = self.unsupported_mode_reasons.get(
                 integration_mode,
                 f"{integration_mode} is not verified for {self.name}",
             )
             raise NotImplementedError(self._unsupported_message(integration_mode, reason))
+        if self.status.status == "dummy":
+            return self._dummy_generation(
+                query_text=str(kwargs.get("query_text") or ""),
+                max_new_tokens=int(kwargs.get("max_new_tokens") or 32),
+                integration_mode=integration_mode,
+            )
         return {
             "status": "stub-only",
             "answer": None,
@@ -2106,7 +2174,7 @@ class Qwen25VLAdapter(QwenAdapter):
     def run_official_processor_path(self, **kwargs: Any) -> dict[str, Any]:
         if self.model is not None and self.processor is not None:
             return self.generate(**kwargs)
-        return self._mode_status("official_processor")
+        return self._mode_status("official_processor", **kwargs)
 
     def run_autogaze_frame_selection_path(self, **_: Any) -> dict[str, Any]:
         if self.model is not None and self.processor is not None:
@@ -2117,7 +2185,7 @@ class Qwen25VLAdapter(QwenAdapter):
             metadata["autogaze_visual_tokens_injected"] = False
             result["metadata"] = metadata
             return result
-        return self._mode_status("autogaze_frame_selection")
+        return self._mode_status("autogaze_frame_selection", **_)
 
     def run_autogaze_chop_selection_path(self, **_: Any) -> dict[str, Any]:
         if self.model is not None and self.processor is not None:
@@ -2128,7 +2196,7 @@ class Qwen25VLAdapter(QwenAdapter):
             metadata["autogaze_visual_tokens_injected"] = False
             result["metadata"] = metadata
             return result
-        return self._mode_status("autogaze_chop_selection")
+        return self._mode_status("autogaze_chop_selection", **_)
 
     def run_autogaze_zero_mask_path(self, **_: Any) -> dict[str, Any]:
         if self.model is not None and self.processor is not None:
@@ -2140,36 +2208,42 @@ class Qwen25VLAdapter(QwenAdapter):
             metadata["qwen_encoder_side_acceleration_claimed"] = False
             result["metadata"] = metadata
             return result
-        return self._mode_status("autogaze_zero_mask")
+        return self._mode_status("autogaze_zero_mask", **_)
 
     def run_siglip_sparse_patch_path(self, **_: Any) -> dict[str, Any]:
-        return self._mode_status("siglip_sparse_patch")
+        return self._mode_status("siglip_sparse_patch", **_)
 
     def run_native_sparse_patch_path(self, **_: Any) -> dict[str, Any]:
-        return self._mode_status("native_sparse_patch")
+        return self._mode_status("native_sparse_patch", **_)
 
     def run_light_modified_sparse_path(self, **_: Any) -> dict[str, Any]:
-        return self._mode_status("light_modified_sparse")
+        return self._mode_status("light_modified_sparse", **_)
 
     def run_rope_sparse_patch_path(self, **_: Any) -> dict[str, Any]:
-        return self._mode_status("rope_sparse_patch")
+        return self._mode_status("rope_sparse_patch", **_)
 
     def run_post_encoder_pruning_path(self, **_: Any) -> dict[str, Any]:
-        return self._mode_status("post_encoder_pruning")
+        return self._mode_status("post_encoder_pruning", **_)
 
     def run_post_encoder_zero_mask_path(self, **_: Any) -> dict[str, Any]:
-        return self._mode_status("post_encoder_zero_mask")
+        return self._mode_status("post_encoder_zero_mask", **_)
 
     def run_direct_visual_token_injection_path(self, **_: Any) -> dict[str, Any]:
-        return self._mode_status("direct_visual_token_injection")
+        return self._mode_status("direct_visual_token_injection", **_)
 
-    def _mode_status(self, integration_mode: str) -> dict[str, Any]:
+    def _mode_status(self, integration_mode: str, **kwargs: Any) -> dict[str, Any]:
         if integration_mode not in self.supported_integration_modes or integration_mode == "direct_visual_token_injection":
             reason = self.unsupported_mode_reasons.get(
                 integration_mode,
                 f"{integration_mode} is not verified for {self.name}",
             )
             raise NotImplementedError(self._unsupported_message(integration_mode, reason))
+        if self.status.status == "dummy":
+            return self._dummy_generation(
+                query_text=str(kwargs.get("query_text") or ""),
+                max_new_tokens=int(kwargs.get("max_new_tokens") or 32),
+                integration_mode=integration_mode,
+            )
         return {
             "status": "stub-only",
             "answer": None,

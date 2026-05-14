@@ -104,6 +104,21 @@ python scripts/run_external_model_smoke.py \
   --dtype bfloat16
 ```
 
+Dummy-weight smoke is available only as an explicit plumbing check. It assumes the configured local weight directory is the intended target, but does not load real checkpoint shards and does not claim real inference:
+
+```bash
+python scripts/run_external_model_smoke.py \
+  --config configs/poc_inference/external/selected_tier1_smoke.yaml \
+  --video-path dummy \
+  --query-text "Describe the main action in the video." \
+  --output-dir outputs/poc_inference/external/selected_tier1_dummy \
+  --allow-dummy-weights \
+  --local-files-only \
+  --max-new-tokens 8
+```
+
+Dummy outputs are marked with `status: dummy`, `dummy_weights: true`, and `real_checkpoint_loaded: false`.
+
 ## Expected Blockers
 
 | Blocker | Scope | Handling |

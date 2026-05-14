@@ -74,6 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--task-loss-requirement", type=float, default=None)
     parser.add_argument("--strict-autogaze-params", action="store_true")
     parser.add_argument("--allow-real-model-loading", action="store_true")
+    parser.add_argument("--allow-dummy-weights", action="store_true")
     parser.add_argument("--zero-mask-stage", choices=["pixel", "patch_embedding", "post_encoder"], default=None)
     parser.add_argument("--zero-mask-value", choices=["zero", "mean"], default=None)
     parser.add_argument("--save-zero-mask-visualization", action="store_true")
@@ -157,6 +158,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     preprocessing_latency_ms = (time.perf_counter() - preprocessing_start) * 1000
     allow_real = bool(args.allow_real_model_loading or nested_get(cfg, "runtime.allow_real_model_loading", False))
+    allow_dummy = bool(args.allow_dummy_weights or nested_get(cfg, "runtime.allow_dummy_weights", False))
+    use_dummy_weights = bool(allow_dummy and not allow_real)
     gaze = run_autogaze_stage(
         cfg,
         prepared,
@@ -204,7 +207,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             }
         )
     else:
-        vision_status = vision.load(allow_real_model_loading=allow_real, device=device, dtype=vision_dtype)
+        vision_status = (
+            vision.load_dummy_weights(device=device, dtype=vision_dtype)
+            if use_dummy_weights
+            else vision.load(allow_real_model_loading=allow_real, device=device, dtype=vision_dtype)
+        )
         if allow_real and vision_status.status != "real":
             skipped.append({"stage": "vision_encoder", "reason": vision_status.reason or f"{vision.name} real loading unavailable"})
             blocked_stages.append("vision_encoder")
@@ -226,7 +233,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     blocked_stages.append("vision_encoder")
 
     mllm = build_mllm(mllm_name, nested_get(cfg, "mllm", {}))
-    mllm_status = mllm.load(allow_real_model_loading=allow_real, device=device, dtype=mllm_dtype)
+    mllm_status = (
+        mllm.load_dummy_weights(device=device, dtype=mllm_dtype)
+        if use_dummy_weights
+        else mllm.load(allow_real_model_loading=allow_real, device=device, dtype=mllm_dtype)
+    )
     max_new_tokens = int(cli_or_config(args.max_new_tokens, cfg, "generation.max_new_tokens", 32))
     mllm_autogaze_payload = _mllm_autogaze_payload(cfg, gaze)
     zero_mask_metadata: dict[str, Any] | None = None
@@ -390,6 +401,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     metrics["autogaze_dtype"] = autogaze_dtype
     metrics["vision_encoder_dtype"] = vision_dtype
     metrics["mllm_dtype"] = mllm_dtype
+    metrics["dummy_weights_enabled"] = use_dummy_weights
     metrics["vision_encoder_required_for_full_pipeline"] = vision_required
     metrics["generation_input_mode"] = generation_input_mode
     generation_metadata = generation.get("metadata") if isinstance(generation.get("metadata"), dict) else {}
