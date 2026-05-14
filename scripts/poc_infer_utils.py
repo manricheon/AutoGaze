@@ -583,6 +583,18 @@ def format_concise_summary(summary: Mapping[str, Any]) -> str:
             f"cuda_peak={_fmt_mib(metrics.get('cuda_max_memory_allocated_mib'))}"
         ),
     ]
+    if metrics.get("autogaze_model_forward_status") != "measured":
+        lines.append(
+            "AutoGaze forward: "
+            f"status={_fmt_value(metrics.get('autogaze_model_forward_status'))} "
+            f"reason={_fmt_short(metrics.get('autogaze_model_forward_reason'))}"
+        )
+    if metrics.get("nvila_processor_internal_autogaze_timing_status"):
+        lines.append(
+            "NVILA processor AutoGaze: "
+            f"status={_fmt_value(metrics.get('nvila_processor_internal_autogaze_timing_status'))} "
+            "time_scope=mllm_prep"
+        )
     return "\n".join(lines)
 
 
@@ -596,6 +608,11 @@ def _sum_chops_from_metrics(metrics: Mapping[str, Any]) -> int | None:
 
 def _fmt_value(value: Any) -> str:
     return "n/a" if value is None else str(value)
+
+
+def _fmt_short(value: Any, *, limit: int = 180) -> str:
+    text = _fmt_value(value).replace("\n", " ")
+    return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
 def _fmt_ms(value: Any) -> str:

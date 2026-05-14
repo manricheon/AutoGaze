@@ -307,6 +307,7 @@ def test_infer_full_main_prints_concise_latency_summary(tmp_path: Path, capsys) 
     assert "Latency ms:" in captured.out
     assert "ag_forward=0.00(not_run)" in captured.out
     assert "ag_build=" in captured.out
+    assert "AutoGaze forward: status=not_run reason=" in captured.out
     assert "Per-item ms:" in captured.out
     assert "Memory:" in captured.out
 
@@ -438,6 +439,7 @@ def test_infer_autogaze_main_prints_concise_latency_summary(tmp_path: Path, caps
     assert "Latency ms:" in captured.out
     assert "ag_forward=0.00(not_run)" in captured.out
     assert "ag_build=" in captured.out
+    assert "AutoGaze forward: status=not_run reason=" in captured.out
     assert "Memory:" in captured.out
 
 
