@@ -1705,13 +1705,27 @@ def _run_real_autogaze(
     kwargs: dict[str, Any] = {"gazing_ratio": gaze_ratio}
     if task_loss_requirement is not None:
         kwargs["task_loss_requirement"] = task_loss_requirement
+    max_batch_size = _autogaze_forward_batch_size(cfg, total_batch=int(video.shape[0]))
 
     def forward_once() -> Mapping[str, Any]:
-        with torch.inference_mode():
-            return model({"video": video}, **kwargs)
+        return _run_autogaze_forward_batches(
+            model,
+            video,
+            kwargs=kwargs,
+            device=device,
+            max_batch_size=max_batch_size,
+            progress=None,
+        )[0]
 
     progress.warmup("AutoGaze", forward_once, runs=warmup_runs, device=device)
-    outputs, latency_ms = progress.timed("AutoGaze", forward_once, device=device)
+    outputs, latency_ms, forward_metadata = _run_autogaze_forward_batches(
+        model,
+        video,
+        kwargs=kwargs,
+        device=device,
+        max_batch_size=max_batch_size,
+        progress=progress,
+    )
     build_start = time.perf_counter()
     result = build_gaze_result(
         prepared,
@@ -1721,11 +1735,127 @@ def _run_real_autogaze(
         real_model_used=True,
         gaze_ratio=gaze_ratio,
         task_loss_requirement=task_loss_requirement,
-        runtime_metadata={**runtime_metadata, "raw_output_keys": sorted(str(key) for key in outputs.keys())},
+        runtime_metadata={
+            **runtime_metadata,
+            **forward_metadata,
+            "raw_output_keys": sorted(str(key) for key in outputs.keys()),
+        },
         latency_ms=latency_ms,
         real_outputs=outputs,
     )
     return _finalize_gaze_latency(result, build_start=build_start, forward_latency_ms=latency_ms)
+
+
+def _autogaze_forward_batch_size(cfg: Mapping[str, Any], *, total_batch: int) -> int:
+    configured = (
+        nested_get(cfg, "autogaze.max_batch_size")
+        or nested_get(cfg, "autogaze.max_batch_size_autogaze")
+        or nvila_hd_effective_settings(cfg).get("max_batch_size_autogaze")
+    )
+    if configured is None:
+        return max(1, int(total_batch))
+    return max(1, min(int(configured), int(total_batch)))
+
+
+def _run_autogaze_forward_batches(
+    model: Any,
+    video: torch.Tensor,
+    *,
+    kwargs: Mapping[str, Any],
+    device: str,
+    max_batch_size: int,
+    progress: ProgressReporter | None,
+) -> tuple[Mapping[str, Any], float, dict[str, Any]]:
+    total_batch = int(video.shape[0])
+    frames = int(video.shape[1])
+    batch_ranges = [
+        (start, min(total_batch, start + int(max_batch_size)))
+        for start in range(0, total_batch, int(max_batch_size))
+    ]
+    outputs: list[Mapping[str, Any]] = []
+    batch_latencies: list[float] = []
+    progress_bar = progress._start("AutoGaze", total=len(batch_ranges), unit="batch") if progress is not None else None
+    try:
+        for start, end in batch_ranges:
+            batch_video = video[start:end]
+            synchronize_device(device)
+            batch_start = time.perf_counter()
+            with torch.inference_mode():
+                batch_output = model({"video": batch_video}, **kwargs)
+            synchronize_device(device)
+            batch_latency_ms = (time.perf_counter() - batch_start) * 1000
+            outputs.append(batch_output)
+            batch_latencies.append(batch_latency_ms)
+            if progress is not None:
+                progress._update(progress_bar, 1)
+    finally:
+        if progress is not None:
+            progress._close(progress_bar)
+    metadata = {
+        "autogaze_model_forward_call_count": len(batch_ranges),
+        "autogaze_model_forward_micro_batch_size": int(max_batch_size),
+        "autogaze_model_forward_batch_latencies_ms": batch_latencies,
+        "autogaze_model_forward_batch_ranges": [
+            {
+                "start": int(start),
+                "end": int(end),
+                "batch_size": int(end - start),
+                "frame_count": frames,
+                "processed_frame_count": int(end - start) * frames,
+            }
+            for start, end in batch_ranges
+        ],
+        "autogaze_model_forward_processed_clip_count": total_batch,
+        "autogaze_model_forward_processed_frame_count": total_batch * frames,
+    }
+    return _merge_autogaze_forward_outputs(outputs), sum(batch_latencies), metadata
+
+
+def _merge_autogaze_forward_outputs(outputs: list[Mapping[str, Any]]) -> Mapping[str, Any]:
+    if not outputs:
+        return {}
+    if len(outputs) == 1:
+        return outputs[0]
+    merged: dict[str, Any] = {}
+    keys = sorted({key for output in outputs for key in output.keys()}, key=str)
+    for key in keys:
+        values = [output[key] for output in outputs if key in output]
+        first = values[0]
+        if isinstance(first, torch.Tensor):
+            if first.ndim == 0:
+                merged[key] = first
+            elif key in {"num_gazing_each_frame", "num_vision_tokens_each_frame"} and first.ndim <= 1:
+                merged[key] = first
+            else:
+                merged[key] = _cat_autogaze_tensors(key, [value for value in values if isinstance(value, torch.Tensor)])
+        else:
+            merged[key] = first
+    return merged
+
+
+def _cat_autogaze_tensors(key: Any, tensors: list[torch.Tensor]) -> torch.Tensor:
+    if len(tensors) == 1:
+        return tensors[0]
+    shapes = [tuple(tensor.shape) for tensor in tensors]
+    if len({shape[1:] for shape in shapes}) == 1:
+        return torch.cat(tensors, dim=0)
+    if str(key) in {"gazing_pos", "if_padded_gazing"} and all(tensor.ndim == 2 for tensor in tensors):
+        total_rows = sum(int(tensor.shape[0]) for tensor in tensors)
+        max_cols = max(int(tensor.shape[1]) for tensor in tensors)
+        fill_value = True if str(key) == "if_padded_gazing" else 0
+        padded = torch.full(
+            (total_rows, max_cols),
+            fill_value,
+            dtype=tensors[0].dtype,
+            device=tensors[0].device,
+        )
+        row_offset = 0
+        for tensor in tensors:
+            rows, cols = int(tensor.shape[0]), int(tensor.shape[1])
+            padded[row_offset : row_offset + rows, :cols] = tensor
+            row_offset += rows
+        return padded
+    return torch.cat(tensors, dim=0)
 
 
 def _finalize_gaze_latency(
@@ -2989,6 +3119,12 @@ def add_streaming_window_result(
                 processed_frame_count,
             ),
             "autogaze_model_forward_latency_ms": gaze.runtime_metadata.get("autogaze_model_forward_latency_ms"),
+            "autogaze_model_forward_call_count": gaze.runtime_metadata.get("autogaze_model_forward_call_count"),
+            "autogaze_model_forward_micro_batch_size": gaze.runtime_metadata.get("autogaze_model_forward_micro_batch_size"),
+            "autogaze_model_forward_batch_latencies_ms": gaze.runtime_metadata.get("autogaze_model_forward_batch_latencies_ms"),
+            "autogaze_model_forward_batch_ranges": gaze.runtime_metadata.get("autogaze_model_forward_batch_ranges"),
+            "autogaze_model_forward_processed_clip_count": gaze.runtime_metadata.get("autogaze_model_forward_processed_clip_count"),
+            "autogaze_model_forward_processed_frame_count": gaze.runtime_metadata.get("autogaze_model_forward_processed_frame_count"),
             "autogaze_result_build_latency_ms": gaze.runtime_metadata.get("autogaze_result_build_latency_ms"),
             "autogaze_stage_latency_ms": gaze.runtime_metadata.get("autogaze_stage_latency_ms", autogaze_stage_latency_ms),
             "vision_encoder_latency_ms": vision_encoder_latency_ms,
@@ -3234,6 +3370,15 @@ def build_streaming_metrics(
         "autogaze_model_forward_latency_per_window_ms": [
             item.get("autogaze_model_forward_latency_ms") for item in aggregate["per_window_metrics"]
         ],
+        "autogaze_model_forward_call_count_per_window": [
+            item.get("autogaze_model_forward_call_count") for item in aggregate["per_window_metrics"]
+        ],
+        "autogaze_model_forward_batch_latencies_per_window_ms": [
+            item.get("autogaze_model_forward_batch_latencies_ms") for item in aggregate["per_window_metrics"]
+        ],
+        "autogaze_model_forward_processed_frame_count_per_window": [
+            item.get("autogaze_model_forward_processed_frame_count") for item in aggregate["per_window_metrics"]
+        ],
         "autogaze_result_build_latency_per_window_ms": [
             item.get("autogaze_result_build_latency_ms") for item in aggregate["per_window_metrics"]
         ],
@@ -3259,6 +3404,11 @@ def build_streaming_metrics(
         "autogaze_preprocessing_latency_ms": autogaze_preprocessing_latency_ms,
         "autogaze_latency_ms": autogaze_total_latency_ms,
         "autogaze_model_forward_latency_ms": _sum_optional_metric(aggregate["per_window_metrics"], "autogaze_model_forward_latency_ms"),
+        "autogaze_model_forward_call_count": _sum_optional_count(aggregate["per_window_metrics"], "autogaze_model_forward_call_count"),
+        "autogaze_model_forward_processed_frame_count": _sum_optional_count(
+            aggregate["per_window_metrics"],
+            "autogaze_model_forward_processed_frame_count",
+        ),
         "autogaze_result_build_latency_ms": _sum_optional_metric(aggregate["per_window_metrics"], "autogaze_result_build_latency_ms"),
         "autogaze_stage_latency_ms": autogaze_stage_latency_ms,
         "mllm_generation_latency_ms": sum(
@@ -3377,6 +3527,12 @@ def build_metrics(
             processed_frame_count,
         ),
         "autogaze_model_forward_latency_ms": gaze.runtime_metadata.get("autogaze_model_forward_latency_ms"),
+        "autogaze_model_forward_call_count": gaze.runtime_metadata.get("autogaze_model_forward_call_count"),
+        "autogaze_model_forward_micro_batch_size": gaze.runtime_metadata.get("autogaze_model_forward_micro_batch_size"),
+        "autogaze_model_forward_batch_latencies_ms": gaze.runtime_metadata.get("autogaze_model_forward_batch_latencies_ms"),
+        "autogaze_model_forward_batch_ranges": gaze.runtime_metadata.get("autogaze_model_forward_batch_ranges"),
+        "autogaze_model_forward_processed_clip_count": gaze.runtime_metadata.get("autogaze_model_forward_processed_clip_count"),
+        "autogaze_model_forward_processed_frame_count": gaze.runtime_metadata.get("autogaze_model_forward_processed_frame_count"),
         "autogaze_result_build_latency_ms": gaze.runtime_metadata.get("autogaze_result_build_latency_ms"),
         "autogaze_stage_latency_ms": autogaze_stage_latency_ms,
         "vision_encoder_latency_ms": vision_encoder_latency_ms,
@@ -3406,6 +3562,13 @@ def _sum_optional_metric(items: list[Mapping[str, Any]], key: str) -> float | No
     if not any(value is not None for value in values):
         return None
     return sum(float(value or 0.0) for value in values)
+
+
+def _sum_optional_count(items: list[Mapping[str, Any]], key: str) -> int | None:
+    values = [item.get(key) for item in items]
+    if not any(value is not None for value in values):
+        return None
+    return sum(int(value or 0) for value in values)
 
 
 def _safe_latency_per_item(latency_ms: float | None, count: int | None) -> float | None:

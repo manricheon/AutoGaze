@@ -781,6 +781,123 @@ def test_real_autogaze_forward_latency_is_split_from_result_build(
     assert runtime["gazing_info_source"] == "real_autogaze_output"
 
 
+def test_real_autogaze_forward_latency_sums_all_chop_batches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_module = types.ModuleType("autogaze.models.autogaze")
+
+    class AutoGaze:
+        calls: list[tuple[int, int]] = []
+
+        @classmethod
+        def from_pretrained(cls, checkpoint: str):
+            instance = cls()
+            instance.checkpoint = checkpoint
+            return instance
+
+        def to(self, *, device: str, dtype: torch.dtype):
+            self.device = device
+            self.dtype = dtype
+            return self
+
+        def eval(self):
+            return self
+
+        def __call__(self, inputs, **kwargs):
+            video = inputs["video"]
+            batch, frames = int(video.shape[0]), int(video.shape[1])
+            self.calls.append((batch, frames))
+            time.sleep(0.001)
+            counts = torch.full((frames,), 2, dtype=torch.long)
+            positions = []
+            for frame_idx in range(frames):
+                positions.extend([frame_idx * 4, frame_idx * 4 + 1])
+            gazing_pos = torch.tensor([positions for _ in range(batch)], dtype=torch.long)
+            return {
+                "gazing_pos": gazing_pos,
+                "num_gazing_each_frame": counts,
+                "if_padded_gazing": torch.zeros_like(gazing_pos, dtype=torch.bool),
+                "num_vision_tokens_each_frame": torch.tensor(4, dtype=torch.long),
+            }
+
+    fake_module.AutoGaze = AutoGaze
+    monkeypatch.setitem(sys.modules, "autogaze.models.autogaze", fake_module)
+
+    checkpoint = tmp_path / "fake_autogaze"
+    checkpoint.mkdir()
+    cfg = load_config(_cfg("A2_modified_siglip_nvila_on.yaml"))
+    cfg["input"] = {"dummy_frames": 2, "dummy_resolution": 64}
+    cfg["autogaze"]["checkpoint_path"] = str(checkpoint)
+    cfg["autogaze"]["target_scales"] = [32]
+    cfg["mllm"]["processor_from_pretrained_kwargs"]["max_batch_size_autogaze"] = 1
+    cfg["frame_selection"] = {
+        **cfg["frame_selection"],
+        "mode": "sample",
+        "num_frames": 2,
+        "frame_interval": 1,
+        "max_windows": 1,
+    }
+    cfg["runtime"] = {**cfg["runtime"], "warmup_runs": 0}
+    cfg["video_input"] = {**cfg.get("video_input", {}), "read_mode": "full"}
+    cfg["memory"] = {
+        **cfg.get("memory", {}),
+        "safe_mode": False,
+        "fail_on_full_video_load": False,
+    }
+    cfg["scaling"] = {
+        **cfg["scaling"],
+        "mode": "resize_then_chop",
+        "resolution": 32,
+        "patch_size": 16,
+        "chop_size": 32,
+        "chop_overlap": 0,
+        "max_chops": 3,
+        "resize_before_chop_threshold": 1,
+        "resize_before_chop_factor": 1.0,
+    }
+    cfg["visualization"] = {
+        **cfg["visualization"],
+        "save_frame_images": False,
+        "save_overlay_video": False,
+        "save_side_by_side_video": False,
+        "save_scale_panel_video": False,
+    }
+    cfg_path = _write_cfg(tmp_path, cfg)
+    output_dir = tmp_path / "real_chop_forward_latency"
+
+    summary = infer_autogaze.run(
+        infer_autogaze.parse_args(
+            [
+                "--config",
+                str(cfg_path),
+                "--video-path",
+                "dummy",
+                "--output-dir",
+                str(output_dir),
+                "--allow-real-model-loading",
+                "--no-progress",
+            ]
+        )
+    )
+
+    assert summary["status"] == "completed"
+    metrics = json.loads((output_dir / "logs" / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["real_stub_blocked_status"] == "real"
+    assert metrics["number_of_processed_frames"] == 6
+    assert metrics["autogaze_latency_processed_frame_count"] == 6
+    assert metrics["autogaze_model_forward_call_count"] == 3
+    assert metrics["autogaze_model_forward_micro_batch_size"] == 1
+    assert metrics["autogaze_model_forward_processed_clip_count"] == 3
+    assert metrics["autogaze_model_forward_processed_frame_count"] == 6
+    assert len(metrics["autogaze_model_forward_batch_latencies_ms"]) == 3
+    assert metrics["autogaze_model_forward_latency_ms"] == pytest.approx(
+        sum(metrics["autogaze_model_forward_batch_latencies_ms"]),
+        rel=1e-6,
+    )
+    assert sum(item["processed_frame_count"] for item in metrics["autogaze_model_forward_batch_ranges"]) == 6
+
+
 def test_autogaze_selected_tokens_flow_to_modified_siglip_and_generic_mllm(tmp_path: Path) -> None:
     output_dir = tmp_path / "autogaze_tokens_vit_mllm"
     summary = infer_full.run(
