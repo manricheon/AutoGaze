@@ -4,6 +4,7 @@ The maintained PoC inference guide for this cleaned branch is:
 
 ```text
 docs/inference_guide_for_poc.md
+docs/POC_INFERENCE_GUIDE.md
 ```
 
 This file is kept because project instructions require `docs/INFERENCE_GUIDE.md` to exist. The detailed guide is intentionally separate and focused on the remaining inference-only branch surface.
@@ -41,6 +42,22 @@ Dummy smoke is not a model-quality test. Its outputs are deliberately labeled as
 Direct sparse token injection is disabled by default for external models. Use official processors, AutoGaze input-level frame/chop selection, or zero-mask probes until positional IDs, dense-grid behavior, projector compatibility, and visual placeholders are verified.
 
 The existing A0-A3 AutoGaze ON/OFF + NVILA inference configs remain the canonical path and keep their previous `official_processor` behavior.
+
+NVILA-HD-Video README-style inference presets are:
+
+```text
+configs/poc_inference/nvila_hd_smoke.yaml
+configs/poc_inference/nvila_hd_default.yaml
+configs/poc_inference/nvila_hd_memory_safe.yaml
+```
+
+The settings audit is documented in:
+
+```text
+docs/NVILA_HD_INFERENCE_UPDATE_AUDIT.md
+```
+
+Both `scripts/infer_full.py` and `scripts/infer_autogaze.py` accept `--num-video-frames`, `--num-video-frames-thumbnail`, `--max-tiles-video`, `--gazing-ratio-tile`, `--task-loss-requirement-tile`, `--gazing-ratio-thumbnail`, `--task-loss-requirement-thumbnail`, `--max-batch-size-autogaze`, and `--max-batch-size-siglip`. CLI values override config values and are written to runtime metadata and metrics.
 
 ## HLVid Evaluation
 
@@ -110,7 +127,7 @@ python scripts/infer_full.py \
 
 ## Streaming Video Inference
 
-`scripts/infer_autogaze.py` and `scripts/infer_full.py` now default to streaming video input through `video_input.read_mode: streaming`. The full-video loader is still available with `--video-read-mode full`, but real file inputs are blocked by default when `memory.fail_on_full_video_load: true`.
+`scripts/infer_autogaze.py` and `scripts/infer_full.py` default to non-streaming input through `video_input.read_mode: full`. Streaming is an explicit opt-in with `--video-read-mode streaming` or `video_input.read_mode: streaming`. Real file inputs remain blocked in full mode when `memory.fail_on_full_video_load: true`, so long/high-resolution runs should enable streaming instead of disabling the guard.
 
 The streaming path follows the QUICK_START.md guidance for long videos by processing bounded frame windows instead of stacking the whole video. Each window is decoded, scaled or chopped, sent through AutoGaze and the selected downstream path, written to disk, then released before the next window.
 
@@ -125,18 +142,18 @@ Full pipeline streaming uses `window_independent_generation` by default. It writ
 
 Visualization in streaming mode writes frame images immediately and uses incremental MP4 writers for `sampled_only` exports. `full_length` video export is blocked until it can be implemented without storing all frames.
 
-Memory safety options:
+Streaming memory safety options:
 
 ```yaml
 video_input:
-  read_mode: streaming
+  read_mode: full
   decode_backend: auto
   decode_fps: null
   max_decode_frames: null
   resize_before_buffer: true
 
 streaming:
-  enabled: true
+  enabled: false
   window_size: 16
   overlap: 0
   max_windows: null
@@ -152,6 +169,16 @@ memory:
   max_video_frames_in_memory: null
   max_pixels_per_window: null
   fail_on_full_video_load: true
+```
+
+For long videos, switch only the input policy:
+
+```yaml
+video_input:
+  read_mode: streaming
+
+streaming:
+  enabled: true
 ```
 
 AutoGaze-only streaming example:

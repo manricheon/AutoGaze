@@ -177,6 +177,16 @@ The full script always preserves query text in `predictions/answer.json` and `lo
 
 NVILA uses the official processor-first route represented by `docs/nvila-hd-video-readme.md`: load `AutoProcessor`, load `AutoModel`, format `{video_token}\n\n{prompt}`, pass video through the processor, call `generate`, and decode. The separate AutoGaze stage remains useful for visualization and metrics; direct visual-token injection into NVILA is not claimed.
 
+README-style NVILA-HD presets are available:
+
+```text
+configs/poc_inference/nvila_hd_smoke.yaml
+configs/poc_inference/nvila_hd_default.yaml
+configs/poc_inference/nvila_hd_memory_safe.yaml
+```
+
+These expose the official names from `docs/nvila-hd-video-readme.md`: `--num-video-frames`, `--num-video-frames-thumbnail`, `--max-tiles-video`, `--gazing-ratio-tile`, `--task-loss-requirement-tile`, `--gazing-ratio-thumbnail`, `--task-loss-requirement-thumbnail`, `--max-batch-size-autogaze`, and `--max-batch-size-siglip`. See `docs/NVILA_HD_INFERENCE_UPDATE_AUDIT.md` and `docs/POC_INFERENCE_GUIDE.md` for the full matrix and commands.
+
 ```bash
 python scripts/infer_full.py \
   --config configs/poc_inference/A2_modified_siglip_nvila_on.yaml \

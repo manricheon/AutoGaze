@@ -21,6 +21,19 @@ from PIL import Image, ImageDraw
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TORCH_DTYPE_DEPRECATION_WARNING = "`torch_dtype` is deprecated! Use `dtype` instead!"
 
+NVILA_HD_TILE_GAZE_DEFAULT = [0.2] + [0.06] * 15
+NVILA_HD_PROCESSOR_KEYS = (
+    "num_video_frames",
+    "num_video_frames_thumbnail",
+    "max_tiles_video",
+    "gazing_ratio_tile",
+    "task_loss_requirement_tile",
+    "gazing_ratio_thumbnail",
+    "task_loss_requirement_thumbnail",
+    "max_batch_size_autogaze",
+)
+NVILA_HD_MODEL_KEYS = ("max_batch_size_siglip",)
+
 
 SCALE_COLORS: dict[int, tuple[int, int, int]] = {
     0: (254, 240, 138),
@@ -428,6 +441,128 @@ def cli_or_config(value: Any, cfg: Mapping[str, Any], dotted: str, default: Any 
     return value if value is not None else nested_get(cfg, dotted, default)
 
 
+def add_nvila_hd_cli_args(parser: Any) -> None:
+    parser.add_argument("--num-video-frames", type=int, default=None)
+    parser.add_argument("--num-video-frames-thumbnail", type=int, default=None)
+    parser.add_argument("--max-tiles-video", type=int, default=None)
+    parser.add_argument("--gazing-ratio-tile", default=None)
+    parser.add_argument("--task-loss-requirement-tile", default=None)
+    parser.add_argument("--gazing-ratio-thumbnail", default=None)
+    parser.add_argument("--task-loss-requirement-thumbnail", default=None)
+    parser.add_argument("--max-batch-size-autogaze", type=int, default=None)
+    parser.add_argument("--max-batch-size-siglip", type=int, default=None)
+
+
+def apply_nvila_hd_overrides(cfg: dict[str, Any], args: Any) -> dict[str, Any]:
+    mllm = cfg.setdefault("mllm", {})
+    nvila_hd = cfg.setdefault("nvila_hd", {})
+    processor_kwargs = mllm.setdefault("processor_from_pretrained_kwargs", {})
+    model_kwargs = mllm.setdefault("from_pretrained_kwargs", {})
+    processor_cli_raw = {
+        "num_video_frames": getattr(args, "num_video_frames", None),
+        "num_video_frames_thumbnail": getattr(args, "num_video_frames_thumbnail", None),
+        "max_tiles_video": getattr(args, "max_tiles_video", None),
+        "gazing_ratio_tile": getattr(args, "gazing_ratio_tile", None),
+        "task_loss_requirement_tile": getattr(args, "task_loss_requirement_tile", None),
+        "gazing_ratio_thumbnail": getattr(args, "gazing_ratio_thumbnail", None),
+        "task_loss_requirement_thumbnail": getattr(args, "task_loss_requirement_thumbnail", None),
+        "max_batch_size_autogaze": getattr(args, "max_batch_size_autogaze", None),
+    }
+    model_cli = {"max_batch_size_siglip": getattr(args, "max_batch_size_siglip", None)}
+    for key, raw in processor_cli_raw.items():
+        if raw is not None:
+            value = parse_optional_number_or_list(raw)
+            processor_kwargs[key] = value
+            nvila_hd[key] = value
+    for key, value in model_cli.items():
+        if value is not None:
+            model_kwargs[key] = value
+            nvila_hd[key] = value
+    if getattr(args, "num_video_frames", None) is not None:
+        frame_selection = cfg.setdefault("frame_selection", {})
+        streaming = cfg.setdefault("streaming", {})
+        frame_selection["num_frames"] = int(args.num_video_frames)
+        streaming["window_size"] = int(args.num_video_frames)
+    cfg["nvila_hd_effective_settings"] = nvila_hd_effective_settings(cfg)
+    return cfg
+
+
+def nvila_hd_effective_settings(cfg: Mapping[str, Any]) -> dict[str, Any]:
+    processor_kwargs = nested_get(cfg, "mllm.processor_from_pretrained_kwargs", {}) or {}
+    model_kwargs = nested_get(cfg, "mllm.from_pretrained_kwargs", {}) or {}
+    nvila_hd = nested_get(cfg, "nvila_hd", {}) or {}
+    result: dict[str, Any] = {}
+    defaults = {
+        "num_video_frames": None,
+        "num_video_frames_thumbnail": None,
+        "max_tiles_video": None,
+        "gazing_ratio_tile": None,
+        "task_loss_requirement_tile": None,
+        "gazing_ratio_thumbnail": None,
+        "task_loss_requirement_thumbnail": None,
+        "max_batch_size_autogaze": None,
+        "max_batch_size_siglip": None,
+    }
+    for key, default in defaults.items():
+        if key in processor_kwargs:
+            result[key] = processor_kwargs[key]
+        elif key in model_kwargs:
+            result[key] = model_kwargs[key]
+        elif key in nvila_hd:
+            result[key] = nvila_hd[key]
+        else:
+            result[key] = default
+    result["video_read_mode"] = nested_get(cfg, "video_input.read_mode", "full")
+    result["decode_backend"] = nested_get(cfg, "video_input.decode_backend", "auto")
+    result["max_decode_frames"] = nested_get(cfg, "video_input.max_decode_frames", None)
+    result["fail_on_full_video_load"] = nested_get(cfg, "memory.fail_on_full_video_load", True)
+    result["cpu_offload_between_windows"] = nested_get(cfg, "streaming.cpu_offload_between_windows", True)
+    result["empty_cache_between_windows"] = nested_get(cfg, "streaming.empty_cache_between_windows", False)
+    result["autogaze_enabled"] = bool(nested_get(cfg, "autogaze.enabled", False))
+    result["official_processor_path"] = bool(nested_get(cfg, "mllm.official_processor_path", False))
+    result["video_input_source"] = nested_get(cfg, "mllm.video_input_source", None)
+    return json_safe(result)
+
+
+def nvila_hd_gaze_ratio(cfg: Mapping[str, Any], cli_gaze_ratio: Any = None) -> Any:
+    if cli_gaze_ratio is not None:
+        return cli_gaze_ratio
+    value = nested_get(cfg, "mllm.processor_from_pretrained_kwargs.gazing_ratio_tile", None)
+    if value is not None:
+        return value
+    value = nested_get(cfg, "nvila_hd.gazing_ratio_tile", None)
+    if value is not None:
+        return value
+    return nested_get(cfg, "autogaze.gaze_ratio", 0.75)
+
+
+def nvila_hd_task_loss_requirement(cfg: Mapping[str, Any], cli_task_loss_requirement: Any = None) -> Any:
+    if cli_task_loss_requirement is not None:
+        return cli_task_loss_requirement
+    value = nested_get(cfg, "mllm.processor_from_pretrained_kwargs.task_loss_requirement_tile", None)
+    if value is not None:
+        return value
+    value = nested_get(cfg, "nvila_hd.task_loss_requirement_tile", None)
+    if value is not None:
+        return value
+    return nested_get(cfg, "autogaze.task_loss_requirement", 0.7)
+
+
+def parse_optional_number_or_list(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (int, float, list, tuple)):
+        return list(value) if isinstance(value, tuple) else value
+    text = str(value).strip()
+    if text.lower() in {"none", "null"}:
+        return None
+    if text.startswith("["):
+        return json.loads(text)
+    if "," in text:
+        return [float(item.strip()) for item in text.split(",") if item.strip()]
+    return float(text)
+
+
 def resolve_frame_selection_max_windows(
     *,
     cli_max_windows: Any,
@@ -452,6 +587,12 @@ def _normalize_max_windows(value: Any) -> int | None:
 
 
 def normalize_device(device: str) -> str:
+    if device == "auto":
+        if torch.cuda.is_available():
+            return "cuda"
+        if torch.backends.mps.is_available():
+            return "mps"
+        return "cpu"
     if device == "cuda" and not torch.cuda.is_available():
         return "cpu"
     if device == "mps" and not torch.backends.mps.is_available():
@@ -486,9 +627,18 @@ def make_dummy_video(num_frames: int = 8, height: int = 64, width: int = 64) -> 
     return torch.stack(frames, dim=0)
 
 
-def load_video_frames(video_path: str, *, dummy_frames: int, dummy_resolution: int) -> tuple[torch.Tensor, str, float | None]:
+def load_video_frames(
+    video_path: str,
+    *,
+    dummy_frames: int,
+    dummy_resolution: int,
+    max_decode_frames: int | None = None,
+) -> tuple[torch.Tensor, str, float | None]:
+    if max_decode_frames is not None and int(max_decode_frames) <= 0:
+        raise ValueError("max_decode_frames must be > 0 when provided")
     if video_path == "dummy":
-        return make_dummy_video(dummy_frames, dummy_resolution, dummy_resolution), "dummy", None
+        frame_count = min(int(dummy_frames), int(max_decode_frames)) if max_decode_frames is not None else int(dummy_frames)
+        return make_dummy_video(frame_count, dummy_resolution, dummy_resolution), "dummy", None
     path = resolve_path(video_path)
     if not path.exists():
         raise FileNotFoundError(f"video file does not exist: {path}")
@@ -505,6 +655,8 @@ def load_video_frames(video_path: str, *, dummy_frames: int, dummy_resolution: i
             array = frame.to_ndarray(format="rgb24")
             tensor = torch.from_numpy(array).permute(2, 0, 1).float() / 255.0
             frames.append(tensor)
+            if max_decode_frames is not None and len(frames) >= int(max_decode_frames):
+                break
     if not frames:
         raise ValueError(f"no frames decoded from video: {path}")
     return torch.stack(frames, dim=0), "file", fps
@@ -991,6 +1143,30 @@ def validate_stream_window_memory(
         )
 
 
+def validate_source_video_memory(
+    video: torch.Tensor,
+    *,
+    max_frames_in_memory: int | None,
+    max_pixels_per_window: int | None,
+) -> None:
+    frame_count = int(video.shape[0])
+    height = int(video.shape[-2])
+    width = int(video.shape[-1])
+    if max_frames_in_memory is not None and frame_count > int(max_frames_in_memory):
+        raise RuntimeError(
+            "full video memory guard blocked input: "
+            f"{frame_count} decoded frames exceed max_video_frames_in_memory={max_frames_in_memory}. "
+            "Set video_input.max_decode_frames lower, use sample mode, or use --video-read-mode streaming."
+        )
+    pixels = frame_count * height * width
+    if max_pixels_per_window is not None and pixels > int(max_pixels_per_window):
+        raise RuntimeError(
+            "full video memory guard blocked input: "
+            f"{pixels} decoded frame-pixels exceed max_pixels_per_window={max_pixels_per_window}. "
+            "Set video_input.max_decode_frames lower, resize before full loading is not available, or use streaming."
+        )
+
+
 def validate_prepared_video_memory(
     prepared: PreparedVideo,
     *,
@@ -1039,6 +1215,9 @@ def prepare_video(
     chop_merge_mode: str,
     resize_before_chop_threshold: int = 1024,
     resize_before_chop_factor: float = 0.5,
+    max_decode_frames: int | None = None,
+    max_frames_in_memory: int | None = None,
+    max_pixels_per_window: int | None = None,
 ) -> PreparedVideo:
     dummy_frames = int(nested_get(cfg, "input.dummy_frames", max(num_frames, 8)))
     dummy_resolution = int(nested_get(cfg, "input.dummy_resolution", max(resolution, 64)))
@@ -1046,6 +1225,12 @@ def prepare_video(
         video_path,
         dummy_frames=dummy_frames,
         dummy_resolution=dummy_resolution,
+        max_decode_frames=max_decode_frames,
+    )
+    validate_source_video_memory(
+        source_video,
+        max_frames_in_memory=max_frames_in_memory,
+        max_pixels_per_window=max_pixels_per_window,
     )
     source_frame_count = int(source_video.shape[0])
     drop_incomplete_chop_windows = (
@@ -1377,8 +1562,8 @@ def run_autogaze_stage(
     device: str,
     dtype: str,
     requested_dtype: str | None = None,
-    gaze_ratio: float,
-    task_loss_requirement: float | None,
+    gaze_ratio: Any,
+    task_loss_requirement: Any,
     strict_autogaze_params: bool,
     allow_real_model_loading: bool,
     warmup_runs: int = 0,
@@ -1401,6 +1586,7 @@ def run_autogaze_stage(
         "autogaze_forced_float32": dtype == "float32" and requested_dtype != "float32",
         "patch_size": int(nested_get(cfg, "scaling.patch_size", 16)),
         "scales": configured_scales(cfg),
+        "nvila_hd": nvila_hd_effective_settings(cfg),
     }
 
     if not autogaze_enabled:
@@ -1488,8 +1674,8 @@ def _run_real_autogaze(
     *,
     device: str,
     dtype: str,
-    gaze_ratio: float,
-    task_loss_requirement: float | None,
+    gaze_ratio: Any,
+    task_loss_requirement: Any,
     runtime_metadata: dict[str, Any],
     warmup_runs: int,
     progress: ProgressReporter,
@@ -1533,8 +1719,8 @@ def build_gaze_result(
     status: str,
     reason: str | None,
     real_model_used: bool,
-    gaze_ratio: float,
-    task_loss_requirement: float | None,
+    gaze_ratio: Any,
+    task_loss_requirement: Any,
     runtime_metadata: dict[str, Any],
     latency_ms: float,
     real_outputs: Mapping[str, Any] | None = None,
@@ -1577,8 +1763,9 @@ def build_gaze_result(
                 per_frame.append(_frame_gaze_record(prepared.frame_records[record_index], local, tokens_each, record_index, scale_layout))
                 offset += count
     else:
-        selected_count = tokens_per_frame if not autogaze_enabled else max(1, min(tokens_per_frame, math.ceil(tokens_per_frame * gaze_ratio)))
         for idx in range(len(prepared.frame_records)):
+            frame_ratio = gaze_ratio_for_frame(gaze_ratio, idx)
+            selected_count = tokens_per_frame if not autogaze_enabled else max(1, min(tokens_per_frame, math.ceil(tokens_per_frame * frame_ratio)))
             local_indices = _deterministic_patch_indices(idx, tokens_per_frame, selected_count)
             per_frame.append(_frame_gaze_record(prepared.frame_records[idx], local_indices, tokens_per_frame, idx, scale_layout))
 
@@ -1595,7 +1782,7 @@ def build_gaze_result(
         "scale_layout": scale_layout,
         "gaze_ratio": gaze_ratio,
         "task_loss_requirement": task_loss_requirement,
-        "encoder_side_acceleration_claimed": bool(real_model_used and autogaze_enabled),
+        "encoder_side_acceleration_claimed": False,
     }
     gazing_info_for_vit = None
     if real_outputs is not None:
@@ -1626,6 +1813,14 @@ def _counts_for_batch(counts: torch.Tensor, *, batch_idx: int, frame_count: int)
         return [int(item) for item in counts.tolist()]
     selected = counts[min(batch_idx, counts.shape[0] - 1)]
     return [int(item) for item in selected.reshape(-1).tolist()]
+
+
+def gaze_ratio_for_frame(value: Any, frame_index: int) -> float:
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return 1.0
+        return float(value[min(int(frame_index), len(value) - 1)])
+    return float(value)
 
 
 def _deterministic_patch_indices(frame_idx: int, total: int, selected_count: int) -> list[int]:
@@ -2838,6 +3033,7 @@ def build_streaming_metrics(
     gaze_statuses = list(aggregate.get("gaze_statuses") or [])
     real_stub_blocked_status = gaze_statuses[0] if len(set(gaze_statuses)) <= 1 and gaze_statuses else "mixed"
     runtime_metadata = dict(aggregate.get("runtime_metadata") or {})
+    nvila_hd = nvila_hd_effective_settings(cfg)
     return {
         "mode": mode,
         "config_path": cfg.get("_config_path"),
@@ -2874,6 +3070,18 @@ def build_streaming_metrics(
         "autogaze_forced_float32": runtime_metadata.get("autogaze_forced_float32"),
         "gaze_ratio": runtime_metadata.get("gaze_ratio"),
         "task_loss_requirement": runtime_metadata.get("task_loss_requirement"),
+        "nvila_hd": nvila_hd,
+        "num_video_frames": nvila_hd.get("num_video_frames"),
+        "num_video_frames_thumbnail": nvila_hd.get("num_video_frames_thumbnail"),
+        "max_tiles_video": nvila_hd.get("max_tiles_video"),
+        "effective_gazing_ratio_tile": nvila_hd.get("gazing_ratio_tile"),
+        "effective_task_loss_requirement_tile": nvila_hd.get("task_loss_requirement_tile"),
+        "effective_gazing_ratio_thumbnail": nvila_hd.get("gazing_ratio_thumbnail"),
+        "effective_task_loss_requirement_thumbnail": nvila_hd.get("task_loss_requirement_thumbnail"),
+        "max_batch_size_autogaze": nvila_hd.get("max_batch_size_autogaze"),
+        "max_batch_size_siglip": nvila_hd.get("max_batch_size_siglip"),
+        "number_of_tiles_processed": _streaming_tile_count(aggregate, nvila_hd),
+        "number_of_thumbnail_frames_processed": nvila_hd.get("num_video_frames_thumbnail"),
         "original_token_count": original,
         "selected_token_count": selected,
         "token_reduction_ratio": token_reduction_ratio,
@@ -2881,6 +3089,8 @@ def build_streaming_metrics(
         "autogaze_selected_visual_token_count": selected,
         "estimated_visual_token_savings_ratio": token_reduction_ratio,
         "selected_patches_per_window": [item["selected_token_count"] for item in aggregate["per_window_metrics"]],
+        "selected_patches_per_frame": [item["selected_token_count"] for item in aggregate["per_frame"]],
+        "selected_patches_per_scale": _sum_scale_counts(aggregate["per_frame"]),
         "original_token_count_per_window": [item["original_token_count"] for item in aggregate["per_window_metrics"]],
         "token_reduction_ratio_per_window": [item["token_reduction_ratio"] for item in aggregate["per_window_metrics"]],
         "preprocessing_latency_per_window_ms": [item["preprocessing_latency_ms"] for item in aggregate["per_window_metrics"]],
@@ -2933,6 +3143,7 @@ def build_metrics(
     warmup_runs: int = 0,
 ) -> dict[str, Any]:
     module_processing_latency_ms = total_latency_ms
+    nvila_hd = nvila_hd_effective_settings(cfg)
     return {
         "mode": mode,
         "config_path": cfg.get("_config_path"),
@@ -2959,6 +3170,18 @@ def build_metrics(
         "autogaze_forced_float32": gaze.runtime_metadata.get("autogaze_forced_float32"),
         "gaze_ratio": gaze.runtime_metadata.get("gaze_ratio"),
         "task_loss_requirement": gaze.runtime_metadata.get("task_loss_requirement"),
+        "nvila_hd": nvila_hd,
+        "num_video_frames": nvila_hd.get("num_video_frames"),
+        "num_video_frames_thumbnail": nvila_hd.get("num_video_frames_thumbnail"),
+        "max_tiles_video": nvila_hd.get("max_tiles_video"),
+        "effective_gazing_ratio_tile": nvila_hd.get("gazing_ratio_tile"),
+        "effective_task_loss_requirement_tile": nvila_hd.get("task_loss_requirement_tile"),
+        "effective_gazing_ratio_thumbnail": nvila_hd.get("gazing_ratio_thumbnail"),
+        "effective_task_loss_requirement_thumbnail": nvila_hd.get("task_loss_requirement_thumbnail"),
+        "max_batch_size_autogaze": nvila_hd.get("max_batch_size_autogaze"),
+        "max_batch_size_siglip": nvila_hd.get("max_batch_size_siglip"),
+        "number_of_tiles_processed": _prepared_tile_count(prepared, nvila_hd),
+        "number_of_thumbnail_frames_processed": nvila_hd.get("num_video_frames_thumbnail"),
         "original_token_count": gaze.original_token_count,
         "selected_token_count": gaze.selected_token_count,
         "token_reduction_ratio": gaze.token_reduction_ratio,
@@ -2983,12 +3206,32 @@ def build_metrics(
         "output_text": output_text,
         "skipped_stages": skipped_stages,
         "failure_reason": skipped_stages[0]["reason"] if skipped_stages else None,
-        "encoder_side_acceleration_claimed": bool(gaze.real_model_used and gaze.autogaze_enabled),
+        "encoder_side_acceleration_claimed": False,
     }
 
 
 def _source_frame_count(frame_records: list[Mapping[str, Any]]) -> int:
     return len({int(item.get("source_frame_index", idx)) for idx, item in enumerate(frame_records) if not bool(item.get("is_padded", False))})
+
+
+def _prepared_tile_count(prepared: PreparedVideo, nvila_hd: Mapping[str, Any]) -> int | None:
+    max_tiles = nvila_hd.get("max_tiles_video")
+    if max_tiles is None:
+        return None
+    chops = _spatial_chops_per_window(prepared.chop_metadata)
+    if chops:
+        return sum(min(int(max_tiles), int(count)) for count in chops.values())
+    return min(int(max_tiles), 1)
+
+
+def _streaming_tile_count(aggregate: Mapping[str, Any], nvila_hd: Mapping[str, Any]) -> int | None:
+    max_tiles = nvila_hd.get("max_tiles_video")
+    if max_tiles is None:
+        return None
+    chop_windows = aggregate.get("chop_windows") or []
+    if chop_windows:
+        return sum(min(int(max_tiles), int(window.get("spatial_chop_count", 0))) for window in chop_windows)
+    return min(int(max_tiles), max(1, len(aggregate.get("windows") or [])))
 
 
 def _spatial_chops_per_window(chop_metadata: Mapping[str, Any] | None) -> dict[str, int] | None:

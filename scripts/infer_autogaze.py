@@ -10,7 +10,9 @@ from typing import Any
 from poc_infer_utils import (
     ProgressReporter,
     StreamingVisualizationSink,
+    add_nvila_hd_cli_args,
     add_streaming_window_result,
+    apply_nvila_hd_overrides,
     build_metrics,
     build_streaming_metrics,
     cli_or_config,
@@ -18,6 +20,8 @@ from poc_infer_utils import (
     load_config,
     nested_get,
     new_streaming_aggregate,
+    nvila_hd_gaze_ratio,
+    nvila_hd_task_loss_requirement,
     normalize_device,
     prepare_stream_window,
     prepare_video,
@@ -38,8 +42,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", required=True)
     parser.add_argument("--video-path", required=True)
     parser.add_argument("--output-dir", default=None)
-    parser.add_argument("--device", choices=["cpu", "cuda", "mps"], default=None)
+    parser.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"], default=None)
     parser.add_argument("--dtype", choices=["float32", "float16", "bfloat16"], default=None)
+    add_nvila_hd_cli_args(parser)
 
     parser.add_argument("--frame-selection-mode", choices=["sample", "chunk", "interval", "all"], default=None)
     parser.add_argument("--num-frames", type=int, default=None)
@@ -102,7 +107,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
     run_start = time.perf_counter()
-    cfg = load_config(args.config)
+    cfg = apply_nvila_hd_overrides(load_config(args.config), args)
     device = normalize_device(str(cli_or_config(args.device, cfg, "runtime.device", "cpu")))
     requested_dtype = str(cli_or_config(args.dtype, cfg, "runtime.dtype", "float32"))
     autogaze_dtype = "float32"
@@ -111,7 +116,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     output_dir = Path(str(cli_or_config(args.output_dir, cfg, "output.output_dir", "outputs/poc_autogaze"))).expanduser()
     if not output_dir.is_absolute():
         output_dir = Path.cwd() / output_dir
-    video_read_mode = str(cli_or_config(args.video_read_mode, cfg, "video_input.read_mode", "streaming"))
+    video_read_mode = str(cli_or_config(args.video_read_mode, cfg, "video_input.read_mode", "full"))
     if video_read_mode == "streaming":
         return _run_streaming(args, cfg=cfg, output_dir=output_dir, run_start=run_start)
     fail_on_full = bool(cli_or_config(args.fail_on_full_video_load, cfg, "memory.fail_on_full_video_load", True))
@@ -143,6 +148,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         chop_merge_mode=str(cli_or_config(args.chop_merge_mode, cfg, "scaling.chop_merge_mode", "metadata_only")),
         resize_before_chop_threshold=int(cli_or_config(args.resize_before_chop_threshold, cfg, "scaling.resize_before_chop_threshold", 1024)),
         resize_before_chop_factor=float(cli_or_config(args.resize_before_chop_factor, cfg, "scaling.resize_before_chop_factor", 0.5)),
+        max_decode_frames=cli_or_config(args.max_decode_frames, cfg, "video_input.max_decode_frames", None),
+        max_frames_in_memory=cli_or_config(args.max_frames_in_memory, cfg, "memory.max_video_frames_in_memory", None),
+        max_pixels_per_window=cli_or_config(args.max_pixels_per_window, cfg, "memory.max_pixels_per_window", None),
     )
     validate_prepared_video_memory(
         prepared,
@@ -167,8 +175,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         device=device,
         dtype=autogaze_dtype,
         requested_dtype=requested_dtype,
-        gaze_ratio=float(cli_or_config(args.gaze_ratio, cfg, "autogaze.gaze_ratio", 0.75)),
-        task_loss_requirement=cli_or_config(args.task_loss_requirement, cfg, "autogaze.task_loss_requirement", 0.7),
+        gaze_ratio=nvila_hd_gaze_ratio(cfg, args.gaze_ratio),
+        task_loss_requirement=nvila_hd_task_loss_requirement(cfg, args.task_loss_requirement),
         strict_autogaze_params=bool(args.strict_autogaze_params or nested_get(cfg, "autogaze.strict_params", False)),
         allow_real_model_loading=allow_real,
         warmup_runs=warmup_runs if allow_real else 0,
@@ -366,8 +374,8 @@ def _run_streaming(args: argparse.Namespace, *, cfg: dict[str, Any], output_dir:
             device=device,
             dtype=autogaze_dtype,
             requested_dtype=requested_dtype,
-            gaze_ratio=float(cli_or_config(args.gaze_ratio, cfg, "autogaze.gaze_ratio", 0.75)),
-            task_loss_requirement=cli_or_config(args.task_loss_requirement, cfg, "autogaze.task_loss_requirement", 0.7),
+            gaze_ratio=nvila_hd_gaze_ratio(cfg, args.gaze_ratio),
+            task_loss_requirement=nvila_hd_task_loss_requirement(cfg, args.task_loss_requirement),
             strict_autogaze_params=bool(args.strict_autogaze_params or nested_get(cfg, "autogaze.strict_params", False)),
             allow_real_model_loading=allow_real,
             warmup_runs=warmup_runs if allow_real and stream_window.window_id == 0 else 0,
