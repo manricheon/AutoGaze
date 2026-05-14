@@ -78,10 +78,10 @@ streaming:
   keep_window_outputs_in_memory: false
 
 memory:
-  safe_mode: true
+  safe_mode: false
   max_video_frames_in_memory: null
   max_pixels_per_window: null
-  fail_on_full_video_load: true
+  fail_on_full_video_load: false
 
 scaling:
   mode: resize

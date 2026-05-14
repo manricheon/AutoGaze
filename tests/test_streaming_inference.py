@@ -278,4 +278,5 @@ def test_canonical_configs_declare_non_streaming_base_defaults() -> None:
         assert cfg["video_input"]["read_mode"] == "full"
         assert cfg["streaming"]["enabled"] is False
         assert cfg["streaming"]["full_pipeline_policy"] == "window_independent_generation"
-        assert cfg["memory"]["fail_on_full_video_load"] is True
+        assert cfg["memory"]["safe_mode"] is False
+        assert cfg["memory"]["fail_on_full_video_load"] is False
