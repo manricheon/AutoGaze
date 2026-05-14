@@ -10,12 +10,15 @@ from typing import Any
 from poc_infer_utils import (
     ProgressReporter,
     StreamingVisualizationSink,
+    attach_memory_snapshots,
     add_nvila_hd_cli_args,
     add_streaming_window_result,
     apply_nvila_hd_overrides,
     build_metrics,
     build_streaming_metrics,
     cli_or_config,
+    capture_memory_snapshot,
+    format_concise_summary,
     iter_stream_windows,
     load_config,
     nested_get,
@@ -125,6 +128,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "full video loading is disabled by memory.fail_on_full_video_load; use --video-read-mode streaming "
             "or set memory.fail_on_full_video_load=false in config for an explicit full-load run"
         )
+    memory_snapshots = [capture_memory_snapshot("start", device=device)]
 
     preprocessing_start = time.perf_counter()
     frame_selection_mode = str(cli_or_config(args.frame_selection_mode, cfg, "frame_selection.mode", "sample"))
@@ -168,6 +172,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         ),
     )
     preprocessing_latency_ms = (time.perf_counter() - preprocessing_start) * 1000
+    memory_snapshots.append(capture_memory_snapshot("after_preprocessing", device=device))
     allow_real = bool(args.allow_real_model_loading or nested_get(cfg, "runtime.allow_real_model_loading", False))
     gaze = run_autogaze_stage(
         cfg,
@@ -182,6 +187,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         warmup_runs=warmup_runs if allow_real else 0,
         progress=progress,
     )
+    memory_snapshots.append(capture_memory_snapshot("after_autogaze", device=device))
 
     artifacts = write_autogaze_artifacts(output_dir, prepared, gaze)
     visualization_start = time.perf_counter()
@@ -206,6 +212,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
     )
     visualization_latency_ms = (time.perf_counter() - visualization_start) * 1000
+    memory_snapshots.append(capture_memory_snapshot("after_visualization", device=device))
 
     skipped = []
     if gaze.status == "blocked":
@@ -234,6 +241,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         wall_clock_latency_ms=wall_clock_latency_ms,
         warmup_runs=warmup_runs,
     )
+    attach_memory_snapshots(metrics, memory_snapshots)
     summary = {
         "mode": "autogaze_only",
         "status": "blocked" if gaze.status == "blocked" else "partial" if gaze.status.startswith("stub") else "completed",
@@ -250,6 +258,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
 def _run_streaming(args: argparse.Namespace, *, cfg: dict[str, Any], output_dir: Path, run_start: float) -> dict[str, Any]:
     device = normalize_device(str(cli_or_config(args.device, cfg, "runtime.device", "cpu")))
+    memory_snapshots = [capture_memory_snapshot("start", device=device)]
     requested_dtype = str(cli_or_config(args.dtype, cfg, "runtime.dtype", "float32"))
     autogaze_dtype = "float32"
     warmup_runs = max(0, int(cli_or_config(args.warmup_runs, cfg, "runtime.warmup_runs", 1)))
@@ -439,6 +448,8 @@ def _run_streaming(args: argparse.Namespace, *, cfg: dict[str, Any], output_dir:
         visualization_latency_ms=visualization_latency_total,
         warmup_runs=warmup_runs,
     )
+    memory_snapshots.append(capture_memory_snapshot("end", device=device))
+    attach_memory_snapshots(metrics, memory_snapshots)
     summary = {
         "mode": "autogaze_only",
         "status": status,
@@ -459,6 +470,8 @@ def main(argv: list[str] | None = None) -> int:
     summary = run(args)
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True))
+    else:
+        print(format_concise_summary(summary))
     return 2 if summary["status"] == "blocked" else 0
 
 

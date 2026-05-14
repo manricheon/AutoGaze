@@ -5,6 +5,7 @@ import csv
 import json
 import logging
 import math
+import resource
 import sys
 import time
 from contextlib import contextmanager
@@ -380,6 +381,248 @@ def json_safe(value: Any) -> Any:
     if hasattr(value, "shape"):
         return [int(dim) for dim in value.shape]
     return value
+
+
+def tensor_nbytes(value: Any) -> int | None:
+    if not isinstance(value, torch.Tensor):
+        return None
+    return int(value.numel() * value.element_size())
+
+
+def bytes_to_mib(value: int | float | None) -> float | None:
+    if value is None:
+        return None
+    return float(value) / float(1024 * 1024)
+
+
+def tensor_memory_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, torch.Tensor):
+        return {
+            "shape": None,
+            "dtype": None,
+            "numel": None,
+            "bytes": None,
+            "mib": None,
+        }
+    nbytes = tensor_nbytes(value)
+    return {
+        "shape": [int(dim) for dim in value.shape],
+        "dtype": str(value.dtype).replace("torch.", ""),
+        "numel": int(value.numel()),
+        "bytes": nbytes,
+        "mib": bytes_to_mib(nbytes),
+    }
+
+
+def capture_memory_snapshot(label: str, *, device: str | None = None) -> dict[str, Any]:
+    process_peak_rss_bytes = _process_peak_rss_bytes()
+    snapshot: dict[str, Any] = {
+        "label": str(label),
+        "timestamp": time.time(),
+        "process_peak_rss_bytes": process_peak_rss_bytes,
+        "process_peak_rss_mib": bytes_to_mib(process_peak_rss_bytes),
+        "process_rss_current_bytes": None,
+        "process_rss_current_mib": None,
+        "process_rss_current_unavailable": True,
+    }
+    device_name = str(device or "")
+    if device_name.startswith("cuda") and torch.cuda.is_available():
+        allocated = int(torch.cuda.memory_allocated())
+        reserved = int(torch.cuda.memory_reserved())
+        max_allocated = int(torch.cuda.max_memory_allocated())
+        max_reserved = int(torch.cuda.max_memory_reserved())
+        snapshot.update(
+            {
+                "cuda_memory_allocated_bytes": allocated,
+                "cuda_memory_allocated_mib": bytes_to_mib(allocated),
+                "cuda_memory_reserved_bytes": reserved,
+                "cuda_memory_reserved_mib": bytes_to_mib(reserved),
+                "cuda_max_memory_allocated_bytes": max_allocated,
+                "cuda_max_memory_allocated_mib": bytes_to_mib(max_allocated),
+                "cuda_max_memory_reserved_bytes": max_reserved,
+                "cuda_max_memory_reserved_mib": bytes_to_mib(max_reserved),
+            }
+        )
+    else:
+        snapshot.update(
+            {
+                "cuda_memory_allocated_bytes": None,
+                "cuda_memory_allocated_mib": None,
+                "cuda_memory_reserved_bytes": None,
+                "cuda_memory_reserved_mib": None,
+                "cuda_max_memory_allocated_bytes": None,
+                "cuda_max_memory_allocated_mib": None,
+                "cuda_max_memory_reserved_bytes": None,
+                "cuda_max_memory_reserved_mib": None,
+            }
+        )
+    return snapshot
+
+
+def prepared_video_memory_metrics(prepared: "PreparedVideo") -> dict[str, Any]:
+    source_summary = tensor_memory_summary(prepared.source_video)
+    processed_summary = tensor_memory_summary(prepared.processed_video)
+    source_frame_count = _source_frame_count(prepared.frame_records)
+    processed_frame_count = len(prepared.frame_records)
+    source_bytes = source_summary["bytes"]
+    processed_bytes = processed_summary["bytes"]
+    return {
+        "source_video_tensor_shape": source_summary["shape"],
+        "source_video_tensor_dtype": source_summary["dtype"],
+        "source_video_tensor_numel": source_summary["numel"],
+        "source_video_tensor_bytes": source_bytes,
+        "source_video_tensor_mib": source_summary["mib"],
+        "processed_video_tensor_shape": processed_summary["shape"],
+        "processed_video_tensor_dtype": processed_summary["dtype"],
+        "processed_video_tensor_numel": processed_summary["numel"],
+        "processed_video_tensor_bytes": processed_bytes,
+        "processed_video_tensor_mib": processed_summary["mib"],
+        "processed_video_clip_count": int(prepared.processed_video.shape[0]) if prepared.processed_video.ndim == 5 else None,
+        "processed_video_frames_per_clip": int(prepared.processed_video.shape[1]) if prepared.processed_video.ndim == 5 else None,
+        "processed_frame_count": processed_frame_count,
+        "source_frame_count": source_frame_count,
+        "processed_to_source_frame_expansion_ratio": _safe_ratio(processed_frame_count, source_frame_count),
+        "processed_to_source_tensor_byte_ratio": _safe_ratio(processed_bytes, source_bytes),
+        "spatial_chop_count_total": _total_spatial_chops(prepared.chop_metadata),
+        "scaling_window_count": len(prepared.scaling_metadata.get("windows", [])),
+    }
+
+
+def _process_peak_rss_bytes() -> int | None:
+    try:
+        raw = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    except Exception:
+        return None
+    if raw <= 0:
+        return None
+    if sys.platform == "darwin":
+        return raw
+    return raw * 1024
+
+
+def _safe_ratio(numerator: int | float | None, denominator: int | float | None) -> float | None:
+    if numerator is None or denominator is None or float(denominator) == 0.0:
+        return None
+    return float(numerator) / float(denominator)
+
+
+def _total_spatial_chops(chop_metadata: Mapping[str, Any] | None) -> int | None:
+    if chop_metadata is None:
+        return None
+    return sum(int(window.get("spatial_chop_count", len(window.get("records", [])))) for window in chop_metadata.get("windows", []))
+
+
+def attach_memory_snapshots(metrics: dict[str, Any], snapshots: list[Mapping[str, Any]]) -> dict[str, Any]:
+    metrics["memory_snapshots"] = list(snapshots)
+    if snapshots:
+        last = dict(snapshots[-1])
+        metrics["process_peak_rss_bytes"] = last.get("process_peak_rss_bytes")
+        metrics["process_peak_rss_mib"] = last.get("process_peak_rss_mib")
+        metrics["cuda_max_memory_allocated_bytes"] = _max_optional_count(
+            [item.get("cuda_max_memory_allocated_bytes") for item in snapshots]
+        )
+        metrics["cuda_max_memory_allocated_mib"] = bytes_to_mib(metrics["cuda_max_memory_allocated_bytes"])
+        metrics["cuda_max_memory_reserved_bytes"] = _max_optional_count(
+            [item.get("cuda_max_memory_reserved_bytes") for item in snapshots]
+        )
+        metrics["cuda_max_memory_reserved_mib"] = bytes_to_mib(metrics["cuda_max_memory_reserved_bytes"])
+    return metrics
+
+
+def format_concise_summary(summary: Mapping[str, Any]) -> str:
+    metrics = summary.get("metrics") if isinstance(summary.get("metrics"), Mapping) else {}
+    if not isinstance(metrics, Mapping):
+        metrics = {}
+    lines = [
+        (
+            f"Status: {summary.get('status')} | mode={summary.get('mode')} | "
+            f"output={summary.get('output_dir')}"
+        ),
+        (
+            "Frames: "
+            f"source={_fmt_value(metrics.get('number_of_source_frames'))} "
+            f"processed={_fmt_value(metrics.get('number_of_processed_frames'))} "
+            f"windows={_fmt_value(metrics.get('number_of_windows'))} "
+            f"chops={_fmt_value(metrics.get('spatial_chop_count_total') or _sum_chops_from_metrics(metrics))} "
+            f"scaling={_fmt_value(metrics.get('scaling_mode'))}"
+        ),
+        (
+            "Tokens: "
+            f"original={_fmt_value(metrics.get('original_token_count'))} "
+            f"selected={_fmt_value(metrics.get('selected_token_count'))} "
+            f"reduction={_fmt_percent(metrics.get('token_reduction_ratio'))}"
+        ),
+        (
+            "Latency ms: "
+            f"pre={_fmt_ms(metrics.get('autogaze_preprocessing_latency_ms'))} "
+            f"autogaze={_fmt_ms(metrics.get('autogaze_latency_ms'))} "
+            f"ag_forward={_fmt_ms(metrics.get('autogaze_model_forward_latency_ms'))} "
+            f"vision={_fmt_ms(metrics.get('vision_encoder_latency_ms'))} "
+            f"mllm={_fmt_ms(metrics.get('mllm_generation_latency_ms'))} "
+            f"module={_fmt_ms(metrics.get('module_processing_latency_ms'))} "
+            f"viz={_fmt_ms(metrics.get('visualization_latency_ms'))} "
+            f"wall={_fmt_ms(metrics.get('wall_clock_latency_ms'))}"
+        ),
+        (
+            "Per-item ms: "
+            f"ag/source_frame={_fmt_ms(metrics.get('autogaze_latency_per_source_frame_ms'))} "
+            f"ag/processed_frame={_fmt_ms(metrics.get('autogaze_latency_per_processed_frame_ms'))} "
+            f"mllm/processed_frame={_fmt_ms_per_item(metrics.get('mllm_generation_latency_ms'), metrics.get('number_of_processed_frames'))} "
+            f"mllm/original_token={_fmt_ms_per_item(metrics.get('mllm_generation_latency_ms'), metrics.get('original_token_count'))} "
+            f"mllm/selected_token={_fmt_ms_per_item(metrics.get('mllm_generation_latency_ms'), metrics.get('selected_token_count'))}"
+        ),
+        (
+            "Memory: "
+            f"source_tensor={_fmt_mib(metrics.get('source_video_tensor_mib'))} "
+            f"processed_tensor={_fmt_mib(metrics.get('processed_video_tensor_mib'))} "
+            f"mllm_input={_fmt_mib(metrics.get('mllm_input_tensor_mib'))} "
+            f"peak_rss={_fmt_mib(metrics.get('process_peak_rss_mib'))} "
+            f"cuda_peak={_fmt_mib(metrics.get('cuda_max_memory_allocated_mib'))}"
+        ),
+    ]
+    return "\n".join(lines)
+
+
+def _sum_chops_from_metrics(metrics: Mapping[str, Any]) -> int | None:
+    chops = metrics.get("spatial_chops_per_window")
+    if isinstance(chops, Mapping):
+        values = [int(value) for value in chops.values()]
+        return sum(values)
+    return None
+
+
+def _fmt_value(value: Any) -> str:
+    return "n/a" if value is None else str(value)
+
+
+def _fmt_ms(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    return f"{float(value):.2f}"
+
+
+def _fmt_mib(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    return f"{float(value):.2f}MiB"
+
+
+def _fmt_percent(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    return f"{float(value) * 100.0:.2f}%"
+
+
+def _fmt_ms_per_item(latency_ms: Any, count: Any) -> str:
+    if latency_ms is None or count is None:
+        return "n/a"
+    try:
+        parsed_count = float(count)
+    except (TypeError, ValueError):
+        return "n/a"
+    if parsed_count <= 0:
+        return "n/a"
+    return _fmt_ms(float(latency_ms) / parsed_count)
 
 
 def write_json(path: Path, data: Mapping[str, Any]) -> None:
@@ -3069,6 +3312,7 @@ def add_streaming_window_result(
     frame_records = [_offset_record(record, processed_offset) for record in prepared.frame_records]
     source_frame_count = _source_frame_count(frame_records)
     processed_frame_count = len(frame_records)
+    window_memory_metrics = prepared_video_memory_metrics(prepared)
     per_frame = [_offset_record(record, processed_offset) for record in gaze.per_frame]
     aggregate["frame_records"].extend(frame_records)
     aggregate["per_frame"].extend(per_frame)
@@ -3097,6 +3341,7 @@ def add_streaming_window_result(
             "effective_num_frames": stream_window.effective_num_frames,
             "source_frame_count": source_frame_count,
             "processed_frame_count": processed_frame_count,
+            **window_memory_metrics,
             "visualization_frame_count": visualization_count,
             "original_token_count": gaze.original_token_count,
             "selected_token_count": gaze.selected_token_count,
@@ -3302,6 +3547,17 @@ def build_streaming_metrics(
     autogaze_preprocessing_latency_ms = _sum_optional_metric(aggregate["per_window_metrics"], "autogaze_preprocessing_latency_ms")
     autogaze_stage_latency_ms = sum(float(item["autogaze_stage_latency_ms"] or 0.0) for item in aggregate["per_window_metrics"])
     autogaze_total_latency_ms = sum(float(item["autogaze_latency_ms"] or 0.0) for item in aggregate["per_window_metrics"])
+    source_tensor_bytes_per_window = [item.get("source_video_tensor_bytes") for item in aggregate["per_window_metrics"]]
+    processed_tensor_bytes_per_window = [item.get("processed_video_tensor_bytes") for item in aggregate["per_window_metrics"]]
+    processed_expansion_per_window = [item.get("processed_to_source_frame_expansion_ratio") for item in aggregate["per_window_metrics"]]
+    max_source_tensor_bytes = _max_optional_count(source_tensor_bytes_per_window)
+    max_processed_tensor_bytes = _max_optional_count(processed_tensor_bytes_per_window)
+    sum_processed_tensor_bytes = _sum_values_as_int(processed_tensor_bytes_per_window)
+    spatial_chop_count_total = (
+        sum(int(window.get("spatial_chop_count", len(window.get("records", [])))) for window in aggregate.get("chop_windows") or [])
+        if aggregate.get("chop_windows")
+        else None
+    )
     return {
         "mode": mode,
         "config_path": cfg.get("_config_path"),
@@ -3315,6 +3571,7 @@ def build_streaming_metrics(
         "number_of_processed_frames": aggregate["processed_frame_count"],
         "number_of_source_frames": source_frame_count,
         "number_of_windows": len(aggregate["windows"]),
+        "spatial_chop_count_total": spatial_chop_count_total,
         "spatial_chops_per_window": {
             str(window.get("window_id", idx)): int(window.get("spatial_chop_count", len(window.get("records", []))))
             for idx, window in enumerate(aggregate.get("chop_windows") or [])
@@ -3362,6 +3619,28 @@ def build_streaming_metrics(
         "selected_patches_per_scale": _sum_scale_counts(aggregate["per_frame"]),
         "original_token_count_per_window": [item["original_token_count"] for item in aggregate["per_window_metrics"]],
         "token_reduction_ratio_per_window": [item["token_reduction_ratio"] for item in aggregate["per_window_metrics"]],
+        "source_video_tensor_bytes_per_window": source_tensor_bytes_per_window,
+        "source_video_tensor_mib_per_window": [item.get("source_video_tensor_mib") for item in aggregate["per_window_metrics"]],
+        "processed_video_tensor_bytes_per_window": processed_tensor_bytes_per_window,
+        "processed_video_tensor_mib_per_window": [item.get("processed_video_tensor_mib") for item in aggregate["per_window_metrics"]],
+        "processed_to_source_frame_expansion_ratio_per_window": processed_expansion_per_window,
+        "processed_to_source_tensor_byte_ratio_per_window": [
+            item.get("processed_to_source_tensor_byte_ratio") for item in aggregate["per_window_metrics"]
+        ],
+        "max_source_video_tensor_bytes_per_window": max_source_tensor_bytes,
+        "max_source_video_tensor_mib_per_window": bytes_to_mib(max_source_tensor_bytes),
+        "max_processed_video_tensor_bytes_per_window": max_processed_tensor_bytes,
+        "max_processed_video_tensor_mib_per_window": bytes_to_mib(max_processed_tensor_bytes),
+        "sum_processed_video_tensor_bytes_over_windows": sum_processed_tensor_bytes,
+        "sum_processed_video_tensor_mib_over_windows": bytes_to_mib(sum_processed_tensor_bytes),
+        "source_video_tensor_bytes": max_source_tensor_bytes,
+        "source_video_tensor_mib": bytes_to_mib(max_source_tensor_bytes),
+        "processed_video_tensor_bytes": max_processed_tensor_bytes,
+        "processed_video_tensor_mib": bytes_to_mib(max_processed_tensor_bytes),
+        "mllm_input_tensor_bytes": max_processed_tensor_bytes,
+        "mllm_input_tensor_mib": bytes_to_mib(max_processed_tensor_bytes),
+        "mllm_input_tensor_memory_scope": "max_per_stream_window",
+        "max_processed_to_source_frame_expansion_ratio": _max_optional_float(processed_expansion_per_window),
         "preprocessing_latency_per_window_ms": [item["preprocessing_latency_ms"] for item in aggregate["per_window_metrics"]],
         "autogaze_preprocessing_latency_per_window_ms": [
             item.get("autogaze_preprocessing_latency_ms") for item in aggregate["per_window_metrics"]
@@ -3462,6 +3741,7 @@ def build_metrics(
     source_frame_count = _source_frame_count(prepared.frame_records)
     processed_frame_count = len(prepared.frame_records)
     nvila_hd = nvila_hd_effective_settings(cfg)
+    memory_metrics = prepared_video_memory_metrics(prepared)
     return {
         "mode": mode,
         "config_path": cfg.get("_config_path"),
@@ -3472,6 +3752,7 @@ def build_metrics(
         "number_of_frames": processed_frame_count,
         "number_of_processed_frames": processed_frame_count,
         "number_of_source_frames": source_frame_count,
+        **memory_metrics,
         "number_of_windows": len(prepared.frame_selection.windows),
         "scaling_mode": prepared.scaling_metadata["scaling_mode"],
         "resolution": prepared.scaling_metadata["resolution"],
@@ -3569,6 +3850,22 @@ def _sum_optional_count(items: list[Mapping[str, Any]], key: str) -> int | None:
     if not any(value is not None for value in values):
         return None
     return sum(int(value or 0) for value in values)
+
+
+def _sum_values_as_int(values: list[Any]) -> int | None:
+    if not any(value is not None for value in values):
+        return None
+    return sum(int(value or 0) for value in values)
+
+
+def _max_optional_count(values: list[Any]) -> int | None:
+    present = [int(value) for value in values if value is not None]
+    return max(present) if present else None
+
+
+def _max_optional_float(values: list[Any]) -> float | None:
+    present = [float(value) for value in values if value is not None]
+    return max(present) if present else None
 
 
 def _safe_latency_per_item(latency_ms: float | None, count: int | None) -> float | None:

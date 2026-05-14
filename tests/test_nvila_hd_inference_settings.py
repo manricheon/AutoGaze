@@ -254,17 +254,80 @@ def test_infer_full_full_mode_comparison_visualizations(tmp_path: Path) -> None:
         assert metrics["autogaze_latency_per_source_frame_ms"] is not None
         assert metrics["autogaze_latency_per_processed_frame_ms"] is not None
         assert metrics["module_processing_latency_ms"] >= metrics["autogaze_latency_ms"]
+        assert metrics["source_video_tensor_bytes"] > 0
+        assert metrics["processed_video_tensor_bytes"] > 0
+        assert metrics["source_video_tensor_mib"] is not None
+        assert metrics["processed_video_tensor_mib"] is not None
+        assert metrics["mllm_input_tensor_bytes"] == metrics["processed_video_tensor_bytes"]
+        assert metrics["mllm_input_tensor_mib"] == metrics["processed_video_tensor_mib"]
+        assert isinstance(metrics["memory_snapshots"], list)
+        assert len(metrics["memory_snapshots"]) >= 4
+        assert metrics["process_peak_rss_mib"] is not None
         if expected_crop_frames is not None:
             assert metrics["number_of_processed_frames"] == expected_crop_frames
             assert metrics["mllm_input_frame_count"] == expected_crop_frames
             assert metrics["mllm_input_tensor_shape"][0] * metrics["mllm_input_tensor_shape"][1] == expected_crop_frames
+            assert metrics["processed_to_source_frame_expansion_ratio"] > 1.0
         else:
             assert metrics["mllm_input_frame_count"] == expected_frames
+            assert metrics["processed_to_source_frame_expansion_ratio"] == 1.0
 
         videos_dir = output_dir / "visualizations" / "autogaze" / "videos"
         assert (videos_dir / "autogaze_overlay.mp4").exists()
         assert (videos_dir / "autogaze_side_by_side.mp4").exists()
         assert (videos_dir / "autogaze_scale_panels.mp4").exists()
+
+
+def test_infer_full_main_prints_concise_latency_summary(tmp_path: Path, capsys) -> None:
+    rc = infer_full.main(
+        [
+            "--config",
+            str(_cfg("A2_modified_siglip_nvila_on.yaml")),
+            "--video-path",
+            "dummy",
+            "--query-text",
+            "Describe the video.",
+            "--output-dir",
+            str(tmp_path / "concise_full"),
+            "--num-frames",
+            "4",
+            "--resolution",
+            "32",
+            "--allow-dummy-weights",
+            "--no-progress",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "Frames:" in captured.out
+    assert "Tokens:" in captured.out
+    assert "Latency ms:" in captured.out
+    assert "Per-item ms:" in captured.out
+    assert "Memory:" in captured.out
+
+
+def test_infer_autogaze_main_prints_concise_latency_summary(tmp_path: Path, capsys) -> None:
+    rc = infer_autogaze.main(
+        [
+            "--config",
+            str(_cfg("A2_modified_siglip_nvila_on.yaml")),
+            "--video-path",
+            "dummy",
+            "--output-dir",
+            str(tmp_path / "concise_autogaze"),
+            "--num-frames",
+            "4",
+            "--resolution",
+            "32",
+            "--no-progress",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "Frames:" in captured.out
+    assert "Tokens:" in captured.out
+    assert "Latency ms:" in captured.out
+    assert "Memory:" in captured.out
 
 
 def test_a1_a2_share_nvila_processor_shape_settings_except_autogaze_flag() -> None:

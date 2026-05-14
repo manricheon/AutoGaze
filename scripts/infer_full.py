@@ -14,12 +14,15 @@ import torch
 from poc_infer_utils import (
     ProgressReporter,
     StreamingVisualizationSink,
+    attach_memory_snapshots,
     add_nvila_hd_cli_args,
     add_streaming_window_result,
     apply_nvila_hd_overrides,
     build_metrics,
     build_streaming_metrics,
     cli_or_config,
+    capture_memory_snapshot,
+    format_concise_summary,
     iter_stream_windows,
     load_config,
     nested_get,
@@ -31,6 +34,7 @@ from poc_infer_utils import (
     prepare_video,
     resolve_frame_selection_max_windows,
     run_autogaze_stage,
+    tensor_memory_summary,
     validate_prepared_video_memory,
     validate_stream_window_memory,
     write_autogaze_artifacts,
@@ -182,6 +186,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "full video loading is disabled by memory.fail_on_full_video_load; use --video-read-mode streaming "
             "or set memory.fail_on_full_video_load=false in config for an explicit full-load run"
         )
+    memory_snapshots = [capture_memory_snapshot("start", device=device)]
 
     preprocessing_start = time.perf_counter()
     frame_selection_mode = str(cli_or_config(args.frame_selection_mode, cfg, "frame_selection.mode", "sample"))
@@ -225,6 +230,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         ),
     )
     preprocessing_latency_ms = (time.perf_counter() - preprocessing_start) * 1000
+    memory_snapshots.append(capture_memory_snapshot("after_preprocessing", device=device))
     allow_real = bool(args.allow_real_model_loading or nested_get(cfg, "runtime.allow_real_model_loading", False))
     allow_dummy = bool(args.allow_dummy_weights or nested_get(cfg, "runtime.allow_dummy_weights", False))
     use_dummy_weights = bool(allow_dummy and not allow_real)
@@ -241,6 +247,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         warmup_runs=warmup_runs if allow_real else 0,
         progress=progress,
     )
+    memory_snapshots.append(capture_memory_snapshot("after_autogaze", device=device))
     artifacts = write_autogaze_artifacts(output_dir, prepared, gaze)
 
     skipped: list[dict[str, str]] = []
@@ -303,6 +310,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 skipped.append({"stage": "vision_encoder", "reason": f"vision encoder failed: {exc}"})
                 if allow_real and vision_required:
                     blocked_stages.append("vision_encoder")
+    memory_snapshots.append(capture_memory_snapshot("after_vision_encoder", device=device))
 
     mllm = build_mllm(mllm_name, nested_get(cfg, "mllm", {}))
     if encoder_only_feature_run:
@@ -405,6 +413,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if allow_real and mllm_status.status == "real":
             progress.warmup("MLLM", mllm_generate_once, runs=warmup_runs, device=device)
         generation, mllm_generation_latency_ms = progress.timed("MLLM", mllm_generate_once, device=device)
+    memory_snapshots.append(capture_memory_snapshot("after_mllm", device=device))
     if zero_mask_metadata is not None:
         generation = _with_generation_metadata(generation, zero_mask_metadata)
     if rope_sparse_metadata is not None:
@@ -462,6 +471,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
     )
     visualization_latency_ms = (time.perf_counter() - visualization_start) * 1000
+    memory_snapshots.append(capture_memory_snapshot("after_visualization", device=device))
 
     module_processing_latency_ms = (
         float(preprocessing_latency_ms or 0.0)
@@ -509,13 +519,22 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if isinstance(prepared.processed_video, torch.Tensor):
         metrics["processed_video_shape"] = [int(dim) for dim in prepared.processed_video.shape]
     metrics["mllm_input_tensor_shape"] = _tensor_shape(video_for_mllm)
+    mllm_input_memory = tensor_memory_summary(video_for_mllm)
+    metrics["mllm_input_tensor_dtype"] = mllm_input_memory["dtype"]
+    metrics["mllm_input_tensor_numel"] = mllm_input_memory["numel"]
+    metrics["mllm_input_tensor_bytes"] = mllm_input_memory["bytes"]
+    metrics["mllm_input_tensor_mib"] = mllm_input_memory["mib"]
     metrics["mllm_input_frame_count"] = _video_tensor_frame_count(video_for_mllm)
     metrics["mllm_input_batch_size"] = int(video_for_mllm.shape[0]) if isinstance(video_for_mllm, torch.Tensor) and video_for_mllm.ndim == 5 else None
     metrics["mllm_input_frames_per_batch"] = int(video_for_mllm.shape[1]) if isinstance(video_for_mllm, torch.Tensor) and video_for_mllm.ndim == 5 else None
     metrics["vision_encoder_required_for_full_pipeline"] = vision_required
     if isinstance(visual_tokens, torch.Tensor):
+        visual_token_memory = tensor_memory_summary(visual_tokens)
         metrics["visual_tokens_shape"] = [int(dim) for dim in visual_tokens.shape]
         metrics["visual_tokens_dtype"] = str(visual_tokens.dtype).replace("torch.", "")
+        metrics["visual_tokens_numel"] = visual_token_memory["numel"]
+        metrics["visual_tokens_bytes"] = visual_token_memory["bytes"]
+        metrics["visual_tokens_mib"] = visual_token_memory["mib"]
         if visual_tokens.ndim >= 3:
             metrics["feature_shape"] = [int(dim) for dim in visual_tokens.shape]
             metrics["pooled_feature_shape"] = [int(visual_tokens.shape[0]), int(visual_tokens.shape[-1])]
@@ -597,6 +616,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         metrics["failure_reason"] = _failure_reason_for_blocked_stages(skipped, blocked_stages)
     else:
         metrics["failure_reason"] = None
+    attach_memory_snapshots(metrics, memory_snapshots)
     status = "blocked" if blocked_stages else "partial"
     if generation_status == "real" and not blocked_stages:
         status = "completed"
@@ -625,6 +645,7 @@ def _run_streaming_full(args: argparse.Namespace, *, cfg: dict[str, Any], output
     if policy == "aggregate_window_answers":
         raise NotImplementedError("aggregate_window_answers is not implemented; use window_independent_generation or first_window_only")
     device = normalize_device(str(cli_or_config(args.device, cfg, "runtime.device", "cpu")))
+    memory_snapshots = [capture_memory_snapshot("start", device=device)]
     requested_dtype = str(cli_or_config(args.dtype, cfg, "runtime.dtype", "float32"))
     autogaze_dtype = "float32"
     vision_dtype = str(nested_get(cfg, "runtime.vision_dtype", requested_dtype))
@@ -1034,6 +1055,8 @@ def _run_streaming_full(args: argparse.Namespace, *, cfg: dict[str, Any], output
         metrics["zero_mask_encoder_compute_reduction"] = bool(generation_metadata.get("zero_mask_encoder_compute_reduction", False))
     if blocked_stages:
         metrics["failure_reason"] = _failure_reason_for_blocked_stages(skipped, blocked_stages)
+    memory_snapshots.append(capture_memory_snapshot("end", device=device))
+    attach_memory_snapshots(metrics, memory_snapshots)
     summary = {
         "mode": "full_pipeline",
         "status": "blocked" if blocked_stages else "partial" if skipped else "completed",
@@ -1460,6 +1483,8 @@ def main(argv: list[str] | None = None) -> int:
     summary = run(args)
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True))
+    else:
+        print(format_concise_summary(summary))
     return 2 if summary["status"] == "blocked" else 0
 
 
