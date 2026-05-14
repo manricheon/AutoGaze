@@ -306,6 +306,55 @@ def test_infer_full_main_prints_concise_latency_summary(tmp_path: Path, capsys) 
     assert "Memory:" in captured.out
 
 
+def test_infer_full_chop_mode_saves_latency_memory_metrics(tmp_path: Path) -> None:
+    output_dir = tmp_path / "full_chop_metrics"
+    summary = infer_full.run(
+        infer_full.parse_args(
+            [
+                "--config",
+                str(_cfg("A2_modified_siglip_nvila_on.yaml")),
+                "--video-path",
+                "dummy",
+                "--query-text",
+                "Describe the video.",
+                "--output-dir",
+                str(output_dir),
+                "--frame-selection-mode",
+                "sample",
+                "--num-frames",
+                "4",
+                "--scaling-mode",
+                "chop",
+                "--resolution",
+                "32",
+                "--chop-size",
+                "32",
+                "--max-chops",
+                "4",
+                "--allow-dummy-weights",
+                "--no-progress",
+            ]
+        )
+    )
+    assert summary["status"] in {"partial", "completed"}
+    metrics = json.loads((output_dir / "logs" / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["scaling_mode"] == "chop"
+    assert metrics["number_of_source_frames"] == 4
+    assert metrics["number_of_processed_frames"] == 16
+    assert metrics["spatial_chop_count_total"] == 4
+    assert metrics["mllm_input_frame_count"] == 16
+    assert metrics["mllm_input_tensor_bytes"] == metrics["processed_video_tensor_bytes"]
+    assert metrics["processed_to_source_frame_expansion_ratio"] == 4.0
+    assert metrics["autogaze_latency_includes_preprocessing"] is True
+    assert metrics["autogaze_latency_source_frame_count"] == 4
+    assert metrics["autogaze_latency_processed_frame_count"] == 16
+    assert metrics["autogaze_latency_per_source_frame_ms"] is not None
+    assert metrics["autogaze_latency_per_processed_frame_ms"] is not None
+    assert metrics["module_processing_latency_ms"] >= metrics["autogaze_latency_ms"]
+    assert isinstance(metrics["memory_snapshots"], list)
+    assert metrics["process_peak_rss_mib"] is not None
+
+
 def test_infer_autogaze_main_prints_concise_latency_summary(tmp_path: Path, capsys) -> None:
     rc = infer_autogaze.main(
         [
