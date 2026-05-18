@@ -1,0 +1,54 @@
+name: example_input_autogaze
+description: Reproduction preset for the official AutoGaze sample MP4.
+
+video:
+  path: assets/example_input.mp4
+  kind: regular_mp4
+  source:
+    width: 448
+    height: 448
+    frames: 64
+    fps: 25
+    duration_seconds: 2.56
+    container: mp4
+    codec: mpeg4
+  sampling:
+    policy: first_n_frames
+    frames: 16
+
+autogaze:
+  model: nvidia/AutoGaze
+  input_size: 224
+  max_num_frames: 16
+  gazing_ratio: 0.75
+  task_loss_requirement: 0.7
+
+siglip:
+  model: google/siglip2-base-patch16-224
+  attn_implementation: sdpa
+  baseline_mode: frame_batch
+
+benchmark:
+  device: auto
+  dtype_mps: float32
+  dtype_cuda: float16
+  warmup: 1
+  repeat: 3
+  output_json: outputs/autogaze_repro/example_input_autogaze_bench.json
+  output_csv: outputs/autogaze_repro/example_input_autogaze_bench.csv
+  command:
+    - .venv/bin/python
+    - -m
+    - repro.autogaze_bench
+    - --video
+    - assets/example_input.mp4
+    - --autogaze-model
+    - nvidia/AutoGaze
+    - --siglip-model
+    - google/siglip2-base-patch16-224
+    - --frames
+    - "16"
+    - --gazing-ratio
+    - "0.75"
+    - --task-loss-requirement
+    - "0.7"

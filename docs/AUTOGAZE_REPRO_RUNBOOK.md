@@ -27,6 +27,8 @@ If `torch.backends.mps.is_available()` is false inside a sandbox but true outsid
 
 ## MPS AutoGaze And SigLIP Smoke Benchmark
 
+The packaged `assets/example_input.mp4` is a regular MP4 video used by the official quick start. Its reproduction preset is `configs/repro/example_input_autogaze.yaml`: 448x448 source video, 64 total frames, first 16 frames sampled for the AutoGaze/SigLIP smoke path.
+
 ```bash
 .venv/bin/python -m repro.autogaze_bench \
   --device mps \
