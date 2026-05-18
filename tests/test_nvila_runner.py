@@ -11,6 +11,7 @@ def make_args(**overrides):
         "num_video_frames": 128,
         "num_video_frames_thumbnail": 64,
         "max_tiles_video": 48,
+        "autogaze_model": "nvidia/AutoGaze",
         "task_loss_requirement_tile": 0.6,
         "max_batch_size_autogaze": 16,
         "hlvid_repo": "bfshi/HLVid",
@@ -26,10 +27,17 @@ def test_processor_kwargs_match_nvila_quickstart_defaults():
     assert kwargs["num_video_frames"] == 128
     assert kwargs["num_video_frames_thumbnail"] == 64
     assert kwargs["max_tiles_video"] == 48
+    assert kwargs["autogaze_model_id"] == "nvidia/AutoGaze"
     assert kwargs["gazing_ratio_tile"] == [0.2] + [0.06] * 15
     assert kwargs["task_loss_requirement_tile"] == 0.6
     assert kwargs["max_batch_size_autogaze"] == 16
     assert kwargs["trust_remote_code"] is True
+
+
+def test_processor_kwargs_accept_local_autogaze_checkpoint_path():
+    kwargs = processor_kwargs(make_args(autogaze_model="/models/autogaze-local"))
+
+    assert kwargs["autogaze_model_id"] == "/models/autogaze-local"
 
 
 def test_resolve_video_prefers_existing_local_path(tmp_path: Path):

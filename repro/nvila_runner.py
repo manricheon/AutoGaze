@@ -30,6 +30,7 @@ def processor_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "num_video_frames": args.num_video_frames,
         "num_video_frames_thumbnail": args.num_video_frames_thumbnail,
         "max_tiles_video": args.max_tiles_video,
+        "autogaze_model_id": args.autogaze_model,
         "gazing_ratio_tile": [0.2] + [0.06] * 15,
         "gazing_ratio_thumbnail": 1,
         "task_loss_requirement_tile": args.task_loss_requirement_tile,
@@ -175,6 +176,7 @@ def run_single(args: argparse.Namespace) -> None:
     payload = {
         "metadata": environment_metadata(device),
         "model_path": args.model_path,
+        "autogaze_model": args.autogaze_model,
         "video": args.video,
         "prompt": args.prompt,
         "result": result,
@@ -204,6 +206,7 @@ def run_hlvid(args: argparse.Namespace) -> None:
             **row,
             **result,
             "model_path": args.model_path,
+            "autogaze_model": args.autogaze_model,
             "num_video_frames": args.num_video_frames,
             "num_video_frames_thumbnail": args.num_video_frames_thumbnail,
             "max_tiles_video": args.max_tiles_video,
@@ -224,6 +227,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run NVILA-HD-Video quickstart and HLVid benchmark")
     parser.add_argument("--mode", choices=["single", "hlvid"], default="single")
     parser.add_argument("--model-path", default=DEFAULT_MODEL)
+    parser.add_argument("--autogaze-model", default="nvidia/AutoGaze")
     parser.add_argument("--device", default="cuda", choices=["cpu", "mps", "cuda"])
     parser.add_argument("--device-map", default="auto")
     parser.add_argument("--video", default=DEFAULT_EXAMPLE_VIDEO)

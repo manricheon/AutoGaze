@@ -39,6 +39,15 @@ If `torch.backends.mps.is_available()` is false inside a sandbox but true outsid
 
 This confirms that the official AutoGaze model loads, emits gazing metadata, and drives the customized SigLIP path on Apple MPS. Local MPS results are a code-path and tensor-contract validation, not a paper-comparable performance claim.
 
+To run the AutoGaze/SigLIP benchmark with a local AutoGaze checkpoint, pass the checkpoint directory to `--autogaze-model`:
+
+```bash
+.venv/bin/python -m repro.autogaze_bench \
+  --autogaze-model /path/to/local/autogaze-checkpoint \
+  --device cuda \
+  --dtype float16
+```
+
 Observed local smoke result on this workspace:
 
 - AutoGaze revision: `ba48d0f94ac2929d6fe3ee4380dc893aa6eed0ab`
@@ -76,6 +85,20 @@ The last number is expected to be weak on local MPS because AutoGaze overhead is
 ```
 
 This mirrors the official NVILA-HD-Video quickstart scale and validates the model and processor path before the full HLVid run.
+
+To run NVILA-HD-Video with a local AutoGaze checkpoint, pass the same checkpoint directory through `--autogaze-model`. The runner forwards it to the NVILA processor as `autogaze_model_id`, which is the argument used by the model's remote code:
+
+```bash
+.venv/bin/python -m repro.nvila_runner \
+  --mode single \
+  --device cuda \
+  --autogaze-model /path/to/local/autogaze-checkpoint \
+  --num-video-frames 128 \
+  --num-video-frames-thumbnail 64 \
+  --max-tiles-video 48 \
+  --measure-ttft \
+  --output-json outputs/autogaze_repro/cuda_nvila_single_local_autogaze.json
+```
 
 ## HLVid Manifest
 
