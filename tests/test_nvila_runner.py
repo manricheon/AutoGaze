@@ -8,6 +8,7 @@ from repro.nvila_runner import (
     StageProfiler,
     apply_resize_to_dimensions,
     autogaze_processor_size_kwargs,
+    build_keep_all_gazing_info,
     build_parser,
     build_stream_profile_token_metrics,
     compute_visual_token_metrics,
@@ -21,6 +22,7 @@ from repro.nvila_runner import (
     repeat_last_stream_samples_after_eof,
     resolve_video,
     spatial_tile_grid,
+    summarize_stream_chunks,
     uniform_sample_indices,
 )
 
@@ -243,6 +245,27 @@ def test_parse_args_accepts_stream_profile_mode_and_chunk_options():
     assert args.stream_profile_json == "out/stream.json"
 
 
+def test_parse_args_accepts_optional_stream_siglip_stage():
+    args = parse_args(
+        [
+            "--mode",
+            "stream-profile",
+            "--stream-run-siglip",
+            "--stream-siglip-mode",
+            "gazed",
+            "--stream-siglip-model",
+            "google/siglip2-base-patch16-224",
+            "--stream-siglip-max-embed-batch-size",
+            "4",
+        ]
+    )
+
+    assert args.stream_run_siglip is True
+    assert args.stream_siglip_mode == "gazed"
+    assert args.stream_siglip_model == "google/siglip2-base-patch16-224"
+    assert args.stream_siglip_max_embed_batch_size == 4
+
+
 def test_stream_profile_plan_describes_chunked_hlvid_like_work():
     plan = estimate_stream_profile_plan(
         width=3840,
@@ -300,6 +323,49 @@ def test_build_stream_profile_token_metrics_compares_autogaze_and_keep_all_token
     assert metrics["encoder_raw_thumbnail_patch_tokens"] == 1280
     assert metrics["encoder_autogaze_selected_thumbnail_patch_tokens"] == 1280
     assert metrics["encoder_token_reduction_ratio"] == 2.0
+
+
+def test_build_keep_all_gazing_info_selects_every_patch_for_siglip():
+    info = build_keep_all_gazing_info(
+        batch_size=2,
+        frames=3,
+        patches_per_frame_value=4,
+        device=torch.device("cpu"),
+    )
+
+    assert info["gazing_pos"].shape == (2, 12)
+    assert info["if_padded_gazing"].shape == (2, 12)
+    assert info["num_gazing_each_frame"].tolist() == [4, 4, 4]
+    assert info["gazing_pos"][0].tolist() == list(range(12))
+    assert info["if_padded_gazing"].any().item() is False
+
+
+def test_summarize_stream_chunks_sums_siglip_time_but_peaks_siglip_memory():
+    summary = summarize_stream_chunks(
+        [
+            {
+                "tile_sequences": 1,
+                "raw_patch_budget": 10,
+                "selected_non_padded_patches": 5,
+                "padded_gazing_positions": 0,
+                "total_gaze_slots": 5,
+                "siglip_gazed_forward_ms": 10.0,
+                "siglip_gazed_hidden_bytes_peak": 100,
+            },
+            {
+                "tile_sequences": 1,
+                "raw_patch_budget": 20,
+                "selected_non_padded_patches": 10,
+                "padded_gazing_positions": 0,
+                "total_gaze_slots": 10,
+                "siglip_gazed_forward_ms": 12.0,
+                "siglip_gazed_hidden_bytes_peak": 80,
+            },
+        ]
+    )
+
+    assert summary["siglip_gazed_forward_ms"] == 22.0
+    assert summary["siglip_gazed_hidden_bytes_peak"] == 100
 
 
 def test_repeat_last_stream_samples_after_eof_fills_missing_decoded_tail_samples():

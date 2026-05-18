@@ -291,7 +291,7 @@ Space 예시 비디오에서 HLVid-like stress check를 하려면 전체 샘플�
 
 ## NVILA 청크 스트리밍 pre-LLM profile
 
-긴 HLVid 비디오에서 전체 sampled frame, spatial tile, AutoGaze tensor를 한 번에 만들면 CPU/GPU memory가 먼저 터질 수 있습니다. `stream-profile` 모드는 NVILA-8B LLM을 로드하지 않고, 비디오 decode부터 AutoGaze selection 직전/직후까지를 temporal chunk 단위로 처리합니다. raw frame과 tile image는 `--stream-chunk-frames`만큼 처리한 뒤 버립니다.
+긴 HLVid 비디오에서 전체 sampled frame, spatial tile, AutoGaze tensor를 한 번에 만들면 CPU/GPU memory가 먼저 터질 수 있습니다. `stream-profile` 모드는 NVILA-8B LLM을 로드하지 않고, 비디오 decode부터 AutoGaze selection 직전/직후까지를 temporal chunk 단위로 처리합니다. `--stream-run-siglip`을 켜면 AutoGaze 이후 custom SigLIP vision tower forward까지 같은 chunk 단위로 이어서 측정합니다. raw frame과 tile image는 `--stream-chunk-frames`만큼 처리한 뒤 버립니다.
 
 해상도별 추천 조합과 로컬 실측 결과는 `docs/STREAMING_PIPELINE_CONFIG_RECOMMENDATIONS_KO.md`에 정리했습니다. 재사용 가능한 preset은 `configs/repro/streaming_pipeline_profiles.yaml`입니다.
 
@@ -329,6 +329,31 @@ stream-profile의 AutoGaze transform은 `--autogaze-resize-scales`의 최대 sca
   --stream-profile-json outputs/autogaze_repro/stream_profile_hlvid_autogaze_128f_resize720_mps.json
 ```
 
+SigLIP vision tower까지 MPS에서 확인하려면 patch16 SigLIP와 AutoGaze target scale을 맞춥니다. 아래 command는 `google/siglip2-base-patch16-224`를 사용하므로 `32+64+112+224 / patch16`을 명시합니다.
+
+```bash
+.venv/bin/python -m repro.nvila_runner \
+  --mode stream-profile \
+  --device mps \
+  --stream-dtype float32 \
+  --video inputs/hf_space_autogaze/security.mp4 \
+  --gazing-mode autogaze \
+  --num-video-frames 64 \
+  --num-video-frames-thumbnail 32 \
+  --max-tiles-video 1 \
+  --stream-chunk-frames 16 \
+  --max-batch-size-autogaze 1 \
+  --autogaze-target-scales 32+64+112+224 \
+  --autogaze-target-patch-size 16 \
+  --stream-run-siglip \
+  --stream-siglip-mode both \
+  --stream-siglip-model google/siglip2-base-patch16-224 \
+  --stream-siglip-max-embed-batch-size 1 \
+  --stream-profile-json outputs/autogaze_repro/security_64f_1tile_siglip_google_both_mps.json
+```
+
+`--stream-siglip-mode gazed`는 AutoGaze가 선택한 patch만 SigLIP에 넣습니다. `both`는 같은 chunk에서 keep-all SigLIP도 한 번 더 돌려 비교값을 남깁니다. keep-all은 sequence length가 커서 긴 4K/다중 tile 조건에서는 먼저 `gazed`로 확인하세요.
+
 이 모드에서 개별 timing은 모두 분리됩니다.
 
 - `timing_ms.video_decode_scan`: 마지막 sampled frame index까지 비디오 프레임을 순차 decode한 시간입니다. 모든 frame을 메모리에 쌓지는 않지만, 마지막 샘플이 비디오 끝에 있으면 decode scan 자체는 길어집니다.
@@ -337,6 +362,8 @@ stream-profile의 AutoGaze transform은 `--autogaze-resize-scales`의 최대 sca
 - `timing_ms.spatial_tile_build`: 현재 chunk의 sampled frames를 NVILA dynamic tile grid로 리사이즈/crop하는 시간입니다.
 - `timing_ms.tile_autogaze_tensorize`: tile image들을 AutoGaze input tensor로 바꾸는 시간입니다.
 - `timing_ms.tile_autogaze_forward`: AutoGaze 모델 forward 시간입니다. `keep-all` 모드에서는 null입니다.
+- `timing_ms.siglip_gazed_forward`: `--stream-run-siglip` 사용 시 AutoGaze가 선택한 patch sequence만 custom SigLIP vision tower에 넣은 forward 시간입니다.
+- `timing_ms.siglip_keep_all_forward`: `--stream-siglip-mode keep-all` 또는 `both` 사용 시 같은 chunk의 전체 patch sequence를 SigLIP에 넣은 baseline forward 시간입니다.
 - `timing_ms.keep_all_mask_build`: `keep-all` 모드에서 AutoGaze 없이 raw patch를 전부 유지하는 mask/count를 만드는 시간입니다.
 - `timing_ms.thumbnail_resize`, `timing_ms.thumbnail_tensorize`: thumbnail frame resize와 tensorization 시간입니다.
 - `timing_ms.eof_sample_padding`: container metadata frame count와 실제 decode 가능한 frame count가 어긋날 때 마지막 decoded sampled frame을 반복해 requested sample count를 맞추는 시간입니다.
@@ -358,10 +385,11 @@ stream-profile의 AutoGaze transform은 `--autogaze-resize-scales`의 최대 sca
 - `stream_plan.memory.streaming_autogaze_tile_tensor_bytes_per_batch`: `--max-batch-size-autogaze`만큼 tile sequence를 tensorize할 때의 예상 AutoGaze tensor peak입니다.
 - `stream_plan.memory.streaming_autogaze_tile_tensor_bytes_full_chunk`: 한 temporal chunk의 모든 spatial tile을 한 번에 tensorize한다고 가정했을 때의 비교용 크기입니다.
 - `memory_bytes.autogaze_tile_tensor_peak_per_temporal_chunk`: 실제 AutoGaze tensor peak입니다. 현재 구현은 `--max-batch-size-autogaze` 단위로 tensorization/forward를 나눠서 full chunk tensor를 만들지 않습니다. `keep-all`에서는 0입니다.
+- `memory_bytes.siglip_gazed_hidden_peak`, `memory_bytes.siglip_keep_all_hidden_peak`: SigLIP output hidden state의 peak 크기입니다. attention 내부 activation 전체 peak는 CUDA에서 `cuda_peak_memory_bytes`와 함께 봐야 합니다.
 - `memory_bytes.thumbnail_tensor`: thumbnail tensor 크기입니다.
 - `memory_bytes.cuda_peak_memory_bytes`: CUDA에서 실행했을 때 PyTorch peak allocation입니다.
 
-중요한 경계가 하나 있습니다. 이 모드는 decode, resize, tiling, AutoGaze까지는 chunk streaming으로 측정합니다. 하지만 public NVILA generation path는 최종 visual token sequence를 모아서 LLM prefill/generation에 넣습니다. 그래서 SigLIP vision tower, projector, LLM forward 시간은 기존 `single`/`hlvid` 모드의 `result.siglip_vision_ms`, `result.mm_projector_ms`, `result.llm_forward_ms`, `result.ttft_ms`로 비교하세요.
+중요한 경계가 하나 있습니다. 이 모드는 decode, resize, tiling, AutoGaze와 선택적 custom SigLIP forward까지는 chunk streaming으로 측정합니다. 하지만 public NVILA generation path는 최종 visual token sequence를 모아서 LLM prefill/generation에 넣습니다. 그래서 projector와 LLM forward 시간은 기존 `single`/`hlvid` 모드의 `result.mm_projector_ms`, `result.llm_forward_ms`, `result.ttft_ms`로 비교하세요. full NVILA path에서의 vision encoder hook은 여전히 `result.siglip_vision_ms`에도 기록됩니다.
 
 이 workspace에서 확인한 긴 비디오 smoke:
 
@@ -379,6 +407,11 @@ stream-profile의 AutoGaze transform은 `--autogaze-resize-scales`의 최대 sca
 ```
 
 결과는 4K/약 5분/8992프레임 MP4에서 `decoded_selected_frames=16`, `raw_frame_buffer_peak=398131200` bytes, `video_decode_scan≈53660 ms`, `spatial_tile_build≈728 ms`였습니다. 즉, decode scan은 끝까지 발생하지만 메모리는 16프레임 chunk 수준으로 제한되는 것을 확인했습니다.
+
+이 workspace에서 확인한 SigLIP 포함 smoke:
+
+- `outputs/autogaze_repro/security_64f_1tile_siglip_google_both_mps.json`: 64프레임을 16프레임 chunk 4개로 처리했고, `siglip_gazed_forward≈1054 ms`, `siglip_keep_all_forward≈15209 ms`, tile patch 감소율 `≈41.8x`였습니다.
+- `outputs/autogaze_repro/hlvid_4k_16f_1tile_siglip_google_gazed_mps.json`: HLVid 4K/약 5분 비디오에서 16프레임, 1 tile, gazed SigLIP까지 통과했고, `video_decode_scan≈68639 ms`, `tile_autogaze_forward≈4004 ms`, `siglip_gazed_forward≈356 ms`였습니다.
 
 ## HLVid example AutoGaze-only smoke
 

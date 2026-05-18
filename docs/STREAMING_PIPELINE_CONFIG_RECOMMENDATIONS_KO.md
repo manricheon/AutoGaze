@@ -5,7 +5,7 @@
 1. 전처리/AutoGaze 단계에서 sampled frame, tile image, AutoGaze tensor를 한 번에 만들지 않아 OOM을 피한다.
 2. AutoGaze로 줄어드는 patch/token 수가 downstream SigLIP/MLLM latency를 이길 만큼 충분한 조합을 찾는다.
 
-현재 로컬은 MPS라서 full NVILA-8B MLLM 최종 latency는 여기서 확정할 수 없습니다. 대신 `stream-profile`로 decode, resize, tiling, AutoGaze latency와 patch/token 감소를 실측했고, CUDA 머신에서 같은 matrix를 이어서 돌릴 수 있게 `repro.stream_profile_sweep`와 `configs/repro/streaming_pipeline_profiles.yaml`을 추가했습니다.
+현재 로컬은 MPS라서 full NVILA-8B MLLM 최종 latency는 여기서 확정할 수 없습니다. 대신 `stream-profile`로 decode, resize, tiling, AutoGaze latency, 선택적 SigLIP vision forward, patch/token 감소를 실측했고, CUDA 머신에서 같은 matrix를 이어서 돌릴 수 있게 `repro.stream_profile_sweep`와 `configs/repro/streaming_pipeline_profiles.yaml`을 추가했습니다.
 
 ## 중요한 결론
 
@@ -13,6 +13,8 @@
 - MPS에서는 `max-batch-size-autogaze=1`이 유리했습니다. 720p/4-tile/16-frame에서 batch 1은 약 11.3초, batch 4는 약 26.3초였습니다.
 - CUDA에서는 기존 기본값인 AutoGaze batch 16, SigLIP batch 32부터 시작하는 것이 맞습니다. 단, full NVILA가 느리면 batch보다 먼저 tile/frame 수를 줄여야 합니다.
 - thumbnail은 현재 keep-all이라 total patch reduction을 희석합니다. 그래서 리더 설명 시 tile-only reduction과 total reduction을 같이 보여줘야 합니다.
+- `--stream-run-siglip`을 켜면 AutoGaze가 만든 gazing_info를 custom SigLIP vision tower에 바로 넣어 `siglip_gazed_forward`와 선택적 `siglip_keep_all_forward`를 chunk 단위로 측정합니다. projector/LLM은 여전히 full NVILA `single`/`hlvid`에서 확인해야 합니다.
+- `google/siglip2-base-patch16-224`로 MPS smoke를 돌릴 때는 `--autogaze-target-scales 32+64+112+224 --autogaze-target-patch-size 16`을 같이 써야 patch 위치가 맞습니다. 기본 NVILA scale은 patch14 기준입니다.
 - 4K HLVid 5분 예시는 16프레임만 샘플링해도 끝 프레임까지 decode scan이 필요해 CPU decode가 약 54-68초였습니다. 긴 비디오에서는 decode seeking/샘플링 최적화도 별도 병목입니다.
 
 ## 로컬 실측 요약
@@ -38,6 +40,22 @@
 - `outputs/autogaze_repro/hlvid_4k_keepall_16f_8tile_cpu.json`
 - `outputs/autogaze_repro/hlvid_4k_keepall_16f_45tile_cpu.json`
 
+SigLIP까지 포함한 MPS smoke:
+
+| 입력 | 설정 | 총 pre-LLM | AutoGaze forward | SigLIP gazed | SigLIP keep-all | tile 감소 | total 감소 | SigLIP hidden peak |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 896 square | 16f, 8thumb, 1tile, patch16, both | 5.88s | 2.33s | 0.19s | 2.88s | 35.9x | 2.84x | 0.6/13.0 MB |
+| 896 square | 64f, 32thumb, 1tile, patch16, both | 25.25s | 7.94s | 1.05s | 15.21s | 41.8x | 2.86x | 0.7/13.0 MB |
+| HLVid 4K | 16f, 8thumb, 1tile, patch16, gazed | 74.80s | 4.00s | 0.36s | n/a | 15.3x | 2.65x | 0.9 MB |
+
+추가 실측 파일:
+
+- `outputs/autogaze_repro/security_16f_1tile_siglip_google_both_mps.json`
+- `outputs/autogaze_repro/security_64f_1tile_siglip_google_both_mps.json`
+- `outputs/autogaze_repro/hlvid_4k_16f_1tile_siglip_google_gazed_mps.json`
+
+MPS timing은 첫 실행의 graph compile/cache 상태에 따라 흔들립니다. 같은 command를 한 번 더 돌리면 특히 SigLIP gazed 시간이 낮아질 수 있으므로, CUDA에서 최종 claim을 만들 때는 warmup 후 반복 측정하세요.
+
 ## 추천 조합
 
 ### 로컬 MPS
@@ -59,6 +77,28 @@ MPS는 기능 확인과 patch/token 감소율 확인용으로만 보세요. 성�
   --max-batch-size-autogaze 1 \
   --max-batch-size-siglip 16 \
   --video-resize-shortest-edge 448
+```
+
+```bash
+# AutoGaze 이후 SigLIP vision tower까지 포함한 MPS path check
+.venv/bin/python -m repro.nvila_runner \
+  --mode stream-profile \
+  --device mps \
+  --stream-dtype float32 \
+  --video inputs/hf_space_autogaze/security.mp4 \
+  --gazing-mode autogaze \
+  --num-video-frames 64 \
+  --num-video-frames-thumbnail 32 \
+  --max-tiles-video 1 \
+  --stream-chunk-frames 16 \
+  --max-batch-size-autogaze 1 \
+  --autogaze-target-scales 32+64+112+224 \
+  --autogaze-target-patch-size 16 \
+  --stream-run-siglip \
+  --stream-siglip-mode both \
+  --stream-siglip-model google/siglip2-base-patch16-224 \
+  --stream-siglip-max-embed-batch-size 1 \
+  --stream-profile-json outputs/autogaze_repro/security_64f_1tile_siglip_google_both_mps.json
 ```
 
 ```bash
@@ -187,6 +227,27 @@ latency-first가 통과하면 tile을 15개 수준으로 늘립니다. 16:9에�
   --summary-csv outputs/autogaze_repro/stream_sweep_hlvid_cuda_run.csv
 ```
 
+SigLIP forward까지 같이 재려면 sweep에도 같은 옵션을 붙일 수 있습니다. `--stream-siglip-mode gazed`는 AutoGaze 이후만 재고, `both`는 keep-all SigLIP까지 같이 재기 때문에 긴 sequence에서는 메모리와 시간이 크게 늘어납니다.
+
+```bash
+.venv/bin/python -m repro.stream_profile_sweep \
+  --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
+  --device cuda \
+  --stream-dtype float16 \
+  --gazing-mode autogaze \
+  --include fast_720 \
+  --run \
+  --autogaze-target-scales 32+64+112+224 \
+  --autogaze-target-patch-size 16 \
+  --stream-run-siglip \
+  --stream-siglip-mode gazed \
+  --stream-siglip-model google/siglip2-base-patch16-224 \
+  --stream-siglip-max-embed-batch-size 16 \
+  --timeout-seconds 1800 \
+  --summary-json outputs/autogaze_repro/stream_sweep_hlvid_cuda_siglip_run.json \
+  --summary-csv outputs/autogaze_repro/stream_sweep_hlvid_cuda_siglip_run.csv
+```
+
 ## full NVILA 비교 순서
 
 stream-profile에서 후보를 줄인 뒤 full NVILA는 같은 조합으로 `--mode single` 또는 `--mode hlvid`를 돌립니다.
@@ -199,6 +260,7 @@ stream-profile에서 후보를 줄인 뒤 full NVILA는 같은 조합으로 `--m
 리더 설득용 지표는 최소 아래를 같이 보고하세요.
 
 - `timing_ms.tile_autogaze_forward`
+- `timing_ms.siglip_gazed_forward` / `timing_ms.siglip_keep_all_forward` (`--stream-run-siglip` 사용 시)
 - `token_metrics.encoder_tile_token_reduction_ratio`
 - `token_metrics.encoder_token_reduction_ratio`
 - `token_metrics.llm_keep_all_visual_tokens_estimated`

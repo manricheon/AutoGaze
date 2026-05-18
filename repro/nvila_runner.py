@@ -1010,7 +1010,7 @@ def summarize_stream_chunks(chunks: list[dict[str, Any]]) -> dict[str, Any]:
     padded = sum(int(chunk.get("padded_gazing_positions", 0)) for chunk in chunks)
     total_slots = sum(int(chunk.get("total_gaze_slots", 0)) for chunk in chunks)
     tile_sequences = sum(int(chunk["tile_sequences"]) for chunk in chunks)
-    return {
+    summary = {
         "tile_sequences": tile_sequences,
         "raw_patch_budget": raw_patch_budget,
         "selected_non_padded_patches": selected,
@@ -1018,6 +1018,91 @@ def summarize_stream_chunks(chunks: list[dict[str, Any]]) -> dict[str, Any]:
         "total_gaze_slots": total_slots,
         "token_reduction_ratio": raw_patch_budget / selected if selected else None,
     }
+    for key in (
+        "siglip_gazed_forward_ms",
+        "siglip_keep_all_forward_ms",
+    ):
+        values = [float(chunk.get(key, 0.0) or 0.0) for chunk in chunks]
+        summary[key] = sum(values)
+    for key in (
+        "siglip_gazed_hidden_bytes_peak",
+        "siglip_keep_all_hidden_bytes_peak",
+    ):
+        values = [int(chunk.get(key, 0) or 0) for chunk in chunks]
+        summary[key] = max(values) if values else 0
+    return summary
+
+
+def build_keep_all_gazing_info(
+    *,
+    batch_size: int,
+    frames: int,
+    patches_per_frame_value: int,
+    device: torch.device,
+) -> dict[str, torch.Tensor]:
+    total_patches = frames * patches_per_frame_value
+    positions = torch.arange(total_patches, device=device, dtype=torch.long).unsqueeze(0).repeat(batch_size, 1)
+    return {
+        "gazing_pos": positions,
+        "if_padded_gazing": torch.zeros_like(positions, dtype=torch.bool),
+        "num_gazing_each_frame": torch.full((frames,), patches_per_frame_value, device=device, dtype=torch.long),
+    }
+
+
+def siglip_hidden_summary(output: Any) -> tuple[list[int] | None, int]:
+    hidden = getattr(output, "last_hidden_state", None)
+    if hidden is None:
+        return None, 0
+    return list(hidden.shape), _tensor_bytes(hidden)
+
+
+def run_siglip_on_stream_batch(
+    *,
+    siglip_model: Any,
+    batch: torch.Tensor,
+    gazing_info: dict[str, Any],
+    mode: str,
+    patches_per_frame_value: int,
+    profiler: StageProfiler,
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    with torch.inference_mode():
+        if mode in {"gazed", "both"}:
+            output, elapsed_ms = _measure_elapsed(
+                batch.device,
+                lambda: siglip_model(batch, gazing_info=gazing_info),
+            )
+            shape, hidden_bytes = siglip_hidden_summary(output)
+            profiler.add("siglip_gazed_forward", elapsed_ms)
+            summary.update(
+                {
+                    "siglip_gazed_forward_ms": elapsed_ms,
+                    "siglip_gazed_last_hidden_shape": shape,
+                    "siglip_gazed_hidden_bytes_peak": hidden_bytes,
+                }
+            )
+
+        if mode in {"keep-all", "both"}:
+            keep_all_info = build_keep_all_gazing_info(
+                batch_size=int(batch.shape[0]),
+                frames=int(batch.shape[1]),
+                patches_per_frame_value=patches_per_frame_value,
+                device=batch.device,
+            )
+            output, elapsed_ms = _measure_elapsed(
+                batch.device,
+                lambda: siglip_model(batch, gazing_info=keep_all_info),
+            )
+            shape, hidden_bytes = siglip_hidden_summary(output)
+            profiler.add("siglip_keep_all_forward", elapsed_ms)
+            summary.update(
+                {
+                    "siglip_keep_all_forward_ms": elapsed_ms,
+                    "siglip_keep_all_last_hidden_shape": shape,
+                    "siglip_keep_all_hidden_bytes_peak": hidden_bytes,
+                }
+            )
+    return summary
 
 
 def run_autogaze_on_stream_tile_sequences(
@@ -1034,6 +1119,8 @@ def run_autogaze_on_stream_tile_sequences(
     target_patch_size: int,
     patches_per_frame_value: int,
     profiler: StageProfiler,
+    siglip_model: Any | None = None,
+    siglip_mode: str = "gazed",
 ) -> tuple[dict[str, Any], int]:
     from autogaze.datasets.video_utils import transform_video_for_pytorch
     from repro.autogaze_bench import summarize_gaze
@@ -1045,6 +1132,12 @@ def run_autogaze_on_stream_tile_sequences(
     tensorize_ms_total = 0.0
     forward_ms = 0.0
     tensor_bytes_peak = 0
+    siglip_gazed_ms = 0.0
+    siglip_keep_all_ms = 0.0
+    siglip_gazed_hidden_bytes_peak = 0
+    siglip_keep_all_hidden_bytes_peak = 0
+    siglip_gazed_last_hidden_shape = None
+    siglip_keep_all_last_hidden_shape = None
 
     with torch.inference_mode():
         for start in range(0, len(tile_sequences), max_batch_size):
@@ -1081,6 +1174,32 @@ def run_autogaze_on_stream_tile_sequences(
             total_slots += int(summary["total_gaze_slots"])
             forward_ms += elapsed_ms
 
+            if siglip_model is not None:
+                siglip_summary = run_siglip_on_stream_batch(
+                    siglip_model=siglip_model,
+                    batch=batch,
+                    gazing_info=outputs,
+                    mode=siglip_mode,
+                    patches_per_frame_value=patches_per_frame_value,
+                    profiler=profiler,
+                )
+                siglip_gazed_ms += float(siglip_summary.get("siglip_gazed_forward_ms", 0.0) or 0.0)
+                siglip_keep_all_ms += float(siglip_summary.get("siglip_keep_all_forward_ms", 0.0) or 0.0)
+                siglip_gazed_hidden_bytes_peak = max(
+                    siglip_gazed_hidden_bytes_peak,
+                    int(siglip_summary.get("siglip_gazed_hidden_bytes_peak", 0) or 0),
+                )
+                siglip_keep_all_hidden_bytes_peak = max(
+                    siglip_keep_all_hidden_bytes_peak,
+                    int(siglip_summary.get("siglip_keep_all_hidden_bytes_peak", 0) or 0),
+                )
+                siglip_gazed_last_hidden_shape = (
+                    siglip_summary.get("siglip_gazed_last_hidden_shape") or siglip_gazed_last_hidden_shape
+                )
+                siglip_keep_all_last_hidden_shape = (
+                    siglip_summary.get("siglip_keep_all_last_hidden_shape") or siglip_keep_all_last_hidden_shape
+                )
+
     return (
         {
             "tile_sequences": len(tile_sequences),
@@ -1091,6 +1210,12 @@ def run_autogaze_on_stream_tile_sequences(
             "token_reduction_ratio": raw_patch_budget / selected if selected else None,
             "autogaze_tensorize_ms": tensorize_ms_total,
             "autogaze_forward_ms": forward_ms,
+            "siglip_gazed_forward_ms": siglip_gazed_ms,
+            "siglip_keep_all_forward_ms": siglip_keep_all_ms,
+            "siglip_gazed_hidden_bytes_peak": siglip_gazed_hidden_bytes_peak,
+            "siglip_keep_all_hidden_bytes_peak": siglip_keep_all_hidden_bytes_peak,
+            "siglip_gazed_last_hidden_shape": siglip_gazed_last_hidden_shape,
+            "siglip_keep_all_last_hidden_shape": siglip_keep_all_last_hidden_shape,
         },
         tensor_bytes_peak,
     )
@@ -1124,6 +1249,86 @@ def stream_profile_dtype(args: argparse.Namespace) -> torch.dtype:
     if getattr(args, "stream_dtype", "float32") == "float16":
         return torch.float16
     return torch.float32
+
+
+def scales_to_string(scales: list[int]) -> str:
+    return "+".join(str(int(scale)) for scale in scales)
+
+
+def build_stream_siglip_model(
+    *,
+    args: argparse.Namespace,
+    target_scales: list[int],
+    target_patch_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> tuple[Any | None, dict[str, Any]]:
+    if not getattr(args, "stream_run_siglip", False):
+        return None, {"enabled": False}
+    if getattr(args, "gazing_mode", "autogaze") != "autogaze":
+        raise ValueError("--stream-run-siglip currently requires --gazing-mode autogaze.")
+
+    from autogaze.vision_encoders.siglip import SiglipVisionConfig, SiglipVisionModel
+
+    scales = scales_to_string(target_scales)
+    model_path = getattr(args, "stream_siglip_model", None)
+    max_embed_batch_size = getattr(args, "stream_siglip_max_embed_batch_size", None)
+    attn_implementation = getattr(args, "stream_siglip_attn_implementation", "sdpa")
+    if model_path:
+        model = SiglipVisionModel.from_pretrained(
+            model_path,
+            scales=scales,
+            max_embed_batch_size=max_embed_batch_size,
+            attn_implementation=attn_implementation,
+        )
+        source = "pretrained"
+        random_init = False
+    else:
+        config = SiglipVisionConfig(
+            hidden_size=1152,
+            intermediate_size=4304,
+            num_hidden_layers=27,
+            num_attention_heads=16,
+            num_channels=3,
+            image_size=int(target_scales[-1]),
+            patch_size=target_patch_size,
+            hidden_act="gelu_pytorch_tanh",
+            layer_norm_eps=1e-6,
+            attention_dropout=0.0,
+            frame_independent_encoding=False,
+            scales=scales,
+            max_embed_batch_size=max_embed_batch_size,
+            attn_type="block_causal",
+        )
+        config._attn_implementation = attn_implementation
+        model = SiglipVisionModel(config)
+        source = "random_nvila_hd_vision_config"
+        random_init = True
+
+    model_patch_size = int(getattr(model.config, "patch_size", target_patch_size))
+    if model_patch_size != int(target_patch_size):
+        raise ValueError(
+            f"SigLIP patch size ({model_patch_size}) must match --autogaze-target-patch-size "
+            f"({target_patch_size}). For google/siglip2-base-patch16-224, use "
+            "--autogaze-target-patch-size 16 and matching patch16 scales such as 32+64+112+224."
+        )
+
+    model = model.to(device=device, dtype=dtype)
+    model.eval()
+    return model, {
+        "enabled": True,
+        "mode": getattr(args, "stream_siglip_mode", "gazed"),
+        "model": model_path,
+        "source": source,
+        "random_init": random_init,
+        "scales": target_scales,
+        "patch_size": target_patch_size,
+        "max_embed_batch_size": max_embed_batch_size,
+        "attn_implementation": attn_implementation,
+        "hidden_size": int(getattr(model.config, "hidden_size", 0) or 0),
+        "num_hidden_layers": int(getattr(model.config, "num_hidden_layers", 0) or 0),
+        "num_attention_heads": int(getattr(model.config, "num_attention_heads", 0) or 0),
+    }
 
 
 def autogaze_processor_size_kwargs(target_scales: list[int]) -> dict[str, dict[str, int]]:
@@ -1172,9 +1377,12 @@ def run_stream_profile(args: argparse.Namespace) -> None:
 
     transform = None
     model = None
+    siglip_model = None
+    siglip_info: dict[str, Any] = {"enabled": False}
     dtype = stream_profile_dtype(args)
-    if args.gazing_mode == "autogaze":
+    if args.gazing_mode == "autogaze" or getattr(args, "stream_run_siglip", False):
         add_external_autogaze(args.autogaze_repo)
+    if args.gazing_mode == "autogaze":
         from autogaze.models.autogaze import AutoGaze, AutoGazeImageProcessor
 
         transform = AutoGazeImageProcessor.from_pretrained(
@@ -1183,6 +1391,13 @@ def run_stream_profile(args: argparse.Namespace) -> None:
         )
         model = AutoGaze.from_pretrained(args.autogaze_model).to(device)
         model.eval()
+    siglip_model, siglip_info = build_stream_siglip_model(
+        args=args,
+        target_scales=target_scales,
+        target_patch_size=target_patch_size,
+        device=device,
+        dtype=dtype,
+    )
 
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
@@ -1206,12 +1421,15 @@ def run_stream_profile(args: argparse.Namespace) -> None:
     raw_frame_buffer_peak_bytes = 0
     tile_pil_buffer_peak_bytes = 0
     autogaze_tile_tensor_peak_bytes = 0
+    siglip_gazed_hidden_peak_bytes = 0
+    siglip_keep_all_hidden_peak_bytes = 0
     decoded_selected_frames = 0
     eof_padding_summary = {"padded_sampled_frames_after_eof": 0, "padded_thumbnail_frames_after_eof": 0}
     last_selected_frame: Image.Image | None = None
 
     def process_current_stream_chunk() -> None:
         nonlocal current_frames, tile_pil_buffer_peak_bytes, autogaze_tile_tensor_peak_bytes
+        nonlocal siglip_gazed_hidden_peak_bytes, siglip_keep_all_hidden_peak_bytes
         tile_sequences, tile_build_ms = _measure_elapsed(
             device,
             lambda current_frames=current_frames: build_spatial_tile_sequences(
@@ -1241,6 +1459,8 @@ def run_stream_profile(args: argparse.Namespace) -> None:
                 target_patch_size=target_patch_size,
                 patches_per_frame_value=patches_per_frame_value,
                 profiler=profiler,
+                siglip_model=siglip_model,
+                siglip_mode=args.stream_siglip_mode,
             )
         else:
             chunk_summary, tile_tensor_bytes = build_keep_all_stream_chunk_summary(
@@ -1255,6 +1475,14 @@ def run_stream_profile(args: argparse.Namespace) -> None:
         chunk_summary["spatial_tile_build_ms"] = tile_build_ms
         temporal_chunks.append(chunk_summary)
         autogaze_tile_tensor_peak_bytes = max(autogaze_tile_tensor_peak_bytes, tile_tensor_bytes)
+        siglip_gazed_hidden_peak_bytes = max(
+            siglip_gazed_hidden_peak_bytes,
+            int(chunk_summary.get("siglip_gazed_hidden_bytes_peak", 0) or 0),
+        )
+        siglip_keep_all_hidden_peak_bytes = max(
+            siglip_keep_all_hidden_peak_bytes,
+            int(chunk_summary.get("siglip_keep_all_hidden_bytes_peak", 0) or 0),
+        )
         current_frames = []
 
     container = av.open(resolved_video)
@@ -1347,6 +1575,19 @@ def run_stream_profile(args: argparse.Namespace) -> None:
     token_metrics = build_stream_profile_token_metrics(plan, tile_summary)
     stage_timings = profiler.as_dict()
     total_measured_ms = sum(float(value["total_ms"]) for value in stage_timings.values())
+    if siglip_info.get("enabled"):
+        metric_note = (
+            "stream-profile measures decode/resize/tile/AutoGaze and customized SigLIP vision forward one temporal "
+            "chunk at a time. Raw frames, tile images, and tile tensors are released after each chunk. NVILA projector "
+            "and LLM timings remain in single/hlvid mode because the public NVILA generate path consumes the collected "
+            "visual token sequence."
+        )
+    else:
+        metric_note = (
+            "stream-profile measures decode/resize/tile/AutoGaze work one temporal chunk at a time and releases "
+            "raw frames/tiles after each chunk. NVILA vision encoding, projector, and LLM timings remain in single/hlvid "
+            "mode because the public NVILA generate path consumes the collected visual token sequence."
+        )
     payload = {
         "metadata": environment_metadata(device),
         "mode": "stream-profile",
@@ -1364,6 +1605,7 @@ def run_stream_profile(args: argparse.Namespace) -> None:
         "video_resize": video_resize_config(args, metadata),
         "autogaze_target_scales": target_scales,
         "autogaze_target_patch_size": target_patch_size,
+        "stream_siglip": siglip_info,
         "stream_plan": plan,
         "streaming_boundary": plan["streaming_boundary"],
         "sampling": {
@@ -1386,6 +1628,8 @@ def run_stream_profile(args: argparse.Namespace) -> None:
             "spatial_tile_build": stage_total(stage_timings, "spatial_tile_build"),
             "tile_autogaze_tensorize": stage_total(stage_timings, "tile_autogaze_tensorize"),
             "tile_autogaze_forward": stage_total(stage_timings, "tile_autogaze_forward"),
+            "siglip_gazed_forward": stage_total(stage_timings, "siglip_gazed_forward"),
+            "siglip_keep_all_forward": stage_total(stage_timings, "siglip_keep_all_forward"),
             "keep_all_mask_build": stage_total(stage_timings, "keep_all_mask_build"),
             "thumbnail_resize": stage_total(stage_timings, "thumbnail_resize"),
             "thumbnail_tensorize": stage_total(stage_timings, "thumbnail_tensorize"),
@@ -1397,15 +1641,13 @@ def run_stream_profile(args: argparse.Namespace) -> None:
             "raw_frame_buffer_peak": raw_frame_buffer_peak_bytes,
             "tile_pil_buffer_peak": tile_pil_buffer_peak_bytes,
             "autogaze_tile_tensor_peak_per_temporal_chunk": autogaze_tile_tensor_peak_bytes,
+            "siglip_gazed_hidden_peak": siglip_gazed_hidden_peak_bytes,
+            "siglip_keep_all_hidden_peak": siglip_keep_all_hidden_peak_bytes,
             "thumbnail_tensor": _tensor_bytes(thumbnail_tensor),
             "cuda_peak_memory_bytes": torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None,
         },
         "temporal_chunk_summaries": temporal_chunks,
-        "metric_note": (
-            "stream-profile measures decode/resize/tile/AutoGaze work one temporal chunk at a time and releases "
-            "raw frames/tiles after each chunk. NVILA vision encoding, projector, and LLM timings remain in single/hlvid "
-            "mode because the public NVILA generate path consumes the collected visual token sequence."
-        ),
+        "metric_note": metric_note,
     }
     write_json(args.stream_profile_json, payload)
     print(json.dumps(payload, indent=2, sort_keys=True))
@@ -1659,6 +1901,11 @@ def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentPar
     parser.add_argument("--measure-ttft", action="store_true")
     parser.add_argument("--stream-chunk-frames", type=int, default=AUTOGAZE_CHUNK_FRAMES)
     parser.add_argument("--stream-dtype", choices=["float32", "float16"], default="float32")
+    parser.add_argument("--stream-run-siglip", action="store_true")
+    parser.add_argument("--stream-siglip-mode", choices=["gazed", "keep-all", "both"], default="gazed")
+    parser.add_argument("--stream-siglip-model")
+    parser.add_argument("--stream-siglip-max-embed-batch-size", type=int, default=1)
+    parser.add_argument("--stream-siglip-attn-implementation", default="sdpa")
     parser.add_argument("--hlvid-repo", default="bfshi/HLVid")
     parser.add_argument("--hlvid-video-root", default="data/hlvid/videos")
     parser.add_argument("--config", default="default")

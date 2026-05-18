@@ -56,6 +56,45 @@ def test_build_recommendation_rows_estimates_tokens_memory_and_command_args():
     assert "stream-profile" in row["command"]
 
 
+def test_build_recommendation_rows_can_include_stream_siglip_probe_args():
+    candidate = SweepCandidate(
+        name="fast_448p_1tile_64f",
+        num_video_frames=64,
+        num_video_frames_thumbnail=32,
+        max_tiles_video=1,
+        stream_chunk_frames=16,
+        max_batch_size_autogaze=4,
+        max_batch_size_siglip=16,
+        video_resize_shortest_edge=448,
+    )
+
+    rows = build_recommendation_rows(
+        video="clip.mp4",
+        width=1920,
+        height=1080,
+        source_frames=9000,
+        candidates=[candidate],
+        device="mps",
+        stream_dtype="float32",
+        out_dir="outputs/sweep",
+        stream_run_siglip=True,
+        stream_siglip_mode="gazed",
+        stream_siglip_model="google/siglip2-base-patch16-224",
+        stream_siglip_max_embed_batch_size=1,
+        autogaze_target_scales="32+64+112+224",
+        autogaze_target_patch_size=16,
+    )
+
+    command = rows[0]["command"]
+    assert "--stream-run-siglip" in command
+    assert "--stream-siglip-mode gazed" in command
+    assert "--stream-siglip-model google/siglip2-base-patch16-224" in command
+    assert "--stream-siglip-max-embed-batch-size 1" in command
+    assert "--autogaze-target-scales 32+64+112+224" in command
+    assert "--autogaze-target-patch-size 16" in command
+    assert rows[0]["encoder_raw_patch_tokens"] == 25440
+
+
 def test_rank_recommendations_filters_context_and_memory_then_prefers_latency():
     rows = [
         {

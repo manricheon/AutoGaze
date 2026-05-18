@@ -13,6 +13,7 @@ from repro.common import write_csv, write_json
 from repro.nvila_runner import (
     apply_resize_to_dimensions,
     estimate_stream_profile_plan,
+    parse_int_sequence,
     read_video_metadata,
     spatial_tile_grid,
 )
@@ -129,6 +130,12 @@ def build_command(
     stream_dtype: str,
     gazing_mode: str,
     output_json: str | Path,
+    stream_run_siglip: bool = False,
+    stream_siglip_mode: str = "gazed",
+    stream_siglip_model: str | None = None,
+    stream_siglip_max_embed_batch_size: int | None = None,
+    autogaze_target_scales: str | None = None,
+    autogaze_target_patch_size: int | None = None,
 ) -> list[str]:
     command = [
         sys.executable,
@@ -159,6 +166,16 @@ def build_command(
         "--stream-profile-json",
         str(output_json),
     ]
+    if autogaze_target_scales:
+        command.extend(["--autogaze-target-scales", autogaze_target_scales])
+    if autogaze_target_patch_size is not None:
+        command.extend(["--autogaze-target-patch-size", str(autogaze_target_patch_size)])
+    if stream_run_siglip:
+        command.extend(["--stream-run-siglip", "--stream-siglip-mode", stream_siglip_mode])
+        if stream_siglip_model:
+            command.extend(["--stream-siglip-model", stream_siglip_model])
+        if stream_siglip_max_embed_batch_size is not None:
+            command.extend(["--stream-siglip-max-embed-batch-size", str(stream_siglip_max_embed_batch_size)])
     if candidate.video_resize_shortest_edge is not None:
         command.extend(["--video-resize-shortest-edge", str(candidate.video_resize_shortest_edge)])
     return command
@@ -175,8 +192,20 @@ def build_recommendation_rows(
     stream_dtype: str,
     out_dir: str | Path,
     gazing_mode: str = "autogaze",
+    stream_run_siglip: bool = False,
+    stream_siglip_mode: str = "gazed",
+    stream_siglip_model: str | None = None,
+    stream_siglip_max_embed_batch_size: int | None = None,
+    autogaze_target_scales: str | None = None,
+    autogaze_target_patch_size: int | None = None,
 ) -> list[dict[str, Any]]:
     rows = []
+    parsed_scales = parse_int_sequence(autogaze_target_scales)
+    plan_overrides: dict[str, Any] = {}
+    if parsed_scales:
+        plan_overrides["scales"] = parsed_scales
+    if autogaze_target_patch_size is not None:
+        plan_overrides["patch_size"] = autogaze_target_patch_size
     for candidate in candidates:
         effective = apply_resize_to_dimensions(
             width=width,
@@ -195,6 +224,7 @@ def build_recommendation_rows(
             max_tiles_video=candidate.max_tiles_video,
             chunk_frames=candidate.stream_chunk_frames,
             max_batch_size_autogaze=candidate.max_batch_size_autogaze,
+            **plan_overrides,
         )
         grid = spatial_tile_grid(int(effective["width"]), int(effective["height"]), candidate.max_tiles_video)
         output_json = _candidate_output_path(out_dir, candidate, gazing_mode)
@@ -205,6 +235,12 @@ def build_recommendation_rows(
             stream_dtype=stream_dtype,
             gazing_mode=gazing_mode,
             output_json=output_json,
+            stream_run_siglip=stream_run_siglip,
+            stream_siglip_mode=stream_siglip_mode,
+            stream_siglip_model=stream_siglip_model,
+            stream_siglip_max_embed_batch_size=stream_siglip_max_embed_batch_size,
+            autogaze_target_scales=autogaze_target_scales,
+            autogaze_target_patch_size=autogaze_target_patch_size,
         )
         rows.append(
             {
@@ -220,6 +256,12 @@ def build_recommendation_rows(
                 "stream_chunk_frames": candidate.stream_chunk_frames,
                 "max_batch_size_autogaze": candidate.max_batch_size_autogaze,
                 "max_batch_size_siglip": candidate.max_batch_size_siglip,
+                "stream_run_siglip": stream_run_siglip,
+                "stream_siglip_mode": stream_siglip_mode if stream_run_siglip else None,
+                "stream_siglip_model": stream_siglip_model if stream_run_siglip else None,
+                "stream_siglip_max_embed_batch_size": stream_siglip_max_embed_batch_size if stream_run_siglip else None,
+                "autogaze_target_scales": autogaze_target_scales,
+                "autogaze_target_patch_size": autogaze_target_patch_size,
                 "tile_sequences": int(plan["chunking"]["tile_sequences"]),
                 "encoder_raw_patch_tokens": int(plan["tokens"]["encoder_raw_patch_tokens"]),
                 "encoder_raw_tile_patch_tokens": int(plan["tokens"]["encoder_raw_tile_patch_tokens"]),
@@ -254,9 +296,13 @@ def _row_with_result(row: dict[str, Any], result_path: str | Path) -> dict[str, 
         "measured_tile_build_ms": timing.get("spatial_tile_build"),
         "measured_autogaze_tensorize_ms": timing.get("tile_autogaze_tensorize"),
         "measured_autogaze_forward_ms": timing.get("tile_autogaze_forward"),
+        "measured_siglip_gazed_forward_ms": timing.get("siglip_gazed_forward"),
+        "measured_siglip_keep_all_forward_ms": timing.get("siglip_keep_all_forward"),
         "measured_raw_frame_buffer_peak": memory.get("raw_frame_buffer_peak"),
         "measured_tile_pil_buffer_peak": memory.get("tile_pil_buffer_peak"),
         "measured_autogaze_tensor_peak": memory.get("autogaze_tile_tensor_peak_per_temporal_chunk"),
+        "measured_siglip_gazed_hidden_peak": memory.get("siglip_gazed_hidden_peak"),
+        "measured_siglip_keep_all_hidden_peak": memory.get("siglip_keep_all_hidden_peak"),
         "encoder_autogaze_selected_patch_tokens": tokens.get("encoder_autogaze_selected_patch_tokens"),
         "encoder_token_reduction_ratio": tokens.get("encoder_token_reduction_ratio"),
         "encoder_tile_token_reduction_ratio": tokens.get("encoder_tile_token_reduction_ratio"),
@@ -333,6 +379,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--summary-json", default="outputs/autogaze_repro/stream_sweep_summary.json")
     parser.add_argument("--summary-csv", default="outputs/autogaze_repro/stream_sweep_summary.csv")
     parser.add_argument("--run", action="store_true")
+    parser.add_argument("--stream-run-siglip", action="store_true")
+    parser.add_argument("--stream-siglip-mode", default="gazed", choices=["gazed", "keep-all", "both"])
+    parser.add_argument("--stream-siglip-model")
+    parser.add_argument("--stream-siglip-max-embed-batch-size", type=int, default=1)
+    parser.add_argument("--autogaze-target-scales", "--autogaze-resize-scales", dest="autogaze_target_scales")
+    parser.add_argument("--autogaze-target-patch-size", type=int)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--include", action="append", default=[])
     parser.add_argument("--timeout-seconds", type=int)
@@ -360,6 +412,12 @@ def main() -> None:
         stream_dtype=args.stream_dtype,
         out_dir=args.out_dir,
         gazing_mode=args.gazing_mode,
+        stream_run_siglip=args.stream_run_siglip,
+        stream_siglip_mode=args.stream_siglip_mode,
+        stream_siglip_model=args.stream_siglip_model,
+        stream_siglip_max_embed_batch_size=args.stream_siglip_max_embed_batch_size,
+        autogaze_target_scales=args.autogaze_target_scales,
+        autogaze_target_patch_size=args.autogaze_target_patch_size,
     )
     if args.run:
         rows = run_candidates(rows, timeout_seconds=args.timeout_seconds)
@@ -375,6 +433,11 @@ def main() -> None:
         "device": args.device,
         "stream_dtype": args.stream_dtype,
         "gazing_mode": args.gazing_mode,
+        "stream_run_siglip": args.stream_run_siglip,
+        "stream_siglip_mode": args.stream_siglip_mode if args.stream_run_siglip else None,
+        "stream_siglip_model": args.stream_siglip_model if args.stream_run_siglip else None,
+        "autogaze_target_scales": args.autogaze_target_scales,
+        "autogaze_target_patch_size": args.autogaze_target_patch_size,
         "rows": rows,
         "ranked_candidates": ranked,
     }

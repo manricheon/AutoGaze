@@ -25,6 +25,26 @@ local_mps:
       max_batch_size_autogaze: 1
       max_batch_size_siglip: 16
       video_resize_shortest_edge: 448
+  siglip_patch16_probe:
+    intent: >
+      MPS smoke that runs AutoGaze and the customized SigLIP vision tower on chunked
+      video tiles. Uses patch16 scales to match google/siglip2-base-patch16-224.
+    args:
+      device: mps
+      stream_dtype: float32
+      gazing_mode: autogaze
+      num_video_frames: 64
+      num_video_frames_thumbnail: 32
+      max_tiles_video: 1
+      stream_chunk_frames: 16
+      max_batch_size_autogaze: 1
+      max_batch_size_siglip: 16
+      autogaze_target_scales: 32+64+112+224
+      autogaze_target_patch_size: 16
+      stream_run_siglip: true
+      stream_siglip_mode: both
+      stream_siglip_model: google/siglip2-base-patch16-224
+      stream_siglip_max_embed_batch_size: 1
   balanced_720p:
     intent: Highest local MPS setting that still looks practical for short probes.
     args:
