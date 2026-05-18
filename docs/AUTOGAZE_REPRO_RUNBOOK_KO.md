@@ -230,6 +230,45 @@ Space 예시 비디오에서 HLVid-like stress check를 하려면 전체 샘플�
 
 4K/1024프레임 estimate에서는 현재 public processor path 기준으로 약 `45`개 spatial tile, `2880`개 tile sequence, 약 `5.44M` keep-all visual token, Python/PIL overhead를 제외한 CPU preprocessing memory lower bound 약 `202 GiB`가 보고됩니다. 이 결과가 나오면 full generation을 시도하기 전에 `--num-video-frames`나 `--max-tiles-video`를 줄이거나, chunked preprocessing 및 vision encoding을 구현해야 한다는 신호로 보세요.
 
+## HLVid example AutoGaze-only smoke
+
+기본 NVILA runner example 비디오는 `bfshi/HLVid`의 `example/clip_av_video_5_001.mp4`입니다. 4K, 약 5분짜리 MP4이고 파일 크기는 약 1.7 GB라서 로컬 다운로드에는 충분한 디스크 여유 공간이 필요합니다.
+
+resume 가능한 다운로드:
+
+```bash
+.venv/bin/python scripts/download_hlvid_example_video.py
+```
+
+파일은 `inputs/hlvid_example/clip_av_video_5_001.mp4`에 저장됩니다. 중간에 끊기면 같은 명령을 다시 실행하세요. 이미 받은 byte 이후부터 이어받도록 `Range` 요청을 보냅니다.
+
+디스크 공간이 부족하면 다운로드 없이 remote URL을 직접 streaming해서 AutoGaze-only smoke를 돌릴 수 있습니다. 이 실행은 NVILA나 SigLIP를 로드하지 않습니다. 대신 NVILA video sampling shape를 흉내 내서 전체 비디오에서 `128`프레임을 uniform sampling하고, 16프레임 AutoGaze chunk로 나누며, 4K dynamic spatial tiling을 `max_tiles_video=48` 기준으로 적용하고, `64`개 thumbnail frame도 NVILA thumbnail subsampling policy로 처리합니다.
+
+```bash
+.venv/bin/python -m repro.hlvid_example_autogaze \
+  --device mps \
+  --num-video-frames 128 \
+  --num-video-frames-thumbnail 64 \
+  --max-tiles-video 48 \
+  --max-batch-size-autogaze 16 \
+  --output-json outputs/autogaze_repro/hlvid_example_autogaze_only_128f.json
+```
+
+다운로드한 파일을 사용하려면:
+
+```bash
+.venv/bin/python -m repro.hlvid_example_autogaze \
+  --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
+  --device cuda \
+  --dtype float16 \
+  --num-video-frames 128 \
+  --num-video-frames-thumbnail 64 \
+  --max-tiles-video 48 \
+  --output-json outputs/autogaze_repro/hlvid_example_autogaze_only_128f_cuda.json
+```
+
+4K HLVid example에서 `max_tiles_video=48`은 `9x5=45` spatial tile로 결정됩니다. 128 sampled frame과 16-frame temporal chunk를 쓰면 `8 * 45 = 360`개의 AutoGaze tile sequence가 생깁니다. 이 smoke는 NVILA-8B를 로드하기 전에 AutoGaze sampling, chunking, tiling, thumbnail 처리, token reduction이 기대대로 동작하는지 확인하는 용도입니다.
+
 ## HLVid manifest
 
 ```bash

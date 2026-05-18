@@ -38,6 +38,7 @@ def test_hlvid_like_nvila_config_uses_fixed_total_frame_sampling():
     assert config.nvila_runner.args.max_tiles_video == 48
     assert config.nvila_runner.args.max_batch_size_autogaze == 16
     assert config.nvila_runner.args.max_batch_size_siglip == 32
+    assert (root / "scripts" / "download_hlvid_example_video.py").is_file()
 
 
 def test_hf_space_autogaze_examples_config_matches_downloaded_videos():

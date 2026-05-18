@@ -230,6 +230,45 @@ For an HLVid-like 4K/5-minute estimate before downloading a specific video:
 
 On the 4K/1024-frame estimate, the current public processor path reports about `45` spatial tiles, `2880` tile sequences, about `5.44M` keep-all visual tokens, and about `202 GiB` lower-bound CPU preprocessing memory before Python/PIL overhead. Treat that as a signal to reduce `--num-video-frames`/`--max-tiles-video` or implement chunked preprocessing and vision encoding before attempting full generation.
 
+## HLVid Example AutoGaze-Only Smoke
+
+The default NVILA runner example video is `example/clip_av_video_5_001.mp4` from `bfshi/HLVid`. It is a 4K, about 5-minute MP4 and is about 1.7 GB, so local download needs enough free disk space.
+
+To download it with resume support:
+
+```bash
+.venv/bin/python scripts/download_hlvid_example_video.py
+```
+
+The file is saved to `inputs/hlvid_example/clip_av_video_5_001.mp4`. If the download is interrupted, rerun the same command and it will request the remaining byte range.
+
+When disk space is tight, the AutoGaze-only smoke can stream the remote URL directly. This does not run NVILA or SigLIP. It mirrors the NVILA video sampling shape by sampling `128` frames uniformly across the full video, splitting them into 16-frame AutoGaze chunks, applying 4K dynamic spatial tiling with `max_tiles_video=48`, and processing `64` thumbnail frames using NVILA's thumbnail subsampling policy.
+
+```bash
+.venv/bin/python -m repro.hlvid_example_autogaze \
+  --device mps \
+  --num-video-frames 128 \
+  --num-video-frames-thumbnail 64 \
+  --max-tiles-video 48 \
+  --max-batch-size-autogaze 16 \
+  --output-json outputs/autogaze_repro/hlvid_example_autogaze_only_128f.json
+```
+
+To use the downloaded file instead of remote streaming:
+
+```bash
+.venv/bin/python -m repro.hlvid_example_autogaze \
+  --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
+  --device cuda \
+  --dtype float16 \
+  --num-video-frames 128 \
+  --num-video-frames-thumbnail 64 \
+  --max-tiles-video 48 \
+  --output-json outputs/autogaze_repro/hlvid_example_autogaze_only_128f_cuda.json
+```
+
+For the 4K HLVid example, `max_tiles_video=48` resolves to `9x5=45` spatial tiles. With 128 sampled frames and 16-frame temporal chunks, this means `8 * 45 = 360` AutoGaze tile sequences. This smoke is useful for validating AutoGaze sampling, chunking, tiling, thumbnail handling, and token reduction before loading NVILA-8B.
+
 ## HLVid Manifest
 
 ```bash
