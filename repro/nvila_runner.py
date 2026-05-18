@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict
+from collections import Counter, defaultdict
 from contextlib import contextmanager
 import json
 import math
@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import av
+import numpy as np
 import torch
 from huggingface_hub import hf_hub_url
 from omegaconf import OmegaConf
@@ -59,6 +60,10 @@ class StageProfiler:
     def reset(self) -> None:
         self._totals.clear()
         self._counts.clear()
+
+    def add(self, name: str, elapsed_ms: float) -> None:
+        self._totals[name] += elapsed_ms
+        self._counts[name] += 1
 
     def as_dict(self) -> dict[str, dict[str, float | int]]:
         return {
@@ -174,6 +179,148 @@ def uniform_sample_indices(total_frames: int, sample_count: int) -> list[int]:
     if sample_count == 1:
         return [0]
     return [int(round(i * (total_frames - 1) / (sample_count - 1))) for i in range(sample_count)]
+
+
+def nvila_thumbnail_indices(sampled_frame_indices: list[int], thumbnail_count: int) -> list[int]:
+    if thumbnail_count <= 0:
+        return []
+    if len(sampled_frame_indices) > thumbnail_count:
+        step = len(sampled_frame_indices) // thumbnail_count
+        return sampled_frame_indices[::step][:thumbnail_count]
+    return list(sampled_frame_indices)
+
+
+def estimate_stream_profile_plan(
+    *,
+    width: int,
+    height: int,
+    source_frames: int | None,
+    num_video_frames: int,
+    num_video_frames_thumbnail: int,
+    max_tiles_video: int,
+    chunk_frames: int,
+    max_batch_size_autogaze: int | None = None,
+    scales: list[int] | None = None,
+    patch_size: int = NVILA_TARGET_PATCH_SIZE,
+    image_size: int = NVILA_IMAGE_SIZE,
+    token_shuffle: int = NVILA_TOKEN_SHUFFLE,
+) -> dict[str, Any]:
+    if num_video_frames <= 0:
+        raise ValueError("num_video_frames must be positive")
+    if chunk_frames <= 0:
+        raise ValueError("chunk_frames must be positive")
+
+    grid = spatial_tile_grid(width, height, max_tiles_video, image_size)
+    temporal_chunks = math.ceil(num_video_frames / chunk_frames)
+    thumbnail_frames = min(num_video_frames, max(num_video_frames_thumbnail, 0))
+    per_frame_patches = patches_per_frame(scales, patch_size)
+    patch_breakdown = {str(scale): (scale // patch_size) ** 2 for scale in (scales or NVILA_TARGET_SCALES)}
+    raw_tile_patches = num_video_frames * grid["tiles"] * per_frame_patches
+    raw_thumbnail_patches = thumbnail_frames * per_frame_patches
+    keep_all_tile_tokens = num_video_frames * math.ceil(grid["tiles"] * per_frame_patches / token_shuffle)
+    keep_all_thumbnail_tokens = thumbnail_frames * math.ceil(per_frame_patches / token_shuffle)
+    autogaze_batch_tile_sequences = min(grid["tiles"], max_batch_size_autogaze or grid["tiles"])
+    autogaze_tensor_bytes_per_batch = chunk_frames * autogaze_batch_tile_sequences * 3 * image_size * image_size * 4
+    autogaze_tensor_bytes_full_chunk = chunk_frames * grid["tiles"] * 3 * image_size * image_size * 4
+
+    return {
+        "video": {
+            "width": width,
+            "height": height,
+            "source_frames": source_frames,
+        },
+        "sampling": {
+            "requested_frames": num_video_frames,
+            "thumbnail_frames": thumbnail_frames,
+            "policy": "nvila_round_linspace_over_full_video",
+        },
+        "tiling": {
+            "cols": grid["cols"],
+            "rows": grid["rows"],
+            "spatial_tiles": grid["tiles"],
+            "tile_size": image_size,
+        },
+        "chunking": {
+            "chunk_frames": chunk_frames,
+            "temporal_chunks": temporal_chunks,
+            "tile_sequences": temporal_chunks * grid["tiles"],
+            "last_chunk_frames": num_video_frames - (temporal_chunks - 1) * chunk_frames,
+        },
+        "tokens": {
+            "encoder_patches_per_frame_multiscale": per_frame_patches,
+            "encoder_patches_per_frame_by_scale": patch_breakdown,
+            "encoder_raw_tile_patch_tokens": raw_tile_patches,
+            "encoder_raw_thumbnail_patch_tokens": raw_thumbnail_patches,
+            "encoder_raw_patch_tokens": raw_tile_patches + raw_thumbnail_patches,
+            "llm_keep_all_tile_visual_tokens_estimated": keep_all_tile_tokens,
+            "llm_keep_all_thumbnail_visual_tokens_estimated": keep_all_thumbnail_tokens,
+            "llm_keep_all_visual_tokens_estimated": keep_all_tile_tokens + keep_all_thumbnail_tokens,
+        },
+        "memory": {
+            "streaming_raw_frame_buffer_bytes": chunk_frames * width * height * 3,
+            "streaming_tile_pil_buffer_bytes": chunk_frames * grid["tiles"] * image_size * image_size * 3,
+            "autogaze_batch_tile_sequences": autogaze_batch_tile_sequences,
+            "streaming_autogaze_tile_tensor_bytes": autogaze_tensor_bytes_per_batch,
+            "streaming_autogaze_tile_tensor_bytes_per_batch": autogaze_tensor_bytes_per_batch,
+            "streaming_autogaze_tile_tensor_bytes_full_chunk": autogaze_tensor_bytes_full_chunk,
+            "thumbnail_tensor_bytes": thumbnail_frames * 3 * image_size * image_size * 4,
+            "note": "Streaming estimates only keep one temporal chunk of raw frames and tiles before AutoGaze/SigLIP-style work; final NVILA generation still needs collected visual tokens.",
+        },
+        "streaming_boundary": {
+            "pre_llm_stages_can_stream": True,
+            "llm_generation_requires_collected_visual_tokens": True,
+            "note": "Decode, resize, spatial tiling, AutoGaze tensorization, and AutoGaze forward can be measured per chunk. NVILA LLM prefill/generation consumes the accumulated visual token sequence.",
+        },
+    }
+
+
+def build_stream_profile_token_metrics(plan: dict[str, Any], tile_summary: dict[str, Any]) -> dict[str, Any]:
+    raw_tile_patches = int(plan["tokens"]["encoder_raw_tile_patch_tokens"])
+    raw_thumbnail_patches = int(plan["tokens"]["encoder_raw_thumbnail_patch_tokens"])
+    raw_total = raw_tile_patches + raw_thumbnail_patches
+    selected_tile_patches = int(tile_summary.get("selected_non_padded_patches", raw_tile_patches))
+    selected_thumbnail_patches = raw_thumbnail_patches
+    selected_total = selected_tile_patches + selected_thumbnail_patches
+    padded_tile = int(tile_summary.get("padded_gazing_positions", 0))
+    total_tile_slots = int(tile_summary.get("total_gaze_slots", 0))
+    token_shuffle = NVILA_TOKEN_SHUFFLE
+
+    return {
+        "video_sampled_frames": int(plan["sampling"]["requested_frames"]),
+        "thumbnail_sampled_frames": int(plan["sampling"]["thumbnail_frames"]),
+        "tile_sequences": int(plan["chunking"]["tile_sequences"]),
+        "spatial_tiles_per_video": [int(plan["tiling"]["spatial_tiles"])],
+        "temporal_chunks_per_video": [int(plan["chunking"]["temporal_chunks"])],
+        "encoder_patches_per_frame_multiscale": int(plan["tokens"]["encoder_patches_per_frame_multiscale"]),
+        "encoder_patches_per_frame_by_scale": plan["tokens"]["encoder_patches_per_frame_by_scale"],
+        "token_shuffle": token_shuffle,
+        "encoder_raw_tile_patch_tokens": raw_tile_patches,
+        "encoder_autogaze_selected_tile_patch_tokens": selected_tile_patches,
+        "encoder_autogaze_padded_tile_patch_tokens": padded_tile,
+        "encoder_autogaze_total_tile_gaze_slots": total_tile_slots,
+        "encoder_tile_token_reduction_ratio": _safe_ratio(raw_tile_patches, selected_tile_patches),
+        "encoder_raw_thumbnail_patch_tokens": raw_thumbnail_patches,
+        "encoder_autogaze_selected_thumbnail_patch_tokens": selected_thumbnail_patches,
+        "encoder_autogaze_padded_thumbnail_patch_tokens": 0,
+        "encoder_autogaze_total_thumbnail_gaze_slots": 0,
+        "encoder_thumbnail_token_reduction_ratio": _safe_ratio(raw_thumbnail_patches, selected_thumbnail_patches),
+        "encoder_raw_patch_tokens": raw_total,
+        "encoder_raw_total_patch_tokens": raw_total,
+        "encoder_autogaze_selected_patch_tokens": selected_total,
+        "encoder_autogaze_selected_total_patch_tokens": selected_total,
+        "encoder_autogaze_padded_patch_tokens": padded_tile,
+        "encoder_autogaze_total_gaze_slots": total_tile_slots,
+        "encoder_token_reduction_ratio": _safe_ratio(raw_total, selected_total),
+        "llm_keep_all_tile_visual_tokens_estimated": plan["tokens"]["llm_keep_all_tile_visual_tokens_estimated"],
+        "llm_keep_all_thumbnail_visual_tokens_estimated": plan["tokens"]["llm_keep_all_thumbnail_visual_tokens_estimated"],
+        "llm_keep_all_visual_tokens_estimated": plan["tokens"]["llm_keep_all_visual_tokens_estimated"],
+        "llm_autogaze_visual_tokens_lower_bound_estimated": math.ceil(selected_total / token_shuffle)
+        if selected_total
+        else 0,
+        "llm_actual_visual_tokens": None,
+        "llm_actual_visual_tokens_after_autogaze": None,
+        "llm_visual_token_reduction_ratio": None,
+    }
 
 
 def apply_resize_to_dimensions(
@@ -793,6 +940,477 @@ def prepare_video_for_processor(video: str, args: argparse.Namespace) -> tuple[A
     }
 
 
+def build_spatial_tile_sequences(
+    frames: list[Image.Image],
+    *,
+    cols: int,
+    rows: int,
+    tile_size: int,
+) -> list[list[Image.Image]]:
+    sequences: list[list[Image.Image]] = [[] for _ in range(cols * rows)]
+    target_size = (cols * tile_size, rows * tile_size)
+    for frame in frames:
+        resized = frame.resize(target_size)
+        for tile_idx in range(cols * rows):
+            col = tile_idx % cols
+            row = tile_idx // cols
+            box = (
+                col * tile_size,
+                row * tile_size,
+                (col + 1) * tile_size,
+                (row + 1) * tile_size,
+            )
+            sequences[tile_idx].append(resized.crop(box))
+    return sequences
+
+
+def repeat_last_stream_samples_after_eof(
+    *,
+    current_frames: list[Image.Image],
+    thumbnails: list[Image.Image],
+    last_selected_frame: Image.Image | None,
+    missing_sampled_frames: int,
+    missing_thumbnail_frames: int,
+    tile_size: int,
+) -> dict[str, int]:
+    if missing_sampled_frames <= 0:
+        return {"padded_sampled_frames_after_eof": 0, "padded_thumbnail_frames_after_eof": 0}
+    if last_selected_frame is None:
+        raise RuntimeError("Cannot pad missing video samples because no sampled frame was decoded.")
+
+    thumbnail_padding = min(missing_sampled_frames, max(missing_thumbnail_frames, 0))
+    for index in range(missing_sampled_frames):
+        frame_copy = last_selected_frame.copy()
+        current_frames.append(frame_copy)
+        if index < thumbnail_padding:
+            thumbnails.append(frame_copy.resize((tile_size, tile_size)))
+    return {
+        "padded_sampled_frames_after_eof": missing_sampled_frames,
+        "padded_thumbnail_frames_after_eof": thumbnail_padding,
+    }
+
+
+def _measure_elapsed(device: torch.device, fn):
+    synchronize(device)
+    start = time.perf_counter()
+    result = fn()
+    synchronize(device)
+    return result, (time.perf_counter() - start) * 1000.0
+
+
+def _tensor_bytes(tensor: Any) -> int:
+    if tensor is None:
+        return 0
+    return int(tensor.numel() * tensor.element_size())
+
+
+def summarize_stream_chunks(chunks: list[dict[str, Any]]) -> dict[str, Any]:
+    raw_patch_budget = sum(int(chunk["raw_patch_budget"]) for chunk in chunks)
+    selected = sum(int(chunk["selected_non_padded_patches"]) for chunk in chunks)
+    padded = sum(int(chunk.get("padded_gazing_positions", 0)) for chunk in chunks)
+    total_slots = sum(int(chunk.get("total_gaze_slots", 0)) for chunk in chunks)
+    tile_sequences = sum(int(chunk["tile_sequences"]) for chunk in chunks)
+    return {
+        "tile_sequences": tile_sequences,
+        "raw_patch_budget": raw_patch_budget,
+        "selected_non_padded_patches": selected,
+        "padded_gazing_positions": padded,
+        "total_gaze_slots": total_slots,
+        "token_reduction_ratio": raw_patch_budget / selected if selected else None,
+    }
+
+
+def run_autogaze_on_stream_tile_sequences(
+    *,
+    tile_sequences: list[list[Image.Image]],
+    transform: Any,
+    model: Any,
+    device: torch.device,
+    dtype: torch.dtype,
+    max_batch_size: int,
+    gazing_ratio: float | list[float],
+    task_loss_requirement: float | None,
+    target_scales: list[int],
+    target_patch_size: int,
+    patches_per_frame_value: int,
+    profiler: StageProfiler,
+) -> tuple[dict[str, Any], int]:
+    from autogaze.datasets.video_utils import transform_video_for_pytorch
+    from repro.autogaze_bench import summarize_gaze
+
+    raw_patch_budget = 0
+    selected = 0
+    padded = 0
+    total_slots = 0
+    tensorize_ms_total = 0.0
+    forward_ms = 0.0
+    tensor_bytes_peak = 0
+
+    with torch.inference_mode():
+        for start in range(0, len(tile_sequences), max_batch_size):
+            batch_sequences = tile_sequences[start : start + max_batch_size]
+
+            def tensorize():
+                flat_tiles = [np.array(frame) for sequence in batch_sequences for frame in sequence]
+                transformed = transform_video_for_pytorch(np.stack(flat_tiles), transform)
+                return transformed.reshape(len(batch_sequences), len(batch_sequences[0]), *transformed.shape[1:])
+
+            transformed, tensorize_ms = _measure_elapsed(device, tensorize)
+            profiler.add("tile_autogaze_tensorize", tensorize_ms)
+            tensorize_ms_total += tensorize_ms
+            tensor_bytes_peak = max(tensor_bytes_peak, _tensor_bytes(transformed))
+
+            batch = transformed.to(device=device, dtype=dtype)
+            raw_budget = int(batch.shape[0] * batch.shape[1] * patches_per_frame_value)
+
+            def forward():
+                return model(
+                    {"video": batch},
+                    gazing_ratio=gazing_ratio,
+                    task_loss_requirement=task_loss_requirement,
+                    target_scales=target_scales,
+                    target_patch_size=target_patch_size,
+                )
+
+            outputs, elapsed_ms = _measure_elapsed(device, forward)
+            profiler.add("tile_autogaze_forward", elapsed_ms)
+            summary = summarize_gaze(outputs, raw_budget)
+            raw_patch_budget += raw_budget
+            selected += int(summary["selected_non_padded_patches"])
+            padded += int(summary["padded_gazing_positions"])
+            total_slots += int(summary["total_gaze_slots"])
+            forward_ms += elapsed_ms
+
+    return (
+        {
+            "tile_sequences": len(tile_sequences),
+            "raw_patch_budget": raw_patch_budget,
+            "selected_non_padded_patches": selected,
+            "padded_gazing_positions": padded,
+            "total_gaze_slots": total_slots,
+            "token_reduction_ratio": raw_patch_budget / selected if selected else None,
+            "autogaze_tensorize_ms": tensorize_ms_total,
+            "autogaze_forward_ms": forward_ms,
+        },
+        tensor_bytes_peak,
+    )
+
+
+def build_keep_all_stream_chunk_summary(
+    *,
+    tile_sequences: list[list[Image.Image]],
+    patches_per_frame_value: int,
+    profiler: StageProfiler,
+) -> tuple[dict[str, Any], int]:
+    def build_summary():
+        raw_budget = len(tile_sequences) * len(tile_sequences[0]) * patches_per_frame_value
+        return {
+            "tile_sequences": len(tile_sequences),
+            "raw_patch_budget": raw_budget,
+            "selected_non_padded_patches": raw_budget,
+            "padded_gazing_positions": 0,
+            "total_gaze_slots": 0,
+            "token_reduction_ratio": 1.0,
+            "autogaze_tensorize_ms": 0.0,
+            "autogaze_forward_ms": 0.0,
+        }
+
+    summary, elapsed_ms = _measure_elapsed(profiler.device or torch.device("cpu"), build_summary)
+    profiler.add("keep_all_mask_build", elapsed_ms)
+    return summary, 0
+
+
+def stream_profile_dtype(args: argparse.Namespace) -> torch.dtype:
+    if getattr(args, "stream_dtype", "float32") == "float16":
+        return torch.float16
+    return torch.float32
+
+
+def autogaze_processor_size_kwargs(target_scales: list[int]) -> dict[str, dict[str, int]]:
+    largest_scale = int(target_scales[-1])
+    return {
+        "size": {"shortest_edge": largest_scale},
+        "crop_size": {"height": largest_scale, "width": largest_scale},
+    }
+
+
+def run_stream_profile(args: argparse.Namespace) -> None:
+    from repro.autogaze_bench import add_external_autogaze
+
+    if args.num_video_frames % args.stream_chunk_frames != 0:
+        raise ValueError("--num-video-frames must be divisible by --stream-chunk-frames for AutoGaze chunk profiling.")
+
+    device = resolve_device(args.device)
+    resolved_video = resolve_video(args.video, args)
+    metadata = read_video_metadata(resolved_video)
+    if metadata["frames"] is None:
+        raise ValueError("Video frame count is required for stream-profile uniform sampling.")
+
+    effective = apply_resize_to_dimensions(
+        width=int(metadata["width"]),
+        height=int(metadata["height"]),
+        shortest_edge=getattr(args, "video_resize_shortest_edge", None),
+        longest_edge=getattr(args, "video_resize_longest_edge", None),
+        exact_width=getattr(args, "video_resize_width", None),
+        exact_height=getattr(args, "video_resize_height", None),
+    )
+    target_scales = parse_int_sequence(getattr(args, "autogaze_target_scales", None)) or NVILA_TARGET_SCALES
+    target_patch_size = int(getattr(args, "autogaze_target_patch_size", None) or NVILA_TARGET_PATCH_SIZE)
+    patches_per_frame_value = patches_per_frame(target_scales, target_patch_size)
+    plan = estimate_stream_profile_plan(
+        width=int(effective["width"]),
+        height=int(effective["height"]),
+        source_frames=int(metadata["frames"]),
+        num_video_frames=args.num_video_frames,
+        num_video_frames_thumbnail=args.num_video_frames_thumbnail,
+        max_tiles_video=args.max_tiles_video,
+        chunk_frames=args.stream_chunk_frames,
+        max_batch_size_autogaze=args.max_batch_size_autogaze,
+        scales=target_scales,
+        patch_size=target_patch_size,
+    )
+
+    transform = None
+    model = None
+    dtype = stream_profile_dtype(args)
+    if args.gazing_mode == "autogaze":
+        add_external_autogaze(args.autogaze_repo)
+        from autogaze.models.autogaze import AutoGaze, AutoGazeImageProcessor
+
+        transform = AutoGazeImageProcessor.from_pretrained(
+            args.autogaze_model,
+            **autogaze_processor_size_kwargs(target_scales),
+        )
+        model = AutoGaze.from_pretrained(args.autogaze_model).to(device)
+        model.eval()
+
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+
+    profiler = StageProfiler(device)
+    sampled_indices = uniform_sample_indices(int(metadata["frames"]), args.num_video_frames)
+    thumbnail_counts = Counter(nvila_thumbnail_indices(sampled_indices, args.num_video_frames_thumbnail))
+    target_counts = Counter(sampled_indices)
+    selected_index_set = set(target_counts)
+    end_index = max(selected_index_set)
+    grid = plan["tiling"]
+    resize = {
+        "width": int(effective["width"]),
+        "height": int(effective["height"]),
+        "mode": effective["mode"],
+    }
+
+    temporal_chunks: list[dict[str, Any]] = []
+    current_frames: list[Image.Image] = []
+    thumbnails: list[Image.Image] = []
+    raw_frame_buffer_peak_bytes = 0
+    tile_pil_buffer_peak_bytes = 0
+    autogaze_tile_tensor_peak_bytes = 0
+    decoded_selected_frames = 0
+    eof_padding_summary = {"padded_sampled_frames_after_eof": 0, "padded_thumbnail_frames_after_eof": 0}
+    last_selected_frame: Image.Image | None = None
+
+    def process_current_stream_chunk() -> None:
+        nonlocal current_frames, tile_pil_buffer_peak_bytes, autogaze_tile_tensor_peak_bytes
+        tile_sequences, tile_build_ms = _measure_elapsed(
+            device,
+            lambda current_frames=current_frames: build_spatial_tile_sequences(
+                current_frames,
+                cols=int(grid["cols"]),
+                rows=int(grid["rows"]),
+                tile_size=NVILA_IMAGE_SIZE,
+            ),
+        )
+        profiler.add("spatial_tile_build", tile_build_ms)
+        tile_pil_buffer_peak_bytes = max(
+            tile_pil_buffer_peak_bytes,
+            len(current_frames) * int(grid["spatial_tiles"]) * NVILA_IMAGE_SIZE * NVILA_IMAGE_SIZE * 3,
+        )
+
+        if args.gazing_mode == "autogaze":
+            chunk_summary, tile_tensor_bytes = run_autogaze_on_stream_tile_sequences(
+                tile_sequences=tile_sequences,
+                transform=transform,
+                model=model,
+                device=device,
+                dtype=dtype,
+                max_batch_size=args.max_batch_size_autogaze,
+                gazing_ratio=[0.2] + [0.06] * 15,
+                task_loss_requirement=args.task_loss_requirement_tile,
+                target_scales=target_scales,
+                target_patch_size=target_patch_size,
+                patches_per_frame_value=patches_per_frame_value,
+                profiler=profiler,
+            )
+        else:
+            chunk_summary, tile_tensor_bytes = build_keep_all_stream_chunk_summary(
+                tile_sequences=tile_sequences,
+                patches_per_frame_value=patches_per_frame_value,
+                profiler=profiler,
+            )
+
+        chunk_start_pos = len(temporal_chunks) * args.stream_chunk_frames
+        chunk_summary["sampled_frame_start"] = sampled_indices[chunk_start_pos]
+        chunk_summary["sampled_frame_end"] = sampled_indices[chunk_start_pos + args.stream_chunk_frames - 1]
+        chunk_summary["spatial_tile_build_ms"] = tile_build_ms
+        temporal_chunks.append(chunk_summary)
+        autogaze_tile_tensor_peak_bytes = max(autogaze_tile_tensor_peak_bytes, tile_tensor_bytes)
+        current_frames = []
+
+    container = av.open(resolved_video)
+    try:
+        decoder = container.decode(video=0)
+        frame_index = 0
+        while frame_index <= end_index:
+            frame, decode_ms = _measure_elapsed(device, lambda: next(decoder))
+            profiler.add("video_decode_scan", decode_ms)
+
+            if frame_index in selected_index_set:
+                image, to_pil_ms = _measure_elapsed(device, lambda: frame.to_image().convert("RGB"))
+                profiler.add("video_frame_to_pil", to_pil_ms)
+                if resize["mode"] != "none":
+                    image, resize_ms = _measure_elapsed(device, lambda image=image: resize_frame(image, resize))
+                    profiler.add("video_frame_resize", resize_ms)
+
+                for _ in range(target_counts[frame_index]):
+                    frame_copy = image.copy()
+                    current_frames.append(frame_copy)
+                    last_selected_frame = frame_copy
+                    decoded_selected_frames += 1
+                    raw_frame_buffer_peak_bytes = max(
+                        raw_frame_buffer_peak_bytes,
+                        len(current_frames) * int(effective["width"]) * int(effective["height"]) * 3,
+                    )
+
+                    if thumbnail_counts[frame_index] > 0:
+                        thumb, thumb_resize_ms = _measure_elapsed(
+                            device,
+                            lambda frame_copy=frame_copy: frame_copy.resize((NVILA_IMAGE_SIZE, NVILA_IMAGE_SIZE)),
+                        )
+                        profiler.add("thumbnail_resize", thumb_resize_ms)
+                        thumbnails.append(thumb)
+                        thumbnail_counts[frame_index] -= 1
+
+                    if len(current_frames) == args.stream_chunk_frames:
+                        process_current_stream_chunk()
+            frame_index += 1
+    except StopIteration:
+        pass
+    finally:
+        container.close()
+
+    if decoded_selected_frames < args.num_video_frames:
+        missing_sampled_frames = args.num_video_frames - decoded_selected_frames
+        missing_thumbnail_frames = sum(thumbnail_counts.values())
+        eof_padding_summary, eof_padding_ms = _measure_elapsed(
+            device,
+            lambda: repeat_last_stream_samples_after_eof(
+                current_frames=current_frames,
+                thumbnails=thumbnails,
+                last_selected_frame=last_selected_frame,
+                missing_sampled_frames=missing_sampled_frames,
+                missing_thumbnail_frames=missing_thumbnail_frames,
+                tile_size=NVILA_IMAGE_SIZE,
+            ),
+        )
+        profiler.add("eof_sample_padding", eof_padding_ms)
+        decoded_selected_frames += eof_padding_summary["padded_sampled_frames_after_eof"]
+        raw_frame_buffer_peak_bytes = max(
+            raw_frame_buffer_peak_bytes,
+            len(current_frames) * int(effective["width"]) * int(effective["height"]) * 3,
+        )
+        if len(current_frames) == args.stream_chunk_frames:
+            process_current_stream_chunk()
+
+    if current_frames:
+        raise RuntimeError(f"Unprocessed partial stream chunk with {len(current_frames)} frames.")
+    if decoded_selected_frames != args.num_video_frames:
+        raise RuntimeError(f"Decoded {decoded_selected_frames} sampled frames, expected {args.num_video_frames}.")
+
+    thumbnail_tensor = None
+    if thumbnails:
+        if transform is not None:
+            from autogaze.datasets.video_utils import transform_video_for_pytorch
+
+            thumbnail_tensor, thumb_tensorize_ms = _measure_elapsed(
+                device,
+                lambda: transform_video_for_pytorch(np.stack([np.array(frame) for frame in thumbnails]), transform),
+            )
+        else:
+            thumbnail_tensor, thumb_tensorize_ms = _measure_elapsed(
+                device,
+                lambda: torch.from_numpy(np.stack([np.array(frame) for frame in thumbnails])).permute(0, 3, 1, 2),
+            )
+        profiler.add("thumbnail_tensorize", thumb_tensorize_ms)
+
+    tile_summary = summarize_stream_chunks(temporal_chunks)
+    token_metrics = build_stream_profile_token_metrics(plan, tile_summary)
+    stage_timings = profiler.as_dict()
+    total_measured_ms = sum(float(value["total_ms"]) for value in stage_timings.values())
+    payload = {
+        "metadata": environment_metadata(device),
+        "mode": "stream-profile",
+        "model_path": args.model_path,
+        "autogaze_model": args.autogaze_model,
+        "gazing_mode": args.gazing_mode,
+        "video": args.video,
+        "video_resolved": resolved_video,
+        "source_metadata": metadata,
+        "effective_video": {
+            "width": int(effective["width"]),
+            "height": int(effective["height"]),
+            "resize_mode": effective["mode"],
+        },
+        "video_resize": video_resize_config(args, metadata),
+        "autogaze_target_scales": target_scales,
+        "autogaze_target_patch_size": target_patch_size,
+        "stream_plan": plan,
+        "streaming_boundary": plan["streaming_boundary"],
+        "sampling": {
+            "policy": "nvila_round_linspace_over_full_video",
+            "num_video_frames": args.num_video_frames,
+            "num_video_frames_thumbnail": args.num_video_frames_thumbnail,
+            "stream_chunk_frames": args.stream_chunk_frames,
+            "sampled_frame_start": sampled_indices[0],
+            "sampled_frame_end": sampled_indices[-1],
+            "decoded_selected_frames": decoded_selected_frames,
+            "thumbnail_frames_processed": len(thumbnails),
+            **eof_padding_summary,
+        },
+        "gaze": tile_summary,
+        "token_metrics": token_metrics,
+        "timing_ms": {
+            "video_decode_scan": stage_total(stage_timings, "video_decode_scan"),
+            "video_frame_to_pil": stage_total(stage_timings, "video_frame_to_pil"),
+            "video_frame_resize": stage_total(stage_timings, "video_frame_resize"),
+            "spatial_tile_build": stage_total(stage_timings, "spatial_tile_build"),
+            "tile_autogaze_tensorize": stage_total(stage_timings, "tile_autogaze_tensorize"),
+            "tile_autogaze_forward": stage_total(stage_timings, "tile_autogaze_forward"),
+            "keep_all_mask_build": stage_total(stage_timings, "keep_all_mask_build"),
+            "thumbnail_resize": stage_total(stage_timings, "thumbnail_resize"),
+            "thumbnail_tensorize": stage_total(stage_timings, "thumbnail_tensorize"),
+            "eof_sample_padding": stage_total(stage_timings, "eof_sample_padding"),
+            "pre_llm_stream_total_measured": total_measured_ms,
+        },
+        "stage_timings_ms": stage_timings,
+        "memory_bytes": {
+            "raw_frame_buffer_peak": raw_frame_buffer_peak_bytes,
+            "tile_pil_buffer_peak": tile_pil_buffer_peak_bytes,
+            "autogaze_tile_tensor_peak_per_temporal_chunk": autogaze_tile_tensor_peak_bytes,
+            "thumbnail_tensor": _tensor_bytes(thumbnail_tensor),
+            "cuda_peak_memory_bytes": torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None,
+        },
+        "temporal_chunk_summaries": temporal_chunks,
+        "metric_note": (
+            "stream-profile measures decode/resize/tile/AutoGaze work one temporal chunk at a time and releases "
+            "raw frames/tiles after each chunk. NVILA vision encoding, projector, and LLM timings remain in single/hlvid "
+            "mode because the public NVILA generate path consumes the collected visual token sequence."
+        ),
+    }
+    write_json(args.stream_profile_json, payload)
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
 def generate_one(model, processor, video: str, prompt: str, device: torch.device, args: argparse.Namespace) -> dict[str, Any]:
     video_token = processor.tokenizer.video_token
     resolved_video = resolve_video(video, args)
@@ -1016,8 +1634,9 @@ def load_preset_defaults(path: str | None) -> dict[str, Any]:
 def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run NVILA-HD-Video quickstart and HLVid benchmark")
     parser.add_argument("--preset-config")
-    parser.add_argument("--mode", choices=["single", "hlvid", "preflight"], default="single")
+    parser.add_argument("--mode", choices=["single", "hlvid", "preflight", "stream-profile"], default="single")
     parser.add_argument("--model-path", "--nvila-model", dest="model_path", default=DEFAULT_MODEL)
+    parser.add_argument("--autogaze-repo", default=".")
     parser.add_argument("--autogaze-model", default="nvidia/AutoGaze")
     parser.add_argument("--device", default="cuda", choices=["cpu", "mps", "cuda"])
     parser.add_argument("--device-map", default="auto")
@@ -1038,6 +1657,8 @@ def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentPar
     parser.add_argument("--max-batch-size-siglip", type=int, default=32)
     parser.add_argument("--max-new-tokens", type=int, default=8)
     parser.add_argument("--measure-ttft", action="store_true")
+    parser.add_argument("--stream-chunk-frames", type=int, default=AUTOGAZE_CHUNK_FRAMES)
+    parser.add_argument("--stream-dtype", choices=["float32", "float16"], default="float32")
     parser.add_argument("--hlvid-repo", default="bfshi/HLVid")
     parser.add_argument("--hlvid-video-root", default="data/hlvid/videos")
     parser.add_argument("--config", default="default")
@@ -1048,6 +1669,7 @@ def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentPar
     parser.add_argument("--preflight-height", type=int)
     parser.add_argument("--preflight-source-frames", type=int)
     parser.add_argument("--preflight-json", default="outputs/autogaze_repro/nvila_preflight.json")
+    parser.add_argument("--stream-profile-json", default="outputs/autogaze_repro/nvila_stream_profile.json")
     parser.add_argument("--output-json", default="outputs/autogaze_repro/nvila_single.json")
     parser.add_argument("--predictions", default="outputs/autogaze_repro/hlvid_predictions.jsonl")
     parser.add_argument("--summary", default="outputs/autogaze_repro/hlvid_summary.json")
@@ -1069,6 +1691,8 @@ def main() -> None:
     args = parse_args()
     if args.mode == "preflight":
         run_preflight(args)
+    elif args.mode == "stream-profile":
+        run_stream_profile(args)
     elif args.mode == "single":
         run_single(args)
     else:

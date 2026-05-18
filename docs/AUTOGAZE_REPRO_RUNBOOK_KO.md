@@ -289,6 +289,95 @@ Space 예시 비디오에서 HLVid-like stress check를 하려면 전체 샘플�
 
 4K/1024프레임 estimate에서는 현재 public processor path 기준으로 약 `45`개 spatial tile, `2880`개 tile sequence, 약 `5.44M` keep-all visual token, Python/PIL overhead를 제외한 CPU preprocessing memory lower bound 약 `202 GiB`가 보고됩니다. 이 결과가 나오면 full generation을 시도하기 전에 `--num-video-frames`나 `--max-tiles-video`를 줄이거나, chunked preprocessing 및 vision encoding을 구현해야 한다는 신호로 보세요.
 
+## NVILA 청크 스트리밍 pre-LLM profile
+
+긴 HLVid 비디오에서 전체 sampled frame, spatial tile, AutoGaze tensor를 한 번에 만들면 CPU/GPU memory가 먼저 터질 수 있습니다. `stream-profile` 모드는 NVILA-8B LLM을 로드하지 않고, 비디오 decode부터 AutoGaze selection 직전/직후까지를 temporal chunk 단위로 처리합니다. raw frame과 tile image는 `--stream-chunk-frames`만큼 처리한 뒤 버립니다.
+
+keep-all baseline부터 memory와 decode/tiling 시간을 확인하려면:
+
+```bash
+.venv/bin/python -m repro.nvila_runner \
+  --mode stream-profile \
+  --device cpu \
+  --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
+  --gazing-mode keep-all \
+  --num-video-frames 128 \
+  --num-video-frames-thumbnail 64 \
+  --max-tiles-video 48 \
+  --stream-chunk-frames 16 \
+  --stream-profile-json outputs/autogaze_repro/stream_profile_hlvid_keep_all_128f.json
+```
+
+AutoGaze forward까지 실제로 재려면 `--gazing-mode autogaze`를 사용합니다. MPS에서는 `float32`가 안전하고, 4K/45-tile 설정이 무거우면 먼저 `--video-resize-shortest-edge 720`이나 `--max-tiles-video 1`로 path 확인을 하세요.
+stream-profile의 AutoGaze transform은 `--autogaze-resize-scales`의 최대 scale에 맞춰 resize/crop size를 설정합니다. 예를 들어 기본 `56+112+196+392`에서는 AutoGaze 입력 tile이 392x392가 되어야 합니다.
+
+```bash
+.venv/bin/python -m repro.nvila_runner \
+  --mode stream-profile \
+  --device mps \
+  --stream-dtype float32 \
+  --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
+  --gazing-mode autogaze \
+  --num-video-frames 128 \
+  --num-video-frames-thumbnail 64 \
+  --max-tiles-video 48 \
+  --stream-chunk-frames 16 \
+  --max-batch-size-autogaze 4 \
+  --video-resize-shortest-edge 720 \
+  --stream-profile-json outputs/autogaze_repro/stream_profile_hlvid_autogaze_128f_resize720_mps.json
+```
+
+이 모드에서 개별 timing은 모두 분리됩니다.
+
+- `timing_ms.video_decode_scan`: 마지막 sampled frame index까지 비디오 프레임을 순차 decode한 시간입니다. 모든 frame을 메모리에 쌓지는 않지만, 마지막 샘플이 비디오 끝에 있으면 decode scan 자체는 길어집니다.
+- `timing_ms.video_frame_to_pil`: sampled frame만 PIL RGB image로 변환한 시간입니다.
+- `timing_ms.video_frame_resize`: `--video-resize-*`를 켰을 때 sampled frame resize 시간입니다.
+- `timing_ms.spatial_tile_build`: 현재 chunk의 sampled frames를 NVILA dynamic tile grid로 리사이즈/crop하는 시간입니다.
+- `timing_ms.tile_autogaze_tensorize`: tile image들을 AutoGaze input tensor로 바꾸는 시간입니다.
+- `timing_ms.tile_autogaze_forward`: AutoGaze 모델 forward 시간입니다. `keep-all` 모드에서는 null입니다.
+- `timing_ms.keep_all_mask_build`: `keep-all` 모드에서 AutoGaze 없이 raw patch를 전부 유지하는 mask/count를 만드는 시간입니다.
+- `timing_ms.thumbnail_resize`, `timing_ms.thumbnail_tensorize`: thumbnail frame resize와 tensorization 시간입니다.
+- `timing_ms.eof_sample_padding`: container metadata frame count와 실제 decode 가능한 frame count가 어긋날 때 마지막 decoded sampled frame을 반복해 requested sample count를 맞추는 시간입니다.
+- `timing_ms.pre_llm_stream_total_measured`: 위 stage들의 합입니다.
+
+토큰/패치 필드는 `single` 모드의 `token_metrics`와 같은 이름을 최대한 유지합니다.
+
+- `token_metrics.encoder_raw_tile_patch_tokens`: sampled video frames × spatial tiles × multi-scale patches per frame
+- `token_metrics.encoder_autogaze_selected_tile_patch_tokens`: AutoGaze 이후 유지된 tile patch 수. `keep-all`에서는 raw tile patch와 같습니다.
+- `token_metrics.encoder_raw_thumbnail_patch_tokens`, `token_metrics.encoder_autogaze_selected_thumbnail_patch_tokens`: thumbnail patch budget과 유지 patch 수입니다. 현재 thumbnail은 keep-all입니다.
+- `token_metrics.encoder_raw_patch_tokens`, `token_metrics.encoder_autogaze_selected_patch_tokens`, `token_metrics.encoder_token_reduction_ratio`: tile+thumbnail total 기준 patch 감소량입니다.
+- `token_metrics.llm_keep_all_visual_tokens_estimated`: TokenShuffle 이후 keep-all visual token 추정치입니다.
+- `token_metrics.llm_autogaze_visual_tokens_lower_bound_estimated`: selected patch를 TokenShuffle로 묶었을 때의 lower-bound 추정치입니다. 실제 LLM token 수는 public NVILA generate path에서 visual token sequence를 모은 뒤에만 확정됩니다.
+
+메모리 필드는 stream 처리 경계 확인용입니다.
+
+- `memory_bytes.raw_frame_buffer_peak`: 현재 구현이 동시에 보유한 sampled raw frame buffer peak입니다.
+- `memory_bytes.tile_pil_buffer_peak`: 현재 chunk에서 만든 PIL tile buffer peak입니다.
+- `stream_plan.memory.streaming_autogaze_tile_tensor_bytes_per_batch`: `--max-batch-size-autogaze`만큼 tile sequence를 tensorize할 때의 예상 AutoGaze tensor peak입니다.
+- `stream_plan.memory.streaming_autogaze_tile_tensor_bytes_full_chunk`: 한 temporal chunk의 모든 spatial tile을 한 번에 tensorize한다고 가정했을 때의 비교용 크기입니다.
+- `memory_bytes.autogaze_tile_tensor_peak_per_temporal_chunk`: 실제 AutoGaze tensor peak입니다. 현재 구현은 `--max-batch-size-autogaze` 단위로 tensorization/forward를 나눠서 full chunk tensor를 만들지 않습니다. `keep-all`에서는 0입니다.
+- `memory_bytes.thumbnail_tensor`: thumbnail tensor 크기입니다.
+- `memory_bytes.cuda_peak_memory_bytes`: CUDA에서 실행했을 때 PyTorch peak allocation입니다.
+
+중요한 경계가 하나 있습니다. 이 모드는 decode, resize, tiling, AutoGaze까지는 chunk streaming으로 측정합니다. 하지만 public NVILA generation path는 최종 visual token sequence를 모아서 LLM prefill/generation에 넣습니다. 그래서 SigLIP vision tower, projector, LLM forward 시간은 기존 `single`/`hlvid` 모드의 `result.siglip_vision_ms`, `result.mm_projector_ms`, `result.llm_forward_ms`, `result.ttft_ms`로 비교하세요.
+
+이 workspace에서 확인한 긴 비디오 smoke:
+
+```bash
+.venv/bin/python -m repro.nvila_runner \
+  --mode stream-profile \
+  --device cpu \
+  --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
+  --gazing-mode keep-all \
+  --num-video-frames 16 \
+  --num-video-frames-thumbnail 8 \
+  --max-tiles-video 1 \
+  --stream-chunk-frames 16 \
+  --stream-profile-json outputs/autogaze_repro/stream_profile_hlvid_example_keep_all_16f_1tile.json
+```
+
+결과는 4K/약 5분/8992프레임 MP4에서 `decoded_selected_frames=16`, `raw_frame_buffer_peak=398131200` bytes, `video_decode_scan≈53660 ms`, `spatial_tile_build≈728 ms`였습니다. 즉, decode scan은 끝까지 발생하지만 메모리는 16프레임 chunk 수준으로 제한되는 것을 확인했습니다.
+
 ## HLVid example AutoGaze-only smoke
 
 기본 NVILA runner example 비디오는 `bfshi/HLVid`의 `example/clip_av_video_5_001.mp4`입니다. 4K, 약 5분짜리 MP4이고 파일 크기는 약 1.7 GB라서 로컬 다운로드에는 충분한 디스크 여유 공간이 필요합니다.

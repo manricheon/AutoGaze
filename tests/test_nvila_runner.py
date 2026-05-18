@@ -2,18 +2,23 @@ import argparse
 from pathlib import Path
 
 import torch
+from PIL import Image
 
 from repro.nvila_runner import (
     StageProfiler,
     apply_resize_to_dimensions,
+    autogaze_processor_size_kwargs,
     build_parser,
+    build_stream_profile_token_metrics,
     compute_visual_token_metrics,
     estimate_nvila_preflight,
+    estimate_stream_profile_plan,
     extract_gaze_metrics,
     model_patches_per_frame,
     parse_int_sequence,
     parse_args,
     processor_kwargs,
+    repeat_last_stream_samples_after_eof,
     resolve_video,
     spatial_tile_grid,
     uniform_sample_indices,
@@ -219,6 +224,114 @@ def test_parse_args_accepts_preflight_mode_and_output_path():
 
     assert args.mode == "preflight"
     assert args.preflight_json == "out/preflight.json"
+
+
+def test_parse_args_accepts_stream_profile_mode_and_chunk_options():
+    args = parse_args(
+        [
+            "--mode",
+            "stream-profile",
+            "--stream-chunk-frames",
+            "16",
+            "--stream-profile-json",
+            "out/stream.json",
+        ]
+    )
+
+    assert args.mode == "stream-profile"
+    assert args.stream_chunk_frames == 16
+    assert args.stream_profile_json == "out/stream.json"
+
+
+def test_stream_profile_plan_describes_chunked_hlvid_like_work():
+    plan = estimate_stream_profile_plan(
+        width=3840,
+        height=2160,
+        source_frames=9000,
+        num_video_frames=128,
+        num_video_frames_thumbnail=64,
+        max_tiles_video=48,
+        chunk_frames=16,
+        max_batch_size_autogaze=4,
+        scales=[56, 112, 196, 392],
+        patch_size=14,
+    )
+
+    assert plan["sampling"]["requested_frames"] == 128
+    assert plan["sampling"]["thumbnail_frames"] == 64
+    assert plan["tiling"]["spatial_tiles"] == 45
+    assert plan["chunking"]["temporal_chunks"] == 8
+    assert plan["chunking"]["tile_sequences"] == 360
+    assert plan["tokens"]["encoder_raw_tile_patch_tokens"] == 128 * 45 * 1060
+    assert plan["tokens"]["encoder_raw_thumbnail_patch_tokens"] == 64 * 1060
+    assert plan["memory"]["streaming_raw_frame_buffer_bytes"] == 16 * 3840 * 2160 * 3
+    assert plan["memory"]["autogaze_batch_tile_sequences"] == 4
+    assert plan["memory"]["streaming_autogaze_tile_tensor_bytes_per_batch"] == 16 * 4 * 3 * 392 * 392 * 4
+    assert plan["streaming_boundary"]["pre_llm_stages_can_stream"] is True
+    assert plan["streaming_boundary"]["llm_generation_requires_collected_visual_tokens"] is True
+
+
+def test_build_stream_profile_token_metrics_compares_autogaze_and_keep_all_tokens():
+    plan = estimate_stream_profile_plan(
+        width=1280,
+        height=720,
+        source_frames=300,
+        num_video_frames=32,
+        num_video_frames_thumbnail=16,
+        max_tiles_video=1,
+        chunk_frames=16,
+        scales=[56, 112],
+        patch_size=14,
+    )
+    tile_summary = {
+        "raw_patch_budget": 32 * 1 * 80,
+        "selected_non_padded_patches": 640,
+        "padded_gazing_positions": 0,
+        "total_gaze_slots": 640,
+    }
+
+    metrics = build_stream_profile_token_metrics(plan, tile_summary)
+
+    assert metrics["video_sampled_frames"] == 32
+    assert metrics["thumbnail_sampled_frames"] == 16
+    assert metrics["encoder_raw_tile_patch_tokens"] == 2560
+    assert metrics["encoder_autogaze_selected_tile_patch_tokens"] == 640
+    assert metrics["encoder_tile_token_reduction_ratio"] == 4.0
+    assert metrics["encoder_raw_thumbnail_patch_tokens"] == 1280
+    assert metrics["encoder_autogaze_selected_thumbnail_patch_tokens"] == 1280
+    assert metrics["encoder_token_reduction_ratio"] == 2.0
+
+
+def test_repeat_last_stream_samples_after_eof_fills_missing_decoded_tail_samples():
+    last_frame = Image.new("RGB", (4, 4), "white")
+    current_frames = [last_frame.copy()]
+    thumbnails = []
+
+    summary = repeat_last_stream_samples_after_eof(
+        current_frames=current_frames,
+        thumbnails=thumbnails,
+        last_selected_frame=last_frame,
+        missing_sampled_frames=2,
+        missing_thumbnail_frames=1,
+        tile_size=2,
+    )
+
+    assert summary == {
+        "padded_sampled_frames_after_eof": 2,
+        "padded_thumbnail_frames_after_eof": 1,
+    }
+    assert len(current_frames) == 3
+    assert len(thumbnails) == 1
+    assert thumbnails[0].size == (2, 2)
+
+
+def test_autogaze_processor_size_kwargs_match_largest_target_scale():
+    kwargs = autogaze_processor_size_kwargs([56, 112, 196, 392])
+
+    assert kwargs == {
+        "size": {"shortest_edge": 392},
+        "crop_size": {"height": 392, "width": 392},
+    }
 
 
 def test_resolve_video_prefers_existing_local_path(tmp_path: Path):
