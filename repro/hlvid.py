@@ -6,10 +6,13 @@ import re
 from pathlib import Path
 from typing import Any
 
-from repro.common import append_jsonl, write_json
+import requests
+
+from repro.common import write_json, write_jsonl
 
 REQUIRED_COLUMNS = ("question_id", "category", "video_path", "question", "answer")
 CHOICE_RE = re.compile(r"\b([ABCD])\b", re.IGNORECASE)
+DATASET_VIEWER_ROWS_URL = "https://datasets-server.huggingface.co/rows"
 
 
 def parse_choice(text: str | None) -> str | None:
@@ -36,15 +39,57 @@ def normalize_row(row: dict[str, Any]) -> dict[str, Any]:
     return {key: row[key] for key in REQUIRED_COLUMNS}
 
 
-def load_hlvid_manifest(split: str = "test", limit: int | None = None) -> list[dict[str, Any]]:
-    from datasets import load_dataset
+def viewer_row_to_manifest(payload: dict[str, Any]) -> dict[str, Any]:
+    row = payload.get("row", payload)
+    return normalize_row(row)
 
-    dataset = load_dataset("bfshi/HLVid", split=split)
-    rows = [normalize_row(dict(row)) for row in dataset]
-    if limit is not None:
-        rows = rows[:limit]
+
+def fetch_hlvid_manifest(
+    dataset: str = "bfshi/HLVid",
+    config: str = "default",
+    split: str = "test",
+    limit: int | None = None,
+    page_size: int = 100,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    offset = 0
+
+    while True:
+        length = page_size if limit is None else min(page_size, limit - len(rows))
+        if length <= 0:
+            break
+        response = requests.get(
+            DATASET_VIEWER_ROWS_URL,
+            params={
+                "dataset": dataset,
+                "config": config,
+                "split": split,
+                "offset": offset,
+                "length": length,
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        batch = [viewer_row_to_manifest(item) for item in payload.get("rows", [])]
+        rows.extend(batch)
+
+        total = payload.get("num_rows_total")
+        if not batch:
+            break
+        if limit is not None and len(rows) >= limit:
+            rows = rows[:limit]
+            break
+        offset += len(batch)
+        if total is not None and offset >= int(total):
+            break
+
     validate_manifest_rows(rows)
     return rows
+
+
+def load_hlvid_manifest(split: str = "test", limit: int | None = None, config: str = "default") -> list[dict[str, Any]]:
+    return fetch_hlvid_manifest(split=split, limit=limit, config=config)
 
 
 def score_predictions(rows: list[dict[str, Any]]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -89,7 +134,7 @@ def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
 
 
 def build_manifest(args: argparse.Namespace) -> None:
-    rows = load_hlvid_manifest(split=args.split, limit=args.limit)
+    rows = load_hlvid_manifest(split=args.split, limit=args.limit, config=args.config)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(rows, indent=2, sort_keys=True) + "\n")
@@ -100,7 +145,7 @@ def score_file(args: argparse.Namespace) -> None:
     rows = read_jsonl(args.predictions)
     summary, scored_rows = score_predictions(rows)
     write_json(args.summary, summary)
-    append_jsonl(args.scored, scored_rows)
+    write_jsonl(args.scored, scored_rows)
     print(json.dumps(summary, indent=2, sort_keys=True))
 
 
@@ -109,6 +154,7 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
 
     manifest = sub.add_parser("manifest")
+    manifest.add_argument("--config", default="default")
     manifest.add_argument("--split", default="test")
     manifest.add_argument("--limit", type=int)
     manifest.add_argument("--output", default="data/hlvid/manifest_test.json")

@@ -7,6 +7,7 @@ from repro.common import (
     compute_stats,
     resolve_device,
     write_json,
+    write_jsonl,
 )
 
 
@@ -35,6 +36,15 @@ def test_json_writers_create_parent_dirs(tmp_path: Path):
         {"idx": 1},
         {"idx": 2},
     ]
+
+
+def test_write_jsonl_overwrites_existing_rows(tmp_path: Path):
+    jsonl_path = tmp_path / "rows.jsonl"
+    append_jsonl(jsonl_path, [{"idx": 1}])
+
+    write_jsonl(jsonl_path, [{"idx": 2}])
+
+    assert [json.loads(line) for line in jsonl_path.read_text().splitlines()] == [{"idx": 2}]
 
 
 def test_benchmark_timer_records_elapsed_ms():

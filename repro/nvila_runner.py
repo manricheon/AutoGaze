@@ -10,7 +10,7 @@ import torch
 from huggingface_hub import hf_hub_url
 from transformers import AutoModel, AutoProcessor
 
-from repro.common import append_jsonl, environment_metadata, resolve_device, synchronize, write_json
+from repro.common import append_jsonl, environment_metadata, resolve_device, synchronize, write_json, write_jsonl
 from repro.hlvid import load_hlvid_manifest, parse_choice, score_predictions
 
 DEFAULT_MODEL = "nvidia/NVILA-8B-HD-Video"
@@ -191,7 +191,7 @@ def completed_question_ids(path: Path) -> set[Any]:
 
 def run_hlvid(args: argparse.Namespace) -> None:
     device = resolve_device(args.device)
-    rows = load_hlvid_manifest(split=args.split, limit=args.limit)
+    rows = load_hlvid_manifest(split=args.split, limit=args.limit, config=args.config)
     model, processor = load_model_and_processor(args)
     output_path = Path(args.predictions)
     completed_ids = completed_question_ids(output_path) if args.resume else set()
@@ -216,7 +216,7 @@ def run_hlvid(args: argparse.Namespace) -> None:
         all_rows = [json.loads(line) for line in output_path.read_text().splitlines() if line.strip()]
     summary, scored = score_predictions(all_rows)
     write_json(args.summary, summary)
-    append_jsonl(args.scored_predictions, scored)
+    write_jsonl(args.scored_predictions, scored)
     print(json.dumps(summary, indent=2, sort_keys=True))
 
 
@@ -238,6 +238,7 @@ def main() -> None:
     parser.add_argument("--measure-ttft", action="store_true")
     parser.add_argument("--hlvid-repo", default="bfshi/HLVid")
     parser.add_argument("--hlvid-video-root", default="data/hlvid/videos")
+    parser.add_argument("--config", default="default")
     parser.add_argument("--split", default="test")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--resume", action="store_true")

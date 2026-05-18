@@ -101,6 +101,14 @@ def append_jsonl(path: str | Path, rows: Iterable[dict[str, Any]]) -> None:
             f.write(json.dumps(row, sort_keys=True) + "\n")
 
 
+def write_jsonl(path: str | Path, rows: Iterable[dict[str, Any]]) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w") as f:
+        for row in rows:
+            f.write(json.dumps(row, sort_keys=True) + "\n")
+
+
 def write_csv(path: str | Path, rows: list[dict[str, Any]]) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)

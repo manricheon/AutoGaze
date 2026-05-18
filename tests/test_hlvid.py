@@ -3,6 +3,7 @@ from repro.hlvid import (
     parse_choice,
     score_predictions,
     validate_manifest_rows,
+    viewer_row_to_manifest,
 )
 
 
@@ -42,3 +43,25 @@ def test_score_predictions_tracks_parse_failures_separately():
     assert summary["parse_failed"] == 1
     assert summary["accuracy_scored"] == 0.5
     assert scored[2]["parse_status"] == "failed"
+
+
+def test_viewer_row_to_manifest_uses_dataset_viewer_row_payload():
+    payload = {
+        "row_idx": 0,
+        "row": {
+            "question_id": 7,
+            "category": "av",
+            "video_path": "clip_av_video_5_001.mp4",
+            "question": "What text is visible? A. A B. B C. C D. D",
+            "answer": "C",
+            "extra": "ignored",
+        },
+    }
+
+    assert viewer_row_to_manifest(payload) == {
+        "question_id": 7,
+        "category": "av",
+        "video_path": "clip_av_video_5_001.mp4",
+        "question": "What text is visible? A. A B. B C. C D. D",
+        "answer": "C",
+    }
