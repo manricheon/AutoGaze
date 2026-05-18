@@ -33,6 +33,7 @@ nvila_runner:
     mode: hlvid
     model_path: nvidia/NVILA-8B-HD-Video
     autogaze_model: nvidia/AutoGaze
+    gazing_mode: autogaze
     device: cuda
     device_map: auto
     config: default

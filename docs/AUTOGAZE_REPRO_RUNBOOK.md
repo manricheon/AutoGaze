@@ -88,6 +88,50 @@ The last number is expected to be weak on local MPS because AutoGaze overhead is
 
 This mirrors the official NVILA-HD-Video quickstart scale and validates the model and processor path before the full HLVid run.
 
+The NVILA runner records module-level timings in the output JSON. The most important fields are:
+
+- `result.video_decode_ms`: sampled frame decode/read time.
+- `result.video_tiling_ms`: dynamic tiling plus image tensorization time.
+- `result.autogaze_ms`: full AutoGaze selection stage, including padding/splitting bookkeeping.
+- `result.autogaze_forward_ms`: AutoGaze model forward time only, when AutoGaze is actually invoked.
+- `result.vision_encoder_ms`: NVILA vision encoding stage around SigLIP features and projector preparation.
+- `result.siglip_vision_ms`: SigLIP vision tower forward time.
+- `result.mm_projector_ms`: multimodal projector forward time.
+- `result.llm_forward_ms`: accumulated LLM forward time during generation.
+- `result.ttft_ms`: time to generate one token from the processed visual/text input when `--measure-ttft` is enabled.
+- `result.decode_estimated_ms`: approximate generation decode time, computed as full `generate_ms - ttft_ms`.
+- `result.stage_timings_ms`: raw nested timing buckets for `processor`, optional `ttft`, and full `generate`.
+- `result.token_metrics`: visual token counts before/after AutoGaze for the encoder patch budget and the LLM visual-token budget.
+- `result.processor_peak_memory_bytes` and `result.peak_memory_bytes`: CUDA peak allocation for processor and full generate phases, when running on CUDA.
+
+`--measure-ttft` runs an additional one-token generation after preprocessing. In this pipeline, TTFT is not just text decoding latency: it includes visual embedding, SigLIP/vision encoding when needed by `generate`, projector work, and the first LLM forward. Use `result.ttft_stage_timings_ms` to split that TTFT bucket into `vision_encode_total`, `siglip_vision_tower`, `mm_projector`, and `llm_forward` when those hooks are available.
+
+To compare AutoGaze against a full-token baseline, run the same input twice with only `--gazing-mode` changed. `autogaze` uses the NVILA quickstart tile selection ratios. `keep-all` sets `gazing_ratio_tile=1` and `task_loss_requirement_tile=None`, which makes the public NVILA processor construct keep-all masks without invoking AutoGaze.
+
+```bash
+.venv/bin/python -m repro.nvila_runner \
+  --mode single \
+  --device cuda \
+  --gazing-mode autogaze \
+  --num-video-frames 128 \
+  --num-video-frames-thumbnail 64 \
+  --max-tiles-video 48 \
+  --measure-ttft \
+  --output-json outputs/autogaze_repro/cuda_nvila_single_128f_autogaze.json
+
+.venv/bin/python -m repro.nvila_runner \
+  --mode single \
+  --device cuda \
+  --gazing-mode keep-all \
+  --num-video-frames 128 \
+  --num-video-frames-thumbnail 64 \
+  --max-tiles-video 48 \
+  --measure-ttft \
+  --output-json outputs/autogaze_repro/cuda_nvila_single_128f_keep_all.json
+```
+
+For the speed story, compare `total_ms`, `video_decode_ms`, `video_tiling_ms`, `autogaze_forward_ms`, `siglip_vision_ms`, `vision_encoder_ms`, and `llm_forward_ms` between the two JSON files. For the token story, compare `token_metrics.encoder_raw_patch_tokens`, `token_metrics.encoder_autogaze_selected_patch_tokens`, `token_metrics.encoder_token_reduction_ratio`, `token_metrics.llm_keep_all_visual_tokens_estimated`, `token_metrics.llm_actual_visual_tokens`, and `token_metrics.llm_visual_token_reduction_ratio`.
+
 To run NVILA-HD-Video with a local AutoGaze checkpoint, pass the same checkpoint directory through `--autogaze-model`. The runner forwards it to the NVILA processor as `autogaze_model_id`, which is the argument used by the model's remote code:
 
 ```bash
@@ -241,6 +285,7 @@ Equivalent expanded command:
 .venv/bin/python -m repro.nvila_runner \
   --mode hlvid \
   --device cuda \
+  --gazing-mode autogaze \
   --config default \
   --split test \
   --limit 268 \
@@ -254,7 +299,27 @@ Equivalent expanded command:
   --scored-predictions outputs/autogaze_repro/hlvid_full_scored.jsonl
 ```
 
-Compare `accuracy_scored` with the project-page HLVid target of `52.6` for NVILA-8B-HD-Video. Report skipped, failed, and parse-failed samples separately. The paper-facing setup is NVILA-8B-HD-Video with up to 1024 frames and maximum resolution 3584 where the target GPU permits it.
+For the matching keep-all baseline, keep every setting identical and change only the gaze mode and output paths:
+
+```bash
+.venv/bin/python -m repro.nvila_runner \
+  --mode hlvid \
+  --device cuda \
+  --gazing-mode keep-all \
+  --config default \
+  --split test \
+  --limit 268 \
+  --num-video-frames 1024 \
+  --num-video-frames-thumbnail 64 \
+  --max-tiles-video 48 \
+  --measure-ttft \
+  --resume \
+  --predictions outputs/autogaze_repro/hlvid_full_keep_all_predictions.jsonl \
+  --summary outputs/autogaze_repro/hlvid_full_keep_all_summary.json \
+  --scored-predictions outputs/autogaze_repro/hlvid_full_keep_all_scored.jsonl
+```
+
+Compare `accuracy_scored` with the project-page HLVid target of `52.6` for NVILA-8B-HD-Video. Report skipped, failed, and parse-failed samples separately. For the AutoGaze-vs-keep-all claim, compare accuracy together with median or mean `total_ms`, `video_decode_ms`, `video_tiling_ms`, `autogaze_forward_ms`, `vision_encoder_ms`, `llm_forward_ms`, `token_metrics.encoder_token_reduction_ratio`, and `token_metrics.llm_visual_token_reduction_ratio`. The paper-facing setup is NVILA-8B-HD-Video with up to 1024 frames and maximum resolution 3584 where the target GPU permits it.
 
 ## Verification
 

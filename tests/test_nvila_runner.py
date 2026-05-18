@@ -4,7 +4,9 @@ from pathlib import Path
 import torch
 
 from repro.nvila_runner import (
+    StageProfiler,
     build_parser,
+    compute_visual_token_metrics,
     estimate_nvila_preflight,
     extract_gaze_metrics,
     parse_args,
@@ -20,6 +22,7 @@ def make_args(**overrides):
         "num_video_frames_thumbnail": 64,
         "max_tiles_video": 48,
         "autogaze_model": "nvidia/AutoGaze",
+        "gazing_mode": "autogaze",
         "task_loss_requirement_tile": 0.6,
         "max_batch_size_autogaze": 16,
         "hlvid_repo": "bfshi/HLVid",
@@ -46,6 +49,21 @@ def test_processor_kwargs_accept_local_autogaze_checkpoint_path():
     kwargs = processor_kwargs(make_args(autogaze_model="/models/autogaze-local"))
 
     assert kwargs["autogaze_model_id"] == "/models/autogaze-local"
+
+
+def test_processor_kwargs_can_run_keep_all_baseline_without_autogaze_selection():
+    kwargs = processor_kwargs(make_args(gazing_mode="keep-all"))
+
+    assert kwargs["gazing_ratio_tile"] == 1
+    assert kwargs["task_loss_requirement_tile"] is None
+    assert kwargs["gazing_ratio_thumbnail"] == 1
+    assert kwargs["task_loss_requirement_thumbnail"] is None
+
+
+def test_parse_args_accepts_gazing_mode_switch():
+    args = parse_args(["--gazing-mode", "keep-all"])
+
+    assert args.gazing_mode == "keep-all"
 
 
 def test_parser_accepts_local_nvila_model_alias():
@@ -149,3 +167,46 @@ def test_extract_gaze_metrics_reads_padded_mask_when_exposed():
     assert metrics["autogaze_selected_patches"] == 2
     assert metrics["autogaze_padded_patches"] == 1
     assert metrics["autogaze_total_gaze_slots"] == 3
+
+
+def test_compute_visual_token_metrics_compares_keep_all_and_autogaze_tokens():
+    payload = {
+        "input_ids": torch.tensor([[11, 32000, 12, 32000]]),
+        "pixel_values_videos_tiles": [torch.zeros(2, 2, 3, 4, 4)],
+        "pixel_values_videos_thumbnails": [torch.zeros(1, 1, 3, 4, 4)],
+        "num_spatial_tiles_each_video": [2],
+        "gazing_info": {
+            "if_padded_gazing_tiles": [torch.tensor([[False, True, False], [True, False, False]])],
+            "if_padded_gazing_thumbnails": [torch.tensor([[False, True]])],
+        },
+    }
+
+    metrics = compute_visual_token_metrics(
+        payload,
+        video_token_id=32000,
+        patches_per_frame_value=4,
+        token_shuffle=2,
+    )
+
+    assert metrics["encoder_raw_patch_tokens"] == 20
+    assert metrics["encoder_autogaze_selected_patch_tokens"] == 5
+    assert metrics["encoder_token_reduction_ratio"] == 4.0
+    assert metrics["llm_keep_all_visual_tokens_estimated"] == 10
+    assert metrics["llm_actual_visual_tokens"] == 2
+    assert metrics["llm_visual_token_reduction_ratio"] == 5.0
+
+
+def test_stage_profiler_records_and_resets_timing():
+    profiler = StageProfiler()
+
+    with profiler.measure("video_decode"):
+        value = 1 + 1
+
+    timings = profiler.as_dict()
+    assert value == 2
+    assert timings["video_decode"]["count"] == 1
+    assert timings["video_decode"]["total_ms"] >= 0
+
+    profiler.reset()
+
+    assert profiler.as_dict() == {}

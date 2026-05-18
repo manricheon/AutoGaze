@@ -58,6 +58,7 @@ nvila_runner:
     mode: single
     model_path: nvidia/NVILA-8B-HD-Video
     autogaze_model: nvidia/AutoGaze
+    gazing_mode: autogaze
     device: cuda
     device_map: auto
     video: inputs/hf_space_autogaze/doorbell.mp4
