@@ -3,7 +3,15 @@ from pathlib import Path
 
 import torch
 
-from repro.nvila_runner import build_parser, extract_gaze_metrics, parse_args, processor_kwargs, resolve_video
+from repro.nvila_runner import (
+    build_parser,
+    estimate_nvila_preflight,
+    extract_gaze_metrics,
+    parse_args,
+    processor_kwargs,
+    resolve_video,
+    spatial_tile_grid,
+)
 
 
 def make_args(**overrides):
@@ -88,6 +96,38 @@ def test_parse_args_loads_committed_hf_space_preset():
     assert args.video == "inputs/hf_space_autogaze/doorbell.mp4"
     assert args.num_video_frames == 128
     assert args.max_tiles_video == 48
+
+
+def test_spatial_tile_grid_matches_nvila_dynamic_tiling_for_4k_16x9():
+    grid = spatial_tile_grid(width=3840, height=2160, max_tiles_video=48, image_size=392)
+
+    assert grid == {"cols": 9, "rows": 5, "tiles": 45}
+
+
+def test_preflight_estimator_flags_4k_1024_frame_keep_all_context_risk():
+    estimate = estimate_nvila_preflight(
+        width=3840,
+        height=2160,
+        source_frames=9000,
+        num_video_frames=1024,
+        num_video_frames_thumbnail=64,
+        max_tiles_video=48,
+    )
+
+    assert estimate["sampling"]["requested_frames"] == 1024
+    assert estimate["tiling"]["spatial_tiles"] == 45
+    assert estimate["chunking"]["temporal_chunks"] == 64
+    assert estimate["counts"]["tile_images"] == 46080
+    assert estimate["tokens"]["keep_all_projected_tokens"] > estimate["tokens"]["llm_context_limit"]
+    assert "context" in estimate["risk_flags"]
+    assert "cpu_memory" in estimate["risk_flags"]
+
+
+def test_parse_args_accepts_preflight_mode_and_output_path():
+    args = parse_args(["--mode", "preflight", "--preflight-json", "out/preflight.json"])
+
+    assert args.mode == "preflight"
+    assert args.preflight_json == "out/preflight.json"
 
 
 def test_resolve_video_prefers_existing_local_path(tmp_path: Path):

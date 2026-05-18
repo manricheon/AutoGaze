@@ -153,6 +153,39 @@ For an HLVid-like stress check on a Space example, override the total sampled fr
   --output-json outputs/autogaze_repro/hf_space_security_nvila_1024f.json
 ```
 
+## NVILA Memory Preflight
+
+Before running a long-form or high-resolution video through NVILA, run preflight mode. It does not load the 8B model. It reads local video metadata, mirrors NVILA's dynamic tiling estimate, and reports tile sequence counts, keep-all visual tokens, and a lower-bound CPU preprocessing memory estimate for the current public processor path.
+
+For a local video:
+
+```bash
+.venv/bin/python -m repro.nvila_runner \
+  --mode preflight \
+  --video inputs/hf_space_autogaze/security.mp4 \
+  --num-video-frames 1024 \
+  --num-video-frames-thumbnail 64 \
+  --max-tiles-video 48 \
+  --preflight-json outputs/autogaze_repro/preflight_space_security_1024.json
+```
+
+For an HLVid-like 4K/5-minute estimate before downloading a specific video:
+
+```bash
+.venv/bin/python -m repro.nvila_runner \
+  --mode preflight \
+  --video hlvid_4k_virtual.mp4 \
+  --preflight-width 3840 \
+  --preflight-height 2160 \
+  --preflight-source-frames 9000 \
+  --num-video-frames 1024 \
+  --num-video-frames-thumbnail 64 \
+  --max-tiles-video 48 \
+  --preflight-json outputs/autogaze_repro/preflight_4k_1024_virtual.json
+```
+
+On the 4K/1024-frame estimate, the current public processor path reports about `45` spatial tiles, `2880` tile sequences, about `5.44M` keep-all visual tokens, and about `202 GiB` lower-bound CPU preprocessing memory before Python/PIL overhead. Treat that as a signal to reduce `--num-video-frames`/`--max-tiles-video` or implement chunked preprocessing and vision encoding before attempting full generation.
+
 ## HLVid Manifest
 
 ```bash

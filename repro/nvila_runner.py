@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import time
 from pathlib import Path
 from typing import Any
 
+import av
 import torch
 from huggingface_hub import hf_hub_url
 from omegaconf import OmegaConf
@@ -24,6 +26,156 @@ DEFAULT_PROMPT = (
     "D. Hampden Rd\n"
     "Please answer directly with the letter of the correct answer."
 )
+NVILA_IMAGE_SIZE = 392
+NVILA_TARGET_SCALES = [56, 112, 196, 392]
+NVILA_TARGET_PATCH_SIZE = 14
+NVILA_TOKEN_SHUFFLE = 9
+NVILA_CONTEXT_LIMIT = 40960
+AUTOGAZE_CHUNK_FRAMES = 16
+
+
+def bytes_to_gib(value: int) -> float:
+    return value / (1024**3)
+
+
+def closest_aspect_ratio(aspect_ratio: float, target_ratios: list[tuple[int, int]], width: int, height: int, image_size: int) -> tuple[int, int]:
+    best_ratio_diff = float("inf")
+    best_ratio = (1, 1)
+    area = width * height
+    for ratio in target_ratios:
+        target_aspect_ratio = ratio[0] / ratio[1]
+        ratio_diff = abs(aspect_ratio - target_aspect_ratio)
+        if ratio_diff < best_ratio_diff:
+            best_ratio_diff = ratio_diff
+            best_ratio = ratio
+        elif ratio_diff == best_ratio_diff:
+            if area > 0.5 * image_size * image_size * ratio[0] * ratio[1]:
+                best_ratio = ratio
+    return best_ratio
+
+
+def spatial_tile_grid(width: int, height: int, max_tiles_video: int, image_size: int = NVILA_IMAGE_SIZE) -> dict[str, int]:
+    max_spatial_tiles = max(max_tiles_video, 1)
+    target_ratios = {
+        (i, j)
+        for n in range(1, max_spatial_tiles + 1)
+        for i in range(1, n + 1)
+        for j in range(1, n + 1)
+        if 1 <= i * j <= max_spatial_tiles
+    }
+    sorted_ratios = sorted(target_ratios, key=lambda item: item[0] * item[1])
+    cols, rows = closest_aspect_ratio(width / height, sorted_ratios, width, height, image_size)
+    return {"cols": cols, "rows": rows, "tiles": cols * rows}
+
+
+def patches_per_frame(scales: list[int] | None = None, patch_size: int = NVILA_TARGET_PATCH_SIZE) -> int:
+    active_scales = scales or NVILA_TARGET_SCALES
+    return sum((scale // patch_size) ** 2 for scale in active_scales)
+
+
+def estimate_nvila_preflight(
+    *,
+    width: int,
+    height: int,
+    source_frames: int | None,
+    num_video_frames: int,
+    num_video_frames_thumbnail: int,
+    max_tiles_video: int,
+    image_size: int = NVILA_IMAGE_SIZE,
+    context_limit: int = NVILA_CONTEXT_LIMIT,
+) -> dict[str, Any]:
+    grid = spatial_tile_grid(width, height, max_tiles_video, image_size)
+    spatial_tiles = grid["tiles"]
+    temporal_chunks = math.ceil(num_video_frames / AUTOGAZE_CHUNK_FRAMES)
+    tile_sequences = temporal_chunks * spatial_tiles
+    padded_sampled_frames = temporal_chunks * AUTOGAZE_CHUNK_FRAMES
+    tile_images = padded_sampled_frames * spatial_tiles
+    thumbnail_frames = min(num_video_frames, num_video_frames_thumbnail)
+    per_frame_patches = patches_per_frame()
+    tokens_per_frame_tile = math.ceil(per_frame_patches / NVILA_TOKEN_SHUFFLE)
+    keep_all_tile_tokens = num_video_frames * spatial_tiles * tokens_per_frame_tile
+    keep_all_thumbnail_tokens = thumbnail_frames * tokens_per_frame_tile
+    keep_all_projected_tokens = keep_all_tile_tokens + keep_all_thumbnail_tokens
+
+    sampled_frame_rgb_bytes = num_video_frames * width * height * 3
+    resized_tile_pil_rgb_bytes = tile_images * image_size * image_size * 3
+    siglip_tile_tensor_bytes = tile_images * 3 * image_size * image_size * 4
+    autogaze_tile_tensor_bytes = siglip_tile_tensor_bytes
+    siglip_thumbnail_tensor_bytes = thumbnail_frames * 3 * image_size * image_size * 4
+    autogaze_thumbnail_tensor_bytes = siglip_thumbnail_tensor_bytes
+    estimated_cpu_preprocess_bytes = (
+        sampled_frame_rgb_bytes
+        + resized_tile_pil_rgb_bytes
+        + siglip_tile_tensor_bytes
+        + autogaze_tile_tensor_bytes
+        + siglip_thumbnail_tensor_bytes
+        + autogaze_thumbnail_tensor_bytes
+    )
+
+    risk_flags: list[str] = []
+    if source_frames is not None and num_video_frames > source_frames:
+        risk_flags.append("requested_frames_exceed_source_frames")
+    if num_video_frames % AUTOGAZE_CHUNK_FRAMES != 0:
+        risk_flags.append("frame_count_not_divisible_by_16")
+    if keep_all_projected_tokens > context_limit:
+        risk_flags.append("context")
+    if estimated_cpu_preprocess_bytes > 32 * 1024**3:
+        risk_flags.append("cpu_memory")
+    if tile_sequences > 1024:
+        risk_flags.append("many_tile_sequences")
+
+    return {
+        "video": {
+            "width": width,
+            "height": height,
+            "source_frames": source_frames,
+        },
+        "sampling": {
+            "requested_frames": num_video_frames,
+            "thumbnail_frames": thumbnail_frames,
+            "policy": "uniform_total_frames",
+        },
+        "tiling": {
+            "cols": grid["cols"],
+            "rows": grid["rows"],
+            "spatial_tiles": spatial_tiles,
+            "tile_size": image_size,
+        },
+        "chunking": {
+            "chunk_frames": AUTOGAZE_CHUNK_FRAMES,
+            "temporal_chunks": temporal_chunks,
+            "padded_sampled_frames": padded_sampled_frames,
+            "tile_sequences": tile_sequences,
+        },
+        "counts": {
+            "tile_images": tile_images,
+            "siglip_autogaze_tile_tensor_items": tile_images,
+        },
+        "tokens": {
+            "patches_per_frame_tile": per_frame_patches,
+            "tokens_per_frame_tile_after_shuffle": tokens_per_frame_tile,
+            "keep_all_tile_tokens": keep_all_tile_tokens,
+            "keep_all_thumbnail_tokens": keep_all_thumbnail_tokens,
+            "keep_all_projected_tokens": keep_all_projected_tokens,
+            "llm_context_limit": context_limit,
+            "keep_all_exceeds_context": keep_all_projected_tokens > context_limit,
+        },
+        "memory": {
+            "sampled_frame_rgb_bytes": sampled_frame_rgb_bytes,
+            "resized_tile_pil_rgb_bytes": resized_tile_pil_rgb_bytes,
+            "siglip_tile_tensor_bytes": siglip_tile_tensor_bytes,
+            "autogaze_tile_tensor_bytes": autogaze_tile_tensor_bytes,
+            "estimated_cpu_preprocess_bytes": estimated_cpu_preprocess_bytes,
+            "estimated_cpu_preprocess_gib": bytes_to_gib(estimated_cpu_preprocess_bytes),
+            "note": "Lower-bound estimate for current public processor path before model forward; Python/PIL overhead and intermediate arrays are not included.",
+        },
+        "risk_flags": risk_flags,
+        "recommendation": (
+            "Use chunked preprocessing/vision encoding or reduce num_video_frames/max_tiles_video before full generation."
+            if risk_flags
+            else "No obvious preflight risk detected for current thresholds."
+        ),
+    }
 
 
 def processor_kwargs(args: argparse.Namespace) -> dict[str, Any]:
@@ -51,6 +203,24 @@ def load_model_and_processor(args: argparse.Namespace):
     )
     model.eval()
     return model, processor
+
+
+def read_video_metadata(video: str) -> dict[str, int | float | str | None]:
+    container = av.open(video)
+    try:
+        stream = container.streams.video[0]
+        duration = float(stream.duration * stream.time_base) if stream.duration else None
+        fps = float(stream.average_rate) if stream.average_rate else None
+        return {
+            "width": int(stream.width),
+            "height": int(stream.height),
+            "frames": int(stream.frames) if stream.frames else None,
+            "fps": fps,
+            "duration_seconds": duration,
+            "codec": stream.codec_context.name,
+        }
+    finally:
+        container.close()
 
 
 def input_device(model, fallback: torch.device) -> torch.device:
@@ -186,6 +356,45 @@ def run_single(args: argparse.Namespace) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
+def run_preflight(args: argparse.Namespace) -> None:
+    resolved_video = resolve_video(args.video, args)
+    metadata: dict[str, Any]
+    if args.preflight_width and args.preflight_height:
+        metadata = {
+            "width": args.preflight_width,
+            "height": args.preflight_height,
+            "frames": args.preflight_source_frames,
+            "fps": None,
+            "duration_seconds": None,
+            "codec": None,
+        }
+    elif resolved_video.startswith("http://") or resolved_video.startswith("https://"):
+        raise ValueError(
+            "Preflight needs a local video path or explicit --preflight-width and --preflight-height for remote videos."
+        )
+    else:
+        metadata = read_video_metadata(resolved_video)
+
+    estimate = estimate_nvila_preflight(
+        width=int(metadata["width"]),
+        height=int(metadata["height"]),
+        source_frames=metadata.get("frames"),
+        num_video_frames=args.num_video_frames,
+        num_video_frames_thumbnail=args.num_video_frames_thumbnail,
+        max_tiles_video=args.max_tiles_video,
+    )
+    payload = {
+        "model_path": args.model_path,
+        "autogaze_model": args.autogaze_model,
+        "video": args.video,
+        "video_resolved": resolved_video,
+        "source_metadata": metadata,
+        "estimate": estimate,
+    }
+    write_json(args.preflight_json, payload)
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
 def completed_question_ids(path: Path) -> set[Any]:
     if not path.exists():
         return set()
@@ -242,7 +451,7 @@ def load_preset_defaults(path: str | None) -> dict[str, Any]:
 def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run NVILA-HD-Video quickstart and HLVid benchmark")
     parser.add_argument("--preset-config")
-    parser.add_argument("--mode", choices=["single", "hlvid"], default="single")
+    parser.add_argument("--mode", choices=["single", "hlvid", "preflight"], default="single")
     parser.add_argument("--model-path", "--nvila-model", dest="model_path", default=DEFAULT_MODEL)
     parser.add_argument("--autogaze-model", default="nvidia/AutoGaze")
     parser.add_argument("--device", default="cuda", choices=["cpu", "mps", "cuda"])
@@ -263,6 +472,10 @@ def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentPar
     parser.add_argument("--split", default="test")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--preflight-width", type=int)
+    parser.add_argument("--preflight-height", type=int)
+    parser.add_argument("--preflight-source-frames", type=int)
+    parser.add_argument("--preflight-json", default="outputs/autogaze_repro/nvila_preflight.json")
     parser.add_argument("--output-json", default="outputs/autogaze_repro/nvila_single.json")
     parser.add_argument("--predictions", default="outputs/autogaze_repro/hlvid_predictions.jsonl")
     parser.add_argument("--summary", default="outputs/autogaze_repro/hlvid_summary.json")
@@ -282,7 +495,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    if args.mode == "single":
+    if args.mode == "preflight":
+        run_preflight(args)
+    elif args.mode == "single":
         run_single(args)
     else:
         run_hlvid(args)
