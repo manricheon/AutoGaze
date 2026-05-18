@@ -3,7 +3,7 @@ from pathlib import Path
 
 import torch
 
-from repro.nvila_runner import extract_gaze_metrics, processor_kwargs, resolve_video
+from repro.nvila_runner import build_parser, extract_gaze_metrics, processor_kwargs, resolve_video
 
 
 def make_args(**overrides):
@@ -38,6 +38,12 @@ def test_processor_kwargs_accept_local_autogaze_checkpoint_path():
     kwargs = processor_kwargs(make_args(autogaze_model="/models/autogaze-local"))
 
     assert kwargs["autogaze_model_id"] == "/models/autogaze-local"
+
+
+def test_parser_accepts_local_nvila_model_alias():
+    args = build_parser().parse_args(["--nvila-model", "/models/nvila-local"])
+
+    assert args.model_path == "/models/nvila-local"
 
 
 def test_resolve_video_prefers_existing_local_path(tmp_path: Path):

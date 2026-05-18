@@ -223,10 +223,10 @@ def run_hlvid(args: argparse.Namespace) -> None:
     print(json.dumps(summary, indent=2, sort_keys=True))
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run NVILA-HD-Video quickstart and HLVid benchmark")
     parser.add_argument("--mode", choices=["single", "hlvid"], default="single")
-    parser.add_argument("--model-path", default=DEFAULT_MODEL)
+    parser.add_argument("--model-path", "--nvila-model", dest="model_path", default=DEFAULT_MODEL)
     parser.add_argument("--autogaze-model", default="nvidia/AutoGaze")
     parser.add_argument("--device", default="cuda", choices=["cpu", "mps", "cuda"])
     parser.add_argument("--device-map", default="auto")
@@ -250,7 +250,11 @@ def main() -> None:
     parser.add_argument("--predictions", default="outputs/autogaze_repro/hlvid_predictions.jsonl")
     parser.add_argument("--summary", default="outputs/autogaze_repro/hlvid_summary.json")
     parser.add_argument("--scored-predictions", default="outputs/autogaze_repro/hlvid_scored_predictions.jsonl")
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
     if args.mode == "single":
         run_single(args)
     else:

@@ -100,6 +100,21 @@ To run NVILA-HD-Video with a local AutoGaze checkpoint, pass the same checkpoint
   --output-json outputs/autogaze_repro/cuda_nvila_single_local_autogaze.json
 ```
 
+To run both NVILA-HD-Video and AutoGaze from local checkpoint directories, use `--nvila-model` and `--autogaze-model` together. `--nvila-model` is an alias for `--model-path`.
+
+```bash
+.venv/bin/python -m repro.nvila_runner \
+  --mode single \
+  --device cuda \
+  --nvila-model /path/to/local/nvila-checkpoint \
+  --autogaze-model /path/to/local/autogaze-checkpoint \
+  --num-video-frames 128 \
+  --num-video-frames-thumbnail 64 \
+  --max-tiles-video 48 \
+  --measure-ttft \
+  --output-json outputs/autogaze_repro/cuda_nvila_single_local_models.json
+```
+
 ## HLVid Manifest
 
 ```bash
