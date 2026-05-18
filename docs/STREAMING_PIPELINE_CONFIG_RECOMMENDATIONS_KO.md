@@ -17,6 +17,173 @@
 - `google/siglip2-base-patch16-224`로 MPS smoke를 돌릴 때는 `--autogaze-target-scales 32+64+112+224 --autogaze-target-patch-size 16`을 같이 써야 patch 위치가 맞습니다. 기본 NVILA scale은 patch14 기준입니다.
 - 4K HLVid 5분 예시는 16프레임만 샘플링해도 끝 프레임까지 decode scan이 필요해 CPU decode가 약 54-68초였습니다. 긴 비디오에서는 decode seeking/샘플링 최적화도 별도 병목입니다.
 
+## 동작 파이프라인 그림
+
+### 모델/패치 기준
+
+full NVILA-HD-Video + AutoGaze 기준으로 먼저 생각하면 됩니다.
+
+```text
+NVILA/AutoGaze default target
+  tile image size             = 392 x 392
+  target scales               = 56 + 112 + 196 + 392
+  vision patch size           = 14
+  patches per frame/sequence  = (56/14)^2 + (112/14)^2 + (196/14)^2 + (392/14)^2
+                              = 4^2 + 8^2 + 14^2 + 28^2
+                              = 16 + 64 + 196 + 784
+                              = 1060 patches
+  TokenShuffle estimate       = ceil(patches / 9) visual tokens
+```
+
+MPS에서 `google/siglip2-base-patch16-224`로 custom SigLIP smoke를 돌릴 때는 patch 위치가 달라서 별도 probe 설정을 씁니다.
+
+```text
+SigLIP patch16 smoke target
+  target scales               = 32 + 64 + 112 + 224
+  vision patch size           = 16
+  patches per frame/sequence  = 2^2 + 4^2 + 7^2 + 14^2
+                              = 4 + 16 + 49 + 196
+                              = 265 patches
+```
+
+### 전체 logical pipeline
+
+```text
+Input video
+  F source frames, W x H
+        |
+        | uniform sample over full video
+        v
+  N sampled video frames                 M thumbnail frames
+        |                                      |
+        | resize input video if requested      | resize to 392 x 392
+        v                                      v
+  dynamic spatial tiling                 thumbnail path
+  S tiles per sampled frame              currently keep-all
+        |
+        | each tile sequence = one spatial tile across C temporal frames
+        v
+  tile sequences
+  count = ceil(N / C) temporal chunks * S spatial tiles
+        |
+        | AutoGaze predicts selected patch positions
+        v
+  gazing_info per tile sequence
+        |
+        | custom SigLIP vision tower can consume gazing_info
+        v
+  reduced visual hidden states
+        |
+        | TokenShuffle / projector / LLM input assembly
+        v
+  NVILA MLLM prefill + generation
+```
+
+현재 `stream-profile`에서 직접 stream 처리/측정하는 경계는 아래와 같습니다.
+
+```text
+STREAMABLE IN THIS BRANCH
+  decode scan
+    -> sampled frame to PIL
+      -> optional resize
+        -> chunk spatial tiling
+          -> AutoGaze tensorize
+            -> AutoGaze forward
+              -> optional custom SigLIP gazed/keep-all forward
+
+COLLECTED FOR FULL NVILA GENERATION
+  final visual token sequence
+    -> projector
+      -> LLM prefill/generation
+```
+
+즉, AutoGaze와 optional SigLIP까지는 chunk 단위로 재고 버릴 수 있습니다. 하지만 public NVILA generation path는 최종 visual token sequence를 모아 LLM에 넣으므로 projector/LLM의 실제 시간과 peak memory는 `single`/`hlvid`에서 확인해야 합니다.
+
+### 스트리밍/배치 동작
+
+`N=128`, `C=16`, `S=45`, `max_batch_size_autogaze=16`이면 실제 작업은 이렇게 나뉩니다.
+
+```text
+Video-level request
+  num_video_frames N = 128
+  stream_chunk_frames C = 16
+  spatial tiles S = 45
+
+Temporal chunks
+  chunks = ceil(128 / 16) = 8
+
+Each temporal chunk
+  sampled raw frames in memory <= 16
+  PIL tile images in memory    <= 16 frames * 45 tiles
+  tile sequences               = 45
+
+AutoGaze/SigLIP tile batching inside one chunk
+  batch 1: tile seq  0..15  -> tensor [16 tile seq, 16 frames, 3, 392, 392]
+  batch 2: tile seq 16..31  -> tensor [16 tile seq, 16 frames, 3, 392, 392]
+  batch 3: tile seq 32..44  -> tensor [13 tile seq, 16 frames, 3, 392, 392]
+
+After each tile batch
+  AutoGaze output gazing_info is summarized in stream-profile
+    or kept/stacked in the full NVILA path
+  optional SigLIP forward runs on that same batch
+  tile tensor is released before next batch
+
+After each temporal chunk
+  raw sampled frames are released
+  PIL tile images are released
+  next 16 sampled frames are decoded
+```
+
+`max_batch_size_autogaze`는 한 번에 몇 개의 spatial tile sequence를 AutoGaze tensor로 만들고 forward할지 정합니다. `--stream-siglip-max-embed-batch-size`는 custom SigLIP 내부 embedding mini-batch 크기입니다. CUDA에서는 보통 AutoGaze 16, SigLIP 32로 시작하고, MPS에서는 AutoGaze 1이 더 안정적이었습니다.
+
+thumbnail은 현재 AutoGaze로 줄이지 않고 keep-all로 처리합니다. `M=64`처럼 작게 유지하면 보통 병목은 아니지만, total patch/token 감소율을 희석하므로 리더 설명에서는 tile-only 감소율과 total 감소율을 분리해서 보여주는 것이 좋습니다.
+
+### Latency와 memory를 같이 보는 법
+
+단순히 `pre_llm_stream_total_measured`만 보면 어느 단계가 병목인지 가려집니다. 아래처럼 나눠 봐야 합니다.
+
+```text
+End-to-end pre-LLM stream time
+  = video_decode_scan
+  + video_frame_to_pil
+  + video_frame_resize
+  + spatial_tile_build
+  + tile_autogaze_tensorize
+  + tile_autogaze_forward
+  + siglip_gazed_forward or siglip_keep_all_forward
+  + thumbnail_resize
+  + thumbnail_tensorize
+
+Tile-specific processing time
+  = spatial_tile_build
+  + tile_autogaze_tensorize
+  + tile_autogaze_forward
+  + optional siglip_*_forward
+
+Memory pressure to compare at the same time
+  raw frame buffer peak       = C * effective_width * effective_height * 3
+  PIL tile buffer peak        = C * S * 392 * 392 * 3
+  AutoGaze tensor peak        = C * min(S, max_batch_size_autogaze) * 3 * 392 * 392 * dtype_bytes
+  full chunk tensor reference = C * S * 3 * 392 * 392 * dtype_bytes
+  thumbnail tensor            = M * 3 * 392 * 392 * dtype_bytes
+```
+
+현재 plan table은 보수적으로 float32 기준 bytes를 잡습니다. 실제 결과 JSON의 `memory_bytes.autogaze_tile_tensor_peak_per_temporal_chunk`는 실제 tensor dtype 기준으로 기록되므로 CUDA float16에서는 더 낮게 나올 수 있습니다.
+
+4K, `C=16`일 때 spatial tile 수별 memory 감각은 아래와 같습니다.
+
+```text
+4K source, no resize, C=16, tile=392, AutoGaze batch cap=16
+
+S spatial tiles | raw frame buffer | PIL tile buffer | AG tensor peak | full chunk tensor
+--------------- | ---------------- | --------------- | -------------- | -----------------
+1 tile          | 398.1 MB         |   7.4 MB        |  29.5 MB       |   29.5 MB
+8 tiles         | 398.1 MB         |  59.0 MB        | 236.0 MB       |  236.0 MB
+45 tiles        | 398.1 MB         | 331.9 MB        | 472.1 MB       | 1327.7 MB
+```
+
+여기서 `AG tensor peak`는 tile batch를 16개 단위로 나누기 때문에 45 tiles에서도 472 MB 수준으로 제한됩니다. 반대로 `PIL tile buffer`는 현재 chunk의 모든 spatial tile image를 만든 뒤 AutoGaze batch로 넘기므로 `S`에 선형으로 늘어납니다. 그래서 4K에서는 latency뿐 아니라 `max_tiles_video`가 memory에도 직접적인 1차 레버입니다.
+
 ## 로컬 실측 요약
 
 | 입력 | 설정 | 총 pre-LLM | AutoGaze forward | tile 감소 | total 감소 | keep-all LLM token | AutoGaze LLM lower-bound | peak raw/tile/AG |
