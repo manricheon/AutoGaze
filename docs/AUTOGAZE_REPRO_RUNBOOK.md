@@ -132,6 +132,42 @@ To compare AutoGaze against a full-token baseline, run the same input twice with
 
 For the speed story, compare `total_ms`, `video_decode_ms`, `video_tiling_ms`, `autogaze_forward_ms`, `siglip_vision_ms`, `vision_encoder_ms`, and `llm_forward_ms` between the two JSON files. For the token story, compare `token_metrics.encoder_raw_patch_tokens`, `token_metrics.encoder_autogaze_selected_patch_tokens`, `token_metrics.encoder_token_reduction_ratio`, `token_metrics.llm_keep_all_visual_tokens_estimated`, `token_metrics.llm_actual_visual_tokens`, and `token_metrics.llm_visual_token_reduction_ratio`.
 
+For feasibility tests, `nvila_runner` can downscale sampled video frames before the public NVILA processor tiles them. This is runner-side preprocessing: the runner samples `--num-video-frames` across the full video, resizes those frames, then passes the resized PIL frames to the NVILA processor.
+
+```bash
+.venv/bin/python -m repro.nvila_runner \
+  --mode single \
+  --device cuda \
+  --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
+  --gazing-mode keep-all \
+  --num-video-frames 128 \
+  --num-video-frames-thumbnail 64 \
+  --max-tiles-video 48 \
+  --video-resize-shortest-edge 720 \
+  --measure-ttft \
+  --output-json outputs/autogaze_repro/hlvid_example_nvila_single_128f_keep_all_resize720.json
+```
+
+Use `--video-resize-width` and `--video-resize-height` together for exact-size tests, or `--video-resize-longest-edge` for a max-side constraint. AutoGaze/keep-all patch scale can also be changed through the processor init path:
+
+```bash
+.venv/bin/python -m repro.nvila_runner \
+  --mode single \
+  --device cuda \
+  --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
+  --gazing-mode autogaze \
+  --num-video-frames 128 \
+  --num-video-frames-thumbnail 64 \
+  --max-tiles-video 48 \
+  --video-resize-shortest-edge 720 \
+  --autogaze-resize-scales 56+112+196+392 \
+  --autogaze-target-patch-size 14 \
+  --measure-ttft \
+  --output-json outputs/autogaze_repro/hlvid_example_nvila_single_128f_autogaze_resize720.json
+```
+
+Run preflight with the same resize flags first. The output includes `source_metadata`, `effective_video`, and `video_resize`, so you can see whether the test is using original 4K dimensions or the downscaled frame dimensions.
+
 To run NVILA-HD-Video with a local AutoGaze checkpoint, pass the same checkpoint directory through `--autogaze-model`. The runner forwards it to the NVILA processor as `autogaze_model_id`, which is the argument used by the model's remote code:
 
 ```bash

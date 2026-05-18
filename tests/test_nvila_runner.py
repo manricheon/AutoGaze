@@ -5,15 +5,18 @@ import torch
 
 from repro.nvila_runner import (
     StageProfiler,
+    apply_resize_to_dimensions,
     build_parser,
     compute_visual_token_metrics,
     estimate_nvila_preflight,
     extract_gaze_metrics,
     model_patches_per_frame,
+    parse_int_sequence,
     parse_args,
     processor_kwargs,
     resolve_video,
     spatial_tile_grid,
+    uniform_sample_indices,
 )
 
 
@@ -24,6 +27,8 @@ def make_args(**overrides):
         "max_tiles_video": 48,
         "autogaze_model": "nvidia/AutoGaze",
         "gazing_mode": "autogaze",
+        "autogaze_target_scales": None,
+        "autogaze_target_patch_size": None,
         "task_loss_requirement_tile": 0.6,
         "max_batch_size_autogaze": 16,
         "hlvid_repo": "bfshi/HLVid",
@@ -77,10 +82,61 @@ def test_processor_kwargs_can_run_keep_all_baseline_without_autogaze_selection()
     assert kwargs["task_loss_requirement_thumbnail"] is None
 
 
+def test_processor_kwargs_forwards_autogaze_resize_scales_to_nvila_processor():
+    kwargs = processor_kwargs(
+        make_args(
+            autogaze_target_scales="56+112+196+392",
+            autogaze_target_patch_size=14,
+        )
+    )
+
+    assert kwargs["target_scales"] == [56, 112, 196, 392]
+    assert kwargs["target_patch_size"] == 14
+
+
 def test_parse_args_accepts_gazing_mode_switch():
     args = parse_args(["--gazing-mode", "keep-all"])
 
     assert args.gazing_mode == "keep-all"
+
+
+def test_parse_args_accepts_video_and_autogaze_resize_options():
+    args = parse_args(
+        [
+            "--video-resize-shortest-edge",
+            "720",
+            "--autogaze-resize-scales",
+            "56+112+196+392",
+            "--autogaze-target-patch-size",
+            "14",
+        ]
+    )
+
+    assert args.video_resize_shortest_edge == 720
+    assert args.autogaze_target_scales == "56+112+196+392"
+    assert args.autogaze_target_patch_size == 14
+
+
+def test_parse_int_sequence_accepts_plus_comma_and_bracket_formats():
+    assert parse_int_sequence("56+112+196+392") == [56, 112, 196, 392]
+    assert parse_int_sequence("[56, 112, 196, 392]") == [56, 112, 196, 392]
+
+
+def test_apply_resize_to_dimensions_preserves_aspect_for_shortest_edge():
+    resized = apply_resize_to_dimensions(
+        width=3840,
+        height=2160,
+        shortest_edge=720,
+        longest_edge=None,
+        exact_width=None,
+        exact_height=None,
+    )
+
+    assert resized == {"width": 1280, "height": 720, "mode": "shortest_edge"}
+
+
+def test_uniform_sample_indices_matches_nvila_processor_round_linspace():
+    assert uniform_sample_indices(total_frames=10, sample_count=4) == [0, 3, 6, 9]
 
 
 def test_parser_accepts_local_nvila_model_alias():

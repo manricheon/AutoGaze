@@ -15,6 +15,7 @@ import av
 import torch
 from huggingface_hub import hf_hub_url
 from omegaconf import OmegaConf
+from PIL import Image
 from transformers import AutoModel, AutoProcessor
 
 from repro.common import append_jsonl, environment_metadata, resolve_device, synchronize, write_json, write_jsonl
@@ -154,6 +155,113 @@ def patches_per_frame(scales: list[int] | None = None, patch_size: int = NVILA_T
     return sum((scale // patch_size) ** 2 for scale in active_scales)
 
 
+def parse_int_sequence(value: str | list[int] | tuple[int, ...] | None) -> list[int] | None:
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        return [int(item) for item in value]
+    parsed = [int(part) for part in re.findall(r"\d+", value)]
+    return parsed or None
+
+
+def uniform_sample_indices(total_frames: int, sample_count: int) -> list[int]:
+    if total_frames <= 0:
+        raise ValueError("total_frames must be positive")
+    if sample_count <= 0:
+        raise ValueError("sample_count must be positive")
+    if total_frames == 1:
+        return [0] * sample_count
+    if sample_count == 1:
+        return [0]
+    return [int(round(i * (total_frames - 1) / (sample_count - 1))) for i in range(sample_count)]
+
+
+def apply_resize_to_dimensions(
+    *,
+    width: int,
+    height: int,
+    shortest_edge: int | None,
+    longest_edge: int | None,
+    exact_width: int | None,
+    exact_height: int | None,
+) -> dict[str, int | str]:
+    exact_requested = exact_width is not None or exact_height is not None
+    if exact_requested and (exact_width is None or exact_height is None):
+        raise ValueError("--video-resize-width and --video-resize-height must be provided together.")
+    active_modes = sum(value is not None for value in (shortest_edge, longest_edge)) + int(exact_requested)
+    if active_modes > 1:
+        raise ValueError("Use only one video resize mode: exact size, shortest edge, or longest edge.")
+    if exact_requested:
+        return {"width": int(exact_width), "height": int(exact_height), "mode": "exact"}
+    if shortest_edge is not None:
+        scale = shortest_edge / min(width, height)
+        return {
+            "width": max(1, int(round(width * scale))),
+            "height": max(1, int(round(height * scale))),
+            "mode": "shortest_edge",
+        }
+    if longest_edge is not None:
+        scale = longest_edge / max(width, height)
+        return {
+            "width": max(1, int(round(width * scale))),
+            "height": max(1, int(round(height * scale))),
+            "mode": "longest_edge",
+        }
+    return {"width": width, "height": height, "mode": "none"}
+
+
+def has_video_resize(args: argparse.Namespace) -> bool:
+    return any(
+        getattr(args, name, None) is not None
+        for name in (
+            "video_resize_shortest_edge",
+            "video_resize_longest_edge",
+            "video_resize_width",
+            "video_resize_height",
+        )
+    )
+
+
+def resize_frame(frame: Image.Image, resize: dict[str, int | str]) -> Image.Image:
+    if resize["mode"] == "none":
+        return frame
+    return frame.resize((int(resize["width"]), int(resize["height"])))
+
+
+def load_sampled_video_frames(video: str, sample_count: int, resize: dict[str, int | str]) -> list[Image.Image]:
+    metadata = read_video_metadata(video)
+    total_frames = metadata.get("frames")
+    if total_frames is None:
+        raise ValueError("Video frame count is required for runner-side resize sampling.")
+    indices = uniform_sample_indices(int(total_frames), sample_count)
+    target_counts: dict[int, int] = {}
+    for index in indices:
+        target_counts[index] = target_counts.get(index, 0) + 1
+    max_index = max(target_counts)
+
+    frames: list[Image.Image] = []
+    container = av.open(video)
+    try:
+        for frame_index, frame in enumerate(container.decode(video=0)):
+            if frame_index > max_index:
+                break
+            count = target_counts.get(frame_index, 0)
+            if count == 0:
+                continue
+            image = resize_frame(frame.to_image().convert("RGB"), resize)
+            frames.extend(image.copy() for _ in range(count))
+            if len(frames) >= sample_count:
+                break
+    finally:
+        container.close()
+
+    if not frames:
+        raise ValueError(f"Could not extract any frames from video: {video}")
+    while len(frames) < sample_count:
+        frames.append(frames[-1].copy())
+    return frames
+
+
 def estimate_nvila_preflight(
     *,
     width: int,
@@ -267,7 +375,7 @@ def processor_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         gazing_ratio_tile = [0.2] + [0.06] * 15
         task_loss_requirement_tile = args.task_loss_requirement_tile
 
-    return {
+    kwargs = {
         "num_video_frames": args.num_video_frames,
         "num_video_frames_thumbnail": args.num_video_frames_thumbnail,
         "max_tiles_video": args.max_tiles_video,
@@ -279,6 +387,13 @@ def processor_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "max_batch_size_autogaze": args.max_batch_size_autogaze,
         "trust_remote_code": True,
     }
+    target_scales = parse_int_sequence(getattr(args, "autogaze_target_scales", None))
+    if target_scales is not None:
+        kwargs["target_scales"] = target_scales
+    target_patch_size = getattr(args, "autogaze_target_patch_size", None)
+    if target_patch_size is not None:
+        kwargs["target_patch_size"] = int(target_patch_size)
+    return kwargs
 
 
 def load_model_and_processor(args: argparse.Namespace):
@@ -527,9 +642,7 @@ def model_patches_per_frame(model) -> int:
     scales = getattr(config, "scales", None)
     patch_size = getattr(config, "patch_size", NVILA_TARGET_PATCH_SIZE)
     if isinstance(scales, str):
-        parsed_scales = [int(part) for part in re.findall(r"\d+", scales)]
-        if not parsed_scales:
-            parsed_scales = NVILA_TARGET_SCALES
+        parsed_scales = parse_int_sequence(scales) or NVILA_TARGET_SCALES
     elif isinstance(scales, int):
         parsed_scales = [int(scales)]
     elif scales is None:
@@ -582,6 +695,50 @@ def stage_total(timings: dict[str, dict[str, float | int]], stage: str) -> float
     return float(value["total_ms"])
 
 
+def video_resize_config(args: argparse.Namespace, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+    source_width = int(metadata["width"]) if metadata and metadata.get("width") is not None else None
+    source_height = int(metadata["height"]) if metadata and metadata.get("height") is not None else None
+    effective = None
+    if source_width is not None and source_height is not None:
+        effective = apply_resize_to_dimensions(
+            width=source_width,
+            height=source_height,
+            shortest_edge=getattr(args, "video_resize_shortest_edge", None),
+            longest_edge=getattr(args, "video_resize_longest_edge", None),
+            exact_width=getattr(args, "video_resize_width", None),
+            exact_height=getattr(args, "video_resize_height", None),
+        )
+    return {
+        "enabled": has_video_resize(args),
+        "shortest_edge": getattr(args, "video_resize_shortest_edge", None),
+        "longest_edge": getattr(args, "video_resize_longest_edge", None),
+        "width": getattr(args, "video_resize_width", None),
+        "height": getattr(args, "video_resize_height", None),
+        "effective": effective,
+    }
+
+
+def prepare_video_for_processor(video: str, args: argparse.Namespace) -> tuple[Any, dict[str, Any]]:
+    if not has_video_resize(args):
+        return video, {"mode": "path_or_url", "resize": video_resize_config(args)}
+    metadata = read_video_metadata(video)
+    resize = apply_resize_to_dimensions(
+        width=int(metadata["width"]),
+        height=int(metadata["height"]),
+        shortest_edge=getattr(args, "video_resize_shortest_edge", None),
+        longest_edge=getattr(args, "video_resize_longest_edge", None),
+        exact_width=getattr(args, "video_resize_width", None),
+        exact_height=getattr(args, "video_resize_height", None),
+    )
+    frames = load_sampled_video_frames(video, args.num_video_frames, resize)
+    return frames, {
+        "mode": "preloaded_resized_frames",
+        "source_metadata": metadata,
+        "resize": video_resize_config(args, metadata),
+        "frames_loaded": len(frames),
+    }
+
+
 def generate_one(model, processor, video: str, prompt: str, device: torch.device, args: argparse.Namespace) -> dict[str, Any]:
     video_token = processor.tokenizer.video_token
     resolved_video = resolve_video(video, args)
@@ -590,8 +747,13 @@ def generate_one(model, processor, video: str, prompt: str, device: torch.device
     with ProfilePatches(model, processor, profiler):
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(device)
+        video_payload: Any = resolved_video
+        video_input_info: dict[str, Any] = {"mode": "path_or_url", "resize": video_resize_config(args)}
+        if has_video_resize(args):
+            with profiler.measure("video_decode_sampling"):
+                video_payload, video_input_info = prepare_video_for_processor(resolved_video, args)
         with profiler.measure("processor_total"):
-            inputs = processor(text=f"{video_token}\n\n{prompt}", videos=resolved_video, return_tensors="pt")
+            inputs = processor(text=f"{video_token}\n\n{prompt}", videos=video_payload, return_tensors="pt")
         processor_peak_memory_bytes = torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None
         processor_timings = profiler.as_dict()
         profiler.reset()
@@ -621,6 +783,8 @@ def generate_one(model, processor, video: str, prompt: str, device: torch.device
         profiler.reset()
 
     preprocess_ms = stage_total(processor_timings, "processor_total") or 0.0
+    if video_input_info["mode"] == "preloaded_resized_frames":
+        preprocess_ms += stage_total(processor_timings, "video_decode_sampling") or 0.0
     decode_estimated_ms = max(result["generate_ms"] - ttft_ms, 0.0) if ttft_ms is not None else None
 
     return {
@@ -628,7 +792,10 @@ def generate_one(model, processor, video: str, prompt: str, device: torch.device
         **gaze_metrics,
         "video_input": video,
         "video_resolved": resolved_video,
+        "video_input_info": video_input_info,
         "gazing_mode": args.gazing_mode,
+        "autogaze_target_scales": parse_int_sequence(getattr(args, "autogaze_target_scales", None)),
+        "autogaze_target_patch_size": getattr(args, "autogaze_target_patch_size", None),
         "input_token_count": int(inputs["input_ids"].shape[1]),
         "input_shapes": tensor_shapes(inputs),
         "token_metrics": token_metrics,
@@ -669,6 +836,9 @@ def run_single(args: argparse.Namespace) -> None:
         "model_path": args.model_path,
         "autogaze_model": args.autogaze_model,
         "gazing_mode": args.gazing_mode,
+        "video_resize": video_resize_config(args),
+        "autogaze_target_scales": parse_int_sequence(getattr(args, "autogaze_target_scales", None)),
+        "autogaze_target_patch_size": getattr(args, "autogaze_target_patch_size", None),
         "video": args.video,
         "prompt": args.prompt,
         "result": result,
@@ -696,9 +866,17 @@ def run_preflight(args: argparse.Namespace) -> None:
     else:
         metadata = read_video_metadata(resolved_video)
 
-    estimate = estimate_nvila_preflight(
+    effective = apply_resize_to_dimensions(
         width=int(metadata["width"]),
         height=int(metadata["height"]),
+        shortest_edge=getattr(args, "video_resize_shortest_edge", None),
+        longest_edge=getattr(args, "video_resize_longest_edge", None),
+        exact_width=getattr(args, "video_resize_width", None),
+        exact_height=getattr(args, "video_resize_height", None),
+    )
+    estimate = estimate_nvila_preflight(
+        width=int(effective["width"]),
+        height=int(effective["height"]),
         source_frames=metadata.get("frames"),
         num_video_frames=args.num_video_frames,
         num_video_frames_thumbnail=args.num_video_frames_thumbnail,
@@ -711,6 +889,12 @@ def run_preflight(args: argparse.Namespace) -> None:
         "video": args.video,
         "video_resolved": resolved_video,
         "source_metadata": metadata,
+        "effective_video": {
+            "width": int(effective["width"]),
+            "height": int(effective["height"]),
+            "resize_mode": effective["mode"],
+        },
+        "video_resize": video_resize_config(args, metadata),
         "estimate": estimate,
     }
     write_json(args.preflight_json, payload)
@@ -743,6 +927,9 @@ def run_hlvid(args: argparse.Namespace) -> None:
             "num_video_frames_thumbnail": args.num_video_frames_thumbnail,
             "max_tiles_video": args.max_tiles_video,
             "gazing_mode": args.gazing_mode,
+            "video_resize": video_resize_config(args),
+            "autogaze_target_scales": parse_int_sequence(getattr(args, "autogaze_target_scales", None)),
+            "autogaze_target_patch_size": getattr(args, "autogaze_target_patch_size", None),
             "task_loss_requirement_tile": args.task_loss_requirement_tile,
         }
         append_jsonl(output_path, [prediction])
@@ -784,7 +971,13 @@ def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentPar
     parser.add_argument("--num-video-frames", type=int, default=128)
     parser.add_argument("--num-video-frames-thumbnail", type=int, default=64)
     parser.add_argument("--max-tiles-video", type=int, default=48)
+    parser.add_argument("--video-resize-shortest-edge", type=int)
+    parser.add_argument("--video-resize-longest-edge", type=int)
+    parser.add_argument("--video-resize-width", type=int)
+    parser.add_argument("--video-resize-height", type=int)
     parser.add_argument("--gazing-mode", choices=["autogaze", "keep-all"], default="autogaze")
+    parser.add_argument("--autogaze-target-scales", "--autogaze-resize-scales", dest="autogaze_target_scales")
+    parser.add_argument("--autogaze-target-patch-size", type=int)
     parser.add_argument("--task-loss-requirement-tile", type=float, default=0.6)
     parser.add_argument("--max-batch-size-autogaze", type=int, default=16)
     parser.add_argument("--max-batch-size-siglip", type=int, default=32)

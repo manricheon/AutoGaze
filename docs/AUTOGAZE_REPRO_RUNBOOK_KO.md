@@ -132,6 +132,42 @@ AutoGaze와 full-token baseline을 비교하려면 같은 input을 두 번 실�
 
 속도 관점에서는 두 JSON 파일의 `total_ms`, `video_decode_ms`, `video_tiling_ms`, `autogaze_forward_ms`, `siglip_vision_ms`, `vision_encoder_ms`, `llm_forward_ms`를 비교합니다. 토큰 관점에서는 `token_metrics.encoder_raw_patch_tokens`, `token_metrics.encoder_autogaze_selected_patch_tokens`, `token_metrics.encoder_token_reduction_ratio`, `token_metrics.llm_keep_all_visual_tokens_estimated`, `token_metrics.llm_actual_visual_tokens`, `token_metrics.llm_visual_token_reduction_ratio`를 비교합니다.
 
+feasibility test를 위해 `nvila_runner`는 public NVILA processor가 tiling하기 전에 sampled video frame을 downscale할 수 있습니다. 이 기능은 runner-side preprocessing입니다. runner가 전체 비디오에서 `--num-video-frames`만큼 샘플링하고, 그 프레임을 리사이즈한 뒤 PIL frame list로 NVILA processor에 넘깁니다.
+
+```bash
+.venv/bin/python -m repro.nvila_runner \
+  --mode single \
+  --device cuda \
+  --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
+  --gazing-mode keep-all \
+  --num-video-frames 128 \
+  --num-video-frames-thumbnail 64 \
+  --max-tiles-video 48 \
+  --video-resize-shortest-edge 720 \
+  --measure-ttft \
+  --output-json outputs/autogaze_repro/hlvid_example_nvila_single_128f_keep_all_resize720.json
+```
+
+exact-size test는 `--video-resize-width`와 `--video-resize-height`를 함께 사용하세요. max-side constraint가 필요하면 `--video-resize-longest-edge`를 씁니다. AutoGaze/keep-all patch scale도 processor init 경로로 바꿀 수 있습니다.
+
+```bash
+.venv/bin/python -m repro.nvila_runner \
+  --mode single \
+  --device cuda \
+  --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
+  --gazing-mode autogaze \
+  --num-video-frames 128 \
+  --num-video-frames-thumbnail 64 \
+  --max-tiles-video 48 \
+  --video-resize-shortest-edge 720 \
+  --autogaze-resize-scales 56+112+196+392 \
+  --autogaze-target-patch-size 14 \
+  --measure-ttft \
+  --output-json outputs/autogaze_repro/hlvid_example_nvila_single_128f_autogaze_resize720.json
+```
+
+같은 resize flag로 preflight를 먼저 실행하세요. 출력에는 `source_metadata`, `effective_video`, `video_resize`가 포함되므로 테스트가 원본 4K 기준인지 downscaled frame 기준인지 확인할 수 있습니다.
+
 로컬 AutoGaze checkpoint로 NVILA-HD-Video를 실행하려면 `--autogaze-model`에 checkpoint 디렉터리를 넘깁니다. runner는 이 값을 NVILA processor의 `autogaze_model_id`로 전달합니다. 이는 모델 remote code에서 사용하는 인자입니다.
 
 ```bash
