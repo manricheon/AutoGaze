@@ -3,7 +3,7 @@ from pathlib import Path
 
 import torch
 
-from repro.nvila_runner import build_parser, extract_gaze_metrics, processor_kwargs, resolve_video
+from repro.nvila_runner import build_parser, extract_gaze_metrics, parse_args, processor_kwargs, resolve_video
 
 
 def make_args(**overrides):
@@ -44,6 +44,50 @@ def test_parser_accepts_local_nvila_model_alias():
     args = build_parser().parse_args(["--nvila-model", "/models/nvila-local"])
 
     assert args.model_path == "/models/nvila-local"
+
+
+def test_parse_args_loads_nvila_runner_preset_config(tmp_path: Path):
+    preset = tmp_path / "preset.yaml"
+    preset.write_text(
+        "\n".join(
+            [
+                "nvila_runner:",
+                "  args:",
+                "    video: inputs/hf_space_autogaze/doorbell.mp4",
+                "    num_video_frames: 1024",
+                "    max_tiles_video: 48",
+                "    model_path: /models/nvila-local",
+            ]
+        )
+        + "\n"
+    )
+
+    args = parse_args(["--preset-config", str(preset)])
+
+    assert args.video == "inputs/hf_space_autogaze/doorbell.mp4"
+    assert args.num_video_frames == 1024
+    assert args.max_tiles_video == 48
+    assert args.model_path == "/models/nvila-local"
+
+
+def test_cli_values_override_preset_config(tmp_path: Path):
+    preset = tmp_path / "preset.yaml"
+    preset.write_text("nvila_runner:\n  args:\n    num_video_frames: 1024\n")
+
+    args = parse_args(["--preset-config", str(preset), "--num-video-frames", "128"])
+
+    assert args.num_video_frames == 128
+
+
+def test_parse_args_loads_committed_hf_space_preset():
+    root = Path(__file__).resolve().parents[1]
+    preset = root / "configs" / "repro" / "hf_space_autogaze_examples.yaml"
+
+    args = parse_args(["--preset-config", str(preset)])
+
+    assert args.video == "inputs/hf_space_autogaze/doorbell.mp4"
+    assert args.num_video_frames == 128
+    assert args.max_tiles_video == 48
 
 
 def test_resolve_video_prefers_existing_local_path(tmp_path: Path):

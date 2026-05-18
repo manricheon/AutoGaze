@@ -1,0 +1,79 @@
+name: hf_space_autogaze_examples
+description: Local preset for bfshi/AutoGaze Space example videos, extended to NVILA.
+
+source:
+  space: bfshi/AutoGaze
+  revision: 357a135349cb709217eeb7d083c1118df97d2cc7
+  url: https://huggingface.co/spaces/bfshi/AutoGaze
+
+download:
+  local_dir: inputs/hf_space_autogaze
+  command:
+    - .venv/bin/python
+    - scripts/download_hf_space_examples.py
+
+examples:
+  - name: doorbell
+    hub_path: example_inputs/doorbell.mp4
+    local_path: inputs/hf_space_autogaze/doorbell.mp4
+    source:
+      width: 894
+      height: 718
+      frames: 16
+      fps: 6.400170671217899
+      duration_seconds: 2.4999333333333333
+      codec: h264
+  - name: tomjerry
+    hub_path: example_inputs/tomjerry.mp4
+    local_path: inputs/hf_space_autogaze/tomjerry.mp4
+    source:
+      width: 448
+      height: 448
+      frames: 44
+      fps: 11.988011988011989
+      duration_seconds: 3.6703333333333332
+      codec: h264
+  - name: security
+    hub_path: example_inputs/security.mp4
+    local_path: inputs/hf_space_autogaze/security.mp4
+    source:
+      width: 896
+      height: 896
+      frames: 64
+      fps: 8.126984126984127
+      duration_seconds: 7.875
+      codec: h264
+
+space_autogaze_settings:
+  ui_gazing_ratio: 0.75
+  model_gazing_ratio: 0.5547169811320755
+  task_loss_requirement: 0.7
+  chunk_frames: 16
+  spatial_chunk_size: 224
+  spatial_batch_size: 2
+  note: The Space multiplies the UI gazing ratio by 196/265 before passing it to AutoGaze.
+
+nvila_runner:
+  args:
+    mode: single
+    model_path: nvidia/NVILA-8B-HD-Video
+    autogaze_model: nvidia/AutoGaze
+    device: cuda
+    device_map: auto
+    video: inputs/hf_space_autogaze/doorbell.mp4
+    num_video_frames: 128
+    num_video_frames_thumbnail: 64
+    max_tiles_video: 48
+    task_loss_requirement_tile: 0.6
+    max_batch_size_autogaze: 16
+    max_batch_size_siglip: 32
+    measure_ttft: true
+    max_new_tokens: 32
+    output_json: outputs/autogaze_repro/hf_space_doorbell_nvila_single.json
+
+nvila_hlvid_like_override:
+  description: Use these values to stress the same fixed total-frame sampling style as HLVid on a Space example video.
+  args:
+    num_video_frames: 1024
+    num_video_frames_thumbnail: 64
+    max_tiles_video: 48

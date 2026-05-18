@@ -117,6 +117,42 @@ To run both NVILA-HD-Video and AutoGaze from local checkpoint directories, use `
   --output-json outputs/autogaze_repro/cuda_nvila_single_local_models.json
 ```
 
+## HF Space Example Videos
+
+The AutoGaze Space at `https://huggingface.co/spaces/bfshi/AutoGaze` uses three example videos: `doorbell.mp4`, `tomjerry.mp4`, and `security.mp4`. Download them locally with:
+
+```bash
+.venv/bin/python scripts/download_hf_space_examples.py
+```
+
+They are saved under `inputs/hf_space_autogaze/`, which is intentionally gitignored. The matching preset is `configs/repro/hf_space_autogaze_examples.yaml`. It records the Space settings: UI gazing ratio `0.75`, model gazing ratio `0.75 * 196 / 265`, task loss requirement `0.7`, 16-frame temporal chunks, 224x224 spatial chunks, and spatial batch size `2`.
+
+To run NVILA on the default Space example video (`doorbell.mp4`) with fixed total-frame sampling:
+
+```bash
+.venv/bin/python -m repro.nvila_runner \
+  --preset-config configs/repro/hf_space_autogaze_examples.yaml
+```
+
+To use another Space example while keeping the same NVILA/AutoGaze settings:
+
+```bash
+.venv/bin/python -m repro.nvila_runner \
+  --preset-config configs/repro/hf_space_autogaze_examples.yaml \
+  --video inputs/hf_space_autogaze/security.mp4 \
+  --output-json outputs/autogaze_repro/hf_space_security_nvila_single.json
+```
+
+For an HLVid-like stress check on a Space example, override the total sampled frame count:
+
+```bash
+.venv/bin/python -m repro.nvila_runner \
+  --preset-config configs/repro/hf_space_autogaze_examples.yaml \
+  --video inputs/hf_space_autogaze/security.mp4 \
+  --num-video-frames 1024 \
+  --output-json outputs/autogaze_repro/hf_space_security_nvila_1024f.json
+```
+
 ## HLVid Manifest
 
 ```bash
@@ -158,6 +194,15 @@ Small metadata check:
 ```
 
 ## HLVid Paper-Facing Run
+
+The preset for this fixed total-frame sampling setup is `configs/repro/hlvid_like_nvila_1024.yaml`.
+
+```bash
+.venv/bin/python -m repro.nvila_runner \
+  --preset-config configs/repro/hlvid_like_nvila_1024.yaml
+```
+
+Equivalent expanded command:
 
 ```bash
 .venv/bin/python -m repro.nvila_runner \

@@ -8,6 +8,7 @@ from typing import Any
 
 import torch
 from huggingface_hub import hf_hub_url
+from omegaconf import OmegaConf
 from transformers import AutoModel, AutoProcessor
 
 from repro.common import append_jsonl, environment_metadata, resolve_device, synchronize, write_json, write_jsonl
@@ -223,8 +224,24 @@ def run_hlvid(args: argparse.Namespace) -> None:
     print(json.dumps(summary, indent=2, sort_keys=True))
 
 
-def build_parser() -> argparse.ArgumentParser:
+def load_preset_defaults(path: str | None) -> dict[str, Any]:
+    if path is None:
+        return {}
+    preset = OmegaConf.to_container(OmegaConf.load(path), resolve=True)
+    if not isinstance(preset, dict):
+        raise ValueError(f"Preset config must be a mapping: {path}")
+    runner = preset.get("nvila_runner", {})
+    if not isinstance(runner, dict):
+        raise ValueError(f"Preset config 'nvila_runner' must be a mapping: {path}")
+    args = runner.get("args", {})
+    if not isinstance(args, dict):
+        raise ValueError(f"Preset config 'nvila_runner.args' must be a mapping: {path}")
+    return dict(args)
+
+
+def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run NVILA-HD-Video quickstart and HLVid benchmark")
+    parser.add_argument("--preset-config")
     parser.add_argument("--mode", choices=["single", "hlvid"], default="single")
     parser.add_argument("--model-path", "--nvila-model", dest="model_path", default=DEFAULT_MODEL)
     parser.add_argument("--autogaze-model", default="nvidia/AutoGaze")
@@ -250,11 +267,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--predictions", default="outputs/autogaze_repro/hlvid_predictions.jsonl")
     parser.add_argument("--summary", default="outputs/autogaze_repro/hlvid_summary.json")
     parser.add_argument("--scored-predictions", default="outputs/autogaze_repro/hlvid_scored_predictions.jsonl")
+    if defaults:
+        parser.set_defaults(**defaults)
     return parser
 
 
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    bootstrap = argparse.ArgumentParser(add_help=False)
+    bootstrap.add_argument("--preset-config")
+    known, _ = bootstrap.parse_known_args(argv)
+    defaults = load_preset_defaults(known.preset_config)
+    return build_parser(defaults).parse_args(argv)
+
+
 def main() -> None:
-    args = build_parser().parse_args()
+    args = parse_args()
     if args.mode == "single":
         run_single(args)
     else:

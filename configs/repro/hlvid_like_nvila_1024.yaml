@@ -1,0 +1,51 @@
+name: hlvid_like_nvila_1024
+description: Paper-facing HLVid-like NVILA preset with fixed total frame sampling.
+
+dataset:
+  repo: bfshi/HLVid
+  config: default
+  split: test
+  expected_rows: 268
+
+sampling:
+  policy: uniform_total_frames
+  note: NVILA samples this many frames from the full video before tiling/chunking.
+  num_video_frames: 1024
+  num_video_frames_thumbnail: 64
+
+tiling:
+  max_tiles_video: 48
+  tile_size: 392
+
+autogaze:
+  model: nvidia/AutoGaze
+  gazing_ratio_tile: [0.2, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06]
+  gazing_ratio_thumbnail: 1
+  task_loss_requirement_tile: 0.6
+  task_loss_requirement_thumbnail: null
+  max_batch_size_autogaze: 16
+
+siglip:
+  max_batch_size_siglip: 32
+
+nvila_runner:
+  args:
+    mode: hlvid
+    model_path: nvidia/NVILA-8B-HD-Video
+    autogaze_model: nvidia/AutoGaze
+    device: cuda
+    device_map: auto
+    config: default
+    split: test
+    limit: 268
+    num_video_frames: 1024
+    num_video_frames_thumbnail: 64
+    max_tiles_video: 48
+    task_loss_requirement_tile: 0.6
+    max_batch_size_autogaze: 16
+    max_batch_size_siglip: 32
+    measure_ttft: true
+    resume: true
+    predictions: outputs/autogaze_repro/hlvid_full_predictions.jsonl
+    summary: outputs/autogaze_repro/hlvid_full_summary.json
+    scored_predictions: outputs/autogaze_repro/hlvid_full_scored.jsonl
