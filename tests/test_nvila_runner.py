@@ -258,9 +258,23 @@ def test_compute_visual_token_metrics_compares_keep_all_and_autogaze_tokens():
         payload,
         video_token_id=32000,
         patches_per_frame_value=4,
+        patches_per_frame_by_scale={"scale_a": 1, "scale_b": 3},
         token_shuffle=2,
     )
 
+    assert metrics["video_sampled_frames"] == 2
+    assert metrics["thumbnail_sampled_frames"] == 1
+    assert metrics["tile_sequences"] == 2
+    assert metrics["spatial_tiles_per_video"] == [2]
+    assert metrics["temporal_chunks_per_video"] == [1]
+    assert metrics["encoder_patches_per_frame_multiscale"] == 4
+    assert metrics["encoder_patches_per_frame_by_scale"] == {"scale_a": 1, "scale_b": 3}
+    assert metrics["encoder_raw_tile_patch_tokens"] == 16
+    assert metrics["encoder_autogaze_selected_tile_patch_tokens"] == 4
+    assert metrics["encoder_tile_token_reduction_ratio"] == 4.0
+    assert metrics["encoder_raw_thumbnail_patch_tokens"] == 4
+    assert metrics["encoder_autogaze_selected_thumbnail_patch_tokens"] == 1
+    assert metrics["encoder_thumbnail_token_reduction_ratio"] == 4.0
     assert metrics["encoder_raw_patch_tokens"] == 20
     assert metrics["encoder_autogaze_selected_patch_tokens"] == 5
     assert metrics["encoder_token_reduction_ratio"] == 4.0

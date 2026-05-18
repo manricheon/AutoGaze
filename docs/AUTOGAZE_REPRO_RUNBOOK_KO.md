@@ -90,21 +90,44 @@ sandbox 안에서 `torch.backends.mps.is_available()`이 false인데 sandbox 밖
 
 NVILA runner는 output JSON에 모듈별 timing을 기록합니다. 중요한 필드는 아래와 같습니다.
 
-- `result.video_decode_ms`: 샘플링된 프레임 decode/read 시간
-- `result.video_tiling_ms`: dynamic tiling 및 image tensorization 시간
-- `result.autogaze_ms`: padding/splitting bookkeeping까지 포함한 전체 AutoGaze selection stage 시간
-- `result.autogaze_forward_ms`: AutoGaze가 실제 호출된 경우 AutoGaze model forward 시간
-- `result.vision_encoder_ms`: SigLIP feature와 projector 준비를 포함한 NVILA vision encoding stage 시간
-- `result.siglip_vision_ms`: SigLIP vision tower forward 시간
-- `result.mm_projector_ms`: multimodal projector forward 시간
-- `result.llm_forward_ms`: generation 동안 누적된 LLM forward 시간
-- `result.ttft_ms`: `--measure-ttft`가 켜졌을 때, 처리된 visual/text input에서 1토큰을 생성하는 데 걸린 시간
-- `result.decode_estimated_ms`: full `generate_ms - ttft_ms`로 계산한 대략적인 generation decode 시간
-- `result.stage_timings_ms`: `processor`, 선택적 `ttft`, full `generate`의 raw nested timing bucket
-- `result.token_metrics`: encoder patch budget 및 LLM visual-token budget 기준 AutoGaze 전후 visual token count
+- `result.video_decode_ms`: 샘플링된 프레임 decode/read 시간입니다. runner-side resize를 쓰지 않으면 NVILA remote code의 video loader를 감싼 시간입니다. `--video-resize-*`를 쓰면 runner가 전체 비디오에서 프레임을 샘플링하고 PIL frame을 리사이즈하는 시간까지 포함합니다.
+- `result.video_tiling_ms`: 프레임이 준비된 뒤 NVILA processor가 비디오를 준비하는 시간입니다. dynamic spatial tiling, thumbnail 생성, SigLIP/AutoGaze 입력 tensorization이 포함됩니다. SigLIP inference 시간은 아닙니다.
+- `result.autogaze_ms`: 전체 AutoGaze selection stage 시간입니다. `autogaze` 모드에서는 AutoGaze forward와 sort/pad/split bookkeeping이 들어갑니다. `keep-all` 모드에서는 AutoGaze forward를 건너뛰고 keep-all mask를 만드는 시간이 대부분입니다.
+- `result.autogaze_forward_ms`: AutoGaze model forward만 잰 시간입니다. AutoGaze 모델 자체 cost를 볼 때 가장 깨끗한 필드입니다.
+- `result.vision_encoder_ms`: generation 중 NVILA visual embedding 경로를 감싼 시간입니다. SigLIP feature extraction, feature cleanup/reordering, projector 준비가 포함됩니다.
+- `result.siglip_vision_ms`: SigLIP vision tower forward 시간입니다. AutoGaze가 vision encoder workload를 줄였는지 볼 때 중요합니다.
+- `result.mm_projector_ms`: 선택/정렬된 vision feature를 MLLM 입력 차원으로 보내는 multimodal projector forward 시간입니다.
+- `result.llm_forward_ms`: `generate` 내부에서 language model forward가 누적된 시간입니다. prefill과 decode 단계의 LLM 호출이 모두 포함됩니다.
+- `result.ttft_ms`: `--measure-ttft`가 켜졌을 때, 처리된 visual/text input에서 1토큰을 생성하는 데 걸린 시간입니다. 별도의 1-token generation pass로 측정되며 `total_ms`에는 포함하지 않습니다.
+- `result.decode_estimated_ms`: full `generate_ms - ttft_ms`로 계산한 대략적인 generation decode 시간입니다. TTFT와 full generation이 별도 호출이므로 추정값으로 보세요.
+- `result.stage_timings_ms`: `processor`, 선택적 `ttft`, full `generate`의 raw nested timing bucket입니다. top-level field가 null이거나 call count까지 봐야 할 때 확인합니다.
+- `result.token_metrics`: tile, thumbnail, total 기준 encoder patch budget과 LLM visual-token budget의 AutoGaze 전후 count입니다.
 - `result.processor_peak_memory_bytes`, `result.peak_memory_bytes`: CUDA 실행 시 processor phase와 full generate phase의 CUDA peak allocation
 
 `--measure-ttft`는 preprocessing 이후 1토큰 generation을 추가로 실행합니다. 이 파이프라인에서 TTFT는 순수 text decoding latency만이 아닙니다. `generate`에서 필요한 visual embedding, SigLIP/vision encoding, projector work, 첫 LLM forward까지 포함될 수 있습니다. 세부 분리는 `result.ttft_stage_timings_ms`의 `vision_encode_total`, `siglip_vision_tower`, `mm_projector`, `llm_forward`를 확인하세요.
+
+토큰 metrics는 두 단계로 나눠서 봅니다. encoder patch budget은 TokenShuffle/projector 이전의 patch 수입니다. 여기에는 실제 샘플링된 비디오 프레임, spatial tile, thumbnail, 그리고 설정된 모든 visual scale의 patch가 포함됩니다. LLM visual-token budget은 TokenShuffle/projector 이후 language model이 실제로 받는 visual placeholder token 수입니다.
+
+encoder patch 기준:
+
+- `token_metrics.video_sampled_frames`: tiled video processing에 들어간 전체 비디오 샘플 프레임 수
+- `token_metrics.thumbnail_sampled_frames`: tiled frame과 별도로 처리된 thumbnail frame 수
+- `token_metrics.spatial_tiles_per_video`, `token_metrics.temporal_chunks_per_video`, `token_metrics.tile_sequences`: spatial/temporal AutoGaze/SigLIP sequence 수
+- `token_metrics.encoder_patches_per_frame_by_scale`: 예를 들어 `56`, `112`, `196`, `392` 같은 multi-scale별 patch 수
+- `token_metrics.encoder_patches_per_frame_multiscale`: 한 프레임에서 multi-scale patch 수를 모두 더한 값
+- `token_metrics.encoder_raw_tile_patch_tokens`: AutoGaze 전 tiled-video patch budget입니다. sampled frames × spatial tiles × multi-scale patches per frame으로 계산됩니다.
+- `token_metrics.encoder_raw_thumbnail_patch_tokens`: AutoGaze 전 thumbnail patch budget입니다. thumbnail frames × multi-scale patches per frame으로 계산됩니다.
+- `token_metrics.encoder_raw_patch_tokens`: tile과 thumbnail을 합친 raw patch budget
+- `token_metrics.encoder_autogaze_selected_tile_patch_tokens`: AutoGaze 이후 실제 유지된 non-padded tile patch 수입니다. `keep-all`에서는 raw tile patch budget과 같아야 합니다.
+- `token_metrics.encoder_autogaze_selected_thumbnail_patch_tokens`: 유지된 thumbnail patch 수입니다. 현재 runner 설정에서는 thumbnail이 keep-all이라 raw thumbnail patch budget과 같아야 합니다.
+- `token_metrics.encoder_autogaze_selected_patch_tokens`: tile과 thumbnail을 합친 AutoGaze 이후 유지 patch 수
+- `token_metrics.encoder_tile_token_reduction_ratio`, `token_metrics.encoder_thumbnail_token_reduction_ratio`, `token_metrics.encoder_token_reduction_ratio`: tile, thumbnail, total 기준 raw patch 수를 유지 patch 수로 나눈 값
+
+LLM visual-token 기준:
+
+- `token_metrics.llm_keep_all_visual_tokens_estimated`: 모든 tile/thumbnail patch를 유지했을 때 TokenShuffle 이후 예상 visual token 수
+- `token_metrics.llm_actual_visual_tokens`: AutoGaze/keep-all padding strategy가 반영된 processor output의 실제 visual placeholder token 수
+- `token_metrics.llm_visual_token_reduction_ratio`: keep-all 예상 LLM visual token 수를 실제 visual token 수로 나눈 값
 
 AutoGaze와 full-token baseline을 비교하려면 같은 input을 두 번 실행하고 `--gazing-mode`만 바꿉니다. `autogaze`는 NVILA quickstart의 tile selection ratio를 사용합니다. `keep-all`은 `gazing_ratio_tile=1`, `task_loss_requirement_tile=None`으로 설정하여 public NVILA processor가 AutoGaze를 호출하지 않고 keep-all mask를 만들게 합니다.
 
@@ -130,7 +153,7 @@ AutoGaze와 full-token baseline을 비교하려면 같은 input을 두 번 실�
   --output-json outputs/autogaze_repro/cuda_nvila_single_128f_keep_all.json
 ```
 
-속도 관점에서는 두 JSON 파일의 `total_ms`, `video_decode_ms`, `video_tiling_ms`, `autogaze_forward_ms`, `siglip_vision_ms`, `vision_encoder_ms`, `llm_forward_ms`를 비교합니다. 토큰 관점에서는 `token_metrics.encoder_raw_patch_tokens`, `token_metrics.encoder_autogaze_selected_patch_tokens`, `token_metrics.encoder_token_reduction_ratio`, `token_metrics.llm_keep_all_visual_tokens_estimated`, `token_metrics.llm_actual_visual_tokens`, `token_metrics.llm_visual_token_reduction_ratio`를 비교합니다.
+속도 관점에서는 두 JSON 파일의 `total_ms`, `video_decode_ms`, `video_tiling_ms`, `autogaze_forward_ms`, `siglip_vision_ms`, `vision_encoder_ms`, `llm_forward_ms`를 비교합니다. 토큰 관점에서는 tile, thumbnail, total patch budget을 같이 비교하세요. 핵심 필드는 `token_metrics.encoder_raw_tile_patch_tokens`, `token_metrics.encoder_autogaze_selected_tile_patch_tokens`, `token_metrics.encoder_raw_thumbnail_patch_tokens`, `token_metrics.encoder_autogaze_selected_thumbnail_patch_tokens`, `token_metrics.encoder_raw_patch_tokens`, `token_metrics.encoder_autogaze_selected_patch_tokens`, `token_metrics.encoder_token_reduction_ratio`, `token_metrics.llm_keep_all_visual_tokens_estimated`, `token_metrics.llm_actual_visual_tokens`, `token_metrics.llm_visual_token_reduction_ratio`입니다.
 
 feasibility test를 위해 `nvila_runner`는 public NVILA processor가 tiling하기 전에 sampled video frame을 downscale할 수 있습니다. 이 기능은 runner-side preprocessing입니다. runner가 전체 비디오에서 `--num-video-frames`만큼 샘플링하고, 그 프레임을 리사이즈한 뒤 PIL frame list로 NVILA processor에 넘깁니다.
 

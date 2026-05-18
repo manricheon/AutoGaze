@@ -481,6 +481,13 @@ def _count_padding_masks(value: Any) -> tuple[int, int, int]:
     return selected, padded_count, total
 
 
+def _gazing_padding_payload(payload: dict[str, Any], key: str) -> Any:
+    gazing_info = payload.get("gazing_info")
+    if isinstance(gazing_info, dict) and key in gazing_info:
+        return gazing_info[key]
+    return None
+
+
 def _gazing_padding_payloads(payload: dict[str, Any]) -> list[Any]:
     masks: list[Any] = []
     gazing_info = payload.get("gazing_info")
@@ -563,38 +570,63 @@ def compute_visual_token_metrics(
     *,
     video_token_id: int | None,
     patches_per_frame_value: int = patches_per_frame(),
+    patches_per_frame_by_scale: dict[str, int] | None = None,
     token_shuffle: int = NVILA_TOKEN_SHUFFLE,
 ) -> dict[str, Any]:
     tile_tensors = _tensor_sequence(payload.get("pixel_values_videos_tiles"))
     thumbnail_tensors = _tensor_sequence(payload.get("pixel_values_videos_thumbnails"))
+    patch_breakdown = patches_per_frame_by_scale or {"multiscale_total": patches_per_frame_value}
 
     raw_tile_patches = sum(_visual_frame_count(tensor) * patches_per_frame_value for tensor in tile_tensors)
     raw_thumbnail_patches = sum(_visual_frame_count(tensor) * patches_per_frame_value for tensor in thumbnail_tensors)
     raw_encoder_patches = raw_tile_patches + raw_thumbnail_patches
 
+    tile_selected, tile_padded_count, tile_slots = _count_padding_masks(
+        _gazing_padding_payload(payload, "if_padded_gazing_tiles")
+    )
+    thumbnail_selected, thumbnail_padded_count, thumbnail_slots = _count_padding_masks(
+        _gazing_padding_payload(payload, "if_padded_gazing_thumbnails")
+    )
     selected, padded_count, total_slots = _count_padding_masks(_gazing_padding_payloads(payload))
-    selected_encoder_patches = selected if total_slots else raw_encoder_patches
+    selected_tile_patches = tile_selected if tile_slots else raw_tile_patches
+    selected_thumbnail_patches = thumbnail_selected if thumbnail_slots else raw_thumbnail_patches
+    selected_encoder_patches = (
+        selected_tile_patches + selected_thumbnail_patches
+        if tile_slots or thumbnail_slots
+        else selected if total_slots else raw_encoder_patches
+    )
 
     num_spatial_tiles = _int_list(payload.get("num_spatial_tiles_each_video"))
     keep_all_tile_tokens = 0
+    video_sampled_frames = 0
+    tile_sequences = 0
+    temporal_chunks_per_video: list[int] = []
     for index, tensor in enumerate(tile_tensors):
         if tensor.ndim < 2:
             continue
         spatial_tiles = num_spatial_tiles[index] if index < len(num_spatial_tiles) else 1
         spatial_tiles = max(spatial_tiles, 1)
-        tile_sequences = int(tensor.shape[0])
+        video_tile_sequences = int(tensor.shape[0])
         frames_per_sequence = int(tensor.shape[1])
-        temporal_chunks = math.ceil(tile_sequences / spatial_tiles)
+        temporal_chunks = math.ceil(video_tile_sequences / spatial_tiles)
         total_frames = temporal_chunks * frames_per_sequence
+        tile_sequences += video_tile_sequences
+        video_sampled_frames += total_frames
+        temporal_chunks_per_video.append(temporal_chunks)
         keep_all_tile_tokens += total_frames * math.ceil(spatial_tiles * patches_per_frame_value / token_shuffle)
 
     keep_all_thumbnail_tokens = 0
+    thumbnail_sampled_frames = 0
     thumbnail_token_per_frame = math.ceil(patches_per_frame_value / token_shuffle)
     for tensor in thumbnail_tensors:
         if tensor.ndim >= 5:
-            keep_all_thumbnail_tokens += int(tensor.shape[0]) * int(tensor.shape[1]) * thumbnail_token_per_frame
+            frame_count = int(tensor.shape[0]) * int(tensor.shape[1])
         elif tensor.ndim >= 1:
-            keep_all_thumbnail_tokens += int(tensor.shape[0]) * thumbnail_token_per_frame
+            frame_count = int(tensor.shape[0])
+        else:
+            frame_count = 0
+        thumbnail_sampled_frames += frame_count
+        keep_all_thumbnail_tokens += frame_count * thumbnail_token_per_frame
 
     llm_actual_visual_tokens = None
     input_ids = payload.get("input_ids")
@@ -603,12 +635,29 @@ def compute_visual_token_metrics(
 
     keep_all_projected_tokens = keep_all_tile_tokens + keep_all_thumbnail_tokens
     return {
+        "video_sampled_frames": video_sampled_frames,
+        "thumbnail_sampled_frames": thumbnail_sampled_frames,
+        "tile_sequences": tile_sequences,
+        "spatial_tiles_per_video": num_spatial_tiles,
+        "temporal_chunks_per_video": temporal_chunks_per_video,
         "patches_per_frame": patches_per_frame_value,
+        "encoder_patches_per_frame_multiscale": patches_per_frame_value,
+        "encoder_patches_per_frame_by_scale": patch_breakdown,
         "token_shuffle": token_shuffle,
         "encoder_raw_tile_patch_tokens": raw_tile_patches,
+        "encoder_autogaze_selected_tile_patch_tokens": selected_tile_patches,
+        "encoder_autogaze_padded_tile_patch_tokens": tile_padded_count if tile_slots else 0,
+        "encoder_autogaze_total_tile_gaze_slots": tile_slots,
+        "encoder_tile_token_reduction_ratio": _safe_ratio(raw_tile_patches, selected_tile_patches),
         "encoder_raw_thumbnail_patch_tokens": raw_thumbnail_patches,
+        "encoder_autogaze_selected_thumbnail_patch_tokens": selected_thumbnail_patches,
+        "encoder_autogaze_padded_thumbnail_patch_tokens": thumbnail_padded_count if thumbnail_slots else 0,
+        "encoder_autogaze_total_thumbnail_gaze_slots": thumbnail_slots,
+        "encoder_thumbnail_token_reduction_ratio": _safe_ratio(raw_thumbnail_patches, selected_thumbnail_patches),
         "encoder_raw_patch_tokens": raw_encoder_patches,
+        "encoder_raw_total_patch_tokens": raw_encoder_patches,
         "encoder_autogaze_selected_patch_tokens": selected_encoder_patches,
+        "encoder_autogaze_selected_total_patch_tokens": selected_encoder_patches,
         "encoder_autogaze_padded_patch_tokens": padded_count if total_slots else 0,
         "encoder_autogaze_total_gaze_slots": total_slots,
         "encoder_token_reduction_ratio": _safe_ratio(raw_encoder_patches, selected_encoder_patches),
@@ -616,6 +665,7 @@ def compute_visual_token_metrics(
         "llm_keep_all_thumbnail_visual_tokens_estimated": keep_all_thumbnail_tokens,
         "llm_keep_all_visual_tokens_estimated": keep_all_projected_tokens,
         "llm_actual_visual_tokens": llm_actual_visual_tokens,
+        "llm_actual_visual_tokens_after_autogaze": llm_actual_visual_tokens,
         "llm_visual_token_reduction_ratio": _safe_ratio(keep_all_projected_tokens, llm_actual_visual_tokens),
     }
 
@@ -637,6 +687,10 @@ def resolve_video_token_id(model, processor) -> int | None:
 
 
 def model_patches_per_frame(model) -> int:
+    return sum(model_patches_per_frame_by_scale(model).values())
+
+
+def model_patches_per_frame_by_scale(model) -> dict[str, int]:
     vision_tower = getattr(model, "vision_tower", None)
     config = getattr(vision_tower, "config", None)
     scales = getattr(config, "scales", None)
@@ -649,7 +703,7 @@ def model_patches_per_frame(model) -> int:
         parsed_scales = NVILA_TARGET_SCALES
     else:
         parsed_scales = [int(scale) for scale in scales]
-    return patches_per_frame(parsed_scales, int(patch_size))
+    return {str(scale): (scale // int(patch_size)) ** 2 for scale in parsed_scales}
 
 
 def move_tensors(payload: dict[str, Any], device: torch.device) -> dict[str, Any]:
@@ -763,6 +817,7 @@ def generate_one(model, processor, video: str, prompt: str, device: torch.device
             inputs,
             video_token_id=resolve_video_token_id(model, processor),
             patches_per_frame_value=model_patches_per_frame(model),
+            patches_per_frame_by_scale=model_patches_per_frame_by_scale(model),
             token_shuffle=NVILA_TOKEN_SHUFFLE,
         )
         gaze_metrics = extract_gaze_metrics(inputs)

@@ -90,21 +90,44 @@ This mirrors the official NVILA-HD-Video quickstart scale and validates the mode
 
 The NVILA runner records module-level timings in the output JSON. The most important fields are:
 
-- `result.video_decode_ms`: sampled frame decode/read time.
-- `result.video_tiling_ms`: dynamic tiling plus image tensorization time.
-- `result.autogaze_ms`: full AutoGaze selection stage, including padding/splitting bookkeeping.
-- `result.autogaze_forward_ms`: AutoGaze model forward time only, when AutoGaze is actually invoked.
-- `result.vision_encoder_ms`: NVILA vision encoding stage around SigLIP features and projector preparation.
-- `result.siglip_vision_ms`: SigLIP vision tower forward time.
-- `result.mm_projector_ms`: multimodal projector forward time.
-- `result.llm_forward_ms`: accumulated LLM forward time during generation.
-- `result.ttft_ms`: time to generate one token from the processed visual/text input when `--measure-ttft` is enabled.
-- `result.decode_estimated_ms`: approximate generation decode time, computed as full `generate_ms - ttft_ms`.
-- `result.stage_timings_ms`: raw nested timing buckets for `processor`, optional `ttft`, and full `generate`.
-- `result.token_metrics`: visual token counts before/after AutoGaze for the encoder patch budget and the LLM visual-token budget.
+- `result.video_decode_ms`: sampled frame decode/read time. Without runner-side resize this wraps NVILA remote code's video loader. With `--video-resize-*`, this also includes runner-side full-video sampling and PIL frame resize before frames are handed to the processor.
+- `result.video_tiling_ms`: NVILA processor video preparation after frames are available. This covers dynamic spatial tiling, thumbnail construction, and pixel tensorization for SigLIP/AutoGaze inputs. It does not mean SigLIP inference.
+- `result.autogaze_ms`: full AutoGaze selection stage. In `autogaze` mode this includes AutoGaze forward plus sort/pad/split bookkeeping. In `keep-all` mode it mostly measures keep-all mask construction because AutoGaze forward is skipped.
+- `result.autogaze_forward_ms`: AutoGaze model forward time only, when AutoGaze is actually invoked. This is the cleanest field for AutoGaze model cost.
+- `result.vision_encoder_ms`: NVILA visual embedding path during generation. It wraps the vision encoding method, including SigLIP feature extraction, feature cleanup/reordering, and projection preparation.
+- `result.siglip_vision_ms`: SigLIP vision tower forward time. Use this to see whether AutoGaze reduced the vision encoder workload.
+- `result.mm_projector_ms`: multimodal projector forward time after vision features are selected/stacked.
+- `result.llm_forward_ms`: accumulated LLM forward time inside `generate`. It includes prefill and decoding calls made by the language model.
+- `result.ttft_ms`: time to generate one token from the processed visual/text input when `--measure-ttft` is enabled. This is measured by an extra one-token generation pass and is not included in `total_ms`.
+- `result.decode_estimated_ms`: approximate generation decode time, computed as full `generate_ms - ttft_ms`. Treat this as an estimate because TTFT and full generation are separate calls.
+- `result.stage_timings_ms`: raw nested timing buckets for `processor`, optional `ttft`, and full `generate`. Use this when the top-level field is null or when you need per-call counts.
+- `result.token_metrics`: visual token and patch counts before/after AutoGaze for tiles, thumbnails, and total encoder/LLM budgets.
 - `result.processor_peak_memory_bytes` and `result.peak_memory_bytes`: CUDA peak allocation for processor and full generate phases, when running on CUDA.
 
 `--measure-ttft` runs an additional one-token generation after preprocessing. In this pipeline, TTFT is not just text decoding latency: it includes visual embedding, SigLIP/vision encoding when needed by `generate`, projector work, and the first LLM forward. Use `result.ttft_stage_timings_ms` to split that TTFT bucket into `vision_encode_total`, `siglip_vision_tower`, `mm_projector`, and `llm_forward` when those hooks are available.
+
+Token metrics are split into two levels. The encoder patch budget is counted before TokenShuffle/projector, and includes every selected frame, every spatial tile, thumbnails, and every configured visual scale. The LLM visual-token budget is counted after TokenShuffle/projector and corresponds to the number of visual placeholder tokens consumed by the language model.
+
+For encoder patch accounting:
+
+- `token_metrics.video_sampled_frames`: number of full-video frames sampled for tiled video processing.
+- `token_metrics.thumbnail_sampled_frames`: number of thumbnail frames processed alongside the tiled frames.
+- `token_metrics.spatial_tiles_per_video`, `token_metrics.temporal_chunks_per_video`, `token_metrics.tile_sequences`: how many spatial/temporal AutoGaze/SigLIP sequences were produced.
+- `token_metrics.encoder_patches_per_frame_by_scale`: multi-scale patch breakdown, for example scale `56`, `112`, `196`, `392`.
+- `token_metrics.encoder_patches_per_frame_multiscale`: sum of the multi-scale patch counts for one frame.
+- `token_metrics.encoder_raw_tile_patch_tokens`: total tiled-video patch budget before AutoGaze, computed from sampled frames × spatial tiles × multi-scale patches per frame.
+- `token_metrics.encoder_raw_thumbnail_patch_tokens`: total thumbnail patch budget before AutoGaze, computed from thumbnail frames × multi-scale patches per frame.
+- `token_metrics.encoder_raw_patch_tokens`: tile plus thumbnail raw patch budget.
+- `token_metrics.encoder_autogaze_selected_tile_patch_tokens`: non-padded tile patches actually kept after AutoGaze. In `keep-all`, this should match the raw tile patch budget.
+- `token_metrics.encoder_autogaze_selected_thumbnail_patch_tokens`: non-padded thumbnail patches kept. With the current runner settings thumbnails are keep-all, so this should match the raw thumbnail patch budget.
+- `token_metrics.encoder_autogaze_selected_patch_tokens`: tile plus thumbnail kept patches after AutoGaze.
+- `token_metrics.encoder_tile_token_reduction_ratio`, `token_metrics.encoder_thumbnail_token_reduction_ratio`, `token_metrics.encoder_token_reduction_ratio`: raw divided by kept patches for tile, thumbnail, and total budgets.
+
+For LLM visual-token accounting:
+
+- `token_metrics.llm_keep_all_visual_tokens_estimated`: estimated visual tokens if every tile and thumbnail patch were kept, after TokenShuffle.
+- `token_metrics.llm_actual_visual_tokens`: actual visual token placeholders in the processor output after AutoGaze/keep-all padding strategy.
+- `token_metrics.llm_visual_token_reduction_ratio`: estimated keep-all LLM visual tokens divided by actual visual tokens.
 
 To compare AutoGaze against a full-token baseline, run the same input twice with only `--gazing-mode` changed. `autogaze` uses the NVILA quickstart tile selection ratios. `keep-all` sets `gazing_ratio_tile=1` and `task_loss_requirement_tile=None`, which makes the public NVILA processor construct keep-all masks without invoking AutoGaze.
 
@@ -130,7 +153,7 @@ To compare AutoGaze against a full-token baseline, run the same input twice with
   --output-json outputs/autogaze_repro/cuda_nvila_single_128f_keep_all.json
 ```
 
-For the speed story, compare `total_ms`, `video_decode_ms`, `video_tiling_ms`, `autogaze_forward_ms`, `siglip_vision_ms`, `vision_encoder_ms`, and `llm_forward_ms` between the two JSON files. For the token story, compare `token_metrics.encoder_raw_patch_tokens`, `token_metrics.encoder_autogaze_selected_patch_tokens`, `token_metrics.encoder_token_reduction_ratio`, `token_metrics.llm_keep_all_visual_tokens_estimated`, `token_metrics.llm_actual_visual_tokens`, and `token_metrics.llm_visual_token_reduction_ratio`.
+For the speed story, compare `total_ms`, `video_decode_ms`, `video_tiling_ms`, `autogaze_forward_ms`, `siglip_vision_ms`, `vision_encoder_ms`, and `llm_forward_ms` between the two JSON files. For the token story, compare tile, thumbnail, and total patch budgets: `token_metrics.encoder_raw_tile_patch_tokens`, `token_metrics.encoder_autogaze_selected_tile_patch_tokens`, `token_metrics.encoder_raw_thumbnail_patch_tokens`, `token_metrics.encoder_autogaze_selected_thumbnail_patch_tokens`, `token_metrics.encoder_raw_patch_tokens`, `token_metrics.encoder_autogaze_selected_patch_tokens`, `token_metrics.encoder_token_reduction_ratio`, `token_metrics.llm_keep_all_visual_tokens_estimated`, `token_metrics.llm_actual_visual_tokens`, and `token_metrics.llm_visual_token_reduction_ratio`.
 
 For feasibility tests, `nvila_runner` can downscale sampled video frames before the public NVILA processor tiles them. This is runner-side preprocessing: the runner samples `--num-video-frames` across the full video, resizes those frames, then passes the resized PIL frames to the NVILA processor.
 
