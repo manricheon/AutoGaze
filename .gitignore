@@ -6,6 +6,7 @@ __pycache__/
 .ruff_cache/
 
 external/
+inputs/
 data/hlvid/videos/
 data/hlvid/cache/
 outputs/autogaze_repro/

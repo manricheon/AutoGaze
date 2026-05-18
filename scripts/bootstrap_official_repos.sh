@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXTERNAL_DIR="${ROOT_DIR}/external"
 AUTOGAZE_DIR="${EXTERNAL_DIR}/AutoGaze"
 VILA_DIR="${EXTERNAL_DIR}/VILA"
+PYTHON_BIN="${PYTHON:-python3}"
 
 mkdir -p "${EXTERNAL_DIR}" "${ROOT_DIR}/outputs/autogaze_repro"
 
@@ -26,7 +27,7 @@ if [[ "${1:-}" == "--with-vila" ]]; then
   clone_or_update "https://github.com/NVlabs/VILA.git" "${VILA_DIR}"
 fi
 
-python - <<'PY'
+"${PYTHON_BIN}" - <<'PY'
 import json
 import subprocess
 from pathlib import Path
