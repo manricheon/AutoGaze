@@ -9,6 +9,7 @@ from repro.nvila_runner import (
     compute_visual_token_metrics,
     estimate_nvila_preflight,
     extract_gaze_metrics,
+    model_patches_per_frame,
     parse_args,
     processor_kwargs,
     resolve_video,
@@ -30,6 +31,22 @@ def make_args(**overrides):
     }
     values.update(overrides)
     return argparse.Namespace(**values)
+
+
+class DummyVisionConfig:
+    def __init__(self, scales, patch_size=14):
+        self.scales = scales
+        self.patch_size = patch_size
+
+
+class DummyVisionTower:
+    def __init__(self, scales, patch_size=14):
+        self.config = DummyVisionConfig(scales, patch_size)
+
+
+class DummyModel:
+    def __init__(self, scales, patch_size=14):
+        self.vision_tower = DummyVisionTower(scales, patch_size)
 
 
 def test_processor_kwargs_match_nvila_quickstart_defaults():
@@ -194,6 +211,12 @@ def test_compute_visual_token_metrics_compares_keep_all_and_autogaze_tokens():
     assert metrics["llm_keep_all_visual_tokens_estimated"] == 10
     assert metrics["llm_actual_visual_tokens"] == 2
     assert metrics["llm_visual_token_reduction_ratio"] == 5.0
+
+
+def test_model_patches_per_frame_accepts_plus_separated_nvila_scales():
+    patches = model_patches_per_frame(DummyModel("56+112+196+392"))
+
+    assert patches == 1060
 
 
 def test_stage_profiler_records_and_resets_timing():

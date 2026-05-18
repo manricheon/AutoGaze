@@ -5,6 +5,7 @@ from collections import defaultdict
 from contextlib import contextmanager
 import json
 import math
+import re
 import sys
 import time
 from pathlib import Path
@@ -526,8 +527,9 @@ def model_patches_per_frame(model) -> int:
     scales = getattr(config, "scales", None)
     patch_size = getattr(config, "patch_size", NVILA_TARGET_PATCH_SIZE)
     if isinstance(scales, str):
-        clean = scales.replace("[", "").replace("]", "").replace("(", "").replace(")", "")
-        parsed_scales = [int(part.strip()) for part in clean.split(",") if part.strip()]
+        parsed_scales = [int(part) for part in re.findall(r"\d+", scales)]
+        if not parsed_scales:
+            parsed_scales = NVILA_TARGET_SCALES
     elif isinstance(scales, int):
         parsed_scales = [int(scales)]
     elif scales is None:
