@@ -38,6 +38,90 @@ python scripts/evaluate_hlvid_nvila.py \
   --output-dir outputs/hlvid_nvila_real
 ```
 
+AutoGaze ON/OFF를 같은 데이터로 비교:
+
+```bash
+python scripts/evaluate_hlvid_nvila.py \
+  --config configs/poc_inference/hlvid_nvila_hd_subset.yaml \
+  --dataset-path /data/HLVid/annotations.jsonl \
+  --video-root /data/HLVid/videos \
+  --model-path weights/NVILA-8B-HD-Video \
+  --processor-path weights/NVILA-8B-HD-Video \
+  --allow-real-model-loading \
+  --local-files-only \
+  --max-samples 20 \
+  --compare-autogaze-on-off \
+  --output-dir outputs/hlvid_nvila_on_off
+```
+
+이 명령은 아래 두 하위 디렉터리를 만듭니다.
+
+```text
+outputs/hlvid_nvila_on_off/autogaze_on_off_comparison/autogaze_off/
+outputs/hlvid_nvila_on_off/autogaze_on_off_comparison/autogaze_on/
+```
+
+그리고 비교 요약을 저장합니다.
+
+```text
+outputs/hlvid_nvila_on_off/autogaze_on_off_comparison/logs/autogaze_comparison.json
+outputs/hlvid_nvila_on_off/autogaze_on_off_comparison/logs/autogaze_comparison.md
+```
+
+단일 모드만 강제로 바꾸고 싶으면:
+
+```bash
+--autogaze-mode on
+--autogaze-mode off
+--autogaze-mode config
+```
+
+`off`는 tile/thumbnail gazing 설정을 `null`로 만들어 pruning 없이 모든 patch를 유지하는 비교 모드입니다.
+
+## 로컬 dataset-path 의미
+
+`--dataset-path`는 비디오 폴더가 아니라 **annotation 파일 또는 annotation이 들어 있는 dataset 디렉터리**입니다.
+
+파일로 주는 경우:
+
+```text
+/data/HLVid/annotations.jsonl
+```
+
+디렉터리로 주는 경우:
+
+```text
+/data/HLVid/
+```
+
+디렉터리 모드에서는 script가 그 안에서 `.jsonl`, `.json`, `.csv` annotation 파일을 찾습니다. `annotations.jsonl`, `metadata.json`, `hlvid.jsonl` 같은 이름을 우선적으로 고릅니다.
+
+`--video-root`는 annotation 안의 상대 `video_path` 앞에 붙는 비디오 root입니다.
+
+예를 들어 annotation이 이렇게 되어 있으면:
+
+```json
+{"video_path": "clip_av_video_5_001.mp4", "question": "...", "A": "...", "B": "...", "C": "...", "D": "...", "answer": "B"}
+```
+
+아래처럼 실행합니다.
+
+```bash
+python scripts/evaluate_hlvid_nvila.py \
+  --config configs/poc_inference/hlvid_nvila_hd_smoke.yaml \
+  --dataset-path /data/HLVid/annotations.jsonl \
+  --video-root /data/HLVid/videos \
+  --dry-run
+```
+
+실제 비디오 경로는 다음처럼 해석됩니다.
+
+```text
+/data/HLVid/videos/clip_av_video_5_001.mp4
+```
+
+`--dataset-path`를 디렉터리로 주고 `/data/HLVid/videos` 폴더가 있으면 `--video-root`를 생략해도 기본값으로 그 폴더를 사용합니다.
+
 ## HLVid Record 입력
 
 한 샘플은 보통 다음 필드를 가집니다.

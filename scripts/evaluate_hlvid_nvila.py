@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import json
 import re
@@ -14,6 +15,7 @@ from poc_infer_utils import capture_memory_snapshot, load_config, nested_get, re
 
 
 CHOICES = ("A", "B", "C", "D")
+NVILA_HD_TILE_GAZE_DEFAULT = [0.2] + [0.06] * 15
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -23,8 +25,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default="configs/poc_inference/hlvid_nvila_hd_eval.yaml")
     parser.add_argument("--dataset-name", default=None)
     parser.add_argument("--dataset-split", default=None)
-    parser.add_argument("--dataset-path", default=None, help="Local JSON/JSONL/CSV file. Preferred for offline tests.")
-    parser.add_argument("--video-root", default=None, help="Optional root for relative video paths in local records.")
+    parser.add_argument(
+        "--dataset-path",
+        default=None,
+        help=(
+            "Local annotation file or directory. File mode expects JSON/JSONL/CSV records. "
+            "Directory mode auto-discovers an annotation file; use --video-root for relative video paths."
+        ),
+    )
+    parser.add_argument(
+        "--video-root",
+        default=None,
+        help=(
+            "Directory/URL prepended to relative video_path values. If omitted for a local annotation file, "
+            "the annotation parent is used; if omitted for a dataset directory, videos/ is preferred when present."
+        ),
+    )
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--model-path", default=None)
     parser.add_argument("--processor-path", default=None)
@@ -38,6 +54,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start-index", type=int, default=0)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--fail-fast", action="store_true")
+    parser.add_argument(
+        "--autogaze-mode",
+        choices=["config", "on", "off"],
+        default=None,
+        help=(
+            "config keeps config processor kwargs; on forces README-style tile AutoGaze; "
+            "off disables gazing by keeping all patches with no AutoGaze pruning."
+        ),
+    )
+    parser.add_argument(
+        "--compare-autogaze-on-off",
+        action="store_true",
+        help="Run the same dataset twice into autogaze_off/ and autogaze_on/ subdirectories and write a comparison report.",
+    )
 
     parser.add_argument("--num-video-frames", type=int, default=None)
     parser.add_argument("--num-video-frames-thumbnail", type=int, default=None)
@@ -58,19 +88,50 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
+    if bool(args.compare_autogaze_on_off):
+        return run_autogaze_on_off_comparison(args)
+    return run_single(args)
+
+
+def run_autogaze_on_off_comparison(args: argparse.Namespace) -> dict[str, Any]:
+    cfg = load_config(args.config)
+    root = Path(str(_cli_or_config(args.output_dir, cfg, "output.output_dir", "outputs/hlvid_nvila_hd_eval"))).expanduser()
+    if not root.is_absolute():
+        root = Path.cwd() / root
+    root = root / "autogaze_on_off_comparison"
+    summaries: dict[str, Any] = {}
+    for mode in ("off", "on"):
+        child_args = copy.copy(args)
+        child_args.compare_autogaze_on_off = False
+        child_args.autogaze_mode = mode
+        child_args.output_dir = str(root / f"autogaze_{mode}")
+        summaries[mode] = run_single(child_args)
+    comparison = build_autogaze_comparison_summary(root, summaries)
+    logs_dir = root / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    write_json(logs_dir / "autogaze_comparison.json", comparison)
+    _write_comparison_markdown(logs_dir / "autogaze_comparison.md", comparison)
+    return comparison
+
+
+def run_single(args: argparse.Namespace) -> dict[str, Any]:
     start = time.perf_counter()
     cfg = load_config(args.config)
     output_dir = Path(str(_cli_or_config(args.output_dir, cfg, "output.output_dir", "outputs/hlvid_nvila_hd_eval"))).expanduser()
     if not output_dir.is_absolute():
         output_dir = Path.cwd() / output_dir
 
+    requested_dataset_path = _cli_or_config(args.dataset_path, cfg, "dataset.path", None)
     records_info = load_records(
-        dataset_path=_cli_or_config(args.dataset_path, cfg, "dataset.path", None),
+        dataset_path=requested_dataset_path,
         dataset_name=_cli_or_config(args.dataset_name, cfg, "dataset.name", "bfshi/HLVid"),
         dataset_split=_cli_or_config(args.dataset_split, cfg, "dataset.split", None),
         start_index=int(_cli_or_config(args.start_index, cfg, "dataset.start_index", 0)),
         max_samples=_optional_int(_cli_or_config(args.max_samples, cfg, "dataset.max_samples", None)),
     )
+    video_root = _cli_or_config(args.video_root, cfg, "dataset.video_root", None)
+    if video_root is None:
+        video_root = records_info.get("default_video_root")
 
     eval_cfg = build_eval_config(args, cfg)
     allow_real = bool(args.allow_real_model_loading or nested_get(cfg, "runtime.allow_real_model_loading", False))
@@ -102,7 +163,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         prepared = prepare_record(
             record,
             index=index + int(records_info["start_index"]),
-            video_root=_cli_or_config(args.video_root, cfg, "dataset.video_root", None),
+            video_root=video_root,
             cfg=cfg,
         )
         if dry_run:
@@ -228,6 +289,8 @@ def build_eval_config(args: argparse.Namespace, cfg: Mapping[str, Any]) -> dict[
     )
     use_fast = _cli_or_config(args.use_fast, cfg, "model.processor_from_pretrained_kwargs.use_fast", False)
     processor_kwargs["use_fast"] = _parse_bool(use_fast)
+    autogaze_mode = _normalize_autogaze_mode(_cli_or_config(args.autogaze_mode, cfg, "evaluation.autogaze_mode", "config"))
+    _apply_autogaze_mode(processor_kwargs, autogaze_mode)
 
     local_files_only = _cli_or_config(args.local_files_only, cfg, "model.local_files_only", True)
     trust_remote_code = _cli_or_config(args.trust_remote_code, cfg, "model.trust_remote_code", True)
@@ -252,6 +315,7 @@ def build_eval_config(args: argparse.Namespace, cfg: Mapping[str, Any]) -> dict[
         },
         "max_new_tokens": max_new_tokens,
         "prompt_format": str(nested_get(cfg, "dataset.prompt_format", "hlvid_mcq")),
+        "autogaze_mode": autogaze_mode,
     }
 
 
@@ -360,14 +424,17 @@ def load_records(
     max_samples: int | None,
 ) -> dict[str, Any]:
     if dataset_path:
-        records = _load_local_records(resolve_path(dataset_path))
-        source = str(dataset_path)
+        annotation_path, default_video_root = _resolve_local_dataset_source(resolve_path(dataset_path))
+        records = _load_local_records(annotation_path)
+        source = str(annotation_path)
         split = None
     else:
         if not dataset_name:
             raise ValueError("Either --dataset-path or --dataset-name is required")
         records, split = _load_hf_records(dataset_name, dataset_split)
         source = dataset_name
+        annotation_path = None
+        default_video_root = None
     if start_index < 0:
         raise ValueError("--start-index must be >= 0")
     sliced = records[start_index:]
@@ -382,6 +449,8 @@ def load_records(
         "max_samples": max_samples,
         "total_available_records": len(records),
         "records": sliced,
+        "annotation_path": str(annotation_path) if annotation_path is not None else None,
+        "default_video_root": default_video_root,
     }
 
 
@@ -510,6 +579,8 @@ def build_summary(
         "dataset": {
             "source": records_info["source"],
             "split": records_info.get("split"),
+            "annotation_path": records_info.get("annotation_path"),
+            "default_video_root": records_info.get("default_video_root"),
             "total_available_records": records_info["total_available_records"],
             "selected_records": len(records_info["records"]),
             "start_index": records_info["start_index"],
@@ -521,6 +592,7 @@ def build_summary(
             "processor_path": eval_cfg["processor_path"],
             "load_status": load_status,
             "processor_setup_source": "docs/nvila-hd-video-readme.md",
+            "autogaze_mode": eval_cfg["autogaze_mode"],
         },
         "processor_kwargs": eval_cfg["processor_kwargs"],
         "official_high_resolution_processing": {
@@ -540,6 +612,7 @@ def build_summary(
             "accuracy": accuracy,
             "num_failed": len(failed),
             "num_invalid_ground_truth": len(invalid_target),
+            "autogaze_mode": eval_cfg["autogaze_mode"],
             "mean_sample_latency_ms": latency_summary["mean_ms"],
             "min_sample_latency_ms": latency_summary["min_ms"],
             "max_sample_latency_ms": latency_summary["max_ms"],
@@ -562,6 +635,7 @@ def build_summary(
             "HLVid is treated as multiple-choice video QA.",
             "The prompt asks for a single answer letter and scoring uses exact option-letter match.",
             "No direct visual-token injection is used; NVILA owns video processing through its official processor.",
+            "autogaze_mode=off disables gazing/pruning by setting tile and thumbnail gazing controls to null.",
         ],
         "artifacts": {
             "predictions_json": str(output_dir / "predictions" / "hlvid_predictions.json"),
@@ -655,6 +729,7 @@ def _write_markdown_report(path: Path, summary: Mapping[str, Any]) -> None:
         f"- selected_records: `{dataset.get('selected_records')}`",
         f"- model_path: `{model.get('model_path')}`",
         f"- processor_path: `{model.get('processor_path')}`",
+        f"- autogaze_mode: `{model.get('autogaze_mode')}`",
         f"- accuracy: `{metrics.get('accuracy')}`",
         f"- num_evaluated: `{metrics.get('num_evaluated')}`",
         f"- num_failed: `{metrics.get('num_failed')}`",
@@ -715,6 +790,86 @@ def _run_report(summary: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def build_autogaze_comparison_summary(output_dir: Path, summaries: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    rows = []
+    for mode in ("off", "on"):
+        summary = summaries[mode]
+        metrics = summary.get("metrics", {}) if isinstance(summary.get("metrics"), Mapping) else {}
+        artifacts = summary.get("artifacts", {}) if isinstance(summary.get("artifacts"), Mapping) else {}
+        rows.append(
+            {
+                "autogaze_mode": mode,
+                "status": summary.get("status"),
+                "accuracy": metrics.get("accuracy"),
+                "num_evaluated": metrics.get("num_evaluated"),
+                "num_predictions": metrics.get("num_predictions"),
+                "mean_sample_latency_ms": metrics.get("mean_sample_latency_ms"),
+                "mean_processor_latency_ms": metrics.get("mean_processor_latency_ms"),
+                "mean_model_generate_latency_ms": metrics.get("mean_model_generate_latency_ms"),
+                "mean_input_token_count": metrics.get("mean_input_token_count"),
+                "mean_video_placeholder_token_count": metrics.get("mean_video_placeholder_token_count"),
+                "peak_process_rss_mib": metrics.get("peak_process_rss_mib"),
+                "peak_cuda_memory_allocated_mib": metrics.get("peak_cuda_memory_allocated_mib"),
+                "summary": artifacts.get("summary"),
+                "report": artifacts.get("report"),
+            }
+        )
+    off_metrics = rows[0]
+    on_metrics = rows[1]
+    return {
+        "status": "comparison",
+        "task": "hlvid_autogaze_on_off_comparison",
+        "output_dir": str(output_dir),
+        "rows": rows,
+        "deltas": {
+            "accuracy_on_minus_off": _numeric_delta(on_metrics.get("accuracy"), off_metrics.get("accuracy")),
+            "mean_sample_latency_ms_on_minus_off": _numeric_delta(
+                on_metrics.get("mean_sample_latency_ms"), off_metrics.get("mean_sample_latency_ms")
+            ),
+            "mean_video_placeholder_token_count_on_minus_off": _numeric_delta(
+                on_metrics.get("mean_video_placeholder_token_count"),
+                off_metrics.get("mean_video_placeholder_token_count"),
+            ),
+            "peak_cuda_memory_allocated_mib_on_minus_off": _numeric_delta(
+                on_metrics.get("peak_cuda_memory_allocated_mib"),
+                off_metrics.get("peak_cuda_memory_allocated_mib"),
+            ),
+        },
+        "artifacts": {
+            "autogaze_off": summaries["off"].get("artifacts", {}),
+            "autogaze_on": summaries["on"].get("artifacts", {}),
+            "comparison_json": str(output_dir / "logs" / "autogaze_comparison.json"),
+            "comparison_markdown": str(output_dir / "logs" / "autogaze_comparison.md"),
+        },
+    }
+
+
+def _write_comparison_markdown(path: Path, comparison: Mapping[str, Any]) -> None:
+    columns = [
+        "autogaze_mode",
+        "status",
+        "accuracy",
+        "num_evaluated",
+        "mean_sample_latency_ms",
+        "mean_processor_latency_ms",
+        "mean_model_generate_latency_ms",
+        "mean_video_placeholder_token_count",
+        "peak_cuda_memory_allocated_mib",
+    ]
+    lines = [
+        "# HLVid AutoGaze ON/OFF Comparison",
+        "",
+        f"- output_dir: `{comparison.get('output_dir')}`",
+        "",
+        "| " + " | ".join(columns) + " |",
+        "| " + " | ".join(["---"] * len(columns)) + " |",
+    ]
+    for row in comparison.get("rows", []):
+        lines.append("| " + " | ".join(_csv_value(row.get(column)) for column in columns) + " |")
+    lines.extend(["", "## Deltas", "", "```json", json.dumps(comparison.get("deltas", {}), indent=2, sort_keys=True), "```", ""])
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
 def _load_local_records(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         raise FileNotFoundError(f"local dataset file does not exist: {path}")
@@ -733,6 +888,30 @@ def _load_local_records(path: Path) -> list[dict[str, Any]]:
         with path.open(newline="", encoding="utf-8") as handle:
             return [dict(row) for row in csv.DictReader(handle)]
     raise ValueError(f"Unsupported local dataset format: {path.suffix}")
+
+
+def _resolve_local_dataset_source(path: Path) -> tuple[Path, str | None]:
+    if path.is_dir():
+        annotation = _discover_annotation_file(path)
+        video_root = path / "videos" if (path / "videos").is_dir() else path
+        return annotation, str(video_root)
+    return path, str(path.parent)
+
+
+def _discover_annotation_file(directory: Path) -> Path:
+    candidates: list[Path] = []
+    for suffix in ("*.jsonl", "*.json", "*.csv"):
+        candidates.extend(directory.glob(suffix))
+    if not candidates:
+        raise FileNotFoundError(
+            f"--dataset-path points to a directory but no JSON/JSONL/CSV annotation file was found: {directory}"
+        )
+    preferred_terms = ("annotation", "annotations", "metadata", "hlvid", "qa", "eval", "test")
+    for term in preferred_terms:
+        matches = [path for path in candidates if term in path.stem.lower()]
+        if matches:
+            return sorted(matches)[0]
+    return sorted(candidates)[0]
 
 
 def _load_hf_records(dataset_name: str, dataset_split: str | None) -> tuple[list[dict[str, Any]], str | None]:
@@ -783,6 +962,39 @@ def parse_optional_value(value: Any) -> Any:
     return value
 
 
+def _apply_autogaze_mode(processor_kwargs: dict[str, Any], mode: str) -> None:
+    if mode == "config":
+        return
+    if mode == "off":
+        processor_kwargs["gazing_ratio_tile"] = None
+        processor_kwargs["task_loss_requirement_tile"] = None
+        processor_kwargs["gazing_ratio_thumbnail"] = None
+        processor_kwargs["task_loss_requirement_thumbnail"] = None
+        return
+    if mode == "on":
+        if processor_kwargs.get("gazing_ratio_tile") is None:
+            processor_kwargs["gazing_ratio_tile"] = list(NVILA_HD_TILE_GAZE_DEFAULT)
+        if processor_kwargs.get("task_loss_requirement_tile") is None:
+            processor_kwargs["task_loss_requirement_tile"] = 0.6
+        if processor_kwargs.get("gazing_ratio_thumbnail") is None:
+            processor_kwargs["gazing_ratio_thumbnail"] = 1
+        if "task_loss_requirement_thumbnail" not in processor_kwargs:
+            processor_kwargs["task_loss_requirement_thumbnail"] = None
+        return
+    raise ValueError(f"Unsupported autogaze_mode: {mode}")
+
+
+def _normalize_autogaze_mode(value: Any) -> str:
+    if value is True:
+        return "on"
+    if value is False:
+        return "off"
+    text = str(value).strip().lower()
+    if text in {"config", "on", "off"}:
+        return text
+    raise ValueError(f"Unsupported autogaze_mode: {value}")
+
+
 def _cli_or_config(cli_value: Any, cfg: Mapping[str, Any], path: str, default: Any) -> Any:
     return cli_value if cli_value is not None else nested_get(cfg, path, default)
 
@@ -791,6 +1003,14 @@ def _optional_int(value: Any) -> int | None:
     if value is None:
         return None
     return int(value)
+
+
+def _numeric_delta(left: Any, right: Any) -> float | None:
+    if isinstance(left, bool) or isinstance(right, bool) or left is None or right is None:
+        return None
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return float(left) - float(right)
+    return None
 
 
 def _parse_bool(value: Any) -> bool:
@@ -999,6 +1219,9 @@ def main() -> int:
         return 2
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True))
+    elif summary.get("task") == "hlvid_autogaze_on_off_comparison":
+        artifacts = summary.get("artifacts", {}) if isinstance(summary.get("artifacts"), Mapping) else {}
+        print(f"Wrote AutoGaze ON/OFF comparison: {artifacts.get('comparison_json')}")
     else:
         metrics = summary["metrics"]
         print(f"Wrote HLVid evaluation outputs: {summary['artifacts']['summary']}")

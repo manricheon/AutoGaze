@@ -132,6 +132,7 @@ HLVid multiple-choice evaluation is available through:
 configs/poc_inference/hlvid_nvila_hd_eval.yaml
 configs/poc_inference/hlvid_nvila_hd_smoke.yaml
 configs/poc_inference/hlvid_nvila_hd_subset.yaml
+configs/poc_inference/hlvid_nvila_hd_subset_autogaze_off.yaml
 scripts/evaluate_hlvid_nvila.py
 docs/HLVID_NVILA_HD_REPRODUCTION_AUDIT.md
 docs/HLVID_NVILA_HD_INPUT_OUTPUT_GUIDE.md
@@ -168,6 +169,32 @@ python scripts/evaluate_hlvid_nvila.py \
 ```
 
 Outputs are written to `predictions/hlvid_predictions.json`, `predictions/hlvid_predictions.jsonl`, `predictions/hlvid_predictions.csv`, `logs/poc_summary.json`, `logs/metrics.json`, `logs/metrics.csv`, `logs/run_report.json`, and `logs/hlvid_report.md`. Accuracy is exact option-letter match against the HLVid answer field. Direct visual-token injection is not used; NVILA owns the video path through its official processor. The reports include latency, memory, and token consumption summaries for each run.
+
+AutoGaze ON/OFF comparison:
+
+```bash
+python scripts/evaluate_hlvid_nvila.py \
+  --config configs/poc_inference/hlvid_nvila_hd_subset.yaml \
+  --dataset-path /data/HLVid/annotations.jsonl \
+  --video-root /data/HLVid/videos \
+  --model-path weights/NVILA-8B-HD-Video \
+  --processor-path weights/NVILA-8B-HD-Video \
+  --allow-real-model-loading \
+  --local-files-only \
+  --max-samples 20 \
+  --compare-autogaze-on-off \
+  --output-dir outputs/hlvid_nvila_on_off
+```
+
+Single-mode override:
+
+```bash
+--autogaze-mode on
+--autogaze-mode off
+--autogaze-mode config
+```
+
+`--dataset-path` means the local annotation file, not the video directory. Supported files are `.json`, `.jsonl`, and `.csv`. If you pass a directory, the script auto-discovers an annotation file in that directory. Use `--video-root` for the directory or URL that should be prepended to relative `video_path` values. If omitted, a local dataset directory's `videos/` subdirectory is used when present.
 
 For single-video PoC visualization with `infer_full.py`, use the bounded HLVid-safe configs. These are not canonical HLVid reproduction configs; they are OOM-resistant smoke/ablation presets.
 

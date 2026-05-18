@@ -231,6 +231,7 @@ Config:
 configs/poc_inference/hlvid_nvila_hd_eval.yaml
 configs/poc_inference/hlvid_nvila_hd_smoke.yaml
 configs/poc_inference/hlvid_nvila_hd_subset.yaml
+configs/poc_inference/hlvid_nvila_hd_subset_autogaze_off.yaml
 docs/HLVID_NVILA_HD_INPUT_OUTPUT_GUIDE.md
 notebooks/hlvid_nvila_hd_input_output_report.ipynb
 ```
@@ -285,6 +286,24 @@ python scripts/evaluate_hlvid_nvila.py \
 ```
 
 The evaluator formats each record as a multiple-choice prompt ending with `Please answer directly with the letter of the correct answer.`, decodes the generated answer, extracts `A/B/C/D`, and reports exact option-letter accuracy in `logs/metrics.json`. It also writes `predictions/hlvid_predictions.csv`, `logs/metrics.csv`, `logs/run_report.json`, and `logs/hlvid_report.md`. These reports include latency, memory, and token consumption summaries. It does not inject AutoGaze-selected visual tokens manually; the official NVILA processor owns video decoding, tiling, AutoGaze controls, SigLIP batching, and generation input construction.
+
+AutoGaze ON/OFF comparison:
+
+```bash
+python scripts/evaluate_hlvid_nvila.py \
+  --config configs/poc_inference/hlvid_nvila_hd_subset.yaml \
+  --dataset-path /data/HLVid/annotations.jsonl \
+  --video-root /data/HLVid/videos \
+  --model-path weights/NVILA-8B-HD-Video \
+  --processor-path weights/NVILA-8B-HD-Video \
+  --allow-real-model-loading \
+  --local-files-only \
+  --max-samples 20 \
+  --compare-autogaze-on-off \
+  --output-dir outputs/hlvid_nvila_on_off
+```
+
+For local datasets, `--dataset-path` is the annotation file or dataset directory, not the video directory. If it is a directory, the evaluator auto-discovers a `.jsonl`, `.json`, or `.csv` annotation file. `--video-root` is prepended to relative `video_path` values; if omitted for a local dataset directory, `videos/` is used when present.
 
 For `infer_full.py` on one HLVid video, avoid large `num_frames` and uncapped `resize_then_chop`; those can expand one window into many processed frames before NVILA generation. Use these bounded configs instead:
 

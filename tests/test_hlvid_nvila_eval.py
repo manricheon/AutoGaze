@@ -87,9 +87,130 @@ def test_hlvid_dry_run_with_local_json(tmp_path: Path) -> None:
     assert "token_consumption_report" in run_report
 
 
+def test_hlvid_autogaze_mode_off_overrides_processor_kwargs(tmp_path: Path) -> None:
+    dataset = tmp_path / "hlvid_sample.jsonl"
+    dataset.write_text(
+        json.dumps(
+            {
+                "question_id": "sample-off",
+                "video_path": "sample.mp4",
+                "question": "What is visible?",
+                "A": "one",
+                "B": "two",
+                "C": "three",
+                "D": "four",
+                "answer": "A",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    args = evaluate_hlvid_nvila.parse_args(
+        [
+            "--config",
+            str(ROOT / "configs" / "poc_inference" / "hlvid_nvila_hd_subset.yaml"),
+            "--dataset-path",
+            str(dataset),
+            "--autogaze-mode",
+            "off",
+            "--dry-run",
+            "--output-dir",
+            str(tmp_path / "outputs"),
+        ]
+    )
+    summary = evaluate_hlvid_nvila.run(args)
+    assert summary["model"]["autogaze_mode"] == "off"
+    assert summary["processor_kwargs"]["gazing_ratio_tile"] is None
+    assert summary["processor_kwargs"]["task_loss_requirement_tile"] is None
+    assert summary["processor_kwargs"]["gazing_ratio_thumbnail"] is None
+    assert summary["metrics"]["autogaze_mode"] == "off"
+
+
+def test_hlvid_dataset_path_directory_discovers_annotations_and_video_root(tmp_path: Path) -> None:
+    dataset_dir = tmp_path / "HLVid"
+    videos_dir = dataset_dir / "videos"
+    videos_dir.mkdir(parents=True)
+    annotation = dataset_dir / "annotations.jsonl"
+    annotation.write_text(
+        json.dumps(
+            {
+                "question_id": "sample-dir",
+                "video_path": "clip.mp4",
+                "question": "What is visible?",
+                "A": "one",
+                "B": "two",
+                "C": "three",
+                "D": "four",
+                "answer": "A",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "outputs"
+    args = evaluate_hlvid_nvila.parse_args(
+        [
+            "--config",
+            str(ROOT / "configs" / "poc_inference" / "hlvid_nvila_hd_smoke.yaml"),
+            "--dataset-path",
+            str(dataset_dir),
+            "--dry-run",
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+    summary = evaluate_hlvid_nvila.run(args)
+    assert summary["dataset"]["annotation_path"] == str(annotation)
+    assert summary["dataset"]["default_video_root"] == str(videos_dir)
+    predictions = json.loads((output_dir / "predictions" / "hlvid_predictions.json").read_text(encoding="utf-8"))
+    assert predictions["predictions"][0]["video_path"] == str(videos_dir / "clip.mp4")
+
+
+def test_hlvid_autogaze_on_off_comparison_dry_run(tmp_path: Path) -> None:
+    dataset = tmp_path / "hlvid_sample.jsonl"
+    dataset.write_text(
+        json.dumps(
+            {
+                "question_id": "sample-compare",
+                "video_path": "https://example.com/video.mp4",
+                "question": "Which option is visible?",
+                "A": "red",
+                "B": "blue",
+                "C": "green",
+                "D": "yellow",
+                "answer": "A",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "compare"
+    args = evaluate_hlvid_nvila.parse_args(
+        [
+            "--config",
+            str(ROOT / "configs" / "poc_inference" / "hlvid_nvila_hd_smoke.yaml"),
+            "--dataset-path",
+            str(dataset),
+            "--output-dir",
+            str(output_dir),
+            "--dry-run",
+            "--compare-autogaze-on-off",
+        ]
+    )
+    summary = evaluate_hlvid_nvila.run(args)
+    assert summary["task"] == "hlvid_autogaze_on_off_comparison"
+    root = output_dir / "autogaze_on_off_comparison"
+    assert (root / "autogaze_off" / "logs" / "poc_summary.json").exists()
+    assert (root / "autogaze_on" / "logs" / "poc_summary.json").exists()
+    assert (root / "logs" / "autogaze_comparison.json").exists()
+
+
 def test_hlvid_smoke_and_subset_configs_load() -> None:
     smoke_cfg = evaluate_hlvid_nvila.load_config(ROOT / "configs" / "poc_inference" / "hlvid_nvila_hd_smoke.yaml")
     subset_cfg = evaluate_hlvid_nvila.load_config(ROOT / "configs" / "poc_inference" / "hlvid_nvila_hd_subset.yaml")
+    off_cfg = evaluate_hlvid_nvila.load_config(
+        ROOT / "configs" / "poc_inference" / "hlvid_nvila_hd_subset_autogaze_off.yaml"
+    )
 
     assert smoke_cfg["dataset"]["max_samples"] == 1
     assert smoke_cfg["model"]["processor_from_pretrained_kwargs"]["num_video_frames"] == 16
@@ -100,6 +221,8 @@ def test_hlvid_smoke_and_subset_configs_load() -> None:
     assert subset_cfg["model"]["processor_from_pretrained_kwargs"]["num_video_frames"] == 128
     assert subset_cfg["model"]["processor_from_pretrained_kwargs"]["num_video_frames_thumbnail"] == 64
     assert subset_cfg["model"]["processor_from_pretrained_kwargs"]["max_tiles_video"] == 48
+    assert off_cfg["evaluation"]["autogaze_mode"] == "off"
+    assert off_cfg["model"]["processor_from_pretrained_kwargs"]["gazing_ratio_tile"] is None
 
 
 def test_hlvid_safe_infer_full_configs_load() -> None:
@@ -175,7 +298,10 @@ def test_hlvid_input_output_guide_and_notebook_exist() -> None:
     assert "AutoGaze 입력/출력" in text
     assert "latency_report" in text
     assert "token_consumption_report" in text
+    assert "--compare-autogaze-on-off" in text
+    assert "--dataset-path`는 비디오 폴더가 아니라" in text
     notebook = ROOT / "notebooks" / "hlvid_nvila_hd_input_output_report.ipynb"
     data = json.loads(notebook.read_text(encoding="utf-8"))
     assert data["nbformat"] == 4
     assert any("Token Consumption Report" in "".join(cell.get("source", [])) for cell in data["cells"])
+    assert any("--compare-autogaze-on-off" in "".join(cell.get("source", [])) for cell in data["cells"])
