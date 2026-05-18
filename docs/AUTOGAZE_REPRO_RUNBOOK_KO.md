@@ -293,6 +293,8 @@ Space 예시 비디오에서 HLVid-like stress check를 하려면 전체 샘플�
 
 긴 HLVid 비디오에서 전체 sampled frame, spatial tile, AutoGaze tensor를 한 번에 만들면 CPU/GPU memory가 먼저 터질 수 있습니다. `stream-profile` 모드는 NVILA-8B LLM을 로드하지 않고, 비디오 decode부터 AutoGaze selection 직전/직후까지를 temporal chunk 단위로 처리합니다. raw frame과 tile image는 `--stream-chunk-frames`만큼 처리한 뒤 버립니다.
 
+해상도별 추천 조합과 로컬 실측 결과는 `docs/STREAMING_PIPELINE_CONFIG_RECOMMENDATIONS_KO.md`에 정리했습니다. 재사용 가능한 preset은 `configs/repro/streaming_pipeline_profiles.yaml`입니다.
+
 keep-all baseline부터 memory와 decode/tiling 시간을 확인하려면:
 
 ```bash

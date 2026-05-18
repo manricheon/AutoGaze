@@ -65,3 +65,16 @@ def test_hf_space_autogaze_examples_config_matches_downloaded_videos():
             assert stream.frames == example.source.frames
         finally:
             container.close()
+
+
+def test_streaming_pipeline_profiles_include_mps_and_cuda_recommendations():
+    root = Path(__file__).resolve().parents[1]
+    config = OmegaConf.load(root / "configs" / "repro" / "streaming_pipeline_profiles.yaml")
+
+    assert config.defaults.stream_chunk_frames == 16
+    assert config.local_mps.fast_448p.args.max_batch_size_autogaze == 1
+    assert config.local_mps.balanced_720p.args.max_tiles_video == 4
+    assert config.cuda.latency_4k.args.max_tiles_video == 8
+    assert config.cuda.quality_4k.args.max_tiles_video == 16
+    assert config.cuda.paper_probe_4k_256f.args.num_video_frames == 256
+    assert config.cuda.paper_stress_4k_1024f.args.num_video_frames == 1024
