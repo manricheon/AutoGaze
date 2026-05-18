@@ -54,7 +54,7 @@ This effort does not retrain AutoGaze. It does not modify AutoGaze architecture 
 
 The reproduction workspace will keep official code and local harness code separate:
 
-- `external/AutoGaze/`: clean clone of `NVlabs/AutoGaze`.
+- repository root: official `NVlabs/AutoGaze` hierarchy, including `autogaze/`, `assets/`, and upstream docs, so official examples and NVILA remote code can resolve `import autogaze` without custom path shims.
 - `external/VILA/`: clean clone of `NVlabs/VILA` if the NVILA runner requires VILA evaluation or inference entrypoints.
 - `repro/`: local scripts, benchmark runners, report helpers, and environment checks.
 - `data/hlvid/`: HLVid metadata, manifest files, and user-managed video cache pointers.
@@ -110,7 +110,7 @@ The scoring rule defaults to direct multiple-choice exact match because the data
 
 Local MPS validation must prove that:
 
-- AutoGaze imports from the fresh official clone.
+- AutoGaze imports from the repository-root official hierarchy.
 - The pretrained AutoGaze model and image processor load from Hugging Face.
 - A 16-frame input produces `gazing_pos`, `if_padded_gazing`, and `num_gazing_each_frame`.
 - The harness computes non-padded selected patches and token reduction ratio from model outputs.
@@ -152,7 +152,7 @@ The main technical risk is dependency drift in a newly released official reposit
 
 The design is complete when the implementation can produce:
 
-- A clean official AutoGaze checkout.
+- A clean official AutoGaze hierarchy at repository root.
 - A local environment setup path that does not depend on older local experiments.
 - A successful AutoGaze smoke run on MPS.
 - A JSON and CSV benchmark result containing token reduction and latency fields.

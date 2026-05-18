@@ -131,8 +131,13 @@ def git_revision(path: str | Path) -> str | None:
     ).strip()
 
 
-def environment_metadata(device: Any, external_root: str | Path = "external") -> dict[str, Any]:
+def environment_metadata(
+    device: Any,
+    external_root: str | Path = "external",
+    autogaze_root: str | Path = ".",
+) -> dict[str, Any]:
     external = Path(external_root)
+    autogaze_source = Path(autogaze_root)
     device_type = _device_type(device)
     metadata: dict[str, Any] = {
         "python": sys.version.split()[0],
@@ -141,7 +146,7 @@ def environment_metadata(device: Any, external_root: str | Path = "external") ->
         "device": device_type,
         "cuda_available": bool(torch and torch.cuda.is_available()),
         "mps_available": bool(torch and torch.backends.mps.is_available()),
-        "autogaze_revision": git_revision(external / "AutoGaze"),
+        "autogaze_revision": git_revision(autogaze_source) or git_revision(external / "AutoGaze"),
         "vila_revision": git_revision(external / "VILA"),
     }
     if torch is not None and device_type == "cuda":

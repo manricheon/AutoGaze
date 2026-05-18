@@ -1,10 +1,25 @@
 import torch
+from pathlib import Path
 
 from repro.autogaze_bench import (
+    add_external_autogaze,
     flatten_video_batch_for_siglip_baseline,
     select_siglip_vision_model_class,
     summarize_gaze,
 )
+
+
+def test_official_autogaze_tree_is_available_at_repository_root():
+    root = Path(__file__).resolve().parents[1]
+
+    assert (root / "autogaze").is_dir()
+    assert (root / "assets" / "example_input.mp4").is_file()
+
+
+def test_add_external_autogaze_accepts_repository_root_layout():
+    root = Path(__file__).resolve().parents[1]
+
+    add_external_autogaze(str(root))
 
 
 def test_summarize_gaze_counts_selected_and_padded_positions_from_lists():

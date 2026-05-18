@@ -3,10 +3,10 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXTERNAL_DIR="${ROOT_DIR}/external"
-AUTOGAZE_DIR="${EXTERNAL_DIR}/AutoGaze"
 VILA_DIR="${EXTERNAL_DIR}/VILA"
 PYTHON_BIN="${PYTHON:-python3}"
 
+cd "${ROOT_DIR}"
 mkdir -p "${EXTERNAL_DIR}" "${ROOT_DIR}/outputs/autogaze_repro"
 
 clone_or_update() {
@@ -21,11 +21,17 @@ clone_or_update() {
   fi
 }
 
-clone_or_update "https://github.com/NVlabs/AutoGaze.git" "${AUTOGAZE_DIR}"
-
-if [[ "${1:-}" == "--with-vila" ]]; then
-  clone_or_update "https://github.com/NVlabs/VILA.git" "${VILA_DIR}"
-fi
+case "${1:-}" in
+  "")
+    ;;
+  "--with-vila")
+    clone_or_update "https://github.com/NVlabs/VILA.git" "${VILA_DIR}"
+    ;;
+  *)
+    echo "Usage: $0 [--with-vila]" >&2
+    exit 2
+    ;;
+esac
 
 "${PYTHON_BIN}" - <<'PY'
 import json
@@ -33,14 +39,20 @@ import subprocess
 from pathlib import Path
 
 root = Path.cwd()
-sources = {}
-for name in ["AutoGaze", "VILA"]:
-    repo = root / "external" / name
-    if (repo / ".git").exists():
-        sources[name] = subprocess.check_output(
-            ["git", "-C", str(repo), "rev-parse", "HEAD"],
-            text=True,
-        ).strip()
+sources = {
+    "AutoGaze": subprocess.check_output(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        text=True,
+    ).strip(),
+    "AutoGaze_layout": "repository-root",
+}
+
+vila = root / "external" / "VILA"
+if (vila / ".git").exists():
+    sources["VILA"] = subprocess.check_output(
+        ["git", "-C", str(vila), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
 
 out = root / "outputs" / "autogaze_repro" / "source_revisions.json"
 out.parent.mkdir(parents=True, exist_ok=True)

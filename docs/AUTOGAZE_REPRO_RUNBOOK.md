@@ -16,8 +16,10 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -U pip setuptools wheel
 .venv/bin/python -m pip install -r requirements-repro.txt
 bash scripts/bootstrap_official_repos.sh
-.venv/bin/python -m pip install -e external/AutoGaze --no-deps --no-build-isolation
+.venv/bin/python -m pip install -e . --no-deps --no-build-isolation
 ```
+
+This branch now keeps the official AutoGaze code hierarchy at the repository root, so `autogaze` imports work the same way as they do in the upstream repository and in the NVILA-HD-Video remote code. The `external/` directory is only used for optional side repositories such as VILA.
 
 The official AutoGaze `pyproject.toml` currently includes `flash_attn` as a normal dependency. On Apple MPS/macOS, use `--no-deps --no-build-isolation` for the editable install and rely on `requirements-repro.txt` for the MPS-compatible runtime dependencies.
 
@@ -40,7 +42,7 @@ This confirms that the official AutoGaze model loads, emits gazing metadata, and
 Observed local smoke result on this workspace:
 
 - AutoGaze revision: `ba48d0f94ac2929d6fe3ee4380dc893aa6eed0ab`
-- Input: official `external/AutoGaze/assets/example_input.mp4`, 16 frames, 224x224
+- Input: official `assets/example_input.mp4`, 16 frames, 224x224
 - Token reduction ratio: about `19.91x`
 - Selected non-padded patches: `213` out of raw patch budget `4240`
 - Mean AutoGaze latency on MPS: about `1609.78 ms`

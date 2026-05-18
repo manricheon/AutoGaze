@@ -216,10 +216,10 @@ def run(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark AutoGaze and AutoGaze-compatible SigLIP")
-    parser.add_argument("--autogaze-repo", default="external/AutoGaze")
+    parser.add_argument("--autogaze-repo", default=".")
     parser.add_argument("--autogaze-model", default="nvidia/AutoGaze")
     parser.add_argument("--siglip-model", default="google/siglip2-base-patch16-224")
-    parser.add_argument("--video", default="external/AutoGaze/assets/example_input.mp4")
+    parser.add_argument("--video", default="assets/example_input.mp4")
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "mps", "cuda"])
     parser.add_argument("--dtype", default="float32", choices=["float32", "float16"])
     parser.add_argument("--frames", type=int)
