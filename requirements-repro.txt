@@ -1,0 +1,9 @@
+accelerate
+av
+datasets
+huggingface_hub
+pandas
+pyarrow
+pytest
+tqdm
+transformers
