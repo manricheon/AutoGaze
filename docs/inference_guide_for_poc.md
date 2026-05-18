@@ -229,6 +229,10 @@ Config:
 
 ```text
 configs/poc_inference/hlvid_nvila_hd_eval.yaml
+configs/poc_inference/hlvid_nvila_hd_smoke.yaml
+configs/poc_inference/hlvid_nvila_hd_subset.yaml
+docs/HLVID_NVILA_HD_INPUT_OUTPUT_GUIDE.md
+notebooks/hlvid_nvila_hd_input_output_report.ipynb
 ```
 
 Script:
@@ -251,14 +255,17 @@ max_batch_size_autogaze: 16
 max_batch_size_siglip: 32
 ```
 
+`hlvid_nvila_hd_smoke.yaml` uses the same official processor path with smaller budgets for local validation. `hlvid_nvila_hd_subset.yaml` keeps README-like settings and caps the default dataset slice at 20 examples. See `docs/HLVID_NVILA_HD_REPRODUCTION_AUDIT.md` for the prompt-to-artifact checklist.
+
+Actual high-resolution handling is done by the official NVILA-HD processor: the source video path is passed to NVILA, the processor uniformly samples `num_video_frames`, builds a dynamic 392px tile grid bounded by `max_tiles_video`, builds separate thumbnails, and creates `gazing_info` for the NVILA model. This is not the same path as PoC `resize`, `chop`, or `resize_then_chop`.
+
 Dry-run with a local HLVid-style JSON/JSONL file:
 
 ```bash
 python scripts/evaluate_hlvid_nvila.py \
-  --config configs/poc_inference/hlvid_nvila_hd_eval.yaml \
+  --config configs/poc_inference/hlvid_nvila_hd_smoke.yaml \
   --dataset-path /path/to/hlvid.jsonl \
   --video-root /path/to/video/root \
-  --max-samples 5 \
   --output-dir outputs/hlvid_nvila_dry_run \
   --dry-run
 ```
@@ -267,7 +274,7 @@ Real local-weight evaluation:
 
 ```bash
 python scripts/evaluate_hlvid_nvila.py \
-  --config configs/poc_inference/hlvid_nvila_hd_eval.yaml \
+  --config configs/poc_inference/hlvid_nvila_hd_subset.yaml \
   --dataset-name bfshi/HLVid \
   --model-path weights/NVILA-8B-HD-Video \
   --processor-path weights/NVILA-8B-HD-Video \
@@ -277,7 +284,7 @@ python scripts/evaluate_hlvid_nvila.py \
   --output-dir outputs/hlvid_nvila_real
 ```
 
-The evaluator formats each record as a multiple-choice prompt ending with `Please answer directly with the letter of the correct answer.`, decodes the generated answer, extracts `A/B/C/D`, and reports exact option-letter accuracy in `logs/metrics.json`. It does not inject AutoGaze-selected visual tokens manually; the official NVILA processor owns video decoding, tiling, AutoGaze controls, SigLIP batching, and generation input construction.
+The evaluator formats each record as a multiple-choice prompt ending with `Please answer directly with the letter of the correct answer.`, decodes the generated answer, extracts `A/B/C/D`, and reports exact option-letter accuracy in `logs/metrics.json`. It also writes `predictions/hlvid_predictions.csv`, `logs/metrics.csv`, `logs/run_report.json`, and `logs/hlvid_report.md`. These reports include latency, memory, and token consumption summaries. It does not inject AutoGaze-selected visual tokens manually; the official NVILA processor owns video decoding, tiling, AutoGaze controls, SigLIP batching, and generation input construction.
 
 For `infer_full.py` on one HLVid video, avoid large `num_frames` and uncapped `resize_then_chop`; those can expand one window into many processed frames before NVILA generation. Use these bounded configs instead:
 

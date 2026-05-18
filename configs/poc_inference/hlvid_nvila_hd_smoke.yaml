@@ -1,0 +1,66 @@
+experiment:
+  id: HLVid_NVILA_HD_SMOKE
+  description: One-sample HLVid dry-run/smoke config using the official NVILA-HD processor shape with small frame/tile budgets.
+
+dataset:
+  name: bfshi/HLVid
+  split: null
+  path: null
+  video_root: null
+  start_index: 0
+  max_samples: 1
+  prompt_format: hlvid_mcq
+  fields:
+    question_id: question_id
+    video_path: video_path
+    question: question
+    answer: answer
+
+model:
+  name: nvila
+  model_path: weights/NVILA-8B-HD-Video
+  processor_path: weights/NVILA-8B-HD-Video
+  trust_remote_code: true
+  local_files_only: true
+  from_pretrained_kwargs:
+    device_map: auto
+    max_batch_size_siglip: 4
+  processor_from_pretrained_kwargs:
+    use_fast: false
+    autogaze_model_id: weights/AutoGaze
+    num_video_frames: 16
+    num_video_frames_thumbnail: 8
+    max_tiles_video: 8
+    gazing_ratio_tile:
+      - 0.2
+      - 0.06
+      - 0.06
+      - 0.06
+      - 0.06
+      - 0.06
+      - 0.06
+      - 0.06
+      - 0.06
+      - 0.06
+      - 0.06
+      - 0.06
+      - 0.06
+      - 0.06
+      - 0.06
+      - 0.06
+    task_loss_requirement_tile: 0.6
+    gazing_ratio_thumbnail: 1
+    task_loss_requirement_thumbnail: null
+    max_batch_size_autogaze: 2
+
+runtime:
+  allow_real_model_loading: false
+  local_files_only: true
+  device_map: auto
+  dtype: null
+
+generation:
+  max_new_tokens: 4
+
+output:
+  output_dir: outputs/hlvid_nvila_hd_smoke

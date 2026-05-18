@@ -74,6 +74,32 @@ def test_hlvid_dry_run_with_local_json(tmp_path: Path) -> None:
     assert predictions["predictions"][0]["status"] == "dry_run"
     assert predictions["predictions"][0]["target_choice"] == "B"
     assert "Please answer directly" in predictions["predictions"][0]["prompt"]
+    assert (output_dir / "predictions" / "hlvid_predictions.csv").exists()
+    assert (output_dir / "logs" / "metrics.csv").exists()
+    assert (output_dir / "logs" / "run_report.json").exists()
+    report = (output_dir / "logs" / "hlvid_report.md").read_text(encoding="utf-8")
+    assert "Official High-Resolution Path" in report
+    assert "not_replaced_by_poc_scaling" in report
+    assert "Latency / Memory / Token Report" in report
+    run_report = json.loads((output_dir / "logs" / "run_report.json").read_text(encoding="utf-8"))
+    assert "latency_report" in run_report
+    assert "memory_report" in run_report
+    assert "token_consumption_report" in run_report
+
+
+def test_hlvid_smoke_and_subset_configs_load() -> None:
+    smoke_cfg = evaluate_hlvid_nvila.load_config(ROOT / "configs" / "poc_inference" / "hlvid_nvila_hd_smoke.yaml")
+    subset_cfg = evaluate_hlvid_nvila.load_config(ROOT / "configs" / "poc_inference" / "hlvid_nvila_hd_subset.yaml")
+
+    assert smoke_cfg["dataset"]["max_samples"] == 1
+    assert smoke_cfg["model"]["processor_from_pretrained_kwargs"]["num_video_frames"] == 16
+    assert smoke_cfg["model"]["processor_from_pretrained_kwargs"]["num_video_frames_thumbnail"] == 8
+    assert smoke_cfg["model"]["processor_from_pretrained_kwargs"]["max_tiles_video"] == 8
+
+    assert subset_cfg["dataset"]["max_samples"] == 20
+    assert subset_cfg["model"]["processor_from_pretrained_kwargs"]["num_video_frames"] == 128
+    assert subset_cfg["model"]["processor_from_pretrained_kwargs"]["num_video_frames_thumbnail"] == 64
+    assert subset_cfg["model"]["processor_from_pretrained_kwargs"]["max_tiles_video"] == 48
 
 
 def test_hlvid_safe_infer_full_configs_load() -> None:
@@ -131,3 +157,25 @@ def test_hlvid_eval_script_cli_dry_run(tmp_path: Path) -> None:
     metrics = json.loads((output_dir / "logs" / "metrics.json").read_text(encoding="utf-8"))
     assert metrics["num_predictions"] == 1
     assert metrics["accuracy"] is None
+    assert (output_dir / "logs" / "hlvid_report.md").exists()
+    assert (output_dir / "logs" / "run_report.json").exists()
+
+
+def test_hlvid_reproduction_audit_exists() -> None:
+    path = ROOT / "docs" / "HLVID_NVILA_HD_REPRODUCTION_AUDIT.md"
+    text = path.read_text(encoding="utf-8")
+    assert "Actual High-Resolution Video Path" in text
+    assert "num_video_frames=128" in text
+    assert "PoC `resize`, `chop`, or `resize_then_chop`" in text
+
+
+def test_hlvid_input_output_guide_and_notebook_exist() -> None:
+    doc = ROOT / "docs" / "HLVID_NVILA_HD_INPUT_OUTPUT_GUIDE.md"
+    text = doc.read_text(encoding="utf-8")
+    assert "AutoGaze 입력/출력" in text
+    assert "latency_report" in text
+    assert "token_consumption_report" in text
+    notebook = ROOT / "notebooks" / "hlvid_nvila_hd_input_output_report.ipynb"
+    data = json.loads(notebook.read_text(encoding="utf-8"))
+    assert data["nbformat"] == 4
+    assert any("Token Consumption Report" in "".join(cell.get("source", [])) for cell in data["cells"])

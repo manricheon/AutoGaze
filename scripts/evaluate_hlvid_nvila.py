@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from poc_infer_utils import load_config, nested_get, resolve_path, write_json
+from poc_infer_utils import capture_memory_snapshot, load_config, nested_get, resolve_path, write_json
 
 
 CHOICES = ("A", "B", "C", "D")
@@ -114,17 +114,24 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "prediction_choice": None,
                     "correct": None,
                     "reason": "model was not loaded",
+                    "latency_ms": None,
+                    "latency_breakdown_ms": {},
+                    "token_counts": {},
+                    "memory": {},
                 }
             )
             continue
         try:
-            prediction_text = generate_one(
+            sample_start = time.perf_counter()
+            generation = generate_one(
                 processor=processor,
                 model=model,
                 video_path=str(prepared["video_path"]),
                 prompt=str(prepared["prompt"]),
                 max_new_tokens=int(eval_cfg["max_new_tokens"]),
             )
+            sample_latency_ms = (time.perf_counter() - sample_start) * 1000
+            prediction_text = str(generation["prediction_text"])
             prediction_choice = extract_choice(prediction_text, prepared.get("options"))
             target_choice = prepared.get("target_choice")
             predictions.append(
@@ -135,6 +142,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "prediction_choice": prediction_choice,
                     "correct": bool(prediction_choice == target_choice) if target_choice else None,
                     "reason": None,
+                    "latency_ms": sample_latency_ms,
+                    "latency_breakdown_ms": generation["latency_breakdown_ms"],
+                    "token_counts": generation["token_counts"],
+                    "memory": generation["memory"],
                 }
             )
         except Exception as exc:  # pragma: no cover - real checkpoint behavior is environment-dependent.
@@ -146,6 +157,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "prediction_choice": None,
                     "correct": None,
                     "reason": str(exc),
+                    "latency_ms": None,
+                    "latency_breakdown_ms": {},
+                    "token_counts": {},
+                    "memory": {},
                 }
             )
             if args.fail_fast:
@@ -268,21 +283,72 @@ def load_processor_and_model(eval_cfg: Mapping[str, Any]) -> tuple[Any, Any, dic
         return None, None, {"status": "blocked", "reason": f"NVILA-HD processor/model loading failed: {exc}"}
 
 
-def generate_one(*, processor: Any, model: Any, video_path: str, prompt: str, max_new_tokens: int) -> str:
+def generate_one(*, processor: Any, model: Any, video_path: str, prompt: str, max_new_tokens: int) -> dict[str, Any]:
     video_token = getattr(getattr(processor, "tokenizer", None), "video_token", "<video>")
     full_prompt = f"{video_token}\n\n{prompt}"
+    device = _model_device(model)
+    _reset_cuda_peak_memory(device)
+    memory_snapshots = [capture_memory_snapshot("before_processor", device=str(device))]
+
+    processor_start = time.perf_counter()
     inputs = processor(text=full_prompt, videos=video_path, return_tensors="pt")
+    processor_latency_ms = (time.perf_counter() - processor_start) * 1000
+    memory_snapshots.append(capture_memory_snapshot("after_processor", device=str(device)))
+
+    input_token_count = _input_token_count(inputs)
+    video_placeholder_count = _video_placeholder_count(inputs, processor)
+    input_tensor_bytes = _mapping_tensor_bytes(inputs) if isinstance(inputs, Mapping) else None
+
+    move_start = time.perf_counter()
     if isinstance(inputs, Mapping):
-        device = _model_device(model)
         inputs = {key: value.to(device) if hasattr(value, "to") else value for key, value in inputs.items()}
+    input_move_latency_ms = (time.perf_counter() - move_start) * 1000
+    memory_snapshots.append(capture_memory_snapshot("after_input_move", device=str(device)))
+
     import torch
 
+    generate_start = time.perf_counter()
     with torch.inference_mode():
         outputs = model.generate(**inputs, max_new_tokens=max_new_tokens)
+    model_generate_latency_ms = (time.perf_counter() - generate_start) * 1000
+    memory_snapshots.append(capture_memory_snapshot("after_generate", device=str(device)))
+
+    decode_start = time.perf_counter()
     input_ids = inputs.get("input_ids") if isinstance(inputs, Mapping) else None
     decode_input = outputs[:, input_ids.shape[1] :] if hasattr(outputs, "shape") and hasattr(input_ids, "shape") else outputs
     decoded = processor.batch_decode(decode_input, skip_special_tokens=True)
-    return str(decoded[0]).strip() if decoded else ""
+    decode_latency_ms = (time.perf_counter() - decode_start) * 1000
+    text = str(decoded[0]).strip() if decoded else ""
+    output_new_token_count = _tensor_sequence_length(decode_input)
+    output_total_token_count = _tensor_sequence_length(outputs)
+    return {
+        "prediction_text": text,
+        "latency_breakdown_ms": {
+            "processor_latency_ms": processor_latency_ms,
+            "input_move_latency_ms": input_move_latency_ms,
+            "model_generate_latency_ms": model_generate_latency_ms,
+            "decode_latency_ms": decode_latency_ms,
+            "total_generation_latency_ms": processor_latency_ms
+            + input_move_latency_ms
+            + model_generate_latency_ms
+            + decode_latency_ms,
+        },
+        "token_counts": {
+            "input_token_count": input_token_count,
+            "video_placeholder_token_count": video_placeholder_count,
+            "output_new_token_count": output_new_token_count,
+            "output_total_token_count": output_total_token_count,
+            "max_new_tokens": int(max_new_tokens),
+        },
+        "memory": {
+            "snapshots": memory_snapshots,
+            "input_tensor_bytes": input_tensor_bytes,
+            "input_tensor_mib": _bytes_to_mib(input_tensor_bytes),
+            "process_peak_rss_mib": _last_snapshot_value(memory_snapshots, "process_peak_rss_mib"),
+            "cuda_max_memory_allocated_mib": _max_snapshot_value(memory_snapshots, "cuda_max_memory_allocated_mib"),
+            "cuda_max_memory_reserved_mib": _max_snapshot_value(memory_snapshots, "cuda_max_memory_reserved_mib"),
+        },
+    }
 
 
 def load_records(
@@ -425,6 +491,19 @@ def build_summary(
     invalid_target = [item for item in predictions if item.get("target_choice") is None]
     status = "dry_run" if dry_run else ("partial" if failed else "pass")
     accuracy = len(correct) / len(evaluated) if evaluated else None
+    real_latencies = [
+        float(item["latency_ms"])
+        for item in predictions
+        if item.get("latency_ms") is not None and item.get("status") == "real"
+    ]
+    latency_summary = {
+        "mean_ms": sum(real_latencies) / len(real_latencies) if real_latencies else None,
+        "min_ms": min(real_latencies) if real_latencies else None,
+        "max_ms": max(real_latencies) if real_latencies else None,
+    }
+    token_summary = _summarize_nested_numeric(predictions, "token_counts")
+    latency_breakdown_summary = _summarize_nested_numeric(predictions, "latency_breakdown_ms")
+    memory_summary = _summarize_memory(predictions)
     return {
         "status": status,
         "task": "hlvid_multiple_choice_video_qa",
@@ -444,6 +523,15 @@ def build_summary(
             "processor_setup_source": "docs/nvila-hd-video-readme.md",
         },
         "processor_kwargs": eval_cfg["processor_kwargs"],
+        "official_high_resolution_processing": {
+            "source": "weights/NVILA-8B-HD-Video/processing_nvila.py",
+            "video_input": "source_video_path",
+            "frame_sampling": "uniform num_video_frames sampled by NVILA processor",
+            "spatial_processing": "dynamic aspect-ratio tile grid bounded by max_tiles_video; one tile is processor image_size",
+            "thumbnail_processing": "whole-frame thumbnails bounded by num_video_frames_thumbnail",
+            "autogaze_scope": "tiles and thumbnails through official processor-owned gazing_info",
+            "not_replaced_by_poc_scaling": True,
+        },
         "generation": {"max_new_tokens": eval_cfg["max_new_tokens"]},
         "metrics": {
             "num_predictions": len(predictions),
@@ -452,7 +540,24 @@ def build_summary(
             "accuracy": accuracy,
             "num_failed": len(failed),
             "num_invalid_ground_truth": len(invalid_target),
+            "mean_sample_latency_ms": latency_summary["mean_ms"],
+            "min_sample_latency_ms": latency_summary["min_ms"],
+            "max_sample_latency_ms": latency_summary["max_ms"],
+            "mean_input_token_count": token_summary.get("input_token_count_mean"),
+            "mean_video_placeholder_token_count": token_summary.get("video_placeholder_token_count_mean"),
+            "mean_output_new_token_count": token_summary.get("output_new_token_count_mean"),
+            "mean_processor_latency_ms": latency_breakdown_summary.get("processor_latency_ms_mean"),
+            "mean_model_generate_latency_ms": latency_breakdown_summary.get("model_generate_latency_ms_mean"),
+            "peak_process_rss_mib": memory_summary.get("peak_process_rss_mib"),
+            "peak_cuda_memory_allocated_mib": memory_summary.get("peak_cuda_memory_allocated_mib"),
+            "peak_cuda_memory_reserved_mib": memory_summary.get("peak_cuda_memory_reserved_mib"),
         },
+        "latency_report": {
+            "sample_latency_ms": latency_summary,
+            "breakdown_ms": latency_breakdown_summary,
+        },
+        "token_consumption_report": token_summary,
+        "memory_report": memory_summary,
         "notes": [
             "HLVid is treated as multiple-choice video QA.",
             "The prompt asks for a single answer letter and scoring uses exact option-letter match.",
@@ -461,8 +566,12 @@ def build_summary(
         "artifacts": {
             "predictions_json": str(output_dir / "predictions" / "hlvid_predictions.json"),
             "predictions_jsonl": str(output_dir / "predictions" / "hlvid_predictions.jsonl"),
+            "predictions_csv": str(output_dir / "predictions" / "hlvid_predictions.csv"),
             "metrics": str(output_dir / "logs" / "metrics.json"),
+            "metrics_csv": str(output_dir / "logs" / "metrics.csv"),
             "summary": str(output_dir / "logs" / "poc_summary.json"),
+            "report": str(output_dir / "logs" / "hlvid_report.md"),
+            "run_report_json": str(output_dir / "logs" / "run_report.json"),
         },
         "config_path": cfg.get("_config_path"),
         "wall_clock_latency_ms": (time.perf_counter() - started_at) * 1000,
@@ -478,8 +587,132 @@ def write_outputs(output_dir: Path, *, predictions: list[dict[str, Any]], summar
     with (predictions_dir / "hlvid_predictions.jsonl").open("w", encoding="utf-8") as handle:
         for item in predictions:
             handle.write(json.dumps(item, ensure_ascii=True, sort_keys=True) + "\n")
+    _write_predictions_csv(predictions_dir / "hlvid_predictions.csv", predictions)
     write_json(logs_dir / "poc_summary.json", summary)
     write_json(logs_dir / "metrics.json", summary["metrics"])
+    write_json(logs_dir / "run_report.json", _run_report(summary))
+    _write_metrics_csv(logs_dir / "metrics.csv", summary["metrics"])
+    _write_markdown_report(logs_dir / "hlvid_report.md", summary)
+
+
+def _write_predictions_csv(path: Path, predictions: list[dict[str, Any]]) -> None:
+    fields = [
+        "index",
+        "question_id",
+        "video_path",
+        "target_choice",
+        "prediction_choice",
+        "correct",
+        "status",
+        "latency_ms",
+        "processor_latency_ms",
+        "model_generate_latency_ms",
+        "input_token_count",
+        "video_placeholder_token_count",
+        "output_new_token_count",
+        "input_tensor_mib",
+        "process_peak_rss_mib",
+        "cuda_max_memory_allocated_mib",
+        "reason",
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for item in predictions:
+            row = {field: _csv_value(item.get(field)) for field in fields}
+            latency = item.get("latency_breakdown_ms") if isinstance(item.get("latency_breakdown_ms"), Mapping) else {}
+            tokens = item.get("token_counts") if isinstance(item.get("token_counts"), Mapping) else {}
+            memory = item.get("memory") if isinstance(item.get("memory"), Mapping) else {}
+            row["processor_latency_ms"] = _csv_value(latency.get("processor_latency_ms"))
+            row["model_generate_latency_ms"] = _csv_value(latency.get("model_generate_latency_ms"))
+            row["input_token_count"] = _csv_value(tokens.get("input_token_count"))
+            row["video_placeholder_token_count"] = _csv_value(tokens.get("video_placeholder_token_count"))
+            row["output_new_token_count"] = _csv_value(tokens.get("output_new_token_count"))
+            row["input_tensor_mib"] = _csv_value(memory.get("input_tensor_mib"))
+            row["process_peak_rss_mib"] = _csv_value(memory.get("process_peak_rss_mib"))
+            row["cuda_max_memory_allocated_mib"] = _csv_value(memory.get("cuda_max_memory_allocated_mib"))
+            writer.writerow(row)
+
+
+def _write_metrics_csv(path: Path, metrics: Mapping[str, Any]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["metric", "value"])
+        writer.writeheader()
+        for key, value in metrics.items():
+            writer.writerow({"metric": key, "value": _csv_value(value)})
+
+
+def _write_markdown_report(path: Path, summary: Mapping[str, Any]) -> None:
+    metrics = summary.get("metrics", {})
+    dataset = summary.get("dataset", {})
+    model = summary.get("model", {})
+    high_res = summary.get("official_high_resolution_processing", {})
+    lines = [
+        "# HLVid NVILA-HD Evaluation Report",
+        "",
+        f"- status: `{summary.get('status')}`",
+        f"- dataset_source: `{dataset.get('source')}`",
+        f"- selected_records: `{dataset.get('selected_records')}`",
+        f"- model_path: `{model.get('model_path')}`",
+        f"- processor_path: `{model.get('processor_path')}`",
+        f"- accuracy: `{metrics.get('accuracy')}`",
+        f"- num_evaluated: `{metrics.get('num_evaluated')}`",
+        f"- num_failed: `{metrics.get('num_failed')}`",
+        "",
+        "## Official High-Resolution Path",
+        "",
+        f"- video_input: `{high_res.get('video_input')}`",
+        f"- frame_sampling: {high_res.get('frame_sampling')}",
+        f"- spatial_processing: {high_res.get('spatial_processing')}",
+        f"- thumbnail_processing: {high_res.get('thumbnail_processing')}",
+        f"- autogaze_scope: {high_res.get('autogaze_scope')}",
+        f"- not_replaced_by_poc_scaling: `{high_res.get('not_replaced_by_poc_scaling')}`",
+        "",
+        "## Processor Settings",
+        "",
+        "```json",
+        json.dumps(summary.get("processor_kwargs", {}), indent=2, sort_keys=True),
+        "```",
+        "",
+        "## Latency / Memory / Token Report",
+        "",
+        "```json",
+        json.dumps(
+            {
+                "latency_report": summary.get("latency_report", {}),
+                "token_consumption_report": summary.get("token_consumption_report", {}),
+                "memory_report": summary.get("memory_report", {}),
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        "```",
+        "",
+        "## Artifacts",
+        "",
+    ]
+    artifacts = summary.get("artifacts", {})
+    if isinstance(artifacts, Mapping):
+        for key, value in artifacts.items():
+            lines.append(f"- {key}: `{value}`")
+    lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _run_report(summary: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "status": summary.get("status"),
+        "task": summary.get("task"),
+        "dataset": summary.get("dataset"),
+        "model": summary.get("model"),
+        "processor_kwargs": summary.get("processor_kwargs"),
+        "official_high_resolution_processing": summary.get("official_high_resolution_processing"),
+        "metrics": summary.get("metrics"),
+        "latency_report": summary.get("latency_report"),
+        "memory_report": summary.get("memory_report"),
+        "token_consumption_report": summary.get("token_consumption_report"),
+        "artifacts": summary.get("artifacts"),
+    }
 
 
 def _load_local_records(path: Path) -> list[dict[str, Any]]:
@@ -585,6 +818,158 @@ def _json_safe_model_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
     for key, value in kwargs.items():
         safe[key] = str(value) if key == "dtype" else value
     return safe
+
+
+def _reset_cuda_peak_memory(device: Any) -> None:
+    try:
+        import torch
+
+        if str(device).startswith("cuda") and torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+    except Exception:
+        return
+
+
+def _input_token_count(inputs: Any) -> int | None:
+    if not isinstance(inputs, Mapping):
+        return None
+    input_ids = inputs.get("input_ids")
+    return _tensor_sequence_length(input_ids)
+
+
+def _video_placeholder_count(inputs: Any, processor: Any) -> int | None:
+    if not isinstance(inputs, Mapping):
+        return None
+    input_ids = inputs.get("input_ids")
+    if input_ids is None or not hasattr(input_ids, "__eq__"):
+        return None
+    token_id = _video_token_id(processor)
+    if token_id is None:
+        return None
+    try:
+        return int((input_ids == int(token_id)).sum().item())
+    except Exception:
+        return None
+
+
+def _video_token_id(processor: Any) -> int | None:
+    tokenizer = getattr(processor, "tokenizer", None)
+    direct = getattr(tokenizer, "video_token_id", None)
+    if direct is not None:
+        try:
+            return int(direct)
+        except Exception:
+            pass
+    token = getattr(tokenizer, "video_token", None)
+    if token is None:
+        return None
+    try:
+        converted = tokenizer.convert_tokens_to_ids(token)
+        return int(converted)
+    except Exception:
+        return None
+
+
+def _tensor_sequence_length(value: Any) -> int | None:
+    if value is None or not hasattr(value, "shape"):
+        return None
+    try:
+        shape = list(value.shape)
+    except Exception:
+        return None
+    if not shape:
+        return None
+    return int(shape[-1])
+
+
+def _mapping_tensor_bytes(inputs: Mapping[str, Any]) -> int:
+    total = 0
+    for value in inputs.values():
+        total += _tensor_bytes(value)
+    return total
+
+
+def _tensor_bytes(value: Any) -> int:
+    if not hasattr(value, "numel") or not hasattr(value, "element_size"):
+        return 0
+    try:
+        return int(value.numel()) * int(value.element_size())
+    except Exception:
+        return 0
+
+
+def _bytes_to_mib(value: int | float | None) -> float | None:
+    if value is None:
+        return None
+    return float(value) / (1024.0 * 1024.0)
+
+
+def _last_snapshot_value(snapshots: Sequence[Mapping[str, Any]], key: str) -> Any:
+    for snapshot in reversed(list(snapshots)):
+        if snapshot.get(key) is not None:
+            return snapshot.get(key)
+    return None
+
+
+def _max_snapshot_value(snapshots: Sequence[Mapping[str, Any]], key: str) -> float | None:
+    values = [float(snapshot[key]) for snapshot in snapshots if snapshot.get(key) is not None]
+    return max(values) if values else None
+
+
+def _summarize_nested_numeric(predictions: Sequence[Mapping[str, Any]], field: str) -> dict[str, Any]:
+    values_by_key: dict[str, list[float]] = {}
+    for item in predictions:
+        nested = item.get(field)
+        if not isinstance(nested, Mapping):
+            continue
+        for key, value in nested.items():
+            if isinstance(value, bool) or value is None:
+                continue
+            if isinstance(value, (int, float)):
+                values_by_key.setdefault(str(key), []).append(float(value))
+    summary: dict[str, Any] = {}
+    for key, values in values_by_key.items():
+        summary[f"{key}_mean"] = sum(values) / len(values)
+        summary[f"{key}_min"] = min(values)
+        summary[f"{key}_max"] = max(values)
+    return summary
+
+
+def _summarize_memory(predictions: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    process_peak = []
+    cuda_allocated = []
+    cuda_reserved = []
+    input_tensor_mib = []
+    for item in predictions:
+        memory = item.get("memory")
+        if not isinstance(memory, Mapping):
+            continue
+        _append_numeric(process_peak, memory.get("process_peak_rss_mib"))
+        _append_numeric(cuda_allocated, memory.get("cuda_max_memory_allocated_mib"))
+        _append_numeric(cuda_reserved, memory.get("cuda_max_memory_reserved_mib"))
+        _append_numeric(input_tensor_mib, memory.get("input_tensor_mib"))
+    return {
+        "peak_process_rss_mib": max(process_peak) if process_peak else None,
+        "peak_cuda_memory_allocated_mib": max(cuda_allocated) if cuda_allocated else None,
+        "peak_cuda_memory_reserved_mib": max(cuda_reserved) if cuda_reserved else None,
+        "mean_input_tensor_mib": sum(input_tensor_mib) / len(input_tensor_mib) if input_tensor_mib else None,
+        "max_input_tensor_mib": max(input_tensor_mib) if input_tensor_mib else None,
+    }
+
+
+def _append_numeric(target: list[float], value: Any) -> None:
+    if isinstance(value, bool) or value is None:
+        return
+    if isinstance(value, (int, float)):
+        target.append(float(value))
+
+
+def _csv_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(value, ensure_ascii=True, sort_keys=True)
+    return str(value)
 
 
 def _model_device(model: Any) -> Any:

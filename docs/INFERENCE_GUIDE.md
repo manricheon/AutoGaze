@@ -41,6 +41,33 @@ Dummy smoke is not a model-quality test. Its outputs are deliberately labeled as
 
 Direct sparse token injection is disabled by default for external models. Use official processors, AutoGaze input-level frame/chop selection, or zero-mask probes until positional IDs, dense-grid behavior, projector compatibility, and visual placeholders are verified.
 
+LongVILA-R1 comparison is documented in:
+
+```text
+docs/LONGVILA_AUTOGAZE_COMPARISON.md
+configs/poc_inference/external/longvila_official_source_off.yaml
+configs/poc_inference/external/longvila_autogaze_zero_mask_on.yaml
+configs/poc_inference/external/longvila_autogaze_feature_mask_on.yaml
+```
+
+The implemented LongVILA path uses the official `generate_content([prompt, {"path": ...}])` media API. The closest NVILA-style LongVILA mode is `longvila_autogaze_feature_mask_on.yaml`: it runs AutoGaze, writes aligned processed frames to `outputs/.../mllm_inputs/processed_frames/`, and applies a dense AutoGaze feature mask after the LongVILA vision tower but before projector/TSP. It does not claim sparse selected-token injection or encoder-side acceleration because LongVILA's projector/TSP path requires dense square patch grids.
+
+LongVILA comparison table, using the same summary format as the NVILA benchmark:
+
+```bash
+python scripts/benchmark_longvila_autogaze.py \
+  --video-path /path/to/video.mp4 \
+  --query-text "Describe the main action in the video." \
+  --output-dir outputs/poc_inference/benchmark_longvila_autogaze \
+  --device cuda \
+  --dtype float16 \
+  --mllm-dtype float16 \
+  --allow-real-model-loading \
+  --local-files-only
+```
+
+For routing-only validation without complete LongVILA shards, use `--video-path dummy` and omit `--allow-real-model-loading`.
+
 The local dummy wiring smoke for AutoGaze-selected tokens through a ViT adapter is:
 
 ```bash
@@ -56,18 +83,43 @@ This uses metadata-derived `gazing_info` and dummy visual tokens only; it does n
 
 The existing A0-A3 AutoGaze ON/OFF + NVILA inference configs remain the canonical path and keep their previous `official_processor` behavior.
 
+Latency / memory / token benchmark tables for the protected A0-A3 NVILA comparison are documented in:
+
+```text
+docs/NVILA_AUTOGAZE_BENCHMARK_GUIDE.md
+scripts/benchmark_nvila_autogaze.py
+```
+
+Dummy routing benchmark:
+
+```bash
+python scripts/benchmark_nvila_autogaze.py \
+  --video-path dummy \
+  --query-text "Describe the video." \
+  --device cpu \
+  --dtype float32 \
+  --mllm-dtype float32 \
+  --num-frames 2 \
+  --resolution 32 \
+  --no-progress
+```
+
 NVILA-HD-Video README-style inference presets are:
 
 ```text
 configs/poc_inference/nvila_hd_smoke.yaml
 configs/poc_inference/nvila_hd_default.yaml
 configs/poc_inference/nvila_hd_memory_safe.yaml
+configs/poc_inference/nvila_hd_official_streaming_default.yaml
+configs/poc_inference/nvila_hd_official_streaming_memory_safe.yaml
+configs/poc_inference/autogaze_quickstart_streaming_chop_224.yaml
 ```
 
 The settings audit is documented in:
 
 ```text
 docs/NVILA_HD_INFERENCE_UPDATE_AUDIT.md
+docs/AUTOGAZE_LONG_HIGH_RES_BENCHMARK_NOTES.md
 ```
 
 Both `scripts/infer_full.py` and `scripts/infer_autogaze.py` accept `--num-video-frames`, `--num-video-frames-thumbnail`, `--max-tiles-video`, `--gazing-ratio-tile`, `--task-loss-requirement-tile`, `--gazing-ratio-thumbnail`, `--task-loss-requirement-thumbnail`, `--max-batch-size-autogaze`, and `--max-batch-size-siglip`. CLI values override config values and are written to runtime metadata and metrics.
@@ -78,16 +130,23 @@ HLVid multiple-choice evaluation is available through:
 
 ```text
 configs/poc_inference/hlvid_nvila_hd_eval.yaml
+configs/poc_inference/hlvid_nvila_hd_smoke.yaml
+configs/poc_inference/hlvid_nvila_hd_subset.yaml
 scripts/evaluate_hlvid_nvila.py
+docs/HLVID_NVILA_HD_REPRODUCTION_AUDIT.md
+docs/HLVID_NVILA_HD_INPUT_OUTPUT_GUIDE.md
+notebooks/hlvid_nvila_hd_input_output_report.ipynb
 ```
 
-The config mirrors the processor setup from `docs/nvila-hd-video-readme.md`: `num_video_frames=128`, `num_video_frames_thumbnail=64`, `max_tiles_video=48`, tile gazing ratio `[0.2] + [0.06] * 15`, tile loss requirement `0.6`, thumbnail gazing ratio `1`, `max_batch_size_autogaze=16`, and `max_batch_size_siglip=32`.
+The default/subset configs mirror the processor setup from `docs/nvila-hd-video-readme.md`: `num_video_frames=128`, `num_video_frames_thumbnail=64`, `max_tiles_video=48`, tile gazing ratio `[0.2] + [0.06] * 15`, tile loss requirement `0.6`, thumbnail gazing ratio `1`, `max_batch_size_autogaze=16`, and `max_batch_size_siglip=32`. The smoke config uses the same official processor path with smaller budgets: 16 frames, 8 thumbnails, 8 tiles, AutoGaze batch 2, SigLIP batch 4.
+
+This evaluator sends the source video path to the official NVILA-HD processor. High-resolution handling is processor-owned: uniform `num_video_frames` sampling, dynamic 392px tile grid bounded by `max_tiles_video`, separate thumbnail frames, and official `gazing_info` into NVILA. It is not the PoC `resize_then_chop` scaler.
 
 Dry-run with a local HLVid-style JSON/JSONL file:
 
 ```bash
 python scripts/evaluate_hlvid_nvila.py \
-  --config configs/poc_inference/hlvid_nvila_hd_eval.yaml \
+  --config configs/poc_inference/hlvid_nvila_hd_smoke.yaml \
   --dataset-path /path/to/hlvid.jsonl \
   --video-root /path/to/video/root \
   --output-dir outputs/hlvid_nvila_dry_run \
@@ -98,7 +157,7 @@ Real NVILA-HD evaluation, using local weights only:
 
 ```bash
 python scripts/evaluate_hlvid_nvila.py \
-  --config configs/poc_inference/hlvid_nvila_hd_eval.yaml \
+  --config configs/poc_inference/hlvid_nvila_hd_subset.yaml \
   --dataset-name bfshi/HLVid \
   --model-path weights/NVILA-8B-HD-Video \
   --processor-path weights/NVILA-8B-HD-Video \
@@ -108,7 +167,7 @@ python scripts/evaluate_hlvid_nvila.py \
   --output-dir outputs/hlvid_nvila_real
 ```
 
-Outputs are written to `predictions/hlvid_predictions.json`, `predictions/hlvid_predictions.jsonl`, `logs/poc_summary.json`, and `logs/metrics.json`. Accuracy is exact option-letter match against the HLVid answer field. Direct visual-token injection is not used; NVILA owns the video path through its official processor.
+Outputs are written to `predictions/hlvid_predictions.json`, `predictions/hlvid_predictions.jsonl`, `predictions/hlvid_predictions.csv`, `logs/poc_summary.json`, `logs/metrics.json`, `logs/metrics.csv`, `logs/run_report.json`, and `logs/hlvid_report.md`. Accuracy is exact option-letter match against the HLVid answer field. Direct visual-token injection is not used; NVILA owns the video path through its official processor. The reports include latency, memory, and token consumption summaries for each run.
 
 For single-video PoC visualization with `infer_full.py`, use the bounded HLVid-safe configs. These are not canonical HLVid reproduction configs; they are OOM-resistant smoke/ablation presets.
 
@@ -152,6 +211,12 @@ Supported frame modes:
 - `sample`: uses frame-count metadata to choose target indices; if metadata is unavailable it fails clearly instead of silently full-loading the video.
 
 Latency metrics use the same scope across `sample`, `chunk`, `interval`, and `all`: `autogaze_latency_ms` includes input preprocessing plus the AutoGaze stage over all processed frames/crops. Use `autogaze_latency_source_frame_count`, `autogaze_latency_processed_frame_count`, `autogaze_latency_per_source_frame_ms`, and `autogaze_latency_per_processed_frame_ms` to compare interval and chop runs.
+
+For isolating the PoC AutoGaze model forward inside `infer_full.py`, add `--stop-after-autogaze`. This still writes full-pipeline metrics and AutoGaze artifacts, but skips ViT/MLLM generation. Compare `autogaze_model_forward_latency_ms`, `autogaze_model_forward_batch_latencies_ms`, `autogaze_model_forward_call_count`, and `autogaze_model_forward_processed_frame_count` across `resize`, `chop`, and `resize_then_chop`.
+
+For full MLLM runs, `infer_full.py` also writes `mllm_processor_latency_ms`, `mllm_input_move_latency_ms`, `mllm_autogaze_mask_build_latency_ms` when applicable, `mllm_model_generate_latency_ms`, `mllm_adapter_overhead_latency_ms`, and `mllm_generation_latency_ms`. The nested `stage_latency_breakdown_ms` field groups these with the AutoGaze breakdown. For NVILA official processor runs, processor-internal AutoGaze remains inside `mllm_processor_latency_ms`; the separate `autogaze_model_forward_latency_ms` field only measures the PoC AutoGaze stage.
+
+For `resize_then_chop`, check the printed AutoGaze forward accounting line. `clips` is the number of independent chop clips sent to AutoGaze, `frames` is `clips * frames_per_clip`, and `count_matches_processed=true` confirms that every processed crop-frame was included in the forward timer. A chopped run can still be faster than a resize run if resize uses one long temporal clip while chop mode uses many shorter clips that batch efficiently.
 
 Full pipeline streaming uses `window_independent_generation` by default. It writes one answer record per window to `predictions/window_answers.json` and a combined list-style `predictions/answer.json`. `aggregate_window_answers` is intentionally not implemented yet. `first_window_only` is available for quick checks, and `blocked_multi_window_generation` allows streaming AutoGaze while skipping MLLM generation.
 
