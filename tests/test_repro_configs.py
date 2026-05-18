@@ -72,6 +72,7 @@ def test_streaming_pipeline_profiles_include_mps_and_cuda_recommendations():
     config = OmegaConf.load(root / "configs" / "repro" / "streaming_pipeline_profiles.yaml")
 
     assert config.defaults.stream_chunk_frames == 16
+    assert config.defaults.stream_decode_strategy == "seek"
     assert config.local_mps.fast_448p.args.max_batch_size_autogaze == 1
     assert config.local_mps.siglip_patch16_probe.args.stream_run_siglip is True
     assert config.local_mps.siglip_patch16_probe.args.autogaze_target_patch_size == 16

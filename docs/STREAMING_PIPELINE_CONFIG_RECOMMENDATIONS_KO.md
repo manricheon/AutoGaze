@@ -15,7 +15,7 @@
 - thumbnail은 현재 keep-all이라 total patch reduction을 희석합니다. 그래서 리더 설명 시 tile-only reduction과 total reduction을 같이 보여줘야 합니다.
 - `--stream-run-siglip`을 켜면 AutoGaze가 만든 gazing_info를 custom SigLIP vision tower에 바로 넣어 `siglip_gazed_forward`와 선택적 `siglip_keep_all_forward`를 chunk 단위로 측정합니다. projector/LLM은 여전히 full NVILA `single`/`hlvid`에서 확인해야 합니다.
 - `google/siglip2-base-patch16-224`로 MPS smoke를 돌릴 때는 `--autogaze-target-scales 32+64+112+224 --autogaze-target-patch-size 16`을 같이 써야 patch 위치가 맞습니다. 기본 NVILA scale은 patch14 기준입니다.
-- 4K HLVid 5분 예시는 16프레임만 샘플링해도 끝 프레임까지 decode scan이 필요해 CPU decode가 약 54-68초였습니다. 긴 비디오에서는 decode seeking/샘플링 최적화도 별도 병목입니다.
+- 4K HLVid 5분 예시는 `--stream-decode-strategy seek`를 써야 합니다. 기존 scan 방식은 16프레임만 샘플링해도 끝 프레임까지 8992프레임을 디코드해서 CPU decode가 약 54-68초였습니다. seek 방식은 packet-level keyframe index를 먼저 읽고 필요한 target frame 근처 keyframe부터만 디코드해서 16프레임 기준 decode 관련 시간이 약 0.94초, 128프레임 기준 약 5.73초였습니다.
 
 ## 동작 파이프라인 그림
 
@@ -99,6 +99,68 @@ COLLECTED FOR FULL NVILA GENERATION
 
 즉, AutoGaze와 optional SigLIP까지는 chunk 단위로 재고 버릴 수 있습니다. 하지만 public NVILA generation path는 최종 visual token sequence를 모아 LLM에 넣으므로 projector/LLM의 실제 시간과 peak memory는 `single`/`hlvid`에서 확인해야 합니다.
 
+### HLVid 4K decode scheduling
+
+HLVid처럼 긴 seekable MP4는 scan decode를 쓰면 안 됩니다. 전체 frame 수는 stream metadata에서 얻고, sample index를 timestamp로 바꾼 뒤 keyframe 단위로 묶어서 디코드합니다.
+
+```text
+HLVid example metadata
+  frames          = 8992
+  fps             = 30
+  time_base       = 1 / 15360
+  pts per frame   = 512
+  keyframe period = about 12 frames
+
+Uniform sample target frames, 16f
+  [0, 599, 1199, ..., 8991]
+
+Old scan strategy
+  decode frame 0
+  decode frame 1
+  ...
+  decode frame 8991
+  decoded frames = 8992
+
+Seek strategy
+  scan packets only to build keyframe index
+  target 599  -> previous keyframe 588 -> decode 588..599
+  target 1199 -> previous keyframe 1188 -> decode 1188..1199
+  ...
+  target 8991 -> previous keyframe 8988 -> decode 8988..8991
+  decoded frames = 124 for 16 sampled frames
+```
+
+1024프레임처럼 sample target이 촘촘하면 target마다 seek하지 않고 같은 previous keyframe을 공유하는 target들을 한 그룹으로 묶습니다.
+
+```text
+Keyframe-grouped seek
+  keyframe K0 -> targets [t0, t1, ...] until next keyframe bucket
+  seek once to K0
+  decode K0..max(targets)
+  collect only target frames
+
+This avoids:
+  repeated seek to the same GOP
+  decoding all frames between far-apart target samples
+```
+
+결과 JSON에서 decode 전략은 아래 필드로 확인합니다.
+
+```text
+sampling.decode_strategy
+sampling.decode_frames_read
+sampling.decode_seek_groups
+sampling.decode_keyframes_indexed
+sampling.decode_packets_scanned_for_keyframes
+
+timing_ms.video_keyframe_index_scan
+timing_ms.video_seek
+timing_ms.video_decode_seek
+timing_ms.video_decode_scan
+```
+
+`seek`는 local/seekable MP4와 정상적인 `fps/time_base/pts` metadata가 있을 때 쓰는 경로입니다. 원격 스트림이 range seek를 지원하지 않거나 variable-frame-rate 영상에서 frame index와 PTS 매핑이 불안정하면 `scan`으로 되돌려 확인하세요.
+
 ### 스트리밍/배치 동작
 
 `N=128`, `C=16`, `S=45`, `max_batch_size_autogaze=16`이면 실제 작업은 이렇게 나뉩니다.
@@ -144,7 +206,7 @@ thumbnail은 현재 AutoGaze로 줄이지 않고 keep-all로 처리합니다. `M
 
 ```text
 End-to-end pre-LLM stream time
-  = video_decode_scan
+  = video_decode_scan or (video_keyframe_index_scan + video_seek + video_decode_seek)
   + video_frame_to_pil
   + video_frame_resize
   + spatial_tile_build
@@ -193,6 +255,8 @@ S spatial tiles | raw frame buffer | PIL tile buffer | AG tensor peak | full chu
 | 720 resized | 16f, 8thumb, 4tile, batch1 | 11.27s | 10.67s | 58.5x | 7.92x | 8,496 | 1,072 | 24.9/29.5/29.5 MB |
 | 720 resized | 16f, 8thumb, 4tile, batch4 | 26.31s | 25.61s | 57.5x | 7.90x | 8,496 | 1,074 | 24.9/29.5/118.0 MB |
 | 1080p 16:9 | 16f, 8thumb, 8tile, batch1 | 42.96s | 38.94s | 15.5x | 8.35x | 16,032 | 1,918 | 99.5/59.0/29.5 MB |
+| HLVid 4K keep-all seek | 16f, 8thumb, 1tile | 2.36s | n/a | 1.0x | 1.0x | 2,832 | n/a | 398.1/7.4/0 MB |
+| HLVid 4K keep-all seek | 128f, 64thumb, 1tile | 16.63s | n/a | 1.0x | 1.0x | 22,656 | n/a | 398.1/7.4/0 MB |
 | HLVid 4K keep-all | 16f, 8thumb, 1tile | 55.06s | n/a | 1.0x | 1.0x | 2,832 | n/a | 398.1/7.4/0 MB |
 | HLVid 4K keep-all | 16f, 8thumb, 8tile | 56.86s | n/a | 1.0x | 1.0x | 16,032 | n/a | 398.1/59.0/0 MB |
 | HLVid 4K keep-all | 16f, 8thumb, 45tile | 70.91s | n/a | 1.0x | 1.0x | 85,744 | n/a | 398.1/331.9/0 MB |
@@ -204,6 +268,8 @@ S spatial tiles | raw frame buffer | PIL tile buffer | AG tensor peak | full chu
 - `outputs/autogaze_repro/security_720p_4tile_16f_batch1_mps.json`
 - `outputs/autogaze_repro/security_720p_4tile_16f_batch4_mps.json`
 - `outputs/autogaze_repro/bbb_1080p_16f_8tile_batch1_mps.json`
+- `outputs/autogaze_repro/hlvid_4k_keepall_16f_1tile_seek_cpu.json`
+- `outputs/autogaze_repro/hlvid_4k_keepall_128f_1tile_seek_cpu.json`
 - `outputs/autogaze_repro/hlvid_4k_keepall_16f_8tile_cpu.json`
 - `outputs/autogaze_repro/hlvid_4k_keepall_16f_45tile_cpu.json`
 
@@ -213,13 +279,14 @@ SigLIP까지 포함한 MPS smoke:
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | 896 square | 16f, 8thumb, 1tile, patch16, both | 5.88s | 2.33s | 0.19s | 2.88s | 35.9x | 2.84x | 0.6/13.0 MB |
 | 896 square | 64f, 32thumb, 1tile, patch16, both | 25.25s | 7.94s | 1.05s | 15.21s | 41.8x | 2.86x | 0.7/13.0 MB |
-| HLVid 4K | 16f, 8thumb, 1tile, patch16, gazed | 74.80s | 4.00s | 0.36s | n/a | 15.3x | 2.65x | 0.9 MB |
+| HLVid 4K seek | 16f, 8thumb, 1tile, patch16, gazed | 6.42s | 3.58s | 0.29s | n/a | 15.3x | 2.65x | 0.9 MB |
 
 추가 실측 파일:
 
 - `outputs/autogaze_repro/security_16f_1tile_siglip_google_both_mps.json`
 - `outputs/autogaze_repro/security_64f_1tile_siglip_google_both_mps.json`
 - `outputs/autogaze_repro/hlvid_4k_16f_1tile_siglip_google_gazed_mps.json`
+- `outputs/autogaze_repro/hlvid_4k_16f_1tile_siglip_google_gazed_seek_mps.json`
 
 MPS timing은 첫 실행의 graph compile/cache 상태에 따라 흔들립니다. 같은 command를 한 번 더 돌리면 특히 SigLIP gazed 시간이 낮아질 수 있으므로, CUDA에서 최종 claim을 만들 때는 warmup 후 반복 측정하세요.
 
@@ -294,6 +361,7 @@ full NVILA가 AutoGaze overhead 때문에 느리다면 이 조합부터 확인�
   --mode stream-profile \
   --device cuda \
   --stream-dtype float16 \
+  --stream-decode-strategy seek \
   --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
   --gazing-mode autogaze \
   --num-video-frames 128 \
@@ -314,6 +382,7 @@ latency-first가 통과하면 tile을 15개 수준으로 늘립니다. 16:9에�
   --mode stream-profile \
   --device cuda \
   --stream-dtype float16 \
+  --stream-decode-strategy seek \
   --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
   --gazing-mode autogaze \
   --num-video-frames 128 \
@@ -334,6 +403,7 @@ latency-first가 통과하면 tile을 15개 수준으로 늘립니다. 16:9에�
   --mode stream-profile \
   --device cuda \
   --stream-dtype float16 \
+  --stream-decode-strategy seek \
   --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
   --gazing-mode autogaze \
   --num-video-frames 256 \
@@ -354,6 +424,7 @@ latency-first가 통과하면 tile을 15개 수준으로 늘립니다. 16:9에�
   --mode stream-profile \
   --device cuda \
   --stream-dtype float16 \
+  --stream-decode-strategy seek \
   --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
   --gazing-mode autogaze \
   --num-video-frames 1024 \
@@ -373,6 +444,7 @@ latency-first가 통과하면 tile을 15개 수준으로 늘립니다. 16:9에�
   --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
   --device cuda \
   --stream-dtype float16 \
+  --stream-decode-strategy seek \
   --gazing-mode autogaze \
   --summary-json outputs/autogaze_repro/stream_sweep_hlvid_cuda_dry.json \
   --summary-csv outputs/autogaze_repro/stream_sweep_hlvid_cuda_dry.csv
@@ -385,6 +457,7 @@ latency-first가 통과하면 tile을 15개 수준으로 늘립니다. 16:9에�
   --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
   --device cuda \
   --stream-dtype float16 \
+  --stream-decode-strategy seek \
   --gazing-mode autogaze \
   --include balanced_720 \
   --include balanced_1080 \
@@ -401,6 +474,7 @@ SigLIP forward까지 같이 재려면 sweep에도 같은 옵션을 붙일 수 �
   --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
   --device cuda \
   --stream-dtype float16 \
+  --stream-decode-strategy seek \
   --gazing-mode autogaze \
   --include fast_720 \
   --run \

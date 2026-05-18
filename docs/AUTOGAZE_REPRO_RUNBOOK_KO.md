@@ -301,6 +301,7 @@ keep-all baseline부터 memory와 decode/tiling 시간을 확인하려면:
 .venv/bin/python -m repro.nvila_runner \
   --mode stream-profile \
   --device cpu \
+  --stream-decode-strategy seek \
   --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
   --gazing-mode keep-all \
   --num-video-frames 128 \
@@ -318,6 +319,7 @@ stream-profile의 AutoGaze transform은 `--autogaze-resize-scales`의 최대 sca
   --mode stream-profile \
   --device mps \
   --stream-dtype float32 \
+  --stream-decode-strategy seek \
   --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
   --gazing-mode autogaze \
   --num-video-frames 128 \
@@ -357,6 +359,8 @@ SigLIP vision tower까지 MPS에서 확인하려면 patch16 SigLIP와 AutoGaze t
 이 모드에서 개별 timing은 모두 분리됩니다.
 
 - `timing_ms.video_decode_scan`: 마지막 sampled frame index까지 비디오 프레임을 순차 decode한 시간입니다. 모든 frame을 메모리에 쌓지는 않지만, 마지막 샘플이 비디오 끝에 있으면 decode scan 자체는 길어집니다.
+- `timing_ms.video_keyframe_index_scan`: `--stream-decode-strategy seek`에서 packet metadata만 읽어 keyframe index를 만드는 시간입니다. 4K HLVid example에서는 전체 8992 packet scan이 약 0.15초였습니다.
+- `timing_ms.video_seek`, `timing_ms.video_decode_seek`: `seek` 전략에서 target frame이 속한 keyframe group으로 이동하고, target frame까지 필요한 GOP 구간만 decode한 시간입니다.
 - `timing_ms.video_frame_to_pil`: sampled frame만 PIL RGB image로 변환한 시간입니다.
 - `timing_ms.video_frame_resize`: `--video-resize-*`를 켰을 때 sampled frame resize 시간입니다.
 - `timing_ms.spatial_tile_build`: 현재 chunk의 sampled frames를 NVILA dynamic tile grid로 리사이즈/crop하는 시간입니다.
@@ -397,6 +401,7 @@ SigLIP vision tower까지 MPS에서 확인하려면 patch16 SigLIP와 AutoGaze t
 .venv/bin/python -m repro.nvila_runner \
   --mode stream-profile \
   --device cpu \
+  --stream-decode-strategy seek \
   --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
   --gazing-mode keep-all \
   --num-video-frames 16 \
@@ -406,12 +411,15 @@ SigLIP vision tower까지 MPS에서 확인하려면 patch16 SigLIP와 AutoGaze t
   --stream-profile-json outputs/autogaze_repro/stream_profile_hlvid_example_keep_all_16f_1tile.json
 ```
 
-결과는 4K/약 5분/8992프레임 MP4에서 `decoded_selected_frames=16`, `raw_frame_buffer_peak=398131200` bytes, `video_decode_scan≈53660 ms`, `spatial_tile_build≈728 ms`였습니다. 즉, decode scan은 끝까지 발생하지만 메모리는 16프레임 chunk 수준으로 제한되는 것을 확인했습니다.
+`seek` 결과는 4K/약 5분/8992프레임 MP4에서 `decoded_selected_frames=16`, `decode_frames_read=124`, `raw_frame_buffer_peak=398131200` bytes, `video_keyframe_index_scan≈150 ms`, `video_decode_seek≈792 ms`, `spatial_tile_build≈696 ms`였습니다. 기존 scan 방식은 같은 16프레임에서도 끝까지 8992프레임을 decode해서 `video_decode_scan≈53660-68639 ms`가 걸렸습니다.
+
+128프레임 keep-all smoke에서는 `decode_frames_read=812`, `video_keyframe_index_scan≈150 ms`, `video_decode_seek≈5584 ms`였습니다. 즉, 5분 4K 비디오를 끝까지 full decode하지 않고, keyframe group별로 필요한 GOP 구간만 decode하는 경로가 동작합니다.
 
 이 workspace에서 확인한 SigLIP 포함 smoke:
 
 - `outputs/autogaze_repro/security_64f_1tile_siglip_google_both_mps.json`: 64프레임을 16프레임 chunk 4개로 처리했고, `siglip_gazed_forward≈1054 ms`, `siglip_keep_all_forward≈15209 ms`, tile patch 감소율 `≈41.8x`였습니다.
-- `outputs/autogaze_repro/hlvid_4k_16f_1tile_siglip_google_gazed_mps.json`: HLVid 4K/약 5분 비디오에서 16프레임, 1 tile, gazed SigLIP까지 통과했고, `video_decode_scan≈68639 ms`, `tile_autogaze_forward≈4004 ms`, `siglip_gazed_forward≈356 ms`였습니다.
+- `outputs/autogaze_repro/hlvid_4k_16f_1tile_siglip_google_gazed_mps.json`: HLVid 4K/약 5분 비디오에서 16프레임, 1 tile, gazed SigLIP까지 통과했습니다. 이 파일은 기존 scan 결과라 `video_decode_scan≈68639 ms`가 포함되어 있고, 새 실행에서는 `--stream-decode-strategy seek`를 붙여야 합니다.
+- `outputs/autogaze_repro/hlvid_4k_16f_1tile_siglip_google_gazed_seek_mps.json`: 같은 HLVid 4K/16프레임 조건에서 seek decode를 적용한 결과입니다. `decode_frames_read=124`, `video_keyframe_index_scan≈235 ms`, `video_decode_seek≈820 ms`, `tile_autogaze_forward≈3584 ms`, `siglip_gazed_forward≈291 ms`, `pre_llm_stream_total_measured≈6417 ms`였습니다.
 
 ## HLVid example AutoGaze-only smoke
 

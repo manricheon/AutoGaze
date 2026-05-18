@@ -4,12 +4,15 @@ description: Recommended AutoGaze/NVILA stream-profile configurations by local M
 defaults:
   mode: stream-profile
   stream_chunk_frames: 16
+  stream_decode_strategy: seek
   num_video_frames_thumbnail: 64
   autogaze_target_scales: 56+112+196+392
   autogaze_target_patch_size: 14
   note: >
     Use stream-profile to bound decode/tile/AutoGaze memory. Full NVILA single/hlvid
     still needs collected visual tokens for SigLIP, projector, and LLM generation.
+    Use seek decode for local/seekable HLVid MP4s; switch to scan for non-seekable
+    streams or videos with unreliable timestamp metadata.
 
 local_mps:
   fast_448p:
@@ -17,6 +20,7 @@ local_mps:
     args:
       device: mps
       stream_dtype: float32
+      stream_decode_strategy: seek
       gazing_mode: autogaze
       num_video_frames: 64
       num_video_frames_thumbnail: 32
@@ -32,6 +36,7 @@ local_mps:
     args:
       device: mps
       stream_dtype: float32
+      stream_decode_strategy: seek
       gazing_mode: autogaze
       num_video_frames: 64
       num_video_frames_thumbnail: 32
@@ -50,6 +55,7 @@ local_mps:
     args:
       device: mps
       stream_dtype: float32
+      stream_decode_strategy: seek
       gazing_mode: autogaze
       num_video_frames: 16
       num_video_frames_thumbnail: 8
@@ -69,6 +75,7 @@ cuda:
     args:
       device: cuda
       stream_dtype: float16
+      stream_decode_strategy: seek
       gazing_mode: autogaze
       num_video_frames: 128
       num_video_frames_thumbnail: 64
@@ -82,6 +89,7 @@ cuda:
     args:
       device: cuda
       stream_dtype: float16
+      stream_decode_strategy: seek
       gazing_mode: autogaze
       num_video_frames: 128
       num_video_frames_thumbnail: 64
@@ -95,6 +103,7 @@ cuda:
     args:
       device: cuda
       stream_dtype: float16
+      stream_decode_strategy: seek
       gazing_mode: autogaze
       num_video_frames: 128
       num_video_frames_thumbnail: 64
@@ -108,6 +117,7 @@ cuda:
     args:
       device: cuda
       stream_dtype: float16
+      stream_decode_strategy: seek
       gazing_mode: autogaze
       num_video_frames: 256
       num_video_frames_thumbnail: 64
@@ -121,6 +131,7 @@ cuda:
     args:
       device: cuda
       stream_dtype: float16
+      stream_decode_strategy: seek
       gazing_mode: autogaze
       num_video_frames: 1024
       num_video_frames_thumbnail: 64

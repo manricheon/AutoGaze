@@ -81,6 +81,7 @@ def test_build_recommendation_rows_can_include_stream_siglip_probe_args():
         stream_siglip_mode="gazed",
         stream_siglip_model="google/siglip2-base-patch16-224",
         stream_siglip_max_embed_batch_size=1,
+        stream_decode_strategy="seek",
         autogaze_target_scales="32+64+112+224",
         autogaze_target_patch_size=16,
     )
@@ -90,6 +91,7 @@ def test_build_recommendation_rows_can_include_stream_siglip_probe_args():
     assert "--stream-siglip-mode gazed" in command
     assert "--stream-siglip-model google/siglip2-base-patch16-224" in command
     assert "--stream-siglip-max-embed-batch-size 1" in command
+    assert "--stream-decode-strategy seek" in command
     assert "--autogaze-target-scales 32+64+112+224" in command
     assert "--autogaze-target-patch-size 16" in command
     assert rows[0]["encoder_raw_patch_tokens"] == 25440

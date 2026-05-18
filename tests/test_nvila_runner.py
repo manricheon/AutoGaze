@@ -1,4 +1,5 @@
 import argparse
+from fractions import Fraction
 from pathlib import Path
 
 import torch
@@ -8,6 +9,7 @@ from repro.nvila_runner import (
     StageProfiler,
     apply_resize_to_dimensions,
     autogaze_processor_size_kwargs,
+    build_seek_decode_groups,
     build_keep_all_gazing_info,
     build_parser,
     build_stream_profile_token_metrics,
@@ -19,6 +21,9 @@ from repro.nvila_runner import (
     parse_int_sequence,
     parse_args,
     processor_kwargs,
+    frame_index_to_pts,
+    pts_to_frame_index,
+    stream_pts_per_frame,
     repeat_last_stream_samples_after_eof,
     resolve_video,
     spatial_tile_grid,
@@ -245,6 +250,12 @@ def test_parse_args_accepts_stream_profile_mode_and_chunk_options():
     assert args.stream_profile_json == "out/stream.json"
 
 
+def test_parse_args_accepts_seek_stream_decode_strategy():
+    args = parse_args(["--mode", "stream-profile", "--stream-decode-strategy", "seek"])
+
+    assert args.stream_decode_strategy == "seek"
+
+
 def test_parse_args_accepts_optional_stream_siglip_stage():
     args = parse_args(
         [
@@ -264,6 +275,27 @@ def test_parse_args_accepts_optional_stream_siglip_stage():
     assert args.stream_siglip_mode == "gazed"
     assert args.stream_siglip_model == "google/siglip2-base-patch16-224"
     assert args.stream_siglip_max_embed_batch_size == 4
+
+
+def test_frame_index_pts_roundtrip_uses_stream_time_base_and_start_time():
+    pts_per_frame = stream_pts_per_frame(average_rate=Fraction(30, 1), time_base=Fraction(1, 15360))
+
+    assert pts_per_frame == Fraction(512, 1)
+    assert frame_index_to_pts(599, pts_per_frame=pts_per_frame, start_time=1000) == 307688
+    assert pts_to_frame_index(307688, pts_per_frame=pts_per_frame, start_time=1000) == 599
+
+
+def test_build_seek_decode_groups_uses_previous_keyframe_and_groups_targets():
+    groups = build_seek_decode_groups(
+        target_indices=[0, 1, 11, 12, 20, 24],
+        keyframe_indices=[0, 12, 24],
+    )
+
+    assert groups == [
+        {"seek_frame_index": 0, "target_indices": [0, 1, 11]},
+        {"seek_frame_index": 12, "target_indices": [12, 20]},
+        {"seek_frame_index": 24, "target_indices": [24]},
+    ]
 
 
 def test_stream_profile_plan_describes_chunked_hlvid_like_work():

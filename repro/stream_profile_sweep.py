@@ -134,6 +134,7 @@ def build_command(
     stream_siglip_mode: str = "gazed",
     stream_siglip_model: str | None = None,
     stream_siglip_max_embed_batch_size: int | None = None,
+    stream_decode_strategy: str = "scan",
     autogaze_target_scales: str | None = None,
     autogaze_target_patch_size: int | None = None,
 ) -> list[str]:
@@ -166,6 +167,8 @@ def build_command(
         "--stream-profile-json",
         str(output_json),
     ]
+    if stream_decode_strategy != "scan":
+        command.extend(["--stream-decode-strategy", stream_decode_strategy])
     if autogaze_target_scales:
         command.extend(["--autogaze-target-scales", autogaze_target_scales])
     if autogaze_target_patch_size is not None:
@@ -196,6 +199,7 @@ def build_recommendation_rows(
     stream_siglip_mode: str = "gazed",
     stream_siglip_model: str | None = None,
     stream_siglip_max_embed_batch_size: int | None = None,
+    stream_decode_strategy: str = "scan",
     autogaze_target_scales: str | None = None,
     autogaze_target_patch_size: int | None = None,
 ) -> list[dict[str, Any]]:
@@ -239,6 +243,7 @@ def build_recommendation_rows(
             stream_siglip_mode=stream_siglip_mode,
             stream_siglip_model=stream_siglip_model,
             stream_siglip_max_embed_batch_size=stream_siglip_max_embed_batch_size,
+            stream_decode_strategy=stream_decode_strategy,
             autogaze_target_scales=autogaze_target_scales,
             autogaze_target_patch_size=autogaze_target_patch_size,
         )
@@ -256,6 +261,7 @@ def build_recommendation_rows(
                 "stream_chunk_frames": candidate.stream_chunk_frames,
                 "max_batch_size_autogaze": candidate.max_batch_size_autogaze,
                 "max_batch_size_siglip": candidate.max_batch_size_siglip,
+                "stream_decode_strategy": stream_decode_strategy,
                 "stream_run_siglip": stream_run_siglip,
                 "stream_siglip_mode": stream_siglip_mode if stream_run_siglip else None,
                 "stream_siglip_model": stream_siglip_model if stream_run_siglip else None,
@@ -288,10 +294,14 @@ def _row_with_result(row: dict[str, Any], result_path: str | Path) -> dict[str, 
     memory = payload.get("memory_bytes", {})
     tokens = payload.get("token_metrics", {})
     gaze = payload.get("gaze", {})
+    sampling = payload.get("sampling", {})
     return {
         **row,
         "status": "ok",
         "measured_pre_llm_stream_total_ms": timing.get("pre_llm_stream_total_measured"),
+        "measured_keyframe_index_ms": timing.get("video_keyframe_index_scan"),
+        "measured_seek_ms": timing.get("video_seek"),
+        "measured_decode_seek_ms": timing.get("video_decode_seek"),
         "measured_decode_ms": timing.get("video_decode_scan"),
         "measured_tile_build_ms": timing.get("spatial_tile_build"),
         "measured_autogaze_tensorize_ms": timing.get("tile_autogaze_tensorize"),
@@ -310,6 +320,9 @@ def _row_with_result(row: dict[str, Any], result_path: str | Path) -> dict[str, 
             "llm_autogaze_visual_tokens_lower_bound_estimated"
         ),
         "gaze_token_reduction_ratio": gaze.get("token_reduction_ratio"),
+        "measured_decode_strategy": sampling.get("decode_strategy"),
+        "measured_decode_frames_read": sampling.get("decode_frames_read"),
+        "measured_decode_seek_groups": sampling.get("decode_seek_groups"),
     }
 
 
@@ -374,6 +387,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--video", required=True)
     parser.add_argument("--device", default="mps", choices=["cpu", "mps", "cuda"])
     parser.add_argument("--stream-dtype", default="float32", choices=["float32", "float16"])
+    parser.add_argument("--stream-decode-strategy", default="scan", choices=["scan", "seek"])
     parser.add_argument("--gazing-mode", default="autogaze", choices=["autogaze", "keep-all"])
     parser.add_argument("--out-dir", default="outputs/autogaze_repro/stream_sweep")
     parser.add_argument("--summary-json", default="outputs/autogaze_repro/stream_sweep_summary.json")
@@ -412,6 +426,7 @@ def main() -> None:
         stream_dtype=args.stream_dtype,
         out_dir=args.out_dir,
         gazing_mode=args.gazing_mode,
+        stream_decode_strategy=args.stream_decode_strategy,
         stream_run_siglip=args.stream_run_siglip,
         stream_siglip_mode=args.stream_siglip_mode,
         stream_siglip_model=args.stream_siglip_model,
@@ -432,6 +447,7 @@ def main() -> None:
         "source_metadata": metadata,
         "device": args.device,
         "stream_dtype": args.stream_dtype,
+        "stream_decode_strategy": args.stream_decode_strategy,
         "gazing_mode": args.gazing_mode,
         "stream_run_siglip": args.stream_run_siglip,
         "stream_siglip_mode": args.stream_siglip_mode if args.stream_run_siglip else None,

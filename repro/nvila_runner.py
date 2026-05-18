@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_right
 from collections import Counter, defaultdict
 from contextlib import contextmanager
+from fractions import Fraction
 import json
 import math
 import re
@@ -179,6 +181,40 @@ def uniform_sample_indices(total_frames: int, sample_count: int) -> list[int]:
     if sample_count == 1:
         return [0]
     return [int(round(i * (total_frames - 1) / (sample_count - 1))) for i in range(sample_count)]
+
+
+def stream_pts_per_frame(*, average_rate: Fraction | None, time_base: Fraction | None) -> Fraction | None:
+    if average_rate is None or time_base is None or average_rate == 0 or time_base == 0:
+        return None
+    return Fraction(average_rate.denominator, average_rate.numerator) / time_base
+
+
+def frame_index_to_pts(frame_index: int, *, pts_per_frame: Fraction, start_time: int | None = 0) -> int:
+    return int(round(Fraction(start_time or 0, 1) + frame_index * pts_per_frame))
+
+
+def pts_to_frame_index(pts: int, *, pts_per_frame: Fraction, start_time: int | None = 0) -> int:
+    return int(round(Fraction(pts - (start_time or 0), 1) / pts_per_frame))
+
+
+def build_seek_decode_groups(
+    *,
+    target_indices: list[int],
+    keyframe_indices: list[int],
+) -> list[dict[str, Any]]:
+    if not target_indices:
+        return []
+    targets = sorted(set(int(index) for index in target_indices))
+    keyframes = sorted(set(int(index) for index in keyframe_indices))
+    groups_by_seek: dict[int, list[int]] = {}
+    for target in targets:
+        key_pos = bisect_right(keyframes, target) - 1
+        seek_index = keyframes[key_pos] if key_pos >= 0 else target
+        groups_by_seek.setdefault(seek_index, []).append(target)
+    return [
+        {"seek_frame_index": seek_index, "target_indices": groups_by_seek[seek_index]}
+        for seek_index in sorted(groups_by_seek)
+    ]
 
 
 def nvila_thumbnail_indices(sampled_frame_indices: list[int], thumbnail_count: int) -> list[int]:
@@ -561,6 +597,7 @@ def read_video_metadata(video: str) -> dict[str, int | float | str | None]:
         stream = container.streams.video[0]
         duration = float(stream.duration * stream.time_base) if stream.duration else None
         fps = float(stream.average_rate) if stream.average_rate else None
+        pts_per_frame = stream_pts_per_frame(average_rate=stream.average_rate, time_base=stream.time_base)
         return {
             "width": int(stream.width),
             "height": int(stream.height),
@@ -568,6 +605,35 @@ def read_video_metadata(video: str) -> dict[str, int | float | str | None]:
             "fps": fps,
             "duration_seconds": duration,
             "codec": stream.codec_context.name,
+            "time_base": str(stream.time_base),
+            "start_time": int(stream.start_time) if stream.start_time is not None else None,
+            "pts_per_frame": float(pts_per_frame) if pts_per_frame is not None else None,
+        }
+    finally:
+        container.close()
+
+
+def read_video_keyframe_indices(video: str) -> tuple[list[int], dict[str, Any]]:
+    container = av.open(video)
+    try:
+        stream = container.streams.video[0]
+        pts_per_frame = stream_pts_per_frame(average_rate=stream.average_rate, time_base=stream.time_base)
+        if pts_per_frame is None:
+            raise ValueError("Seek decode requires video average_rate and time_base metadata.")
+        start_time = int(stream.start_time) if stream.start_time is not None else 0
+        keyframes: list[int] = []
+        packets_scanned = 0
+        for packet in container.demux(stream):
+            if packet.pts is None:
+                continue
+            packets_scanned += 1
+            if packet.is_keyframe:
+                keyframes.append(pts_to_frame_index(packet.pts, pts_per_frame=pts_per_frame, start_time=start_time))
+        return keyframes, {
+            "packets_scanned": packets_scanned,
+            "keyframes": len(keyframes),
+            "pts_per_frame": float(pts_per_frame),
+            "start_time": start_time,
         }
     finally:
         container.close()
@@ -1426,6 +1492,13 @@ def run_stream_profile(args: argparse.Namespace) -> None:
     decoded_selected_frames = 0
     eof_padding_summary = {"padded_sampled_frames_after_eof": 0, "padded_thumbnail_frames_after_eof": 0}
     last_selected_frame: Image.Image | None = None
+    decode_stats: dict[str, Any] = {
+        "decode_strategy": args.stream_decode_strategy,
+        "decode_frames_read": 0,
+        "decode_seek_groups": 0,
+        "decode_keyframes_indexed": None,
+        "decode_packets_scanned_for_keyframes": None,
+    }
 
     def process_current_stream_chunk() -> None:
         nonlocal current_frames, tile_pil_buffer_peak_bytes, autogaze_tile_tensor_peak_bytes
@@ -1485,47 +1558,112 @@ def run_stream_profile(args: argparse.Namespace) -> None:
         )
         current_frames = []
 
-    container = av.open(resolved_video)
-    try:
-        decoder = container.decode(video=0)
-        frame_index = 0
-        while frame_index <= end_index:
-            frame, decode_ms = _measure_elapsed(device, lambda: next(decoder))
-            profiler.add("video_decode_scan", decode_ms)
+    def process_selected_frame(frame_index: int, frame: Any) -> None:
+        nonlocal decoded_selected_frames, last_selected_frame, raw_frame_buffer_peak_bytes
+        image, to_pil_ms = _measure_elapsed(device, lambda: frame.to_image().convert("RGB"))
+        profiler.add("video_frame_to_pil", to_pil_ms)
+        if resize["mode"] != "none":
+            image, resize_ms = _measure_elapsed(device, lambda image=image: resize_frame(image, resize))
+            profiler.add("video_frame_resize", resize_ms)
 
-            if frame_index in selected_index_set:
-                image, to_pil_ms = _measure_elapsed(device, lambda: frame.to_image().convert("RGB"))
-                profiler.add("video_frame_to_pil", to_pil_ms)
-                if resize["mode"] != "none":
-                    image, resize_ms = _measure_elapsed(device, lambda image=image: resize_frame(image, resize))
-                    profiler.add("video_frame_resize", resize_ms)
+        for _ in range(target_counts[frame_index]):
+            frame_copy = image.copy()
+            current_frames.append(frame_copy)
+            last_selected_frame = frame_copy
+            decoded_selected_frames += 1
+            raw_frame_buffer_peak_bytes = max(
+                raw_frame_buffer_peak_bytes,
+                len(current_frames) * int(effective["width"]) * int(effective["height"]) * 3,
+            )
 
-                for _ in range(target_counts[frame_index]):
-                    frame_copy = image.copy()
-                    current_frames.append(frame_copy)
-                    last_selected_frame = frame_copy
-                    decoded_selected_frames += 1
-                    raw_frame_buffer_peak_bytes = max(
-                        raw_frame_buffer_peak_bytes,
-                        len(current_frames) * int(effective["width"]) * int(effective["height"]) * 3,
-                    )
+            if thumbnail_counts[frame_index] > 0:
+                thumb, thumb_resize_ms = _measure_elapsed(
+                    device,
+                    lambda frame_copy=frame_copy: frame_copy.resize((NVILA_IMAGE_SIZE, NVILA_IMAGE_SIZE)),
+                )
+                profiler.add("thumbnail_resize", thumb_resize_ms)
+                thumbnails.append(thumb)
+                thumbnail_counts[frame_index] -= 1
 
-                    if thumbnail_counts[frame_index] > 0:
-                        thumb, thumb_resize_ms = _measure_elapsed(
-                            device,
-                            lambda frame_copy=frame_copy: frame_copy.resize((NVILA_IMAGE_SIZE, NVILA_IMAGE_SIZE)),
-                        )
-                        profiler.add("thumbnail_resize", thumb_resize_ms)
-                        thumbnails.append(thumb)
-                        thumbnail_counts[frame_index] -= 1
+            if len(current_frames) == args.stream_chunk_frames:
+                process_current_stream_chunk()
 
-                    if len(current_frames) == args.stream_chunk_frames:
-                        process_current_stream_chunk()
-            frame_index += 1
-    except StopIteration:
-        pass
-    finally:
-        container.close()
+    if args.stream_decode_strategy == "scan":
+        container = av.open(resolved_video)
+        try:
+            decoder = container.decode(video=0)
+            frame_index = 0
+            while frame_index <= end_index:
+                frame, decode_ms = _measure_elapsed(device, lambda: next(decoder))
+                profiler.add("video_decode_scan", decode_ms)
+                decode_stats["decode_frames_read"] += 1
+
+                if frame_index in selected_index_set:
+                    process_selected_frame(frame_index, frame)
+                frame_index += 1
+        except StopIteration:
+            pass
+        finally:
+            container.close()
+    else:
+        keyframe_result, keyframe_ms = _measure_elapsed(
+            torch.device("cpu"),
+            lambda: read_video_keyframe_indices(resolved_video),
+        )
+        keyframe_indices, keyframe_metadata = keyframe_result
+        profiler.add("video_keyframe_index_scan", keyframe_ms)
+        decode_stats["decode_keyframes_indexed"] = keyframe_metadata["keyframes"]
+        decode_stats["decode_packets_scanned_for_keyframes"] = keyframe_metadata["packets_scanned"]
+        groups = build_seek_decode_groups(
+            target_indices=sorted(selected_index_set),
+            keyframe_indices=keyframe_indices,
+        )
+        decode_stats["decode_seek_groups"] = len(groups)
+
+        container = av.open(resolved_video)
+        try:
+            stream = container.streams.video[0]
+            pts_per_frame = stream_pts_per_frame(average_rate=stream.average_rate, time_base=stream.time_base)
+            if pts_per_frame is None:
+                raise ValueError("Seek decode requires video average_rate and time_base metadata.")
+            start_time = int(stream.start_time) if stream.start_time is not None else 0
+            processed_targets: set[int] = set()
+            for group in groups:
+                seek_pts = frame_index_to_pts(
+                    int(group["seek_frame_index"]),
+                    pts_per_frame=pts_per_frame,
+                    start_time=start_time,
+                )
+                _, seek_ms = _measure_elapsed(
+                    device,
+                    lambda seek_pts=seek_pts: container.seek(
+                        seek_pts,
+                        stream=stream,
+                        backward=True,
+                        any_frame=False,
+                    ),
+                )
+                profiler.add("video_seek", seek_ms)
+                group_targets = set(int(index) for index in group["target_indices"])
+                group_last_target = max(group_targets)
+                decoder = container.decode(video=0)
+                while True:
+                    try:
+                        frame, decode_ms = _measure_elapsed(device, lambda: next(decoder))
+                    except StopIteration:
+                        break
+                    decode_stats["decode_frames_read"] += 1
+                    profiler.add("video_decode_seek", decode_ms)
+                    if frame.pts is None:
+                        continue
+                    frame_index = pts_to_frame_index(frame.pts, pts_per_frame=pts_per_frame, start_time=start_time)
+                    if frame_index in group_targets and frame_index not in processed_targets:
+                        process_selected_frame(frame_index, frame)
+                        processed_targets.add(frame_index)
+                    if frame_index >= group_last_target:
+                        break
+        finally:
+            container.close()
 
     if decoded_selected_frames < args.num_video_frames:
         missing_sampled_frames = args.num_video_frames - decoded_selected_frames
@@ -1617,12 +1755,16 @@ def run_stream_profile(args: argparse.Namespace) -> None:
             "sampled_frame_end": sampled_indices[-1],
             "decoded_selected_frames": decoded_selected_frames,
             "thumbnail_frames_processed": len(thumbnails),
+            **decode_stats,
             **eof_padding_summary,
         },
         "gaze": tile_summary,
         "token_metrics": token_metrics,
         "timing_ms": {
             "video_decode_scan": stage_total(stage_timings, "video_decode_scan"),
+            "video_keyframe_index_scan": stage_total(stage_timings, "video_keyframe_index_scan"),
+            "video_seek": stage_total(stage_timings, "video_seek"),
+            "video_decode_seek": stage_total(stage_timings, "video_decode_seek"),
             "video_frame_to_pil": stage_total(stage_timings, "video_frame_to_pil"),
             "video_frame_resize": stage_total(stage_timings, "video_frame_resize"),
             "spatial_tile_build": stage_total(stage_timings, "spatial_tile_build"),
@@ -1901,6 +2043,7 @@ def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentPar
     parser.add_argument("--measure-ttft", action="store_true")
     parser.add_argument("--stream-chunk-frames", type=int, default=AUTOGAZE_CHUNK_FRAMES)
     parser.add_argument("--stream-dtype", choices=["float32", "float16"], default="float32")
+    parser.add_argument("--stream-decode-strategy", choices=["scan", "seek"], default="scan")
     parser.add_argument("--stream-run-siglip", action="store_true")
     parser.add_argument("--stream-siglip-mode", choices=["gazed", "keep-all", "both"], default="gazed")
     parser.add_argument("--stream-siglip-model")
