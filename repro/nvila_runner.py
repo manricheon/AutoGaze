@@ -935,15 +935,31 @@ def resize_frame(frame: Image.Image, resize: dict[str, int | str]) -> Image.Imag
     return frame.resize((int(resize["width"]), int(resize["height"])))
 
 
-def load_sampled_video_frames(video: str, sample_count: int, resize: dict[str, int | str]) -> list[Image.Image]:
-    metadata = read_video_metadata(video)
-    total_frames = metadata.get("frames")
-    if total_frames is None:
-        raise ValueError("Video frame count is required for runner-side resize sampling.")
-    indices = uniform_sample_indices(int(total_frames), sample_count)
-    target_counts: dict[int, int] = {}
-    for index in indices:
-        target_counts[index] = target_counts.get(index, 0) + 1
+def _new_decode_stats(requested_strategy: str) -> dict[str, Any]:
+    return {
+        "requested_decode_strategy": requested_strategy,
+        "decode_strategy": None,
+        "decode_strategy_fallback_error": None,
+        "decode_frames_read": 0,
+        "decode_seek_groups": 0,
+        "decode_keyframes_indexed": None,
+        "decode_packets_scanned_for_keyframes": None,
+    }
+
+
+def _target_frame_counts(total_frames: int, sample_count: int) -> Counter[int]:
+    return Counter(uniform_sample_indices(total_frames, sample_count))
+
+
+def _load_sampled_video_frames_scan(
+    video: str,
+    target_counts: Counter[int],
+    resize: dict[str, int | str],
+    *,
+    requested_strategy: str,
+) -> tuple[list[Image.Image], dict[str, Any]]:
+    stats = _new_decode_stats(requested_strategy)
+    stats["decode_strategy"] = "scan"
     max_index = max(target_counts)
 
     frames: list[Image.Image] = []
@@ -952,21 +968,142 @@ def load_sampled_video_frames(video: str, sample_count: int, resize: dict[str, i
         for frame_index, frame in enumerate(container.decode(video=0)):
             if frame_index > max_index:
                 break
+            stats["decode_frames_read"] += 1
             count = target_counts.get(frame_index, 0)
             if count == 0:
                 continue
             image = resize_frame(frame.to_image().convert("RGB"), resize)
             frames.extend(image.copy() for _ in range(count))
-            if len(frames) >= sample_count:
+            if len(frames) >= sum(target_counts.values()):
                 break
     finally:
         container.close()
+    return frames, stats
+
+
+def _load_sampled_video_frames_seek(
+    video: str,
+    target_counts: Counter[int],
+    resize: dict[str, int | str],
+    *,
+    requested_strategy: str,
+) -> tuple[list[Image.Image], dict[str, Any]]:
+    stats = _new_decode_stats(requested_strategy)
+    stats["decode_strategy"] = "seek"
+    keyframe_indices, keyframe_metadata = read_video_keyframe_indices(video)
+    stats["decode_keyframes_indexed"] = keyframe_metadata["keyframes"]
+    stats["decode_packets_scanned_for_keyframes"] = keyframe_metadata["packets_scanned"]
+    groups = build_seek_decode_groups(
+        target_indices=sorted(target_counts),
+        keyframe_indices=keyframe_indices,
+    )
+    stats["decode_seek_groups"] = len(groups)
+
+    frames_by_index: dict[int, Image.Image] = {}
+    processed_targets: set[int] = set()
+    container = av.open(video)
+    try:
+        stream = container.streams.video[0]
+        pts_per_frame = stream_pts_per_frame(average_rate=stream.average_rate, time_base=stream.time_base)
+        if pts_per_frame is None:
+            raise ValueError("Seek decode requires video average_rate and time_base metadata.")
+        start_time = int(stream.start_time) if stream.start_time is not None else 0
+        for group in groups:
+            seek_pts = frame_index_to_pts(
+                int(group["seek_frame_index"]),
+                pts_per_frame=pts_per_frame,
+                start_time=start_time,
+            )
+            container.seek(seek_pts, stream=stream, backward=True, any_frame=False)
+            group_targets = set(int(index) for index in group["target_indices"])
+            group_last_target = max(group_targets)
+            decoder = container.decode(video=0)
+            while True:
+                try:
+                    frame = next(decoder)
+                except StopIteration:
+                    break
+                stats["decode_frames_read"] += 1
+                if frame.pts is None:
+                    continue
+                frame_index = pts_to_frame_index(frame.pts, pts_per_frame=pts_per_frame, start_time=start_time)
+                if frame_index in group_targets and frame_index not in processed_targets:
+                    frames_by_index[frame_index] = resize_frame(frame.to_image().convert("RGB"), resize)
+                    processed_targets.add(frame_index)
+                if frame_index >= group_last_target:
+                    break
+    finally:
+        container.close()
+
+    frames: list[Image.Image] = []
+    for index in sorted(target_counts):
+        image = frames_by_index.get(index)
+        if image is None:
+            continue
+        frames.extend(image.copy() for _ in range(target_counts[index]))
+    return frames, stats
+
+
+def load_sampled_video_frames(
+    video: str,
+    sample_count: int,
+    resize: dict[str, int | str],
+    *,
+    decode_strategy: str = "auto",
+) -> tuple[list[Image.Image], dict[str, Any]]:
+    metadata = read_video_metadata(video)
+    total_frames = metadata.get("frames")
+    if total_frames is None:
+        raise ValueError("Video frame count is required for runner-side resize sampling.")
+    target_counts = _target_frame_counts(int(total_frames), sample_count)
+
+    if decode_strategy not in {"auto", "seek", "scan"}:
+        raise ValueError(f"Unsupported video decode strategy: {decode_strategy}")
+    if decode_strategy in {"auto", "seek"}:
+        try:
+            frames, stats = _load_sampled_video_frames_seek(
+                video,
+                target_counts,
+                resize,
+                requested_strategy=decode_strategy,
+            )
+            if len(frames) >= sample_count:
+                while len(frames) < sample_count:
+                    frames.append(frames[-1].copy())
+                return frames, stats
+            if decode_strategy == "seek":
+                if frames:
+                    while len(frames) < sample_count:
+                        frames.append(frames[-1].copy())
+                    return frames, stats
+                raise ValueError("Seek decode returned no frames")
+        except Exception as exc:
+            if decode_strategy == "seek":
+                raise
+            fallback_error = repr(exc)
+        else:
+            fallback_error = f"seek decoded {len(frames)} of {sample_count} requested frames"
+
+        frames, stats = _load_sampled_video_frames_scan(
+            video,
+            target_counts,
+            resize,
+            requested_strategy=decode_strategy,
+        )
+        stats["decode_strategy_fallback_error"] = fallback_error
+    else:
+        frames, stats = _load_sampled_video_frames_scan(
+            video,
+            target_counts,
+            resize,
+            requested_strategy=decode_strategy,
+        )
 
     if not frames:
         raise ValueError(f"Could not extract any frames from video: {video}")
     while len(frames) < sample_count:
         frames.append(frames[-1].copy())
-    return frames
+    return frames, stats
 
 
 def estimate_nvila_preflight(
@@ -1868,6 +2005,9 @@ def build_video_input_summary(
     requested_video_frames = _maybe_int(getattr(args, "num_video_frames", None))
     requested_thumbnail_frames = _maybe_int(getattr(args, "num_video_frames_thumbnail", None))
     resize = video_input_info.get("resize") if isinstance(video_input_info, dict) else None
+    decode = video_input_info.get("decode") if isinstance(video_input_info, dict) else None
+    if not isinstance(decode, dict):
+        decode = {}
     if not isinstance(resize, dict):
         resize = video_resize_config(args, source_metadata)
     effective = resize.get("effective") if isinstance(resize, dict) else None
@@ -1918,6 +2058,15 @@ def build_video_input_summary(
         "processor_input_resolution": _resolution(processor_width, processor_height),
         "processor_video_input_mode": video_input_info.get("mode"),
         "frames_loaded_for_processor": _maybe_int(video_input_info.get("frames_loaded")),
+        "video_decode_requested_strategy": decode.get("requested_decode_strategy"),
+        "video_decode_strategy": decode.get("decode_strategy"),
+        "video_decode_strategy_fallback_error": decode.get("decode_strategy_fallback_error"),
+        "video_decode_frames_read": _maybe_int(decode.get("decode_frames_read")),
+        "video_decode_seek_groups": _maybe_int(decode.get("decode_seek_groups")),
+        "video_decode_keyframes_indexed": _maybe_int(decode.get("decode_keyframes_indexed")),
+        "video_decode_packets_scanned_for_keyframes": _maybe_int(
+            decode.get("decode_packets_scanned_for_keyframes")
+        ),
         "spatial_tiles_per_video": token_metrics.get("spatial_tiles_per_video"),
         "temporal_chunks_per_video": token_metrics.get("temporal_chunks_per_video"),
     }
@@ -1935,12 +2084,18 @@ def prepare_video_for_processor(video: str, args: argparse.Namespace) -> tuple[A
         exact_width=getattr(args, "video_resize_width", None),
         exact_height=getattr(args, "video_resize_height", None),
     )
-    frames = load_sampled_video_frames(video, args.num_video_frames, resize)
+    frames, decode_stats = load_sampled_video_frames(
+        video,
+        args.num_video_frames,
+        resize,
+        decode_strategy=getattr(args, "video_decode_strategy", "auto"),
+    )
     return frames, {
         "mode": "preloaded_resized_frames",
         "source_metadata": metadata,
         "resize": video_resize_config(args, metadata),
         "frames_loaded": len(frames),
+        "decode": decode_stats,
     }
 
 
@@ -3094,6 +3249,7 @@ def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentPar
     parser.add_argument("--video-resize-longest-edge", type=int)
     parser.add_argument("--video-resize-width", type=int)
     parser.add_argument("--video-resize-height", type=int)
+    parser.add_argument("--video-decode-strategy", choices=["auto", "seek", "scan"], default="auto")
     parser.add_argument("--gazing-mode", choices=["autogaze", "keep-all"], default="autogaze")
     parser.add_argument("--autogaze-target-scales", "--autogaze-resize-scales", dest="autogaze_target_scales")
     parser.add_argument("--autogaze-target-patch-size", type=int)

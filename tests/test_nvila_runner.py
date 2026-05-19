@@ -568,6 +568,14 @@ def test_build_video_input_summary_reports_source_sample_and_resize_context():
                 "effective": {"width": 1280, "height": 720, "mode": "shortest_edge"},
             },
             "frames_loaded": 128,
+            "decode": {
+                "requested_decode_strategy": "auto",
+                "decode_strategy": "seek",
+                "decode_frames_read": 256,
+                "decode_seek_groups": 64,
+                "decode_keyframes_indexed": 120,
+                "decode_packets_scanned_for_keyframes": 9000,
+            },
         },
         token_metrics=token_metrics,
     )
@@ -599,6 +607,13 @@ def test_build_video_input_summary_reports_source_sample_and_resize_context():
         "processor_input_resolution": "1280x720",
         "processor_video_input_mode": "preloaded_resized_frames",
         "frames_loaded_for_processor": 128,
+        "video_decode_requested_strategy": "auto",
+        "video_decode_strategy": "seek",
+        "video_decode_strategy_fallback_error": None,
+        "video_decode_frames_read": 256,
+        "video_decode_seek_groups": 64,
+        "video_decode_keyframes_indexed": 120,
+        "video_decode_packets_scanned_for_keyframes": 9000,
         "spatial_tiles_per_video": [8],
         "temporal_chunks_per_video": 8,
     }
@@ -729,6 +744,12 @@ def test_parse_args_accepts_seek_stream_decode_strategy():
     args = parse_args(["--mode", "stream-profile", "--stream-decode-strategy", "seek"])
 
     assert args.stream_decode_strategy == "seek"
+
+
+def test_parse_args_accepts_general_video_decode_strategy():
+    args = parse_args(["--mode", "hlvid", "--video-decode-strategy", "seek"])
+
+    assert args.video_decode_strategy == "seek"
 
 
 def test_parse_args_accepts_optional_stream_siglip_stage():

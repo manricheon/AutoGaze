@@ -92,7 +92,7 @@ sandbox 안에서 `torch.backends.mps.is_available()`이 false인데 sandbox 밖
 
 NVILA runner는 output JSON에 모듈별 timing을 기록합니다. 중요한 필드는 아래와 같습니다.
 
-- `result.video_decode_ms`: 샘플링된 프레임 decode/read 시간입니다. runner-side resize를 쓰지 않으면 NVILA remote code의 video loader를 감싼 시간입니다. `--video-resize-*`를 쓰면 runner가 전체 비디오에서 프레임을 샘플링하고 PIL frame을 리사이즈하는 시간까지 포함합니다.
+- `result.video_decode_ms`: 샘플링된 프레임 decode/read 시간입니다. runner-side resize를 쓰지 않으면 NVILA remote code의 video loader를 감싼 시간입니다. `--video-resize-*`를 쓰면 runner가 전체 비디오에서 프레임을 샘플링하고 PIL frame을 리사이즈하는 시간까지 포함합니다. 이때 `--video-decode-strategy auto|seek|scan`으로 샘플링 decode 방식을 고를 수 있고, 기본값 `auto`는 keyframe seek를 먼저 시도한 뒤 실패하면 scan으로 fallback합니다.
 - `result.video_tiling_ms`: 프레임이 준비된 뒤 NVILA processor가 비디오를 준비하는 시간입니다. dynamic spatial tiling, thumbnail 생성, SigLIP/AutoGaze 입력 tensorization이 포함됩니다. SigLIP inference 시간은 아닙니다.
 - `result.autogaze_ms`: 전체 AutoGaze selection stage 시간입니다. `autogaze` 모드에서는 AutoGaze forward와 sort/pad/split bookkeeping이 들어갑니다. `keep-all` 모드에서는 AutoGaze forward를 건너뛰고 keep-all mask를 만드는 시간이 대부분입니다.
 - `result.autogaze_forward_ms`: AutoGaze model forward만 잰 시간입니다. AutoGaze 모델 자체 cost를 볼 때 가장 깨끗한 필드입니다.
@@ -111,7 +111,7 @@ NVILA runner는 output JSON에 모듈별 timing을 기록합니다. 중요한 �
 
 단일 파일 inference도 같은 output JSON에 속도/토큰/메모리 필드를 남깁니다. `--measure-ttft` 없이도 `total_ms`, `video_decode_ms`, `video_tiling_ms`, `autogaze_forward_ms`, `siglip_vision_ms`, `mm_projector_ms`, `llm_forward_ms`, `token_metrics`, `compute_metrics`, CUDA의 `processor_peak_memory_bytes`와 `llm_peak_memory_bytes`가 기록됩니다. `--measure-ttft`를 켜면 여기에 `ttft_ms`, `ttft_stage_timings_ms`, `ttft_peak_memory_bytes`, `decode_estimated_ms`가 추가됩니다. MPS에서는 CUDA peak allocation API가 없어서 memory field가 null일 수 있습니다.
 
-raw output JSON이 너무 길면 `--print-summary --summary-json <path>`를 붙이세요. 전체 raw JSON은 `--output-json`에 그대로 저장하고, 터미널과 summary file에는 답변과 함께 `prompt`, `question`, `video_input_summary`, `autogaze_token_summary`, `key_autogaze_effect`를 별도로 정리합니다. `single` 모드에서는 `prompt`가 실행에 사용한 `--prompt` 원문이고, HLVid row 기반 실행에서는 per-row `question`이 `predictions.jsonl`과 `scored_predictions.jsonl`에 보존됩니다. `video_input_summary`에는 원본 총 프레임 수, 원본 해상도, 요청한 video/thumbnail frame 수, 실제 processor tensor 기준 frame 수, runner resize 적용 여부, resize 후 processor 입력 해상도, spatial tile/temporal chunk 수가 들어갑니다. `autogaze_token_summary`에는 사용한 프레임/타일 기준 raw patch budget과 AutoGaze가 실제 유지한 patch 수, TokenShuffle 이후 LLM visual token 수가 나뉘어 들어갑니다. `key_autogaze_effect`에는 AutoGaze 전후 차이를 가장 잘 보여주는 encoder patch 수, LLM visual token 수, reduction ratio/percent, SigLIP/MLLM 계산량 감소 추정치, 핵심 latency/memory median이 모입니다. 상세 분석용 `latency_ms`, `memory_bytes`, `tokens`, `compute` 섹션도 함께 남깁니다.
+raw output JSON이 너무 길면 `--print-summary --summary-json <path>`를 붙이세요. 전체 raw JSON은 `--output-json`에 그대로 저장하고, 터미널과 summary file에는 답변과 함께 `prompt`, `question`, `video_input_summary`, `autogaze_token_summary`, `key_autogaze_effect`를 별도로 정리합니다. `single` 모드에서는 `prompt`가 실행에 사용한 `--prompt` 원문이고, HLVid row 기반 실행에서는 per-row `question`이 `predictions.jsonl`과 `scored_predictions.jsonl`에 보존됩니다. `video_input_summary`에는 원본 총 프레임 수, 원본 해상도, 요청한 video/thumbnail frame 수, 실제 processor tensor 기준 frame 수, runner resize 적용 여부, resize 후 processor 입력 해상도, decode 전략/읽은 frame 수, spatial tile/temporal chunk 수가 들어갑니다. `autogaze_token_summary`에는 사용한 프레임/타일 기준 raw patch budget과 AutoGaze가 실제 유지한 patch 수, TokenShuffle 이후 LLM visual token 수가 나뉘어 들어갑니다. `key_autogaze_effect`에는 AutoGaze 전후 차이를 가장 잘 보여주는 encoder patch 수, LLM visual token 수, reduction ratio/percent, SigLIP/MLLM 계산량 감소 추정치, 핵심 latency/memory median이 모입니다. 상세 분석용 `latency_ms`, `memory_bytes`, `tokens`, `compute` 섹션도 함께 남깁니다.
 
 단일 실행의 비디오 입력 조건을 빠르게 확인할 때는 아래 필드를 먼저 보세요. raw JSON에는 top-level `video_input_summary`와 `result.video_input_summary`가 모두 있고, compact summary JSON에도 같은 `video_input_summary`가 들어갑니다.
 
@@ -123,6 +123,8 @@ raw output JSON이 너무 길면 `--print-summary --summary-json <path>`를 붙�
 | 전체 비디오 중 어디까지 샘플링했나? | `video_input_summary.sampled_frame_start`, `sampled_frame_end` |
 | runner-side resize를 켰나? | `video_input_summary.runner_resize_enabled`, `runner_resize_request` |
 | NVILA processor에 넘긴 비디오 frame 해상도는? | `video_input_summary.processor_input_resolution`, `processor_input_width`, `processor_input_height` |
+| 빠른 seek decode가 실제로 적용됐나? | `video_input_summary.video_decode_requested_strategy`, `video_decode_strategy`, `video_decode_strategy_fallback_error` |
+| decode가 얼마나 덜 읽었나? | `video_input_summary.video_decode_frames_read`, `video_decode_seek_groups`, `video_decode_keyframes_indexed` |
 | tile/chunk 구조는? | `video_input_summary.spatial_tiles_per_video`, `temporal_chunks_per_video` |
 
 토큰 감소를 빠르게 볼 때는 아래 필드를 먼저 보세요.
@@ -195,7 +197,7 @@ if --measure-ttft:
 | `llm_forward_ms` | `llm.forward` 누적 | full generation pass에서 LLM forward hook을 누적합니다. | prefill과 decode 호출이 모두 포함됩니다. TTFT 분리는 `ttft_stage_timings_ms`를 함께 봅니다. |
 | `ttft_ms` | `ttft_stage_timings_ms.*` | `--measure-ttft`일 때 별도 1-token generate pass입니다. | prefill context, KV cache, 첫 토큰 latency를 보는 값입니다. full `total_ms`에 더하지 않습니다. |
 
-관련 코드 위치는 stage hook 정의 [ProfilePatches:L126](../repro/nvila_runner.py#L126), processor/generate 실행 [generate_one:L2427](../repro/nvila_runner.py#L2427), 결과 필드 조립 [generate_one result fields:L2492](../repro/nvila_runner.py#L2492), full/TTFT generation timer [timed_generate:L1538](../repro/nvila_runner.py#L1538), compact summary 생성 [build_single_summary:L285](../repro/nvila_runner.py#L285)입니다.
+관련 코드 위치는 stage hook 정의 [ProfilePatches:L126](../repro/nvila_runner.py#L126), processor/generate 실행 [generate_one:L2920](../repro/nvila_runner.py#L2920), 결과 필드 조립 [generate_one:L2920](../repro/nvila_runner.py#L2920), full/TTFT generation timer [timed_generate:L1907](../repro/nvila_runner.py#L1907), compact summary 생성 [build_single_summary:L497](../repro/nvila_runner.py#L497)입니다.
 
 토큰 metrics는 두 단계로 나눠서 봅니다. encoder patch budget은 TokenShuffle/projector 이전의 patch 수입니다. 여기에는 실제 샘플링된 비디오 프레임, spatial tile, thumbnail, 그리고 설정된 모든 visual scale의 patch가 포함됩니다. LLM visual-token budget은 TokenShuffle/projector 이후 language model이 실제로 받는 visual placeholder token 수입니다. 헷갈릴 때는 raw `token_metrics`보다 `autogaze_token_summary`를 먼저 보세요.
 
@@ -247,18 +249,18 @@ HLVid `--mode hlvid` summary에는 `question_count`, `question_samples`, `benchm
 
 | 영역 | 필드 | 설명 | 코드 위치 | 중요도 |
 | --- | --- | --- | --- | --- |
-| 입력/샘플링 | `video_input_summary.*`, `input_token_count`, `input_shapes`, `token_metrics.video_sampled_frames`, `token_metrics.thumbnail_sampled_frames` | 원본 프레임 수/해상도, 요청 frame 수, 실제 processor tensor 기준 frame 수, resize 후 입력 해상도, text+visual context 길이입니다. 설정이 의도대로 반영됐는지 확인합니다. | [build_video_input_summary:L1626](../repro/nvila_runner.py#L1626), [generate_one:L2528](../repro/nvila_runner.py#L2528), [compute_visual_token_metrics:L1383](../repro/nvila_runner.py#L1383), [build_stream_profile_token_metrics:L515](../repro/nvila_runner.py#L515) | 높음 |
-| 비디오 decode | `video_decode_ms`, `stage_timings_ms.*.video_decode_sampling`, stream의 `timing_ms.video_decode_scan/seek` | CPU decode와 seek sampling 비용입니다. 긴 4K HLVid에서는 병목 여부를 먼저 봅니다. | [ProfilePatches:L81](../repro/nvila_runner.py#L81), [run_stream_profile:L1822](../repro/nvila_runner.py#L1822) | 높음 |
-| resize/tiling | `video_tiling_ms`, stream의 `video_frame_resize`, `spatial_tile_build` | NVILA dynamic tiling과 runner resize cost입니다. AutoGaze 효과와 무관한 전처리 overhead를 분리합니다. | [ProfilePatches:L81](../repro/nvila_runner.py#L81), [run_stream_profile:L1822](../repro/nvila_runner.py#L1822) | 높음 |
-| AutoGaze | `autogaze_ms`, `autogaze_forward_ms`, stream의 `tile_autogaze_tensorize`, `tile_autogaze_forward` | AutoGaze를 넣어서 추가된 비용입니다. token 감소 이득이 이 비용을 이기는지 판단합니다. | [ProfilePatches:L81](../repro/nvila_runner.py#L81), [run_autogaze_on_stream_tile_sequences:L1576](../repro/nvila_runner.py#L1576) | 높음 |
-| SigLIP latency | `siglip_vision_ms`, stream의 `siglip_gazed_forward`, `siglip_keep_all_forward` | vision encoder의 실제 forward 시간입니다. AutoGaze의 1차 효과가 드러나는 지점입니다. | [ProfilePatches:L81](../repro/nvila_runner.py#L81), [run_siglip_on_stream_batch:L1527](../repro/nvila_runner.py#L1527) | 높음 |
-| SigLIP 계산량 | `compute_metrics.siglip_encoder.*` | attention/MLP MACs와 activation byte 추정치입니다. latency가 noisy할 때도 계산량 감소를 설명할 수 있습니다. | [build_autogaze_effect_metrics:L1043](../repro/nvila_runner.py#L1043), [build_stream_profile_compute_metrics:L362](../repro/nvila_runner.py#L362) | 높음 |
-| projector | `mm_projector_ms` | SigLIP hidden state를 LLM hidden dimension으로 보내는 TokenShuffle+MLP 시간입니다. visual token 수가 줄면 같이 줄 수 있습니다. | [mm_projector.forward hook:L95-L97](../repro/nvila_runner.py#L95-L97), [output field:L2313](../repro/nvila_runner.py#L2313) | 중간 |
-| LLM latency | `llm_forward_ms`, `ttft_ms`, `decode_estimated_ms` | prefill과 generation decode 비용입니다. AutoGaze의 MLLM context 감소 효과를 봅니다. | [llm.forward hook:L99-L100](../repro/nvila_runner.py#L99-L100), [timed_generate:L1337](../repro/nvila_runner.py#L1337), [generate_one:L2220](../repro/nvila_runner.py#L2220) | 높음 |
-| LLM context/KV | `compute_metrics.mllm.actual_prefill_context_tokens`, `kv_cache_reduction_ratio`, `prefill_total_macs_reduction_ratio` | LLM이 실제로 받은 context 길이와 KV cache/attention 계산 감소 추정치입니다. | [build_autogaze_effect_metrics:L1043](../repro/nvila_runner.py#L1043) | 높음 |
-| CUDA memory | `processor_peak_memory_bytes`, `ttft_peak_memory_bytes`, `llm_peak_memory_bytes`, `peak_memory_bytes` | CUDA peak allocation입니다. OOM 리스크와 배치/프레임 설정 선택에 중요합니다. | [timed_generate peak:L1339-L1348](../repro/nvila_runner.py#L1339-L1348), [generate_one memory fields:L2227-L2302](../repro/nvila_runner.py#L2227-L2302), [stream CUDA peak:L1883-L2211](../repro/nvila_runner.py#L1883-L2211) | 높음 |
-| token/patch | `token_metrics.encoder_*`, `token_metrics.llm_*` | encoder patch 감소와 LLM visual token 감소를 분리해서 보여줍니다. 리더 설득용 핵심 근거입니다. | [compute_visual_token_metrics:L1181](../repro/nvila_runner.py#L1181), [build_stream_profile_token_metrics:L313](../repro/nvila_runner.py#L313) | 높음 |
-| 정확도 | HLVid `accuracy_scored`, `accuracy_total`, `failed`, `skipped`, `parse_failed` | AutoGaze 속도 이득이 성능 손실을 만들었는지 확인합니다. | [score_predictions:L96](../repro/hlvid.py#L96), [summarize_run:L194](../repro/hlvid_batch_benchmark.py#L194), [build_gain_report:L205](../repro/hlvid_batch_benchmark.py#L205) | 높음 |
+| 입력/샘플링 | `video_input_summary.*`, `input_token_count`, `input_shapes`, `token_metrics.video_sampled_frames`, `token_metrics.thumbnail_sampled_frames` | 원본 프레임 수/해상도, 요청 frame 수, 실제 processor tensor 기준 frame 수, resize 후 입력 해상도, text+visual context 길이입니다. 설정이 의도대로 반영됐는지 확인합니다. | [build_video_input_summary:L1994](../repro/nvila_runner.py#L1994), [generate_one:L2920](../repro/nvila_runner.py#L2920), [compute_visual_token_metrics:L1745](../repro/nvila_runner.py#L1745), [build_stream_profile_token_metrics:L733](../repro/nvila_runner.py#L733) | 높음 |
+| 비디오 decode | `video_decode_ms`, `stage_timings_ms.*.video_decode_sampling`, `video_input_summary.video_decode_*`, stream의 `timing_ms.video_decode_scan/seek` | CPU decode와 seek sampling 비용입니다. `single`/`hlvid`에서 `--video-resize-*`를 켠 경우 `--video-decode-strategy auto|seek|scan`이 적용되고, 실제 전략과 읽은 frame 수가 summary에 남습니다. 긴 4K HLVid에서는 병목 여부를 먼저 봅니다. | [ProfilePatches:L126](../repro/nvila_runner.py#L126), [load_sampled_video_frames:L1047](../repro/nvila_runner.py#L1047), [build_video_input_summary:L1994](../repro/nvila_runner.py#L1994), [run_stream_profile:L2521](../repro/nvila_runner.py#L2521) | 높음 |
+| resize/tiling | `video_tiling_ms`, stream의 `video_frame_resize`, `spatial_tile_build` | NVILA dynamic tiling과 runner resize cost입니다. AutoGaze 효과와 무관한 전처리 overhead를 분리합니다. | [ProfilePatches:L126](../repro/nvila_runner.py#L126), [run_stream_profile:L2521](../repro/nvila_runner.py#L2521) | 높음 |
+| AutoGaze | `autogaze_ms`, `autogaze_forward_ms`, stream의 `tile_autogaze_tensorize`, `tile_autogaze_forward` | AutoGaze를 넣어서 추가된 비용입니다. token 감소 이득이 이 비용을 이기는지 판단합니다. | [ProfilePatches:L126](../repro/nvila_runner.py#L126), [run_autogaze_on_stream_tile_sequences:L2275](../repro/nvila_runner.py#L2275) | 높음 |
+| SigLIP latency | `siglip_vision_ms`, stream의 `siglip_gazed_forward`, `siglip_keep_all_forward` | vision encoder의 실제 forward 시간입니다. AutoGaze의 1차 효과가 드러나는 지점입니다. | [ProfilePatches:L126](../repro/nvila_runner.py#L126), [run_siglip_on_stream_batch:L2226](../repro/nvila_runner.py#L2226) | 높음 |
+| SigLIP 계산량 | `compute_metrics.siglip_encoder.*` | attention/MLP MACs와 activation byte 추정치입니다. latency가 noisy할 때도 계산량 감소를 설명할 수 있습니다. | [build_autogaze_effect_metrics:L1607](../repro/nvila_runner.py#L1607), [build_stream_profile_compute_metrics:L789](../repro/nvila_runner.py#L789) | 높음 |
+| projector | `mm_projector_ms` | SigLIP hidden state를 LLM hidden dimension으로 보내는 TokenShuffle+MLP 시간입니다. visual token 수가 줄면 같이 줄 수 있습니다. | [mm_projector.forward hook:L164](../repro/nvila_runner.py#L164), [generate_one:L2920](../repro/nvila_runner.py#L2920) | 중간 |
+| LLM latency | `llm_forward_ms`, `ttft_ms`, `decode_estimated_ms` | prefill과 generation decode 비용입니다. AutoGaze의 MLLM context 감소 효과를 봅니다. | [llm.forward hook:L167](../repro/nvila_runner.py#L167), [timed_generate:L1907](../repro/nvila_runner.py#L1907), [generate_one:L2920](../repro/nvila_runner.py#L2920) | 높음 |
+| LLM context/KV | `compute_metrics.mllm.actual_prefill_context_tokens`, `kv_cache_reduction_ratio`, `prefill_total_macs_reduction_ratio` | LLM이 실제로 받은 context 길이와 KV cache/attention 계산 감소 추정치입니다. | [build_autogaze_effect_metrics:L1607](../repro/nvila_runner.py#L1607) | 높음 |
+| CUDA memory | `processor_peak_memory_bytes`, `ttft_peak_memory_bytes`, `llm_peak_memory_bytes`, `peak_memory_bytes` | CUDA peak allocation입니다. OOM 리스크와 배치/프레임 설정 선택에 중요합니다. | [timed_generate:L1907](../repro/nvila_runner.py#L1907), [generate_one:L2920](../repro/nvila_runner.py#L2920), [run_stream_profile:L2521](../repro/nvila_runner.py#L2521) | 높음 |
+| token/patch | `token_metrics.encoder_*`, `token_metrics.llm_*` | encoder patch 감소와 LLM visual token 감소를 분리해서 보여줍니다. 리더 설득용 핵심 근거입니다. | [compute_visual_token_metrics:L1745](../repro/nvila_runner.py#L1745), [build_stream_profile_token_metrics:L733](../repro/nvila_runner.py#L733) | 높음 |
+| 정확도 | HLVid `accuracy_scored`, `accuracy_total`, `failed`, `skipped`, `parse_failed` | AutoGaze 속도 이득이 성능 손실을 만들었는지 확인합니다. | [score_predictions:L141](../repro/hlvid.py#L141), [summarize_run:L492](../repro/hlvid_batch_benchmark.py#L492), [build_gain_report:L503](../repro/hlvid_batch_benchmark.py#L503) | 높음 |
 
 아직 직접 측정하지 않는 항목도 있습니다. `compute_metrics`의 MACs는 실제 GPU hardware counter가 아니라 config 기반 추정치입니다. CUDA의 정확한 SM utilization, DRAM bandwidth, per-layer peak activation은 Nsight/PyTorch profiler가 필요합니다. MPS는 CUDA처럼 reliable한 peak allocation을 제공하지 않으므로 memory 평가는 CUDA에서 최종 확인하세요.
 
@@ -266,7 +268,7 @@ HLVid `--mode hlvid` summary에는 `question_count`, `question_samples`, `benchm
 
 1. Dataset row 로드: HLVid `manifest`, `question`, `answer`, `video_path`
 2. 비디오 resolve: `video_resolved`, `video_input_info`, `video_resize`
-3. frame sampling/decode: `video_decode_ms`, stream의 `decode_strategy`, `decode_frames_read`
+3. frame sampling/decode: `video_decode_ms`, `video_input_summary.video_decode_strategy`, `video_input_summary.video_decode_frames_read`, stream의 `decode_strategy`, `decode_frames_read`
 4. PIL 변환/resize: stream의 `video_frame_to_pil`, `video_frame_resize`
 5. spatial tiling/thumbnail: `video_tiling_ms`, stream의 `spatial_tile_build`, `thumbnail_resize`
 6. AutoGaze 입력 tensorization: stream의 `tile_autogaze_tensorize`
@@ -573,13 +575,13 @@ stream-profile의 측정값을 코드에서 따라가려면 아래 위치를 보
 
 | 측정 그룹 | 코드 위치 |
 | --- | --- |
-| stage timer 누적 | [StageProfiler:L45](../repro/nvila_runner.py#L45) |
-| decode/resize/tiling stream loop | [run_stream_profile:L1822](../repro/nvila_runner.py#L1822) |
-| AutoGaze tensorize/forward | [run_autogaze_on_stream_tile_sequences:L1576](../repro/nvila_runner.py#L1576) |
-| gazed/keep-all SigLIP forward | [run_siglip_on_stream_batch:L1527](../repro/nvila_runner.py#L1527) |
-| stream token/patch count | [build_stream_profile_token_metrics:L313](../repro/nvila_runner.py#L313) |
-| stream SigLIP/MLLM compute estimate | [build_stream_profile_compute_metrics:L362](../repro/nvila_runner.py#L362) |
-| full NVILA hook 기반 timing | [ProfilePatches:L81](../repro/nvila_runner.py#L81), [forward hooks:L95-L100](../repro/nvila_runner.py#L95-L100) |
+| stage timer 누적 | [StageProfiler:L115](../repro/nvila_runner.py#L115) |
+| decode/resize/tiling stream loop | [run_stream_profile:L2521](../repro/nvila_runner.py#L2521) |
+| AutoGaze tensorize/forward | [run_autogaze_on_stream_tile_sequences:L2275](../repro/nvila_runner.py#L2275) |
+| gazed/keep-all SigLIP forward | [run_siglip_on_stream_batch:L2226](../repro/nvila_runner.py#L2226) |
+| stream token/patch count | [build_stream_profile_token_metrics:L733](../repro/nvila_runner.py#L733) |
+| stream SigLIP/MLLM compute estimate | [build_stream_profile_compute_metrics:L789](../repro/nvila_runner.py#L789) |
+| full NVILA hook 기반 timing | [ProfilePatches:L126](../repro/nvila_runner.py#L126), [forward hooks:L164-L167](../repro/nvila_runner.py#L164) |
 
 중요한 경계가 하나 있습니다. 이 모드는 decode, resize, tiling, AutoGaze와 선택적 custom SigLIP forward까지는 chunk streaming으로 측정합니다. 하지만 public NVILA generation path는 최종 visual token sequence를 모아서 LLM prefill/generation에 넣습니다. 그래서 projector와 LLM forward 시간은 기존 `single`/`hlvid` 모드의 `result.mm_projector_ms`, `result.llm_forward_ms`, `result.ttft_ms`로 비교하세요. full NVILA path에서의 vision encoder hook은 여전히 `result.siglip_vision_ms`에도 기록됩니다.
 
@@ -756,7 +758,7 @@ matching keep-all baseline은 모든 설정을 동일하게 유지하고 gaze mo
 
 ### HLVid 폴더 기반 일괄 benchmark
 
-데이터셋을 로컬 폴더로 받은 경우에는 `scripts/run_hlvid_folder_benchmark.py`를 쓰면 됩니다. 이 스크립트는 폴더에서 manifest를 찾고, `keep-all`과 `autogaze`를 같은 설정으로 각각 실행한 뒤, accuracy/속도/메모리/token/compute gain report를 만듭니다.
+데이터셋을 로컬 폴더로 받은 경우에는 `scripts/run_hlvid_folder_benchmark.py`를 쓰면 됩니다. 이 스크립트는 폴더에서 manifest를 찾고, `keep-all`과 `autogaze`를 같은 설정으로 각각 실행한 뒤, accuracy/속도/메모리/token/compute gain report를 만듭니다. `--video-resize-*`를 켠 benchmark에서는 기본적으로 `--video-decode-strategy auto`가 하위 `repro.nvila_runner`에 전달되어 keyframe seek sampling을 먼저 사용합니다.
 
 지원하는 폴더 형태:
 
@@ -874,10 +876,13 @@ CUDA full benchmark 예시:
   --num-video-frames-thumbnail 64 \
   --max-tiles-video 8 \
   --video-resize-shortest-edge 720 \
+  --video-decode-strategy auto \
   --measure-ttft \
   --warmup-runs 1 \
   --continue-on-error
 ```
+
+`--video-decode-strategy`는 `auto`, `seek`, `scan` 중 하나입니다. HLVid benchmark에서 decode 속도 개선을 확인하려면 `--video-resize-shortest-edge` 또는 다른 `--video-resize-*` 옵션을 함께 켜야 합니다. resize를 켜지 않으면 runner가 비디오 path를 그대로 NVILA processor에 넘기므로 이 옵션은 NVILA 내부 loader를 바꾸지 않습니다. `auto`는 안전한 기본값이고, seek fallback을 숨기고 싶지 않은 검증 run에서는 `--video-decode-strategy seek`를 사용하세요. 각 sample의 실제 적용 여부는 predictions JSONL 또는 summary의 `video_input_summary.video_decode_strategy`, `video_decode_frames_read`, `video_decode_strategy_fallback_error`에서 확인합니다.
 
 생성되는 주요 파일:
 

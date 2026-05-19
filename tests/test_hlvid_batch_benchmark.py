@@ -112,6 +112,7 @@ def test_build_runner_command_includes_local_manifest_and_measurement_flags(tmp_
         video_resize_longest_edge=None,
         video_resize_width=None,
         video_resize_height=None,
+        video_decode_strategy="auto",
         autogaze_target_scales="56+112+196+392",
         autogaze_target_patch_size=14,
         task_loss_requirement_tile=0.7,
@@ -142,6 +143,8 @@ def test_build_runner_command_includes_local_manifest_and_measurement_flags(tmp_
     assert "--continue-on-error" in command
     assert "--warmup-runs" in command
     assert "1" in command
+    assert "--video-decode-strategy" in command
+    assert "auto" in command
 
 
 def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():

@@ -479,6 +479,8 @@ def build_runner_command(
         command.extend(["--video-resize-width", str(args.video_resize_width)])
     if getattr(args, "video_resize_height", None) is not None:
         command.extend(["--video-resize-height", str(args.video_resize_height)])
+    if getattr(args, "video_decode_strategy", None) is not None:
+        command.extend(["--video-decode-strategy", str(args.video_decode_strategy)])
     if getattr(args, "autogaze_target_scales", None) is not None:
         command.extend(["--autogaze-target-scales", str(args.autogaze_target_scales)])
     if getattr(args, "autogaze_target_patch_size", None) is not None:
@@ -718,6 +720,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--video-resize-longest-edge", type=int)
     parser.add_argument("--video-resize-width", type=int)
     parser.add_argument("--video-resize-height", type=int)
+    parser.add_argument("--video-decode-strategy", choices=["auto", "seek", "scan"], default="auto")
     parser.add_argument("--autogaze-target-scales")
     parser.add_argument("--autogaze-target-patch-size", type=int)
     parser.add_argument("--python-executable", default=sys.executable)
