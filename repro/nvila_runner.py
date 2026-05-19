@@ -248,6 +248,66 @@ def summarize_repeat_results(results: list[dict[str, Any]]) -> dict[str, dict[st
     return summary
 
 
+def summary_metric(payload: dict[str, Any], field: str, stat: str = "median") -> Any:
+    repeat_summary = payload.get("repeat_summary")
+    if isinstance(repeat_summary, dict) and isinstance(repeat_summary.get(field), dict):
+        return repeat_summary[field].get(stat)
+    return metric_value(payload.get("result", {}), field)
+
+
+def build_single_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    result = payload.get("result", {})
+    token_metrics = result.get("token_metrics", {}) if isinstance(result, dict) else {}
+    compute_metrics = result.get("compute_metrics", {}) if isinstance(result, dict) else {}
+    siglip_metrics = compute_metrics.get("siglip_encoder", {}) if isinstance(compute_metrics, dict) else {}
+    mllm_metrics = compute_metrics.get("mllm", {}) if isinstance(compute_metrics, dict) else {}
+    return {
+        "model_path": payload.get("model_path"),
+        "gazing_mode": payload.get("gazing_mode"),
+        "video": payload.get("video"),
+        "answer": result.get("raw_output"),
+        "parsed_answer": result.get("parsed_answer"),
+        "generated_tokens": result.get("generated_tokens"),
+        "latency_ms": {
+            "total_median": summary_metric(payload, "total_ms"),
+            "ttft_median": summary_metric(payload, "ttft_ms"),
+            "decode_estimated_median": summary_metric(payload, "decode_estimated_ms"),
+            "video_decode_median": summary_metric(payload, "video_decode_ms"),
+            "video_tiling_median": summary_metric(payload, "video_tiling_ms"),
+            "autogaze_forward_median": summary_metric(payload, "autogaze_forward_ms"),
+            "siglip_vision_median": summary_metric(payload, "siglip_vision_ms"),
+            "mm_projector_median": summary_metric(payload, "mm_projector_ms"),
+            "llm_forward_median": summary_metric(payload, "llm_forward_ms"),
+        },
+        "memory_bytes": {
+            "processor_peak_median": summary_metric(payload, "processor_peak_memory_bytes"),
+            "ttft_peak_median": summary_metric(payload, "ttft_peak_memory_bytes"),
+            "llm_peak_median": summary_metric(payload, "llm_peak_memory_bytes"),
+        },
+        "tokens": {
+            "encoder_raw_patch_tokens": token_metrics.get("encoder_raw_patch_tokens"),
+            "encoder_selected_patch_tokens": token_metrics.get("encoder_autogaze_selected_patch_tokens"),
+            "encoder_token_reduction_ratio": token_metrics.get("encoder_token_reduction_ratio"),
+            "encoder_tile_token_reduction_ratio": token_metrics.get("encoder_tile_token_reduction_ratio"),
+            "llm_keep_all_visual_tokens_estimated": token_metrics.get("llm_keep_all_visual_tokens_estimated"),
+            "llm_actual_visual_tokens": token_metrics.get("llm_actual_visual_tokens"),
+            "llm_visual_token_reduction_ratio": token_metrics.get("llm_visual_token_reduction_ratio"),
+        },
+        "compute": {
+            "siglip_attention_macs_reduction_ratio": siglip_metrics.get(
+                "keep_all_to_actual_attention_macs_ratio"
+            ),
+            "siglip_mlp_macs_reduction_ratio": siglip_metrics.get("keep_all_to_actual_mlp_macs_ratio"),
+            "siglip_total_macs_reduction_ratio": siglip_metrics.get("keep_all_to_actual_total_macs_ratio"),
+            "mllm_prefill_context_reduction_ratio": mllm_metrics.get("prefill_context_reduction_ratio"),
+            "mllm_kv_cache_reduction_ratio": mllm_metrics.get("kv_cache_reduction_ratio"),
+            "mllm_prefill_total_macs_reduction_ratio": mllm_metrics.get(
+                "prefill_total_macs_reduction_ratio"
+            ),
+        },
+    }
+
+
 def uniform_sample_indices(total_frames: int, sample_count: int) -> list[int]:
     if total_frames <= 0:
         raise ValueError("total_frames must be positive")
@@ -2444,8 +2504,15 @@ def run_single(args: argparse.Namespace) -> None:
             "result is the last measured run for backward compatibility. "
             "Use repeat_summary median/mean/min/max fields for warmup-aware latency and memory claims."
         )
+    summary = build_single_summary(payload)
+    payload["summary"] = summary
+    if args.summary_json:
+        write_json(args.summary_json, summary)
     write_json(args.output_json, payload)
-    print(json.dumps(payload, indent=2, sort_keys=True))
+    if args.print_summary:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+    else:
+        print(json.dumps(payload, indent=2, sort_keys=True))
 
 
 def run_preflight(args: argparse.Namespace) -> None:
@@ -2643,6 +2710,8 @@ def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentPar
     parser.add_argument("--preflight-json", default="outputs/autogaze_repro/nvila_preflight.json")
     parser.add_argument("--stream-profile-json", default="outputs/autogaze_repro/nvila_stream_profile.json")
     parser.add_argument("--output-json", default="outputs/autogaze_repro/nvila_single.json")
+    parser.add_argument("--summary-json")
+    parser.add_argument("--print-summary", action="store_true")
     parser.add_argument("--predictions", default="outputs/autogaze_repro/hlvid_predictions.jsonl")
     parser.add_argument("--summary", default="outputs/autogaze_repro/hlvid_summary.json")
     parser.add_argument("--scored-predictions", default="outputs/autogaze_repro/hlvid_scored_predictions.jsonl")

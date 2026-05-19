@@ -25,6 +25,7 @@ from repro.nvila_runner import (
     parse_args,
     processor_kwargs,
     processor_videos_argument,
+    build_single_summary,
     frame_index_to_pts,
     pts_to_frame_index,
     stream_pts_per_frame,
@@ -228,6 +229,48 @@ def test_processor_videos_argument_keeps_path_or_url_as_single_input():
     path = "/tmp/video.mp4"
 
     assert processor_videos_argument(path, {"mode": "path_or_url"}) == path
+
+
+def test_build_single_summary_extracts_report_ready_metrics_from_single_payload():
+    payload = {
+        "model_path": "local-nvila",
+        "gazing_mode": "autogaze",
+        "video": "video.mp4",
+        "result": {
+            "raw_output": "A",
+            "generated_tokens": 4,
+            "total_ms": 100.0,
+            "ttft_ms": 30.0,
+            "siglip_vision_ms": 20.0,
+            "llm_peak_memory_bytes": 1024,
+            "token_metrics": {
+                "encoder_token_reduction_ratio": 3.0,
+                "llm_visual_token_reduction_ratio": 2.0,
+                "llm_actual_visual_tokens": 40,
+            },
+            "compute_metrics": {
+                "siglip_encoder": {"keep_all_to_actual_total_macs_ratio": 4.0},
+                "mllm": {"kv_cache_reduction_ratio": 2.5},
+            },
+        },
+        "repeat_summary": {
+            "total_ms": {"median": 90.0},
+            "ttft_ms": {"median": 25.0},
+            "siglip_vision_ms": {"median": 18.0},
+            "llm_peak_memory_bytes": {"median": 900.0},
+        },
+    }
+
+    summary = build_single_summary(payload)
+
+    assert summary["answer"] == "A"
+    assert summary["latency_ms"]["total_median"] == 90.0
+    assert summary["latency_ms"]["ttft_median"] == 25.0
+    assert summary["memory_bytes"]["llm_peak_median"] == 900.0
+    assert summary["tokens"]["encoder_token_reduction_ratio"] == 3.0
+    assert summary["tokens"]["llm_actual_visual_tokens"] == 40
+    assert summary["compute"]["siglip_total_macs_reduction_ratio"] == 4.0
+    assert summary["compute"]["mllm_kv_cache_reduction_ratio"] == 2.5
 
 
 def test_parse_int_sequence_accepts_plus_comma_and_bracket_formats():

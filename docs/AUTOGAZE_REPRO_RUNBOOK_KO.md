@@ -111,6 +111,8 @@ NVILA runner는 output JSON에 모듈별 timing을 기록합니다. 중요한 �
 
 단일 파일 inference도 같은 output JSON에 속도/토큰/메모리 필드를 남깁니다. `--measure-ttft` 없이도 `total_ms`, `video_decode_ms`, `video_tiling_ms`, `autogaze_forward_ms`, `siglip_vision_ms`, `mm_projector_ms`, `llm_forward_ms`, `token_metrics`, `compute_metrics`, CUDA의 `processor_peak_memory_bytes`와 `llm_peak_memory_bytes`가 기록됩니다. `--measure-ttft`를 켜면 여기에 `ttft_ms`, `ttft_stage_timings_ms`, `ttft_peak_memory_bytes`, `decode_estimated_ms`가 추가됩니다. MPS에서는 CUDA peak allocation API가 없어서 memory field가 null일 수 있습니다.
 
+raw output JSON이 너무 길면 `--print-summary --summary-json <path>`를 붙이세요. 전체 raw JSON은 `--output-json`에 그대로 저장하고, 터미널과 summary file에는 답변, 주요 latency, CUDA memory, token reduction, compute reduction만 정리합니다.
+
 CUDA에서 속도 claim을 만들 때는 `single` 모드에 `--warmup-runs 1 --repeat-runs 3` 이상을 붙이는 것을 권장합니다. warmup 결과는 버리고, 측정 run은 `repeat_results`에 모두 저장되며 `repeat_summary`에 mean/median/min/max가 정리됩니다. backward compatibility를 위해 `result`는 마지막 측정 run으로 남겨둡니다. HLVid full benchmark에서는 `--warmup-runs`만 사용하세요. dataset row 자체가 여러 샘플이므로 반복 통계는 per-row 결과의 median으로 봅니다.
 
 한 파일에서 AutoGaze 적용 이득까지 보려면 같은 video/prompt를 `--gazing-mode keep-all`과 `--gazing-mode autogaze`로 각각 한 번씩 실행해 JSON을 비교합니다. 한 번의 `single` 실행은 한 mode의 실제 end-to-end 결과만 기록합니다. `stream-profile --stream-siglip-mode both`는 한 번에 keep-all/gazed SigLIP forward를 비교할 수 있지만, projector/LLM까지 포함한 full NVILA 비교는 아닙니다.
@@ -718,6 +720,8 @@ HLVid는 benchmark용 manifest지만, 각 row는 `video_path + question` 형태�
   --measure-ttft \
   --warmup-runs 1 \
   --repeat-runs 3 \
+  --print-summary \
+  --summary-json outputs/autogaze_repro/single_hlvid_infer_autogaze_summary.json \
   --output-json outputs/autogaze_repro/single_hlvid_infer_autogaze.json
 ```
 
