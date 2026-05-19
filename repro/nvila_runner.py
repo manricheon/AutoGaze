@@ -255,16 +255,79 @@ def summary_metric(payload: dict[str, Any], field: str, stat: str = "median") ->
     return metric_value(payload.get("result", {}), field)
 
 
+def _numeric_delta(before: Any, after: Any) -> float | int | None:
+    if before is None or after is None:
+        return None
+    try:
+        before_value = float(before)
+        after_value = float(after)
+    except (TypeError, ValueError):
+        return None
+    delta = before_value - after_value
+    if isinstance(before, int) and isinstance(after, int):
+        return int(delta)
+    return delta
+
+
+def _reduction_percent(before: Any, after: Any) -> float | None:
+    if before is None or after is None:
+        return None
+    try:
+        before_value = float(before)
+        after_value = float(after)
+    except (TypeError, ValueError):
+        return None
+    if before_value == 0:
+        return None
+    return round((1.0 - (after_value / before_value)) * 100.0, 6)
+
+
 def build_single_summary(payload: dict[str, Any]) -> dict[str, Any]:
     result = payload.get("result", {})
     token_metrics = result.get("token_metrics", {}) if isinstance(result, dict) else {}
     compute_metrics = result.get("compute_metrics", {}) if isinstance(result, dict) else {}
     siglip_metrics = compute_metrics.get("siglip_encoder", {}) if isinstance(compute_metrics, dict) else {}
     mllm_metrics = compute_metrics.get("mllm", {}) if isinstance(compute_metrics, dict) else {}
+    encoder_raw_patch_tokens = token_metrics.get("encoder_raw_patch_tokens")
+    encoder_selected_patch_tokens = token_metrics.get("encoder_autogaze_selected_patch_tokens")
+    llm_keep_all_visual_tokens = token_metrics.get("llm_keep_all_visual_tokens_estimated")
+    llm_actual_visual_tokens = token_metrics.get("llm_actual_visual_tokens")
     return {
         "model_path": payload.get("model_path"),
         "gazing_mode": payload.get("gazing_mode"),
         "video": payload.get("video"),
+        "key_autogaze_effect": {
+            "gazing_mode": payload.get("gazing_mode"),
+            "total_ms_median": summary_metric(payload, "total_ms"),
+            "ttft_ms_median": summary_metric(payload, "ttft_ms"),
+            "autogaze_total_ms_median": summary_metric(payload, "autogaze_ms"),
+            "autogaze_forward_ms_median": summary_metric(payload, "autogaze_forward_ms"),
+            "siglip_vision_ms_median": summary_metric(payload, "siglip_vision_ms"),
+            "llm_forward_ms_median": summary_metric(payload, "llm_forward_ms"),
+            "encoder_patch_tokens_before_keep_all": encoder_raw_patch_tokens,
+            "encoder_patch_tokens_after_actual": encoder_selected_patch_tokens,
+            "encoder_patch_tokens_removed": _numeric_delta(encoder_raw_patch_tokens, encoder_selected_patch_tokens),
+            "encoder_patch_reduction_ratio": token_metrics.get("encoder_token_reduction_ratio"),
+            "encoder_patch_reduction_percent": _reduction_percent(
+                encoder_raw_patch_tokens,
+                encoder_selected_patch_tokens,
+            ),
+            "llm_visual_tokens_before_keep_all_estimated": llm_keep_all_visual_tokens,
+            "llm_visual_tokens_after_actual": llm_actual_visual_tokens,
+            "llm_visual_tokens_removed_estimated": _numeric_delta(
+                llm_keep_all_visual_tokens,
+                llm_actual_visual_tokens,
+            ),
+            "llm_visual_token_reduction_ratio": token_metrics.get("llm_visual_token_reduction_ratio"),
+            "llm_visual_token_reduction_percent": _reduction_percent(
+                llm_keep_all_visual_tokens,
+                llm_actual_visual_tokens,
+            ),
+            "siglip_total_macs_reduction_ratio": siglip_metrics.get("keep_all_to_actual_total_macs_ratio"),
+            "mllm_prefill_context_reduction_ratio": mllm_metrics.get("prefill_context_reduction_ratio"),
+            "mllm_kv_cache_reduction_ratio": mllm_metrics.get("kv_cache_reduction_ratio"),
+            "llm_peak_memory_bytes_median": summary_metric(payload, "llm_peak_memory_bytes"),
+        },
         "answer": result.get("raw_output"),
         "parsed_answer": result.get("parsed_answer"),
         "generated_tokens": result.get("generated_tokens"),
@@ -274,6 +337,7 @@ def build_single_summary(payload: dict[str, Any]) -> dict[str, Any]:
             "decode_estimated_median": summary_metric(payload, "decode_estimated_ms"),
             "video_decode_median": summary_metric(payload, "video_decode_ms"),
             "video_tiling_median": summary_metric(payload, "video_tiling_ms"),
+            "autogaze_total_median": summary_metric(payload, "autogaze_ms"),
             "autogaze_forward_median": summary_metric(payload, "autogaze_forward_ms"),
             "siglip_vision_median": summary_metric(payload, "siglip_vision_ms"),
             "mm_projector_median": summary_metric(payload, "mm_projector_ms"),

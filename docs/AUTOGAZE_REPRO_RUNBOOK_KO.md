@@ -111,11 +111,66 @@ NVILA runner는 output JSON에 모듈별 timing을 기록합니다. 중요한 �
 
 단일 파일 inference도 같은 output JSON에 속도/토큰/메모리 필드를 남깁니다. `--measure-ttft` 없이도 `total_ms`, `video_decode_ms`, `video_tiling_ms`, `autogaze_forward_ms`, `siglip_vision_ms`, `mm_projector_ms`, `llm_forward_ms`, `token_metrics`, `compute_metrics`, CUDA의 `processor_peak_memory_bytes`와 `llm_peak_memory_bytes`가 기록됩니다. `--measure-ttft`를 켜면 여기에 `ttft_ms`, `ttft_stage_timings_ms`, `ttft_peak_memory_bytes`, `decode_estimated_ms`가 추가됩니다. MPS에서는 CUDA peak allocation API가 없어서 memory field가 null일 수 있습니다.
 
-raw output JSON이 너무 길면 `--print-summary --summary-json <path>`를 붙이세요. 전체 raw JSON은 `--output-json`에 그대로 저장하고, 터미널과 summary file에는 답변, 주요 latency, CUDA memory, token reduction, compute reduction만 정리합니다.
+raw output JSON이 너무 길면 `--print-summary --summary-json <path>`를 붙이세요. 전체 raw JSON은 `--output-json`에 그대로 저장하고, 터미널과 summary file에는 답변과 함께 `key_autogaze_effect`를 별도로 정리합니다. 이 섹션에는 AutoGaze 전후 차이를 가장 잘 보여주는 encoder patch 수, LLM visual token 수, reduction ratio/percent, SigLIP/MLLM 계산량 감소 추정치, 핵심 latency/memory median이 모입니다. 상세 분석용 `latency_ms`, `memory_bytes`, `tokens`, `compute` 섹션도 함께 남깁니다.
 
 CUDA에서 속도 claim을 만들 때는 `single` 모드에 `--warmup-runs 1 --repeat-runs 3` 이상을 붙이는 것을 권장합니다. warmup 결과는 버리고, 측정 run은 `repeat_results`에 모두 저장되며 `repeat_summary`에 mean/median/min/max가 정리됩니다. backward compatibility를 위해 `result`는 마지막 측정 run으로 남겨둡니다. HLVid full benchmark에서는 `--warmup-runs`만 사용하세요. dataset row 자체가 여러 샘플이므로 반복 통계는 per-row 결과의 median으로 봅니다.
 
 한 파일에서 AutoGaze 적용 이득까지 보려면 같은 video/prompt를 `--gazing-mode keep-all`과 `--gazing-mode autogaze`로 각각 한 번씩 실행해 JSON을 비교합니다. 한 번의 `single` 실행은 한 mode의 실제 end-to-end 결과만 기록합니다. `stream-profile --stream-siglip-mode both`는 한 번에 keep-all/gazed SigLIP forward를 비교할 수 있지만, projector/LLM까지 포함한 full NVILA 비교는 아닙니다.
+
+### 시간 필드의 상하위 관계
+
+runner의 timing은 NVILA remote-code method를 runtime에 감싸서 측정합니다. 그래서 어떤 값은 상위 구간이고, 어떤 값은 그 안에서 잡힌 하위 구간입니다. 상위와 하위 값은 병목을 설명하기 위한 관계이지, 모든 필드가 항상 더해서 정확히 같은 숫자가 되는 closed accounting은 아닙니다. 특히 `--measure-ttft`는 full generation과 별도의 1-token generation pass를 한 번 더 실행합니다.
+
+```text
+single run
+|
+|-- optional runner-side video_decode_sampling
+|      when --video-resize-* is enabled, frames are decoded/sampled/resized
+|      before calling the NVILA processor.
+|
+|-- processor_total
+|   |-- video_tiling_and_tensorize  -> result.video_tiling_ms
+|   |      dynamic tiling, thumbnail resize/crop, image tensorization
+|   |
+|   `-- autogaze_total             -> result.autogaze_ms
+|       |  AutoGaze selection stage: model forward + gaze-info
+|       |  construction + padding/splitting/bookkeeping
+|       |
+|       `-- autogaze_forward_batched -> result.autogaze_forward_ms
+|           pure AutoGaze model forward over batched tile tensors
+|
+|-- model.generate full pass        -> result.generate_ms
+|   |-- vision_encode_total         -> result.vision_encoder_ms
+|   |   |-- siglip_vision_tower      -> result.siglip_vision_ms
+|   |   `-- mm_projector.forward     -> result.mm_projector_ms
+|   |
+|   `-- llm.forward accumulated      -> result.llm_forward_ms
+|
+`-- result.total_ms = result.video_preprocess_ms + result.generate_ms
+
+if --measure-ttft:
+`-- separate 1-token model.generate pass -> result.ttft_ms
+    |-- result.ttft_stage_timings_ms.siglip_vision_tower
+    |-- result.ttft_stage_timings_ms.mm_projector
+    `-- result.ttft_stage_timings_ms.llm_forward
+```
+
+| 상위/대표 필드 | 하위 또는 관련 필드 | 포함 관계 | 해석 |
+| --- | --- | --- | --- |
+| `total_ms` | `video_preprocess_ms`, `generate_ms` | `generate_one()`이 최종 산출합니다. | 단일 run의 end-to-end latency입니다. `ttft_ms`는 별도 pass라 여기에 포함하지 않습니다. |
+| `video_preprocess_ms` | `processor_total`, 선택적 `video_decode_sampling` | resize 옵션이 켜지면 runner-side decode/sampling도 더합니다. | MLLM generate 전까지 입력을 만드는 전체 비용입니다. |
+| `stage_timings_ms.processor.processor_total` | `video_tiling_and_tensorize`, `autogaze_total`, 내부 decode | processor call 전체를 감싼 상위 구간입니다. | tokenization, video preprocess, tiling/tensorization, AutoGaze selection을 함께 봅니다. |
+| `video_decode_ms` | `video_decode_sampling` | resize 사용 시 processor 밖에서, 미사용 시 processor 안에서 측정될 수 있습니다. | 긴 4K HLVid에서 CPU decode/seek가 병목인지 확인합니다. |
+| `video_tiling_ms` | `video_tiling_and_tensorize` | `processor_total`의 하위 구간입니다. | tile/thumbnail 생성과 image tensorization 비용입니다. |
+| `autogaze_ms` | `autogaze_total` | `processor_total`의 하위 구간입니다. | AutoGaze stage 전체 시간입니다. 순수 모델 forward만이 아니라 gaze-info 생성, padding, split/bookkeeping이 포함됩니다. |
+| `autogaze_forward_ms` | `autogaze_forward_batched` | `autogaze_total`의 하위 구간입니다. | 순수 AutoGaze 모델 forward 시간입니다. “AutoGaze 모델만 돈 시간”은 이 값을 봅니다. |
+| `vision_encoder_ms` | `siglip_vision_ms`, `mm_projector_ms` | generate pass 내부 vision path 상위 구간입니다. | NVILA의 vision encoding 전체입니다. 순수 SigLIP만 보려면 `siglip_vision_ms`를 봅니다. |
+| `siglip_vision_ms` | `siglip_vision_tower` | `vision_encoder_ms`의 하위 구간입니다. | AutoGaze가 patch/token을 줄여 vision tower forward가 빨라지는지 보는 핵심 latency입니다. |
+| `mm_projector_ms` | `mm_projector.forward` | vision feature를 LLM hidden dimension으로 투영하는 구간입니다. | TokenShuffle 이후 visual token 수 감소가 projector 비용에 반영되는지 확인합니다. |
+| `llm_forward_ms` | `llm.forward` 누적 | full generation pass에서 LLM forward hook을 누적합니다. | prefill과 decode 호출이 모두 포함됩니다. TTFT 분리는 `ttft_stage_timings_ms`를 함께 봅니다. |
+| `ttft_ms` | `ttft_stage_timings_ms.*` | `--measure-ttft`일 때 별도 1-token generate pass입니다. | prefill context, KV cache, 첫 토큰 latency를 보는 값입니다. full `total_ms`에 더하지 않습니다. |
+
+관련 코드 위치는 stage hook 정의 [ProfilePatches:L126](../repro/nvila_runner.py#L126), processor/generate 실행 [generate_one:L2427](../repro/nvila_runner.py#L2427), 결과 필드 조립 [generate_one result fields:L2492](../repro/nvila_runner.py#L2492), full/TTFT generation timer [timed_generate:L1538](../repro/nvila_runner.py#L1538), compact summary 생성 [build_single_summary:L285](../repro/nvila_runner.py#L285)입니다.
 
 토큰 metrics는 두 단계로 나눠서 봅니다. encoder patch budget은 TokenShuffle/projector 이전의 patch 수입니다. 여기에는 실제 샘플링된 비디오 프레임, spatial tile, thumbnail, 그리고 설정된 모든 visual scale의 patch가 포함됩니다. LLM visual-token budget은 TokenShuffle/projector 이후 language model이 실제로 받는 visual placeholder token 수입니다.
 
@@ -180,24 +235,26 @@ LLM visual-token 기준:
 4. PIL 변환/resize: stream의 `video_frame_to_pil`, `video_frame_resize`
 5. spatial tiling/thumbnail: `video_tiling_ms`, stream의 `spatial_tile_build`, `thumbnail_resize`
 6. AutoGaze 입력 tensorization: stream의 `tile_autogaze_tensorize`
-7. AutoGaze forward: `autogaze_forward_ms`, stream의 `tile_autogaze_forward`
-8. SigLIP vision tower: `siglip_vision_ms` 또는 stream의 `siglip_gazed_forward/keep_all_forward`
-9. visual token 정렬/TokenShuffle/projector: `mm_projector_ms`, `token_metrics.llm_actual_visual_tokens`
-10. LLM prefill/TTFT: `ttft_ms`, `compute_metrics.mllm.actual_prefill_context_tokens`, `actual_kv_cache_bytes_after_prefill_estimated`
-11. LLM decode: `llm_forward_ms`, `decode_estimated_ms`, `generated_tokens`
-12. scoring/report: HLVid `accuracy_scored`, batch report의 `gains.*`
+7. AutoGaze selection 전체: `autogaze_ms`
+8. AutoGaze model forward-only: `autogaze_forward_ms`, stream의 `tile_autogaze_forward`
+9. SigLIP vision tower: `siglip_vision_ms` 또는 stream의 `siglip_gazed_forward/keep_all_forward`
+10. visual token 정렬/TokenShuffle/projector: `mm_projector_ms`, `token_metrics.llm_actual_visual_tokens`
+11. LLM prefill/TTFT: `ttft_ms`, `compute_metrics.mllm.actual_prefill_context_tokens`, `actual_kv_cache_bytes_after_prefill_estimated`
+12. LLM decode: `llm_forward_ms`, `decode_estimated_ms`, `generated_tokens`
+13. scoring/report: HLVid `accuracy_scored`, batch report의 `gains.*`
 
 AutoGaze 적용 전후 실제 gain은 반드시 같은 설정의 `keep-all`과 `autogaze`를 나란히 비교합니다.
 
 | 확인 질문 | 볼 필드 |
 | --- | --- |
+| 단일 파일 summary에서 먼저 볼 핵심은? | `summary.key_autogaze_effect.encoder_patch_*`, `summary.key_autogaze_effect.llm_visual_*`, `summary.key_autogaze_effect.siglip_total_macs_reduction_ratio`, `summary.key_autogaze_effect.mllm_*`, `summary.key_autogaze_effect.total_ms_median` |
 | 정확도가 유지됐나? | `autogaze.accuracy.accuracy_scored`, `keep_all.accuracy.accuracy_scored`, `gains.accuracy_scored_delta` |
 | 전체 latency가 줄었나? | `gains.latency_speedup_median.total_ms` |
 | SigLIP가 빨라졌나? | `gains.latency_speedup_median.siglip_vision_ms`, stream의 `siglip_keep_all_forward / siglip_gazed_forward` |
 | LLM prefill 부담이 줄었나? | `compute_metrics.mllm.prefill_context_reduction_ratio`, `kv_cache_reduction_ratio` |
 | visual token이 줄었나? | `token_metrics.llm_visual_token_reduction_ratio`, batch report의 `gains.autogaze_token_reduction_median` |
 | 메모리 이득이 있나? | `gains.memory_reduction_ratio_median.llm_peak_memory_bytes`, `ttft_peak_memory_bytes` |
-| AutoGaze overhead가 이득을 잡아먹나? | `autogaze_forward_ms`와 `siglip_vision_ms/llm_forward_ms` 감소량 비교 |
+| AutoGaze overhead가 이득을 잡아먹나? | `autogaze_ms`, `autogaze_forward_ms`와 `siglip_vision_ms/llm_forward_ms` 감소량 비교 |
 
 AutoGaze와 full-token baseline을 비교하려면 같은 input을 두 번 실행하고 `--gazing-mode`만 바꿉니다. `autogaze`는 NVILA quickstart의 tile selection ratio를 사용합니다. `keep-all`은 `gazing_ratio_tile=1`, `task_loss_requirement_tile=None`으로 설정하여 public NVILA processor가 AutoGaze를 호출하지 않고 keep-all mask를 만들게 합니다.
 

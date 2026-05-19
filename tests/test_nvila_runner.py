@@ -241,33 +241,72 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
             "generated_tokens": 4,
             "total_ms": 100.0,
             "ttft_ms": 30.0,
+            "video_tiling_ms": 11.0,
+            "autogaze_ms": 12.0,
+            "autogaze_forward_ms": 10.0,
             "siglip_vision_ms": 20.0,
+            "mm_projector_ms": 3.0,
+            "llm_forward_ms": 50.0,
             "llm_peak_memory_bytes": 1024,
             "token_metrics": {
-                "encoder_token_reduction_ratio": 3.0,
+                "encoder_raw_patch_tokens": 80,
+                "encoder_autogaze_selected_patch_tokens": 40,
+                "encoder_token_reduction_ratio": 2.0,
                 "llm_visual_token_reduction_ratio": 2.0,
+                "llm_keep_all_visual_tokens_estimated": 80,
                 "llm_actual_visual_tokens": 40,
             },
             "compute_metrics": {
                 "siglip_encoder": {"keep_all_to_actual_total_macs_ratio": 4.0},
-                "mllm": {"kv_cache_reduction_ratio": 2.5},
+                "mllm": {
+                    "prefill_context_reduction_ratio": 1.5,
+                    "kv_cache_reduction_ratio": 2.5,
+                },
             },
         },
         "repeat_summary": {
             "total_ms": {"median": 90.0},
             "ttft_ms": {"median": 25.0},
+            "autogaze_ms": {"median": 12.0},
+            "autogaze_forward_ms": {"median": 10.0},
             "siglip_vision_ms": {"median": 18.0},
+            "llm_forward_ms": {"median": 45.0},
             "llm_peak_memory_bytes": {"median": 900.0},
         },
     }
 
     summary = build_single_summary(payload)
 
+    assert summary["key_autogaze_effect"] == {
+        "gazing_mode": "autogaze",
+        "total_ms_median": 90.0,
+        "ttft_ms_median": 25.0,
+        "autogaze_total_ms_median": 12.0,
+        "autogaze_forward_ms_median": 10.0,
+        "siglip_vision_ms_median": 18.0,
+        "llm_forward_ms_median": 45.0,
+        "encoder_patch_tokens_before_keep_all": 80,
+        "encoder_patch_tokens_after_actual": 40,
+        "encoder_patch_tokens_removed": 40,
+        "encoder_patch_reduction_ratio": 2.0,
+        "encoder_patch_reduction_percent": 50.0,
+        "llm_visual_tokens_before_keep_all_estimated": 80,
+        "llm_visual_tokens_after_actual": 40,
+        "llm_visual_tokens_removed_estimated": 40,
+        "llm_visual_token_reduction_ratio": 2.0,
+        "llm_visual_token_reduction_percent": 50.0,
+        "siglip_total_macs_reduction_ratio": 4.0,
+        "mllm_prefill_context_reduction_ratio": 1.5,
+        "mllm_kv_cache_reduction_ratio": 2.5,
+        "llm_peak_memory_bytes_median": 900.0,
+    }
     assert summary["answer"] == "A"
     assert summary["latency_ms"]["total_median"] == 90.0
     assert summary["latency_ms"]["ttft_median"] == 25.0
+    assert summary["latency_ms"]["autogaze_total_median"] == 12.0
+    assert summary["latency_ms"]["autogaze_forward_median"] == 10.0
     assert summary["memory_bytes"]["llm_peak_median"] == 900.0
-    assert summary["tokens"]["encoder_token_reduction_ratio"] == 3.0
+    assert summary["tokens"]["encoder_token_reduction_ratio"] == 2.0
     assert summary["tokens"]["llm_actual_visual_tokens"] == 40
     assert summary["compute"]["siglip_total_macs_reduction_ratio"] == 4.0
     assert summary["compute"]["mllm_kv_cache_reduction_ratio"] == 2.5
