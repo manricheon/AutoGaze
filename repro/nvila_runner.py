@@ -296,6 +296,7 @@ def build_single_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "model_path": payload.get("model_path"),
         "gazing_mode": payload.get("gazing_mode"),
         "video": payload.get("video"),
+        "video_input_summary": result.get("video_input_summary") if isinstance(result, dict) else None,
         "key_autogaze_effect": {
             "gazing_mode": payload.get("gazing_mode"),
             "total_ms_median": summary_metric(payload, "total_ms"),
@@ -1586,6 +1587,111 @@ def video_resize_config(args: argparse.Namespace, metadata: dict[str, Any] | Non
     }
 
 
+def _maybe_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _maybe_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolution(width: int | None, height: int | None) -> str | None:
+    if width is None or height is None:
+        return None
+    return f"{width}x{height}"
+
+
+def read_video_metadata_if_local(video: str) -> dict[str, Any] | None:
+    if video.startswith("http://") or video.startswith("https://"):
+        return None
+    path = Path(video)
+    if not path.exists():
+        return None
+    try:
+        return read_video_metadata(str(path))
+    except Exception:
+        return None
+
+
+def build_video_input_summary(
+    *,
+    args: argparse.Namespace,
+    resolved_video: str,
+    source_metadata: dict[str, Any] | None,
+    video_input_info: dict[str, Any],
+    token_metrics: dict[str, Any],
+) -> dict[str, Any]:
+    source_width = _maybe_int(source_metadata.get("width")) if source_metadata else None
+    source_height = _maybe_int(source_metadata.get("height")) if source_metadata else None
+    source_frames = _maybe_int(source_metadata.get("frames")) if source_metadata else None
+    requested_video_frames = _maybe_int(getattr(args, "num_video_frames", None))
+    requested_thumbnail_frames = _maybe_int(getattr(args, "num_video_frames_thumbnail", None))
+    resize = video_input_info.get("resize") if isinstance(video_input_info, dict) else None
+    if not isinstance(resize, dict):
+        resize = video_resize_config(args, source_metadata)
+    effective = resize.get("effective") if isinstance(resize, dict) else None
+    processor_width = None
+    processor_height = None
+    if isinstance(effective, dict):
+        processor_width = _maybe_int(effective.get("width"))
+        processor_height = _maybe_int(effective.get("height"))
+    if processor_width is None:
+        processor_width = source_width
+    if processor_height is None:
+        processor_height = source_height
+    sampled_frame_start = None
+    sampled_frame_end = None
+    if (
+        source_frames is not None
+        and source_frames > 0
+        and requested_video_frames is not None
+        and requested_video_frames > 0
+    ):
+        sampled_indices = uniform_sample_indices(source_frames, requested_video_frames)
+        sampled_frame_start = sampled_indices[0]
+        sampled_frame_end = sampled_indices[-1]
+    return {
+        "resolved_video": resolved_video,
+        "source_frames": source_frames,
+        "source_resolution": _resolution(source_width, source_height),
+        "source_width": source_width,
+        "source_height": source_height,
+        "source_fps": _maybe_float(source_metadata.get("fps")) if source_metadata else None,
+        "source_duration_seconds": _maybe_float(source_metadata.get("duration_seconds")) if source_metadata else None,
+        "source_codec": source_metadata.get("codec") if source_metadata else None,
+        "requested_video_frames": requested_video_frames,
+        "actual_video_frames": _maybe_int(token_metrics.get("video_sampled_frames")),
+        "requested_thumbnail_frames": requested_thumbnail_frames,
+        "actual_thumbnail_frames": _maybe_int(token_metrics.get("thumbnail_sampled_frames")),
+        "sampled_frame_start": sampled_frame_start,
+        "sampled_frame_end": sampled_frame_end,
+        "runner_resize_enabled": bool(resize.get("enabled")) if isinstance(resize, dict) else False,
+        "runner_resize_request": {
+            "shortest_edge": resize.get("shortest_edge") if isinstance(resize, dict) else None,
+            "longest_edge": resize.get("longest_edge") if isinstance(resize, dict) else None,
+            "width": resize.get("width") if isinstance(resize, dict) else None,
+            "height": resize.get("height") if isinstance(resize, dict) else None,
+        },
+        "processor_input_width": processor_width,
+        "processor_input_height": processor_height,
+        "processor_input_resolution": _resolution(processor_width, processor_height),
+        "processor_video_input_mode": video_input_info.get("mode"),
+        "frames_loaded_for_processor": _maybe_int(video_input_info.get("frames_loaded")),
+        "spatial_tiles_per_video": token_metrics.get("spatial_tiles_per_video"),
+        "temporal_chunks_per_video": token_metrics.get("temporal_chunks_per_video"),
+    }
+
+
 def prepare_video_for_processor(video: str, args: argparse.Namespace) -> tuple[Any, dict[str, Any]]:
     if not has_video_resize(args):
         return video, {"mode": "path_or_url", "resize": video_resize_config(args)}
@@ -2466,6 +2572,16 @@ def generate_one(model, processor, video: str, prompt: str, device: torch.device
             token_shuffle=NVILA_TOKEN_SHUFFLE,
         )
         gaze_metrics = extract_gaze_metrics(inputs)
+        source_metadata = video_input_info.get("source_metadata")
+        if source_metadata is None:
+            source_metadata = read_video_metadata_if_local(resolved_video)
+        video_input_summary = build_video_input_summary(
+            args=args,
+            resolved_video=resolved_video,
+            source_metadata=source_metadata,
+            video_input_info=video_input_info,
+            token_metrics=token_metrics,
+        )
 
         target_device = input_device(model, device)
         inputs = move_tensors(inputs, target_device)
@@ -2495,6 +2611,7 @@ def generate_one(model, processor, video: str, prompt: str, device: torch.device
         "video_input": video,
         "video_resolved": resolved_video,
         "video_input_info": video_input_info,
+        "video_input_summary": video_input_summary,
         "gazing_mode": args.gazing_mode,
         "autogaze_target_scales": parse_int_sequence(getattr(args, "autogaze_target_scales", None)),
         "autogaze_target_patch_size": getattr(args, "autogaze_target_patch_size", None),
@@ -2556,6 +2673,7 @@ def run_single(args: argparse.Namespace) -> None:
         "autogaze_target_scales": parse_int_sequence(getattr(args, "autogaze_target_scales", None)),
         "autogaze_target_patch_size": getattr(args, "autogaze_target_patch_size", None),
         "video": args.video,
+        "video_input_summary": result.get("video_input_summary"),
         "prompt": args.prompt,
         "result": result,
     }

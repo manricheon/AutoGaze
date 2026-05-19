@@ -13,6 +13,7 @@ from repro.nvila_runner import (
     build_seek_decode_groups,
     build_keep_all_gazing_info,
     build_parser,
+    build_video_input_summary,
     build_stream_profile_compute_metrics,
     build_stream_profile_token_metrics,
     compute_visual_token_metrics,
@@ -248,6 +249,16 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
             "mm_projector_ms": 3.0,
             "llm_forward_ms": 50.0,
             "llm_peak_memory_bytes": 1024,
+            "video_input_summary": {
+                "source_frames": 240,
+                "source_resolution": "3840x2160",
+                "requested_video_frames": 128,
+                "actual_video_frames": 128,
+                "requested_thumbnail_frames": 64,
+                "actual_thumbnail_frames": 64,
+                "runner_resize_enabled": True,
+                "processor_input_resolution": "1280x720",
+            },
             "token_metrics": {
                 "encoder_raw_patch_tokens": 80,
                 "encoder_autogaze_selected_patch_tokens": 40,
@@ -300,6 +311,16 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
         "mllm_kv_cache_reduction_ratio": 2.5,
         "llm_peak_memory_bytes_median": 900.0,
     }
+    assert summary["video_input_summary"] == {
+        "source_frames": 240,
+        "source_resolution": "3840x2160",
+        "requested_video_frames": 128,
+        "actual_video_frames": 128,
+        "requested_thumbnail_frames": 64,
+        "actual_thumbnail_frames": 64,
+        "runner_resize_enabled": True,
+        "processor_input_resolution": "1280x720",
+    }
     assert summary["answer"] == "A"
     assert summary["latency_ms"]["total_median"] == 90.0
     assert summary["latency_ms"]["ttft_median"] == 25.0
@@ -310,6 +331,81 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
     assert summary["tokens"]["llm_actual_visual_tokens"] == 40
     assert summary["compute"]["siglip_total_macs_reduction_ratio"] == 4.0
     assert summary["compute"]["mllm_kv_cache_reduction_ratio"] == 2.5
+
+
+def test_build_video_input_summary_reports_source_sample_and_resize_context():
+    args = make_args(
+        num_video_frames=128,
+        num_video_frames_thumbnail=64,
+        video_resize_shortest_edge=720,
+        video_resize_longest_edge=None,
+        video_resize_width=None,
+        video_resize_height=None,
+    )
+    source_metadata = {
+        "width": 3840,
+        "height": 2160,
+        "frames": 240,
+        "fps": 30.0,
+        "duration_seconds": 8.0,
+        "codec": "h264",
+    }
+    token_metrics = {
+        "video_sampled_frames": 128,
+        "thumbnail_sampled_frames": 64,
+        "spatial_tiles_per_video": [8],
+        "temporal_chunks_per_video": 8,
+    }
+
+    summary = build_video_input_summary(
+        args=args,
+        resolved_video="/videos/sample.mp4",
+        source_metadata=source_metadata,
+        video_input_info={
+            "mode": "preloaded_resized_frames",
+            "resize": {
+                "enabled": True,
+                "shortest_edge": 720,
+                "longest_edge": None,
+                "width": None,
+                "height": None,
+                "effective": {"width": 1280, "height": 720, "mode": "shortest_edge"},
+            },
+            "frames_loaded": 128,
+        },
+        token_metrics=token_metrics,
+    )
+
+    assert summary == {
+        "resolved_video": "/videos/sample.mp4",
+        "source_frames": 240,
+        "source_resolution": "3840x2160",
+        "source_width": 3840,
+        "source_height": 2160,
+        "source_fps": 30.0,
+        "source_duration_seconds": 8.0,
+        "source_codec": "h264",
+        "requested_video_frames": 128,
+        "actual_video_frames": 128,
+        "requested_thumbnail_frames": 64,
+        "actual_thumbnail_frames": 64,
+        "sampled_frame_start": 0,
+        "sampled_frame_end": 239,
+        "runner_resize_enabled": True,
+        "runner_resize_request": {
+            "shortest_edge": 720,
+            "longest_edge": None,
+            "width": None,
+            "height": None,
+        },
+        "processor_input_width": 1280,
+        "processor_input_height": 720,
+        "processor_input_resolution": "1280x720",
+        "processor_video_input_mode": "preloaded_resized_frames",
+        "frames_loaded_for_processor": 128,
+        "spatial_tiles_per_video": [8],
+        "temporal_chunks_per_video": 8,
+    }
 
 
 def test_parse_int_sequence_accepts_plus_comma_and_bracket_formats():
