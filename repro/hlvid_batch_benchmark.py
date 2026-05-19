@@ -119,11 +119,160 @@ def _median_ratio(
     denominator_rows: list[dict[str, Any]],
     field: str,
 ) -> float | None:
-    numerator = compute_stats(_numeric_values(numerator_rows, field))["median"]
-    denominator = compute_stats(_numeric_values(denominator_rows, field))["median"]
+    numerator_values = _numeric_values(numerator_rows, field)
+    denominator_values = _numeric_values(denominator_rows, field)
+    if not numerator_values or not denominator_values:
+        return None
+    numerator = compute_stats(numerator_values)["median"]
+    denominator = compute_stats(denominator_values)["median"]
     if denominator == 0:
         return None
     return float(numerator) / float(denominator)
+
+
+def _median_value(rows: list[dict[str, Any]], field: str) -> float | None:
+    return compute_stats(_numeric_values(rows, field))["median"]
+
+
+def _percent_reduction(before: float | None, after: float | None) -> float | None:
+    if before in {None, 0} or after is None:
+        return None
+    return 100.0 * (float(before) - float(after)) / float(before)
+
+
+def _comparison_summary(
+    keep_all_rows: list[dict[str, Any]],
+    autogaze_rows: list[dict[str, Any]],
+    field: str,
+    *,
+    ratio_key: str,
+) -> dict[str, float | None]:
+    keep_all_value = _median_value(keep_all_rows, field)
+    autogaze_value = _median_value(autogaze_rows, field)
+    return {
+        "keep_all": keep_all_value,
+        "autogaze": autogaze_value,
+        ratio_key: _median_ratio(keep_all_rows, autogaze_rows, field),
+        "reduction_percent_of_keep_all": _percent_reduction(keep_all_value, autogaze_value),
+    }
+
+
+def _autogaze_before_after_summary(
+    rows: list[dict[str, Any]],
+    before_field: str,
+    after_field: str,
+    *,
+    before_key: str,
+    after_key: str,
+    extra_fields: dict[str, str] | None = None,
+) -> dict[str, float | None]:
+    before = _median_value(rows, before_field)
+    after = _median_value(rows, after_field)
+    summary: dict[str, float | None] = {
+        before_key: before,
+        after_key: after,
+        "reduction_ratio_before_over_after": _median_ratio(rows, rows, before_field)
+        if before_field == after_field
+        else None,
+        "reduction_percent_of_before": _percent_reduction(before, after),
+    }
+    if after not in {None, 0} and before is not None:
+        summary["reduction_ratio_before_over_after"] = float(before) / float(after)
+    for key, field in (extra_fields or {}).items():
+        summary[key] = _median_value(rows, field)
+    return summary
+
+
+def build_readable_summary(
+    *,
+    keep_all_rows: list[dict[str, Any]],
+    autogaze_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    latency = {
+        field: _comparison_summary(
+            keep_all_rows,
+            autogaze_rows,
+            field,
+            ratio_key="speedup_ratio_keep_all_over_autogaze",
+        )
+        for field in LATENCY_FIELDS
+    }
+    memory = {
+        field: _comparison_summary(
+            keep_all_rows,
+            autogaze_rows,
+            field,
+            ratio_key="reduction_ratio_keep_all_over_autogaze",
+        )
+        for field in MEMORY_FIELDS
+    }
+    tokens = {
+        "encoder_patches": _autogaze_before_after_summary(
+            autogaze_rows,
+            "token_metrics.encoder_raw_patch_tokens",
+            "token_metrics.encoder_autogaze_selected_patch_tokens",
+            before_key="before_keep_all_or_raw",
+            after_key="after_autogaze",
+        ),
+        "autogaze_input_tile_patches": _autogaze_before_after_summary(
+            autogaze_rows,
+            "token_metrics.autogaze_input_patch_tokens",
+            "token_metrics.autogaze_selected_patch_tokens",
+            before_key="before_autogaze_selection",
+            after_key="after_autogaze_selection",
+            extra_fields={
+                "tile_frame_instances": "token_metrics.autogaze_input_tile_frame_instances",
+            },
+        ),
+        "llm_visual_tokens": _autogaze_before_after_summary(
+            autogaze_rows,
+            "token_metrics.llm_keep_all_visual_tokens_estimated",
+            "token_metrics.llm_actual_visual_tokens",
+            before_key="before_keep_all_estimated",
+            after_key="after_autogaze_actual",
+        ),
+    }
+    return {
+        "mode_status": {
+            "keep_all": "available" if keep_all_rows else "skipped_or_missing",
+            "autogaze": "available" if autogaze_rows else "skipped_or_missing",
+            "note": (
+                "A skipped/missing mode is still shown, but cross-mode ratios are null because no baseline rows exist."
+            ),
+        },
+        "run_counts": {
+            "keep_all_rows": len(keep_all_rows),
+            "autogaze_rows": len(autogaze_rows),
+            "count_note": (
+                "Counts are prediction rows per mode. With --limit 3 and both modes enabled, "
+                "expect keep_all_rows=3 and autogaze_rows=3; warmup runs are not counted."
+            ),
+        },
+        "latency_ms_median": latency,
+        "memory_bytes_median": memory,
+        "tokens_median": tokens,
+        "ratio_note": (
+            "Ratio fields use before_or_keep_all / after_or_autogaze. "
+            "Percent fields use (before - after) / before * 100, so their denominator is the original value."
+        ),
+    }
+
+
+def _reduction_percent_summary(readable_summary: dict[str, Any]) -> dict[str, dict[str, float | None]]:
+    return {
+        "latency_ms": {
+            field: summary.get("reduction_percent_of_keep_all")
+            for field, summary in readable_summary.get("latency_ms_median", {}).items()
+        },
+        "memory_bytes": {
+            field: summary.get("reduction_percent_of_keep_all")
+            for field, summary in readable_summary.get("memory_bytes_median", {}).items()
+        },
+        "tokens": {
+            field: summary.get("reduction_percent_of_before")
+            for field, summary in readable_summary.get("tokens_median", {}).items()
+        },
+    }
 
 
 def _candidate_manifest_paths(root: Path) -> list[Path]:
@@ -356,6 +505,10 @@ def build_gain_report(
 ) -> dict[str, Any]:
     keep_all = summarize_run(keep_all_rows)
     autogaze = summarize_run(autogaze_rows)
+    readable_summary = build_readable_summary(
+        keep_all_rows=keep_all_rows,
+        autogaze_rows=autogaze_rows,
+    )
     latency_speedups = {
         field: _median_ratio(keep_all_rows, autogaze_rows, field)
         for field in LATENCY_FIELDS
@@ -403,6 +556,7 @@ def build_gain_report(
     return {
         "keep_all": keep_all,
         "autogaze": autogaze,
+        "readable_summary": readable_summary,
         "benchmark_samples": {
             "keep_all": keep_all["accuracy"].get("benchmark_samples", []),
             "autogaze": autogaze["accuracy"].get("benchmark_samples", []),
@@ -417,6 +571,7 @@ def build_gain_report(
             "memory_reduction_ratio_median": memory_reductions,
             "autogaze_token_reduction_median": token_reductions,
             "compute_reduction_median": compute_reductions,
+            "reduction_percent_median": _reduction_percent_summary(readable_summary),
         },
         "metric_note": (
             "Speedups and memory reductions are keep-all median divided by AutoGaze median. "

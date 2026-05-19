@@ -889,8 +889,15 @@ CUDA full benchmark 예시:
 
 리더 리뷰용으로 빠르게 샘플을 확인할 때는 `hlvid_autogaze_gain_report.json`의 `benchmark_samples.autogaze`를 먼저 보세요. 각 항목에는 `target_video`, `question`, `model_answer`, `parsed_model_answer`, `correct_answer`, `ground_truth_answer`, `correct`, `status`가 들어갑니다. keep-all과 AutoGaze의 같은 샘플을 비교하려면 `benchmark_samples.keep_all`도 같이 봅니다.
 
+`--limit 3`으로 실행했을 때 `readable_summary.run_counts.autogaze_rows=3`이면 AutoGaze 모드가 HLVid row 3개를 처리했다는 뜻입니다. wrapper에서 keep-all과 AutoGaze를 둘 다 켠 기본 상태라면 `keep_all_rows=3`, `autogaze_rows=3`이 각각 생깁니다. `--warmup-runs`로 실행된 warmup은 predictions/scoring row에 포함하지 않습니다.
+
+`--skip-keep-all`로 AutoGaze만 돌린 경우에도 report에는 keep-all 섹션과 `readable_summary.mode_status.keep_all`이 남습니다. 이때 `keep_all_rows=0`, keep-all metric은 0 또는 빈 값으로 보이고, 실제 baseline이 없으므로 cross-mode speedup/reduction ratio는 `null`로 표시됩니다. AutoGaze 자체의 before/after token 감소율은 AutoGaze row 안의 keep-all estimate와 actual 값으로 계속 계산됩니다.
+
 `hlvid_autogaze_gain_report.json`에서 우선 볼 항목:
 
+- `readable_summary.latency_ms_median`: `total_ms`, `video_decode_ms`, `video_tiling_ms`, `autogaze_forward_ms`, `siglip_vision_ms`, `mm_projector_ms`, `llm_forward_ms`, `ttft_ms`를 keep-all/autogaze median과 함께 보여줍니다.
+- `readable_summary.memory_bytes_median`: CUDA peak memory를 keep-all/autogaze median으로 비교합니다.
+- `readable_summary.tokens_median`: encoder patch, AutoGaze input tile patch, LLM visual token을 before/after 형태로 보여줍니다.
 - `gains.accuracy_scored_delta`: AutoGaze와 keep-all의 HLVid accuracy 차이
 - `gains.latency_speedup_median.total_ms`: 전체 end-to-end median speedup
 - `gains.latency_speedup_median.siglip_vision_ms`: SigLIP vision tower median speedup
@@ -898,6 +905,9 @@ CUDA full benchmark 예시:
 - `gains.memory_reduction_ratio_median.llm_peak_memory_bytes`: LLM generate CUDA peak memory 감소 비율
 - `gains.autogaze_token_reduction_median.llm_visual_token_reduction_ratio`: LLM visual token 감소 비율
 - `gains.compute_reduction_median.siglip_total_macs`, `gains.compute_reduction_median.mllm_kv_cache`: 계산량/KV cache 감소 추정
+- `gains.reduction_percent_median`: `ratio` 대신 `(before - after) / before * 100`으로 계산한 감소율입니다. 여기서 분모는 keep-all 또는 AutoGaze 적용 전 값입니다.
+
+ratio와 percent는 의도가 다릅니다. `*_ratio_*`는 `before_or_keep_all / after_or_autogaze`라 2.0이면 “2배 작아짐”입니다. `reduction_percent_median`은 원래 값을 분모로 둔 감소율이라 50이면 “원래 대비 50% 감소”입니다.
 
 이미 prediction JSONL이 있는 상태에서 report만 다시 만들려면 같은 `--output-dir`에 대해 `--report-only`를 붙입니다.
 

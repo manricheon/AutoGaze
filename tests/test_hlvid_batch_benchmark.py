@@ -205,6 +205,54 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
     assert report["benchmark_samples"]["autogaze"][0]["question"] == "Q? A. a B. b C. c D. d"
     assert report["benchmark_samples"]["autogaze"][0]["model_answer"] == "A"
     assert report["benchmark_samples"]["autogaze"][0]["correct_answer"] == "A"
+    assert report["readable_summary"]["run_counts"] == {
+        "keep_all_rows": 1,
+        "autogaze_rows": 1,
+        "count_note": (
+            "Counts are prediction rows per mode. With --limit 3 and both modes enabled, "
+            "expect keep_all_rows=3 and autogaze_rows=3; warmup runs are not counted."
+        ),
+    }
+    assert report["readable_summary"]["latency_ms_median"]["total_ms"] == {
+        "keep_all": 100.0,
+        "autogaze": 60.0,
+        "speedup_ratio_keep_all_over_autogaze": 100.0 / 60.0,
+        "reduction_percent_of_keep_all": 40.0,
+    }
+    assert report["readable_summary"]["latency_ms_median"]["siglip_vision_ms"] == {
+        "keep_all": 40.0,
+        "autogaze": 15.0,
+        "speedup_ratio_keep_all_over_autogaze": 40.0 / 15.0,
+        "reduction_percent_of_keep_all": 62.5,
+    }
+    assert report["readable_summary"]["memory_bytes_median"]["llm_peak_memory_bytes"] == {
+        "keep_all": 1000.0,
+        "autogaze": 500.0,
+        "reduction_ratio_keep_all_over_autogaze": 2.0,
+        "reduction_percent_of_keep_all": 50.0,
+    }
+    assert report["readable_summary"]["tokens_median"]["encoder_patches"] == {
+        "before_keep_all_or_raw": 900.0,
+        "after_autogaze": 300.0,
+        "reduction_ratio_before_over_after": 3.0,
+        "reduction_percent_of_before": 100.0 * (900.0 - 300.0) / 900.0,
+    }
+    assert report["readable_summary"]["tokens_median"]["autogaze_input_tile_patches"] == {
+        "before_autogaze_selection": 800.0,
+        "after_autogaze_selection": 200.0,
+        "tile_frame_instances": 80.0,
+        "reduction_ratio_before_over_after": 4.0,
+        "reduction_percent_of_before": 75.0,
+    }
+    assert report["readable_summary"]["tokens_median"]["llm_visual_tokens"] == {
+        "before_keep_all_estimated": 100.0,
+        "after_autogaze_actual": 40.0,
+        "reduction_ratio_before_over_after": 2.5,
+        "reduction_percent_of_before": 60.0,
+    }
+    assert report["gains"]["reduction_percent_median"]["latency_ms"]["total_ms"] == 40.0
+    assert report["gains"]["reduction_percent_median"]["memory_bytes"]["llm_peak_memory_bytes"] == 50.0
+    assert report["gains"]["reduction_percent_median"]["tokens"]["llm_visual_tokens"] == 60.0
     assert report["autogaze"]["latency_ms"]["total_ms"]["median"] == 60.0
     assert report["gains"]["latency_speedup_median"]["total_ms"] == 100.0 / 60.0
     assert report["gains"]["memory_reduction_ratio_median"]["llm_peak_memory_bytes"] == 2.0
@@ -220,6 +268,58 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
     assert report["gains"]["autogaze_token_reduction_median"]["autogaze_input_patch_tokens"] == 800.0
     assert report["gains"]["autogaze_token_reduction_median"]["autogaze_selected_patch_tokens"] == 200.0
     assert report["gains"]["compute_reduction_median"]["siglip_total_macs"] == 4.0
+
+
+def test_build_gain_report_marks_keep_all_as_missing_when_skipped():
+    autogaze_rows = [
+        {
+            "question_id": 1,
+            "answer": "A",
+            "raw_output": "A",
+            "total_ms": 60.0,
+            "llm_peak_memory_bytes": 500,
+            "token_metrics": {
+                "llm_actual_visual_tokens": 40,
+                "llm_keep_all_visual_tokens_estimated": 100,
+                "encoder_raw_patch_tokens": 900,
+                "encoder_autogaze_selected_patch_tokens": 300,
+                "autogaze_input_patch_tokens": 800,
+                "autogaze_selected_patch_tokens": 200,
+            },
+        }
+    ]
+
+    report = build_gain_report(keep_all_rows=[], autogaze_rows=autogaze_rows)
+
+    assert report["keep_all"]["accuracy"]["total"] == 0
+    assert report["autogaze"]["accuracy"]["total"] == 1
+    assert report["readable_summary"]["mode_status"] == {
+        "keep_all": "skipped_or_missing",
+        "autogaze": "available",
+        "note": "A skipped/missing mode is still shown, but cross-mode ratios are null because no baseline rows exist.",
+    }
+    assert report["readable_summary"]["run_counts"]["keep_all_rows"] == 0
+    assert report["readable_summary"]["latency_ms_median"]["total_ms"] == {
+        "keep_all": 0.0,
+        "autogaze": 60.0,
+        "speedup_ratio_keep_all_over_autogaze": None,
+        "reduction_percent_of_keep_all": None,
+    }
+    assert report["readable_summary"]["memory_bytes_median"]["llm_peak_memory_bytes"] == {
+        "keep_all": 0.0,
+        "autogaze": 500.0,
+        "reduction_ratio_keep_all_over_autogaze": None,
+        "reduction_percent_of_keep_all": None,
+    }
+    assert report["readable_summary"]["tokens_median"]["llm_visual_tokens"] == {
+        "before_keep_all_estimated": 100.0,
+        "after_autogaze_actual": 40.0,
+        "reduction_ratio_before_over_after": 2.5,
+        "reduction_percent_of_before": 60.0,
+    }
+    assert report["gains"]["latency_speedup_median"]["total_ms"] is None
+    assert report["gains"]["memory_reduction_ratio_median"]["llm_peak_memory_bytes"] is None
+    assert report["gains"]["reduction_percent_median"]["latency_ms"]["total_ms"] is None
 
 
 def test_flatten_metric_row_creates_csv_friendly_summary():
