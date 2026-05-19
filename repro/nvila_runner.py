@@ -1483,6 +1483,12 @@ def prepare_video_for_processor(video: str, args: argparse.Namespace) -> tuple[A
     }
 
 
+def processor_videos_argument(video_payload: Any, video_input_info: dict[str, Any]) -> Any:
+    if video_input_info.get("mode") == "preloaded_resized_frames":
+        return [video_payload]
+    return video_payload
+
+
 def build_spatial_tile_sequences(
     frames: list[Image.Image],
     *,
@@ -2308,7 +2314,11 @@ def generate_one(model, processor, video: str, prompt: str, device: torch.device
             with profiler.measure("video_decode_sampling"):
                 video_payload, video_input_info = prepare_video_for_processor(resolved_video, args)
         with profiler.measure("processor_total"):
-            inputs = processor(text=f"{video_token}\n\n{prompt}", videos=video_payload, return_tensors="pt")
+            inputs = processor(
+                text=f"{video_token}\n\n{prompt}",
+                videos=processor_videos_argument(video_payload, video_input_info),
+                return_tensors="pt",
+            )
         processor_peak_memory_bytes = torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None
         processor_timings = profiler.as_dict()
         profiler.reset()

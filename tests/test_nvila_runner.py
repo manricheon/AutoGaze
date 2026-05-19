@@ -24,6 +24,7 @@ from repro.nvila_runner import (
     parse_int_sequence,
     parse_args,
     processor_kwargs,
+    processor_videos_argument,
     frame_index_to_pts,
     pts_to_frame_index,
     stream_pts_per_frame,
@@ -215,6 +216,18 @@ def test_parse_args_accepts_video_and_autogaze_resize_options():
     assert args.video_resize_shortest_edge == 720
     assert args.autogaze_target_scales == "56+112+196+392"
     assert args.autogaze_target_patch_size == 14
+
+
+def test_processor_videos_argument_wraps_preloaded_frames_as_single_video():
+    frames = [object(), object()]
+
+    assert processor_videos_argument(frames, {"mode": "preloaded_resized_frames"}) == [frames]
+
+
+def test_processor_videos_argument_keeps_path_or_url_as_single_input():
+    path = "/tmp/video.mp4"
+
+    assert processor_videos_argument(path, {"mode": "path_or_url"}) == path
 
 
 def test_parse_int_sequence_accepts_plus_comma_and_bracket_formats():
