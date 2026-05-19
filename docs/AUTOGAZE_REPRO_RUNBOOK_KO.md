@@ -111,7 +111,7 @@ NVILA runner는 output JSON에 모듈별 timing을 기록합니다. 중요한 �
 
 단일 파일 inference도 같은 output JSON에 속도/토큰/메모리 필드를 남깁니다. `--measure-ttft` 없이도 `total_ms`, `video_decode_ms`, `video_tiling_ms`, `autogaze_forward_ms`, `siglip_vision_ms`, `mm_projector_ms`, `llm_forward_ms`, `token_metrics`, `compute_metrics`, CUDA의 `processor_peak_memory_bytes`와 `llm_peak_memory_bytes`가 기록됩니다. `--measure-ttft`를 켜면 여기에 `ttft_ms`, `ttft_stage_timings_ms`, `ttft_peak_memory_bytes`, `decode_estimated_ms`가 추가됩니다. MPS에서는 CUDA peak allocation API가 없어서 memory field가 null일 수 있습니다.
 
-raw output JSON이 너무 길면 `--print-summary --summary-json <path>`를 붙이세요. 전체 raw JSON은 `--output-json`에 그대로 저장하고, 터미널과 summary file에는 답변과 함께 `video_input_summary`, `autogaze_token_summary`, `key_autogaze_effect`를 별도로 정리합니다. `video_input_summary`에는 원본 총 프레임 수, 원본 해상도, 요청한 video/thumbnail frame 수, 실제 processor tensor 기준 frame 수, runner resize 적용 여부, resize 후 processor 입력 해상도, spatial tile/temporal chunk 수가 들어갑니다. `autogaze_token_summary`에는 사용한 프레임/타일 기준 raw patch budget과 AutoGaze가 실제 유지한 patch 수, TokenShuffle 이후 LLM visual token 수가 나뉘어 들어갑니다. `key_autogaze_effect`에는 AutoGaze 전후 차이를 가장 잘 보여주는 encoder patch 수, LLM visual token 수, reduction ratio/percent, SigLIP/MLLM 계산량 감소 추정치, 핵심 latency/memory median이 모입니다. 상세 분석용 `latency_ms`, `memory_bytes`, `tokens`, `compute` 섹션도 함께 남깁니다.
+raw output JSON이 너무 길면 `--print-summary --summary-json <path>`를 붙이세요. 전체 raw JSON은 `--output-json`에 그대로 저장하고, 터미널과 summary file에는 답변과 함께 `prompt`, `question`, `video_input_summary`, `autogaze_token_summary`, `key_autogaze_effect`를 별도로 정리합니다. `single` 모드에서는 `prompt`가 실행에 사용한 `--prompt` 원문이고, HLVid row 기반 실행에서는 per-row `question`이 `predictions.jsonl`과 `scored_predictions.jsonl`에 보존됩니다. `video_input_summary`에는 원본 총 프레임 수, 원본 해상도, 요청한 video/thumbnail frame 수, 실제 processor tensor 기준 frame 수, runner resize 적용 여부, resize 후 processor 입력 해상도, spatial tile/temporal chunk 수가 들어갑니다. `autogaze_token_summary`에는 사용한 프레임/타일 기준 raw patch budget과 AutoGaze가 실제 유지한 patch 수, TokenShuffle 이후 LLM visual token 수가 나뉘어 들어갑니다. `key_autogaze_effect`에는 AutoGaze 전후 차이를 가장 잘 보여주는 encoder patch 수, LLM visual token 수, reduction ratio/percent, SigLIP/MLLM 계산량 감소 추정치, 핵심 latency/memory median이 모입니다. 상세 분석용 `latency_ms`, `memory_bytes`, `tokens`, `compute` 섹션도 함께 남깁니다.
 
 단일 실행의 비디오 입력 조건을 빠르게 확인할 때는 아래 필드를 먼저 보세요. raw JSON에는 top-level `video_input_summary`와 `result.video_input_summary`가 모두 있고, compact summary JSON에도 같은 `video_input_summary`가 들어갑니다.
 
@@ -130,6 +130,7 @@ raw output JSON이 너무 길면 `--print-summary --summary-json <path>`를 붙�
 | 질문 | 볼 필드 |
 | --- | --- |
 | AutoGaze 입력으로 들어간 전체 patch 수는? | `autogaze_token_summary.autogaze_selection_patch_tokens.input_patch_tokens`, raw의 `token_metrics.autogaze_input_patch_tokens` |
+| 그 patch 수가 왜 큰가? | `autogaze_token_summary.autogaze_input_breakdown.expanded_formula` |
 | AutoGaze가 실제 선택/유지한 patch 수는? | `autogaze_token_summary.autogaze_selection_patch_tokens.selected_patch_tokens`, raw의 `token_metrics.autogaze_selected_patch_tokens` |
 | AutoGaze가 제거한 patch 수/비율은? | `autogaze_token_summary.autogaze_selection_patch_tokens.removed_patch_tokens`, `reduction_percent` |
 | 사용한 프레임/타일/thumbnail 전체 encoder raw patch budget은? | `autogaze_token_summary.encoder_patch_tokens_before_siglip.raw_total_patch_tokens` |
@@ -205,6 +206,7 @@ encoder patch 기준:
 - `token_metrics.spatial_tiles_per_video`, `token_metrics.temporal_chunks_per_video`, `token_metrics.tile_sequences`: spatial/temporal AutoGaze/SigLIP sequence 수
 - `token_metrics.encoder_patches_per_frame_by_scale`: 예를 들어 `56`, `112`, `196`, `392` 같은 multi-scale별 patch 수
 - `token_metrics.encoder_patches_per_frame_multiscale`: 한 프레임에서 multi-scale patch 수를 모두 더한 값
+- `token_metrics.autogaze_input_tile_frame_instances`: sampled frame이 spatial tile로 펼쳐진 뒤의 tile-frame 개수입니다. 단일 비디오에서는 보통 `video_sampled_frames × spatial_tiles_per_video[0]`입니다.
 - `token_metrics.encoder_raw_tile_patch_tokens`: AutoGaze 전 tiled-video patch budget입니다. sampled frames × spatial tiles × multi-scale patches per frame으로 계산됩니다.
 - `token_metrics.autogaze_input_patch_tokens`: AutoGaze 모델이 선택하기 전에 입력으로 받은 전체 tiled-video patch 수입니다. 현재 구현에서는 `encoder_raw_tile_patch_tokens`와 같은 값입니다.
 - `token_metrics.autogaze_selected_patch_tokens`: AutoGaze가 실제 유지한 non-padded tiled-video patch 수입니다. 현재 구현에서는 `encoder_autogaze_selected_tile_patch_tokens`와 같은 값입니다.
@@ -218,13 +220,15 @@ encoder patch 기준:
 
 여기서 `autogaze_input_patch_tokens`와 `autogaze_selected_patch_tokens`가 AutoGaze 자체의 입력 대비 선택 결과를 가장 직접적으로 보여줍니다. `encoder_autogaze_selected_*`는 LLM token이 아니라 **SigLIP에 들어가기 전 AutoGaze가 유지하기로 선택한 non-padded encoder patch 위치 수**입니다. 현재 runner에서는 thumbnail은 keep-all이라 tile 쪽 선택량이 AutoGaze 효과를 가장 직접적으로 보여줍니다.
 
+예를 들어 720p로 resize된 128프레임 비디오라도 `max_tiles_video=8`이면 단일 720p frame 하나가 아니라 최대 8개 spatial tile로 나뉩니다. 기본 scale `56+112+196+392`, patch size 14에서는 한 tile-frame당 patch 위치가 `16+64+196+784=1060`개입니다. 따라서 AutoGaze 입력 patch 수는 `128 frames × 8 tiles/frame × 1060 patches = 1,085,440`처럼 백만 단위가 될 수 있습니다. 이 값은 LLM visual token 수가 아니라 SigLIP/TokenShuffle 이전의 encoder patch-position budget입니다. 실제 LLM 쪽 비교는 `llm_keep_all_visual_tokens_estimated`와 `llm_actual_visual_tokens`를 봐야 합니다.
+
 LLM visual-token 기준:
 
 - `token_metrics.llm_keep_all_visual_tokens_estimated`: 모든 tile/thumbnail patch를 유지했을 때 TokenShuffle 이후 예상 visual token 수
 - `token_metrics.llm_actual_visual_tokens`: AutoGaze/keep-all padding strategy가 반영된 processor output의 실제 visual placeholder token 수
 - `token_metrics.llm_visual_token_reduction_ratio`: keep-all 예상 LLM visual token 수를 실제 visual token 수로 나눈 값
 
-HLVid `--mode hlvid` summary에는 `token_budget_summary`가 추가됩니다. 이 값은 성공한 row들의 `token_metrics`에서 median/mean을 모은 것이고, `failed` row는 token metric이 없으므로 집계에서 빠집니다. `scripts/run_hlvid_folder_benchmark.py`의 최종 gain report에서도 `autogaze.tokens`와 `gains.autogaze_token_reduction_median`에 raw/selected patch 수와 LLM visual token 수가 함께 들어갑니다.
+HLVid `--mode hlvid` summary에는 `question_count`, `question_samples`, `benchmark_samples`, `token_budget_summary`가 추가됩니다. `question_samples`는 질문 원문 확인용이고, `benchmark_samples`는 대상 비디오, 질문, 모델 답변, parsed 답변, 정답, 정오 여부를 같이 보여주는 읽기 쉬운 샘플 표입니다. summary가 너무 커지지 않도록 앞쪽 샘플만 담고, 전체 row의 질문/정답/모델 출력은 `predictions.jsonl`과 `scored_predictions.jsonl`에 남깁니다. `token_budget_summary`는 성공한 row들의 `token_metrics`에서 median/mean을 모은 것이고, `failed` row는 token metric이 없으므로 집계에서 빠집니다. `scripts/run_hlvid_folder_benchmark.py`의 최종 gain report에서도 top-level `benchmark_samples.keep_all`, `benchmark_samples.autogaze`, `autogaze.tokens`와 `gains.autogaze_token_reduction_median`에 raw/selected patch 수와 LLM visual token 수가 함께 들어갑니다.
 
 계산량/메모리 추정치는 `compute_metrics`에 있습니다. 이 값은 profiler가 직접 센 FLOPs가 아니라, token 수와 hidden size/layer 수를 이용한 analytical MAC estimate입니다.
 
@@ -839,7 +843,7 @@ manifest 여러 row를 순회하되 benchmark wrapper 없이 prediction만 보�
   --continue-on-error
 ```
 
-이 경우 `predictions.jsonl`의 각 줄이 일반 inference 결과입니다. `summary`와 `scored-predictions`는 HLVid 정답 컬럼이 있을 때 자동으로 붙는 평가 산출물이라, inference만 볼 때는 predictions 파일을 우선 보면 됩니다.
+이 경우 `predictions.jsonl`의 각 줄이 일반 inference 결과이며 각 줄에 `question`이 그대로 들어갑니다. `summary`에는 전체 개수와 앞쪽 `question_samples`, 그리고 `benchmark_samples`만 들어가므로, 특정 샘플의 질문/출력/토큰/메모리를 같이 볼 때는 predictions 파일을 우선 보면 됩니다.
 
 CUDA full benchmark 예시:
 
@@ -882,6 +886,8 @@ CUDA full benchmark 예시:
 - `hlvid_keep_all_summary.json`, `hlvid_autogaze_summary.json`: 각 run의 HLVid scoring summary
 - `hlvid_autogaze_gain_report.json`: keep-all 대비 AutoGaze gain report
 - `hlvid_autogaze_gain_report.csv`: 리더 보고용 single-row 요약
+
+리더 리뷰용으로 빠르게 샘플을 확인할 때는 `hlvid_autogaze_gain_report.json`의 `benchmark_samples.autogaze`를 먼저 보세요. 각 항목에는 `target_video`, `question`, `model_answer`, `parsed_model_answer`, `correct_answer`, `ground_truth_answer`, `correct`, `status`가 들어갑니다. keep-all과 AutoGaze의 같은 샘플을 비교하려면 `benchmark_samples.keep_all`도 같이 봅니다.
 
 `hlvid_autogaze_gain_report.json`에서 우선 볼 항목:
 

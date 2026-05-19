@@ -148,6 +148,8 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
     keep_all_rows = [
         {
             "question_id": 1,
+            "video_path": "clip.mp4",
+            "question": "Q? A. a B. b C. c D. d",
             "answer": "A",
             "raw_output": "A",
             "total_ms": 100.0,
@@ -160,6 +162,7 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
                 "llm_keep_all_visual_tokens_estimated": 100,
                     "encoder_raw_patch_tokens": 900,
                     "encoder_autogaze_selected_patch_tokens": 900,
+                    "autogaze_input_tile_frame_instances": 80,
                     "autogaze_input_patch_tokens": 800,
                     "autogaze_selected_patch_tokens": 800,
                 },
@@ -168,6 +171,8 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
     autogaze_rows = [
         {
             "question_id": 1,
+            "video_path": "clip.mp4",
+            "question": "Q? A. a B. b C. c D. d",
             "answer": "A",
             "raw_output": "A",
             "total_ms": 60.0,
@@ -181,6 +186,7 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
                 "llm_visual_token_reduction_ratio": 2.5,
                 "encoder_raw_patch_tokens": 900,
                 "encoder_autogaze_selected_patch_tokens": 300,
+                "autogaze_input_tile_frame_instances": 80,
                 "autogaze_input_patch_tokens": 800,
                 "autogaze_selected_patch_tokens": 200,
                 "encoder_token_reduction_ratio": 3.0,
@@ -195,16 +201,22 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
     report = build_gain_report(keep_all_rows=keep_all_rows, autogaze_rows=autogaze_rows)
 
     assert report["keep_all"]["accuracy"]["accuracy_scored"] == 1.0
+    assert report["benchmark_samples"]["autogaze"][0]["target_video"] == "clip.mp4"
+    assert report["benchmark_samples"]["autogaze"][0]["question"] == "Q? A. a B. b C. c D. d"
+    assert report["benchmark_samples"]["autogaze"][0]["model_answer"] == "A"
+    assert report["benchmark_samples"]["autogaze"][0]["correct_answer"] == "A"
     assert report["autogaze"]["latency_ms"]["total_ms"]["median"] == 60.0
     assert report["gains"]["latency_speedup_median"]["total_ms"] == 100.0 / 60.0
     assert report["gains"]["memory_reduction_ratio_median"]["llm_peak_memory_bytes"] == 2.0
     assert report["gains"]["autogaze_token_reduction_median"]["llm_visual_token_reduction_ratio"] == 2.5
     assert report["autogaze"]["tokens"]["token_metrics.encoder_raw_patch_tokens"]["median"] == 900.0
     assert report["autogaze"]["tokens"]["token_metrics.encoder_autogaze_selected_patch_tokens"]["median"] == 300.0
+    assert report["autogaze"]["tokens"]["token_metrics.autogaze_input_tile_frame_instances"]["median"] == 80.0
     assert report["autogaze"]["tokens"]["token_metrics.autogaze_input_patch_tokens"]["median"] == 800.0
     assert report["autogaze"]["tokens"]["token_metrics.autogaze_selected_patch_tokens"]["median"] == 200.0
     assert report["gains"]["autogaze_token_reduction_median"]["encoder_raw_patch_tokens"] == 900.0
     assert report["gains"]["autogaze_token_reduction_median"]["encoder_autogaze_selected_patch_tokens"] == 300.0
+    assert report["gains"]["autogaze_token_reduction_median"]["autogaze_input_tile_frame_instances"] == 80.0
     assert report["gains"]["autogaze_token_reduction_median"]["autogaze_input_patch_tokens"] == 800.0
     assert report["gains"]["autogaze_token_reduction_median"]["autogaze_selected_patch_tokens"] == 200.0
     assert report["gains"]["compute_reduction_median"]["siglip_total_macs"] == 4.0

@@ -72,6 +72,7 @@ REPEAT_SUMMARY_FIELDS = (
     "token_metrics.encoder_token_reduction_ratio",
     "token_metrics.encoder_raw_tile_patch_tokens",
     "token_metrics.encoder_autogaze_selected_tile_patch_tokens",
+    "token_metrics.autogaze_input_tile_frame_instances",
     "token_metrics.autogaze_input_patch_tokens",
     "token_metrics.autogaze_selected_patch_tokens",
     "token_metrics.autogaze_removed_patch_tokens",
@@ -95,6 +96,7 @@ TOKEN_BUDGET_SUMMARY_FIELDS = (
     "token_metrics.thumbnail_sampled_frames",
     "token_metrics.encoder_raw_tile_patch_tokens",
     "token_metrics.encoder_autogaze_selected_tile_patch_tokens",
+    "token_metrics.autogaze_input_tile_frame_instances",
     "token_metrics.autogaze_input_patch_tokens",
     "token_metrics.autogaze_selected_patch_tokens",
     "token_metrics.autogaze_removed_patch_tokens",
@@ -331,6 +333,7 @@ def build_autogaze_token_summary(token_metrics: dict[str, Any]) -> dict[str, Any
             "temporal_chunks_per_video": token_metrics.get("temporal_chunks_per_video"),
             "encoder_patches_per_frame_multiscale": token_metrics.get("encoder_patches_per_frame_multiscale"),
         },
+        "autogaze_input_breakdown": build_autogaze_input_breakdown(token_metrics),
         "autogaze_selection_patch_tokens": {
             "input_patch_tokens": autogaze_input,
             "selected_patch_tokens": autogaze_selected,
@@ -373,6 +376,63 @@ def build_autogaze_token_summary(token_metrics: dict[str, Any]) -> dict[str, Any
                 "packing; this is the token count that drives LLM prefill/KV cache estimates."
             ),
         },
+    }
+
+
+def _single_or_list(value: Any) -> Any:
+    if isinstance(value, (list, tuple)):
+        if len(value) == 1:
+            return value[0]
+        return list(value)
+    return value
+
+
+def _integer_division_or_float(numerator: Any, denominator: Any) -> int | float | None:
+    if numerator is None or denominator in {None, 0}:
+        return None
+    try:
+        numerator_value = int(numerator)
+        denominator_value = int(denominator)
+    except (TypeError, ValueError):
+        return None
+    if denominator_value == 0:
+        return None
+    if numerator_value % denominator_value == 0:
+        return numerator_value // denominator_value
+    return numerator_value / denominator_value
+
+
+def build_autogaze_input_breakdown(token_metrics: dict[str, Any]) -> dict[str, Any]:
+    autogaze_input = token_metrics.get("autogaze_input_patch_tokens")
+    patches_per_tile_frame = token_metrics.get("encoder_patches_per_frame_multiscale")
+    tile_frame_instances = token_metrics.get("autogaze_input_tile_frame_instances")
+    if tile_frame_instances is None:
+        tile_frame_instances = _integer_division_or_float(autogaze_input, patches_per_tile_frame)
+
+    expanded_formula = None
+    if tile_frame_instances is not None and patches_per_tile_frame is not None and autogaze_input is not None:
+        expanded_formula = (
+            f"{tile_frame_instances} tile-frame instances * "
+            f"{patches_per_tile_frame} multiscale patch positions = {autogaze_input}"
+        )
+
+    return {
+        "formula": "tile_frame_instances * multiscale_patch_positions_per_tile_frame",
+        "expanded_formula": expanded_formula,
+        "video_sampled_frames": token_metrics.get("video_sampled_frames"),
+        "spatial_tiles_per_frame": _single_or_list(token_metrics.get("spatial_tiles_per_video")),
+        "temporal_chunks": _single_or_list(token_metrics.get("temporal_chunks_per_video")),
+        "tile_frame_instances": tile_frame_instances,
+        "multiscale_patch_positions_per_tile_frame": patches_per_tile_frame,
+        "patch_positions_by_scale": token_metrics.get("encoder_patches_per_frame_by_scale"),
+        "input_patch_tokens": autogaze_input,
+        "unit_note": (
+            "These are encoder patch positions before SigLIP/TokenShuffle/MLLM, not final LLM visual tokens."
+        ),
+        "why_it_can_be_large": (
+            "A resized video can still be split into multiple spatial tiles. "
+            "For example, 128 frames * 8 tiles/frame * 1060 multiscale patches = 1085440."
+        ),
     }
 
 
@@ -444,10 +504,15 @@ def build_single_summary(payload: dict[str, Any]) -> dict[str, Any]:
     encoder_selected_patch_tokens = token_metrics.get("encoder_autogaze_selected_patch_tokens")
     llm_keep_all_visual_tokens = token_metrics.get("llm_keep_all_visual_tokens_estimated")
     llm_actual_visual_tokens = token_metrics.get("llm_actual_visual_tokens")
+    question = payload.get("question")
+    if question is None and isinstance(result, dict):
+        question = result.get("question")
     return {
         "model_path": payload.get("model_path"),
         "gazing_mode": payload.get("gazing_mode"),
         "video": payload.get("video"),
+        "prompt": payload.get("prompt"),
+        "question": question,
         "video_input_summary": result.get("video_input_summary") if isinstance(result, dict) else None,
         "autogaze_token_summary": build_autogaze_token_summary(token_metrics),
         "key_autogaze_effect": {
@@ -669,6 +734,8 @@ def build_stream_profile_token_metrics(plan: dict[str, Any], tile_summary: dict[
     raw_tile_patches = int(plan["tokens"]["encoder_raw_tile_patch_tokens"])
     raw_thumbnail_patches = int(plan["tokens"]["encoder_raw_thumbnail_patch_tokens"])
     raw_total = raw_tile_patches + raw_thumbnail_patches
+    patches_per_tile_frame = int(plan["tokens"]["encoder_patches_per_frame_multiscale"])
+    tile_frame_instances = raw_tile_patches // patches_per_tile_frame if patches_per_tile_frame else 0
     selected_tile_patches = int(tile_summary.get("selected_non_padded_patches", raw_tile_patches))
     selected_thumbnail_patches = raw_thumbnail_patches
     selected_total = selected_tile_patches + selected_thumbnail_patches
@@ -687,6 +754,7 @@ def build_stream_profile_token_metrics(plan: dict[str, Any], tile_summary: dict[
         "token_shuffle": token_shuffle,
         "encoder_raw_tile_patch_tokens": raw_tile_patches,
         "encoder_autogaze_selected_tile_patch_tokens": selected_tile_patches,
+        "autogaze_input_tile_frame_instances": tile_frame_instances,
         "autogaze_input_patch_tokens": raw_tile_patches,
         "autogaze_selected_patch_tokens": selected_tile_patches,
         "autogaze_removed_patch_tokens": raw_tile_patches - selected_tile_patches,
@@ -1549,7 +1617,8 @@ def compute_visual_token_metrics(
     thumbnail_tensors = _tensor_sequence(payload.get("pixel_values_videos_thumbnails"))
     patch_breakdown = patches_per_frame_by_scale or {"multiscale_total": patches_per_frame_value}
 
-    raw_tile_patches = sum(_visual_frame_count(tensor) * patches_per_frame_value for tensor in tile_tensors)
+    tile_frame_instances = sum(_visual_frame_count(tensor) for tensor in tile_tensors)
+    raw_tile_patches = tile_frame_instances * patches_per_frame_value
     raw_thumbnail_patches = sum(_visual_frame_count(tensor) * patches_per_frame_value for tensor in thumbnail_tensors)
     raw_encoder_patches = raw_tile_patches + raw_thumbnail_patches
 
@@ -1618,6 +1687,7 @@ def compute_visual_token_metrics(
         "token_shuffle": token_shuffle,
         "encoder_raw_tile_patch_tokens": raw_tile_patches,
         "encoder_autogaze_selected_tile_patch_tokens": selected_tile_patches,
+        "autogaze_input_tile_frame_instances": tile_frame_instances,
         "autogaze_input_patch_tokens": raw_tile_patches,
         "autogaze_selected_patch_tokens": selected_tile_patches,
         "autogaze_removed_patch_tokens": raw_tile_patches - selected_tile_patches,

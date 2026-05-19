@@ -14,6 +14,8 @@ from repro.common import write_json, write_jsonl
 REQUIRED_COLUMNS = ("question_id", "category", "video_path", "question", "answer")
 CHOICE_RE = re.compile(r"\b([ABCD])\b", re.IGNORECASE)
 DATASET_VIEWER_ROWS_URL = "https://datasets-server.huggingface.co/rows"
+QUESTION_SUMMARY_SAMPLE_LIMIT = 5
+BENCHMARK_SAMPLE_LIMIT = 5
 
 
 def parse_choice(text: str | None) -> str | None:
@@ -93,6 +95,49 @@ def load_hlvid_manifest(split: str = "test", limit: int | None = None, config: s
     return fetch_hlvid_manifest(split=split, limit=limit, config=config)
 
 
+def summarize_prompt_or_question_samples(rows: list[dict[str, Any]]) -> tuple[int, list[dict[str, Any]]]:
+    count = 0
+    samples: list[dict[str, Any]] = []
+    for row in rows:
+        if row.get("question") is None and row.get("prompt") is None:
+            continue
+        count += 1
+        if len(samples) >= QUESTION_SUMMARY_SAMPLE_LIMIT:
+            continue
+        sample = {
+            key: row[key]
+            for key in ("question_id", "video_path", "question", "prompt", "answer")
+            if row.get(key) is not None
+        }
+        samples.append(sample)
+    return count, samples
+
+
+def build_benchmark_samples(scored_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    samples: list[dict[str, Any]] = []
+    for row in scored_rows:
+        if len(samples) >= BENCHMARK_SAMPLE_LIMIT:
+            break
+        target_video = row.get("video_path", row.get("video"))
+        question = row.get("question", row.get("prompt"))
+        if target_video is None and question is None and row.get("raw_output") is None:
+            continue
+        sample = {
+            "question_id": row.get("question_id"),
+            "target_video": target_video,
+            "question": question,
+            "model_answer": row.get("raw_output"),
+            "parsed_model_answer": row.get("parsed_answer"),
+            "correct_answer": row.get("expected_answer"),
+            "ground_truth_answer": row.get("answer"),
+            "correct": row.get("correct"),
+            "status": row.get("status", "ok"),
+            "parse_status": row.get("parse_status"),
+        }
+        samples.append(sample)
+    return samples
+
+
 def score_predictions(rows: list[dict[str, Any]]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     scored_rows: list[dict[str, Any]] = []
     correct = 0
@@ -100,6 +145,7 @@ def score_predictions(rows: list[dict[str, Any]]) -> tuple[dict[str, Any], list[
     parse_failed = 0
     failed = 0
     skipped = 0
+    question_count, question_samples = summarize_prompt_or_question_samples(rows)
 
     for row in rows:
         status = row.get("status")
@@ -139,6 +185,16 @@ def score_predictions(rows: list[dict[str, Any]]) -> tuple[dict[str, Any], list[
         "skipped": skipped,
         "accuracy_scored": correct / scored if scored else 0.0,
         "accuracy_total": correct / len(rows) if rows else 0.0,
+        "question_count": question_count,
+        "question_samples": question_samples,
+        "question_note": (
+            "Full per-row prompts/questions are stored in predictions and scored_predictions JSONL."
+        ),
+        "benchmark_samples": build_benchmark_samples(scored_rows),
+        "benchmark_sample_note": (
+            "Readable benchmark samples: target_video, question, model_answer, "
+            "parsed_model_answer, correct_answer, and correctness. Full rows remain in JSONL."
+        ),
     }
     return summary, scored_rows
 

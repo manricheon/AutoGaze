@@ -59,6 +59,7 @@ AUTOGAZE_TOKEN_FIELDS = (
     "token_metrics.thumbnail_sampled_frames",
     "token_metrics.encoder_raw_tile_patch_tokens",
     "token_metrics.encoder_autogaze_selected_tile_patch_tokens",
+    "token_metrics.autogaze_input_tile_frame_instances",
     "token_metrics.autogaze_input_patch_tokens",
     "token_metrics.autogaze_selected_patch_tokens",
     "token_metrics.autogaze_removed_patch_tokens",
@@ -402,6 +403,14 @@ def build_gain_report(
     return {
         "keep_all": keep_all,
         "autogaze": autogaze,
+        "benchmark_samples": {
+            "keep_all": keep_all["accuracy"].get("benchmark_samples", []),
+            "autogaze": autogaze["accuracy"].get("benchmark_samples", []),
+            "note": (
+                "Readable per-sample benchmark context copied from the scoring summaries. "
+                "Full per-row outputs are in hlvid_*_predictions.jsonl and hlvid_*_scored.jsonl."
+            ),
+        },
         "gains": {
             "accuracy_scored_delta": accuracy_delta,
             "latency_speedup_median": latency_speedups,

@@ -61,6 +61,97 @@ def test_score_predictions_counts_model_failures_without_parse_failures():
     assert scored[1]["parse_status"] == "failed_run"
 
 
+def test_score_predictions_summarizes_questions_without_dropping_row_details():
+    rows = [
+        {
+            "question_id": 1,
+            "video_path": "clip_1.mp4",
+            "question": "What is shown? A. One B. Two C. Three D. Four",
+            "answer": "A",
+            "raw_output": "A",
+        },
+        {
+            "question_id": 2,
+            "video_path": "clip_2.mp4",
+            "question": "What text appears? A. Left B. Right C. Up D. Down",
+            "answer": "B",
+            "raw_output": "B",
+        },
+    ]
+
+    summary, scored = score_predictions(rows)
+
+    assert summary["question_count"] == 2
+    assert summary["question_samples"] == [
+        {
+            "question_id": 1,
+            "video_path": "clip_1.mp4",
+            "question": "What is shown? A. One B. Two C. Three D. Four",
+            "answer": "A",
+        },
+        {
+            "question_id": 2,
+            "video_path": "clip_2.mp4",
+            "question": "What text appears? A. Left B. Right C. Up D. Down",
+            "answer": "B",
+        },
+    ]
+    assert "predictions" in summary["question_note"]
+    assert scored[0]["question"] == rows[0]["question"]
+
+
+def test_score_predictions_adds_readable_benchmark_samples():
+    rows = [
+        {
+            "question_id": 1,
+            "video_path": "clip_1.mp4",
+            "question": "What is shown? A. One B. Two C. Three D. Four",
+            "answer": "A",
+            "raw_output": "Answer: A",
+            "status": "ok",
+        },
+        {
+            "question_id": 2,
+            "video": "clip_2.mp4",
+            "prompt": "What text appears? A. Left B. Right C. Up D. Down",
+            "answer": "B",
+            "raw_output": None,
+            "status": "failed",
+            "error": "OOM",
+        },
+    ]
+
+    summary, _ = score_predictions(rows)
+
+    assert summary["benchmark_samples"] == [
+        {
+            "question_id": 1,
+            "target_video": "clip_1.mp4",
+            "question": "What is shown? A. One B. Two C. Three D. Four",
+            "model_answer": "Answer: A",
+            "parsed_model_answer": "A",
+            "correct_answer": "A",
+            "ground_truth_answer": "A",
+            "correct": True,
+            "status": "ok",
+            "parse_status": "parsed",
+        },
+        {
+            "question_id": 2,
+            "target_video": "clip_2.mp4",
+            "question": "What text appears? A. Left B. Right C. Up D. Down",
+            "model_answer": None,
+            "parsed_model_answer": None,
+            "correct_answer": "B",
+            "ground_truth_answer": "B",
+            "correct": False,
+            "status": "failed",
+            "parse_status": "failed_run",
+        },
+    ]
+    assert "model_answer" in summary["benchmark_sample_note"]
+
+
 def test_read_manifest_file_supports_jsonl_and_validates_rows(tmp_path):
     manifest = tmp_path / "manifest.jsonl"
     manifest.write_text(

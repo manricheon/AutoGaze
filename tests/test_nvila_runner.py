@@ -239,6 +239,8 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
         "model_path": "local-nvila",
         "gazing_mode": "autogaze",
         "video": "video.mp4",
+        "prompt": "What does the sign say? A. A B. B C. C D. D",
+        "question": "What does the sign say?",
         "result": {
             "raw_output": "A",
             "generated_tokens": 4,
@@ -254,22 +256,24 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
             "video_input_summary": {
                 "source_frames": 240,
                 "source_resolution": "3840x2160",
-                "requested_video_frames": 128,
-                "actual_video_frames": 128,
-                "requested_thumbnail_frames": 64,
-                "actual_thumbnail_frames": 64,
+                "requested_video_frames": 8,
+                "actual_video_frames": 8,
+                "requested_thumbnail_frames": 4,
+                "actual_thumbnail_frames": 4,
                 "runner_resize_enabled": True,
                 "processor_input_resolution": "1280x720",
             },
             "token_metrics": {
-                "video_sampled_frames": 128,
-                "thumbnail_sampled_frames": 64,
-                "spatial_tiles_per_video": [8],
-                "temporal_chunks_per_video": [8],
-                "encoder_patches_per_frame_multiscale": 1060,
+                "video_sampled_frames": 8,
+                "thumbnail_sampled_frames": 4,
+                "spatial_tiles_per_video": [2],
+                "temporal_chunks_per_video": [4],
+                "encoder_patches_per_frame_multiscale": 4,
+                "encoder_patches_per_frame_by_scale": {"scale_a": 1, "scale_b": 3},
                 "encoder_raw_patch_tokens": 80,
                 "encoder_raw_tile_patch_tokens": 64,
                 "encoder_autogaze_selected_tile_patch_tokens": 24,
+                "autogaze_input_tile_frame_instances": 16,
                 "autogaze_input_patch_tokens": 64,
                 "autogaze_selected_patch_tokens": 24,
                 "autogaze_removed_patch_tokens": 40,
@@ -329,20 +333,38 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
     assert summary["video_input_summary"] == {
         "source_frames": 240,
         "source_resolution": "3840x2160",
-        "requested_video_frames": 128,
-        "actual_video_frames": 128,
-        "requested_thumbnail_frames": 64,
-        "actual_thumbnail_frames": 64,
+        "requested_video_frames": 8,
+        "actual_video_frames": 8,
+        "requested_thumbnail_frames": 4,
+        "actual_thumbnail_frames": 4,
         "runner_resize_enabled": True,
         "processor_input_resolution": "1280x720",
     }
     assert summary["autogaze_token_summary"] == {
         "frame_basis": {
-            "video_sampled_frames": 128,
-            "thumbnail_sampled_frames": 64,
-            "spatial_tiles_per_video": [8],
-            "temporal_chunks_per_video": [8],
-            "encoder_patches_per_frame_multiscale": 1060,
+            "video_sampled_frames": 8,
+            "thumbnail_sampled_frames": 4,
+            "spatial_tiles_per_video": [2],
+            "temporal_chunks_per_video": [4],
+            "encoder_patches_per_frame_multiscale": 4,
+        },
+        "autogaze_input_breakdown": {
+            "formula": "tile_frame_instances * multiscale_patch_positions_per_tile_frame",
+            "expanded_formula": "16 tile-frame instances * 4 multiscale patch positions = 64",
+            "video_sampled_frames": 8,
+            "spatial_tiles_per_frame": 2,
+            "temporal_chunks": 4,
+            "tile_frame_instances": 16,
+            "multiscale_patch_positions_per_tile_frame": 4,
+            "patch_positions_by_scale": {"scale_a": 1, "scale_b": 3},
+            "input_patch_tokens": 64,
+            "unit_note": (
+                "These are encoder patch positions before SigLIP/TokenShuffle/MLLM, not final LLM visual tokens."
+            ),
+            "why_it_can_be_large": (
+                "A resized video can still be split into multiple spatial tiles. "
+                "For example, 128 frames * 8 tiles/frame * 1060 multiscale patches = 1085440."
+            ),
         },
         "autogaze_selection_patch_tokens": {
             "input_patch_tokens": 64,
@@ -385,6 +407,8 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
         },
     }
     assert summary["answer"] == "A"
+    assert summary["prompt"] == "What does the sign say? A. A B. B C. C D. D"
+    assert summary["question"] == "What does the sign say?"
     assert summary["latency_ms"]["total_median"] == 90.0
     assert summary["latency_ms"]["ttft_median"] == 25.0
     assert summary["latency_ms"]["autogaze_total_median"] == 12.0
@@ -403,6 +427,8 @@ def test_build_autogaze_token_summary_separates_encoder_patches_and_llm_tokens()
         "spatial_tiles_per_video": [8],
         "temporal_chunks_per_video": [2],
         "encoder_patches_per_frame_multiscale": 1060,
+        "encoder_patches_per_frame_by_scale": {"56": 16, "112": 64, "196": 196, "392": 784},
+        "autogaze_input_tile_frame_instances": 256,
         "encoder_raw_tile_patch_tokens": 271360,
         "encoder_autogaze_selected_tile_patch_tokens": 27136,
         "autogaze_input_patch_tokens": 271360,
@@ -426,6 +452,24 @@ def test_build_autogaze_token_summary_separates_encoder_patches_and_llm_tokens()
     assert summary["autogaze_selection_patch_tokens"]["selected_patch_tokens"] == 27136
     assert summary["autogaze_selection_patch_tokens"]["removed_patch_tokens"] == 244224
     assert summary["autogaze_selection_patch_tokens"]["reduction_ratio"] == 10.0
+    assert summary["autogaze_input_breakdown"] == {
+        "formula": "tile_frame_instances * multiscale_patch_positions_per_tile_frame",
+        "expanded_formula": "256 tile-frame instances * 1060 multiscale patch positions = 271360",
+        "video_sampled_frames": 32,
+        "spatial_tiles_per_frame": 8,
+        "temporal_chunks": 2,
+        "tile_frame_instances": 256,
+        "multiscale_patch_positions_per_tile_frame": 1060,
+        "patch_positions_by_scale": {"56": 16, "112": 64, "196": 196, "392": 784},
+        "input_patch_tokens": 271360,
+        "unit_note": (
+            "These are encoder patch positions before SigLIP/TokenShuffle/MLLM, not final LLM visual tokens."
+        ),
+        "why_it_can_be_large": (
+            "A resized video can still be split into multiple spatial tiles. "
+            "For example, 128 frames * 8 tiles/frame * 1060 multiscale patches = 1085440."
+        ),
+    }
     assert summary["encoder_patch_tokens_before_siglip"]["raw_total_patch_tokens"] == 288320
     assert summary["encoder_patch_tokens_before_siglip"]["selected_total_patch_tokens"] == 44096
     assert summary["encoder_patch_tokens_before_siglip"]["removed_total_patch_tokens"] == 244224
@@ -443,6 +487,7 @@ def test_summarize_token_budget_rows_reports_benchmark_medians():
                 "video_sampled_frames": 32,
                 "encoder_raw_patch_tokens": 100,
                 "encoder_autogaze_selected_patch_tokens": 25,
+                "autogaze_input_tile_frame_instances": 20,
                 "autogaze_input_patch_tokens": 80,
                 "autogaze_selected_patch_tokens": 20,
                 "encoder_token_reduction_ratio": 4.0,
@@ -457,6 +502,7 @@ def test_summarize_token_budget_rows_reports_benchmark_medians():
                 "video_sampled_frames": 32,
                 "encoder_raw_patch_tokens": 200,
                 "encoder_autogaze_selected_patch_tokens": 100,
+                "autogaze_input_tile_frame_instances": 40,
                 "autogaze_input_patch_tokens": 160,
                 "autogaze_selected_patch_tokens": 80,
                 "encoder_token_reduction_ratio": 2.0,
@@ -475,6 +521,7 @@ def test_summarize_token_budget_rows_reports_benchmark_medians():
     assert summary["median"]["encoder_raw_patch_tokens"] == 150
     assert summary["median"]["encoder_autogaze_selected_patch_tokens"] == 62.5
     assert summary["median"]["encoder_removed_patch_tokens"] == 87.5
+    assert summary["median"]["autogaze_input_tile_frame_instances"] == 30
     assert summary["median"]["autogaze_input_patch_tokens"] == 120
     assert summary["median"]["autogaze_selected_patch_tokens"] == 50
     assert summary["median"]["autogaze_removed_patch_tokens"] == 70
@@ -779,6 +826,7 @@ def test_build_stream_profile_token_metrics_compares_autogaze_and_keep_all_token
     assert metrics["thumbnail_sampled_frames"] == 16
     assert metrics["encoder_raw_tile_patch_tokens"] == 2560
     assert metrics["encoder_autogaze_selected_tile_patch_tokens"] == 640
+    assert metrics["autogaze_input_tile_frame_instances"] == 32
     assert metrics["encoder_tile_token_reduction_ratio"] == 4.0
     assert metrics["encoder_raw_thumbnail_patch_tokens"] == 1280
     assert metrics["encoder_autogaze_selected_thumbnail_patch_tokens"] == 1280
@@ -955,6 +1003,7 @@ def test_compute_visual_token_metrics_compares_keep_all_and_autogaze_tokens():
     assert metrics["temporal_chunks_per_video"] == [1]
     assert metrics["encoder_patches_per_frame_multiscale"] == 4
     assert metrics["encoder_patches_per_frame_by_scale"] == {"scale_a": 1, "scale_b": 3}
+    assert metrics["autogaze_input_tile_frame_instances"] == 4
     assert metrics["encoder_raw_tile_patch_tokens"] == 16
     assert metrics["encoder_autogaze_selected_tile_patch_tokens"] == 4
     assert metrics["encoder_tile_token_reduction_ratio"] == 4.0
