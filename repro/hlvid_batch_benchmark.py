@@ -55,6 +55,18 @@ MEMORY_FIELDS = (
     "peak_memory_bytes",
 )
 AUTOGAZE_TOKEN_FIELDS = (
+    "token_metrics.video_sampled_frames",
+    "token_metrics.thumbnail_sampled_frames",
+    "token_metrics.encoder_raw_tile_patch_tokens",
+    "token_metrics.encoder_autogaze_selected_tile_patch_tokens",
+    "token_metrics.autogaze_input_patch_tokens",
+    "token_metrics.autogaze_selected_patch_tokens",
+    "token_metrics.autogaze_removed_patch_tokens",
+    "token_metrics.autogaze_patch_reduction_ratio",
+    "token_metrics.encoder_raw_thumbnail_patch_tokens",
+    "token_metrics.encoder_autogaze_selected_thumbnail_patch_tokens",
+    "token_metrics.encoder_raw_patch_tokens",
+    "token_metrics.encoder_autogaze_selected_patch_tokens",
     "token_metrics.encoder_token_reduction_ratio",
     "token_metrics.encoder_tile_token_reduction_ratio",
     "token_metrics.llm_visual_token_reduction_ratio",

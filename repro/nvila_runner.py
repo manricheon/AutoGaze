@@ -65,8 +65,20 @@ REPEAT_SUMMARY_FIELDS = (
     "ttft_peak_memory_bytes",
     "llm_peak_memory_bytes",
     "peak_memory_bytes",
+    "token_metrics.video_sampled_frames",
+    "token_metrics.thumbnail_sampled_frames",
+    "token_metrics.encoder_raw_patch_tokens",
+    "token_metrics.encoder_autogaze_selected_patch_tokens",
     "token_metrics.encoder_token_reduction_ratio",
+    "token_metrics.encoder_raw_tile_patch_tokens",
+    "token_metrics.encoder_autogaze_selected_tile_patch_tokens",
+    "token_metrics.autogaze_input_patch_tokens",
+    "token_metrics.autogaze_selected_patch_tokens",
+    "token_metrics.autogaze_removed_patch_tokens",
+    "token_metrics.autogaze_patch_reduction_ratio",
     "token_metrics.encoder_tile_token_reduction_ratio",
+    "token_metrics.encoder_raw_thumbnail_patch_tokens",
+    "token_metrics.encoder_autogaze_selected_thumbnail_patch_tokens",
     "token_metrics.llm_visual_token_reduction_ratio",
     "token_metrics.llm_actual_visual_tokens",
     "token_metrics.llm_keep_all_visual_tokens_estimated",
@@ -77,6 +89,24 @@ REPEAT_SUMMARY_FIELDS = (
     "compute_metrics.mllm.kv_cache_reduction_ratio",
     "compute_metrics.mllm.prefill_attention_pair_reduction_ratio",
     "compute_metrics.mllm.prefill_total_macs_reduction_ratio",
+)
+TOKEN_BUDGET_SUMMARY_FIELDS = (
+    "token_metrics.video_sampled_frames",
+    "token_metrics.thumbnail_sampled_frames",
+    "token_metrics.encoder_raw_tile_patch_tokens",
+    "token_metrics.encoder_autogaze_selected_tile_patch_tokens",
+    "token_metrics.autogaze_input_patch_tokens",
+    "token_metrics.autogaze_selected_patch_tokens",
+    "token_metrics.autogaze_removed_patch_tokens",
+    "token_metrics.autogaze_patch_reduction_ratio",
+    "token_metrics.encoder_raw_thumbnail_patch_tokens",
+    "token_metrics.encoder_autogaze_selected_thumbnail_patch_tokens",
+    "token_metrics.encoder_raw_patch_tokens",
+    "token_metrics.encoder_autogaze_selected_patch_tokens",
+    "token_metrics.encoder_token_reduction_ratio",
+    "token_metrics.llm_keep_all_visual_tokens_estimated",
+    "token_metrics.llm_actual_visual_tokens",
+    "token_metrics.llm_visual_token_reduction_ratio",
 )
 
 
@@ -282,6 +312,128 @@ def _reduction_percent(before: Any, after: Any) -> float | None:
     return round((1.0 - (after_value / before_value)) * 100.0, 6)
 
 
+def build_autogaze_token_summary(token_metrics: dict[str, Any]) -> dict[str, Any]:
+    autogaze_input = token_metrics.get("autogaze_input_patch_tokens")
+    autogaze_selected = token_metrics.get("autogaze_selected_patch_tokens")
+    raw_tile = token_metrics.get("encoder_raw_tile_patch_tokens")
+    selected_tile = token_metrics.get("encoder_autogaze_selected_tile_patch_tokens")
+    raw_thumbnail = token_metrics.get("encoder_raw_thumbnail_patch_tokens")
+    selected_thumbnail = token_metrics.get("encoder_autogaze_selected_thumbnail_patch_tokens")
+    raw_total = token_metrics.get("encoder_raw_patch_tokens")
+    selected_total = token_metrics.get("encoder_autogaze_selected_patch_tokens")
+    keep_all_visual = token_metrics.get("llm_keep_all_visual_tokens_estimated")
+    actual_visual = token_metrics.get("llm_actual_visual_tokens")
+    return {
+        "frame_basis": {
+            "video_sampled_frames": token_metrics.get("video_sampled_frames"),
+            "thumbnail_sampled_frames": token_metrics.get("thumbnail_sampled_frames"),
+            "spatial_tiles_per_video": token_metrics.get("spatial_tiles_per_video"),
+            "temporal_chunks_per_video": token_metrics.get("temporal_chunks_per_video"),
+            "encoder_patches_per_frame_multiscale": token_metrics.get("encoder_patches_per_frame_multiscale"),
+        },
+        "autogaze_selection_patch_tokens": {
+            "input_patch_tokens": autogaze_input,
+            "selected_patch_tokens": autogaze_selected,
+            "removed_patch_tokens": token_metrics.get("autogaze_removed_patch_tokens")
+            if token_metrics.get("autogaze_removed_patch_tokens") is not None
+            else _numeric_delta(autogaze_input, autogaze_selected),
+            "reduction_ratio": token_metrics.get("autogaze_patch_reduction_ratio")
+            or token_metrics.get("encoder_tile_token_reduction_ratio"),
+            "reduction_percent": _reduction_percent(autogaze_input, autogaze_selected),
+            "scope": (
+                "Tiled-video encoder patch positions passed to AutoGaze before selection. "
+                "Thumbnail patches are not included because thumbnails are keep-all in this runner."
+            ),
+        },
+        "encoder_patch_tokens_before_siglip": {
+            "raw_tile_patch_tokens": raw_tile,
+            "selected_tile_patch_tokens": selected_tile,
+            "removed_tile_patch_tokens": _numeric_delta(raw_tile, selected_tile),
+            "raw_thumbnail_patch_tokens": raw_thumbnail,
+            "selected_thumbnail_patch_tokens": selected_thumbnail,
+            "removed_thumbnail_patch_tokens": _numeric_delta(raw_thumbnail, selected_thumbnail),
+            "raw_total_patch_tokens": raw_total,
+            "selected_total_patch_tokens": selected_total,
+            "removed_total_patch_tokens": _numeric_delta(raw_total, selected_total),
+            "reduction_ratio": token_metrics.get("encoder_token_reduction_ratio"),
+            "reduction_percent": _reduction_percent(raw_total, selected_total),
+            "selected_token_definition": (
+                "Non-padded AutoGaze-selected encoder patch positions before TokenShuffle, "
+                "SigLIP, and the MLLM projector. Thumbnails are keep-all in this runner."
+            ),
+        },
+        "llm_visual_tokens_after_token_shuffle": {
+            "keep_all_visual_tokens_estimated": keep_all_visual,
+            "actual_visual_tokens": actual_visual,
+            "removed_visual_tokens_estimated": _numeric_delta(keep_all_visual, actual_visual),
+            "reduction_ratio": token_metrics.get("llm_visual_token_reduction_ratio"),
+            "reduction_percent": _reduction_percent(keep_all_visual, actual_visual),
+            "token_definition": (
+                "Visual placeholder tokens consumed by the LLM after TokenShuffle/projector input "
+                "packing; this is the token count that drives LLM prefill/KV cache estimates."
+            ),
+        },
+    }
+
+
+def _token_budget_summary_key(field: str) -> str:
+    return field.split(".")[-1]
+
+
+def summarize_token_budget_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    rows_with_token_metrics = [
+        row for row in rows if isinstance(row.get("token_metrics"), dict)
+    ]
+    values_by_key: dict[str, list[float]] = {
+        _token_budget_summary_key(field): [] for field in TOKEN_BUDGET_SUMMARY_FIELDS
+    }
+    values_by_key["encoder_removed_patch_tokens"] = []
+    values_by_key["autogaze_removed_patch_tokens"] = []
+    values_by_key["llm_removed_visual_tokens_estimated"] = []
+    for row in rows_with_token_metrics:
+        for field in TOKEN_BUDGET_SUMMARY_FIELDS:
+            value = metric_value(row, field)
+            if value is None:
+                continue
+            try:
+                values_by_key[_token_budget_summary_key(field)].append(float(value))
+            except (TypeError, ValueError):
+                continue
+        removed_patch_tokens = _numeric_delta(
+            metric_value(row, "token_metrics.encoder_raw_patch_tokens"),
+            metric_value(row, "token_metrics.encoder_autogaze_selected_patch_tokens"),
+        )
+        if removed_patch_tokens is not None:
+            values_by_key["encoder_removed_patch_tokens"].append(float(removed_patch_tokens))
+        removed_autogaze_patch_tokens = _numeric_delta(
+            metric_value(row, "token_metrics.autogaze_input_patch_tokens"),
+            metric_value(row, "token_metrics.autogaze_selected_patch_tokens"),
+        )
+        if removed_autogaze_patch_tokens is not None:
+            values_by_key["autogaze_removed_patch_tokens"].append(float(removed_autogaze_patch_tokens))
+        removed_visual_tokens = _numeric_delta(
+            metric_value(row, "token_metrics.llm_keep_all_visual_tokens_estimated"),
+            metric_value(row, "token_metrics.llm_actual_visual_tokens"),
+        )
+        if removed_visual_tokens is not None:
+            values_by_key["llm_removed_visual_tokens_estimated"].append(float(removed_visual_tokens))
+
+    stats_by_key = {
+        key: compute_stats(values) for key, values in values_by_key.items()
+    }
+    return {
+        "rows_with_token_metrics": len(rows_with_token_metrics),
+        "median": {key: stats["median"] for key, stats in stats_by_key.items()},
+        "mean": {key: stats["mean"] for key, stats in stats_by_key.items()},
+        "stats": stats_by_key,
+        "selected_token_definition": (
+            "encoder_autogaze_selected_* counts non-padded AutoGaze-selected encoder patch "
+            "positions before TokenShuffle/SigLIP/projector. llm_actual_visual_tokens is the "
+            "visual placeholder count consumed by the LLM after TokenShuffle/projector packing."
+        ),
+    }
+
+
 def build_single_summary(payload: dict[str, Any]) -> dict[str, Any]:
     result = payload.get("result", {})
     token_metrics = result.get("token_metrics", {}) if isinstance(result, dict) else {}
@@ -297,6 +449,7 @@ def build_single_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "gazing_mode": payload.get("gazing_mode"),
         "video": payload.get("video"),
         "video_input_summary": result.get("video_input_summary") if isinstance(result, dict) else None,
+        "autogaze_token_summary": build_autogaze_token_summary(token_metrics),
         "key_autogaze_effect": {
             "gazing_mode": payload.get("gazing_mode"),
             "total_ms_median": summary_metric(payload, "total_ms"),
@@ -534,6 +687,10 @@ def build_stream_profile_token_metrics(plan: dict[str, Any], tile_summary: dict[
         "token_shuffle": token_shuffle,
         "encoder_raw_tile_patch_tokens": raw_tile_patches,
         "encoder_autogaze_selected_tile_patch_tokens": selected_tile_patches,
+        "autogaze_input_patch_tokens": raw_tile_patches,
+        "autogaze_selected_patch_tokens": selected_tile_patches,
+        "autogaze_removed_patch_tokens": raw_tile_patches - selected_tile_patches,
+        "autogaze_patch_reduction_ratio": _safe_ratio(raw_tile_patches, selected_tile_patches),
         "encoder_autogaze_padded_tile_patch_tokens": padded_tile,
         "encoder_autogaze_total_tile_gaze_slots": total_tile_slots,
         "encoder_tile_token_reduction_ratio": _safe_ratio(raw_tile_patches, selected_tile_patches),
@@ -1461,6 +1618,10 @@ def compute_visual_token_metrics(
         "token_shuffle": token_shuffle,
         "encoder_raw_tile_patch_tokens": raw_tile_patches,
         "encoder_autogaze_selected_tile_patch_tokens": selected_tile_patches,
+        "autogaze_input_patch_tokens": raw_tile_patches,
+        "autogaze_selected_patch_tokens": selected_tile_patches,
+        "autogaze_removed_patch_tokens": raw_tile_patches - selected_tile_patches,
+        "autogaze_patch_reduction_ratio": _safe_ratio(raw_tile_patches, selected_tile_patches),
         "encoder_autogaze_padded_tile_patch_tokens": tile_padded_count if tile_slots else 0,
         "encoder_autogaze_total_tile_gaze_slots": tile_slots,
         "encoder_tile_token_reduction_ratio": _safe_ratio(raw_tile_patches, selected_tile_patches),
@@ -2494,6 +2655,7 @@ def run_stream_profile(args: argparse.Namespace) -> None:
         },
         "gaze": tile_summary,
         "token_metrics": token_metrics,
+        "autogaze_token_summary": build_autogaze_token_summary(token_metrics),
         "compute_metrics": compute_metrics,
         "timing_ms": {
             "video_decode_scan": stage_total(stage_timings, "video_decode_scan"),
@@ -2618,6 +2780,7 @@ def generate_one(model, processor, video: str, prompt: str, device: torch.device
         "input_token_count": input_token_count,
         "input_shapes": tensor_shapes(inputs),
         "token_metrics": token_metrics,
+        "autogaze_token_summary": build_autogaze_token_summary(token_metrics),
         "compute_metrics": compute_metrics,
         "video_preprocess_ms": preprocess_ms,
         "video_decode_ms": stage_total(processor_timings, "video_decode_sampling"),
@@ -2822,6 +2985,7 @@ def run_hlvid(args: argparse.Namespace) -> None:
     if output_path.exists():
         all_rows = [json.loads(line) for line in output_path.read_text().splitlines() if line.strip()]
     summary, scored = score_predictions(all_rows)
+    summary["token_budget_summary"] = summarize_token_budget_rows(all_rows)
     write_json(args.summary, summary)
     write_jsonl(args.scored_predictions, scored)
     print(json.dumps(summary, indent=2, sort_keys=True))

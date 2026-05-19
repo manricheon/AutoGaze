@@ -13,6 +13,7 @@ from repro.nvila_runner import (
     build_seek_decode_groups,
     build_keep_all_gazing_info,
     build_parser,
+    build_autogaze_token_summary,
     build_video_input_summary,
     build_stream_profile_compute_metrics,
     build_stream_profile_token_metrics,
@@ -34,6 +35,7 @@ from repro.nvila_runner import (
     resolve_video,
     spatial_tile_grid,
     summarize_repeat_results,
+    summarize_token_budget_rows,
     summarize_stream_chunks,
     uniform_sample_indices,
 )
@@ -260,7 +262,20 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
                 "processor_input_resolution": "1280x720",
             },
             "token_metrics": {
+                "video_sampled_frames": 128,
+                "thumbnail_sampled_frames": 64,
+                "spatial_tiles_per_video": [8],
+                "temporal_chunks_per_video": [8],
+                "encoder_patches_per_frame_multiscale": 1060,
                 "encoder_raw_patch_tokens": 80,
+                "encoder_raw_tile_patch_tokens": 64,
+                "encoder_autogaze_selected_tile_patch_tokens": 24,
+                "autogaze_input_patch_tokens": 64,
+                "autogaze_selected_patch_tokens": 24,
+                "autogaze_removed_patch_tokens": 40,
+                "autogaze_patch_reduction_ratio": 64 / 24,
+                "encoder_raw_thumbnail_patch_tokens": 16,
+                "encoder_autogaze_selected_thumbnail_patch_tokens": 16,
                 "encoder_autogaze_selected_patch_tokens": 40,
                 "encoder_token_reduction_ratio": 2.0,
                 "llm_visual_token_reduction_ratio": 2.0,
@@ -321,6 +336,54 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
         "runner_resize_enabled": True,
         "processor_input_resolution": "1280x720",
     }
+    assert summary["autogaze_token_summary"] == {
+        "frame_basis": {
+            "video_sampled_frames": 128,
+            "thumbnail_sampled_frames": 64,
+            "spatial_tiles_per_video": [8],
+            "temporal_chunks_per_video": [8],
+            "encoder_patches_per_frame_multiscale": 1060,
+        },
+        "autogaze_selection_patch_tokens": {
+            "input_patch_tokens": 64,
+            "selected_patch_tokens": 24,
+            "removed_patch_tokens": 40,
+            "reduction_ratio": 64 / 24,
+            "reduction_percent": 62.5,
+            "scope": (
+                "Tiled-video encoder patch positions passed to AutoGaze before selection. "
+                "Thumbnail patches are not included because thumbnails are keep-all in this runner."
+            ),
+        },
+        "encoder_patch_tokens_before_siglip": {
+            "raw_tile_patch_tokens": 64,
+            "selected_tile_patch_tokens": 24,
+            "removed_tile_patch_tokens": 40,
+            "raw_thumbnail_patch_tokens": 16,
+            "selected_thumbnail_patch_tokens": 16,
+            "removed_thumbnail_patch_tokens": 0,
+            "raw_total_patch_tokens": 80,
+            "selected_total_patch_tokens": 40,
+            "removed_total_patch_tokens": 40,
+            "reduction_ratio": 2.0,
+            "reduction_percent": 50.0,
+            "selected_token_definition": (
+                "Non-padded AutoGaze-selected encoder patch positions before TokenShuffle, "
+                "SigLIP, and the MLLM projector. Thumbnails are keep-all in this runner."
+            ),
+        },
+        "llm_visual_tokens_after_token_shuffle": {
+            "keep_all_visual_tokens_estimated": 80,
+            "actual_visual_tokens": 40,
+            "removed_visual_tokens_estimated": 40,
+            "reduction_ratio": 2.0,
+            "reduction_percent": 50.0,
+            "token_definition": (
+                "Visual placeholder tokens consumed by the LLM after TokenShuffle/projector input "
+                "packing; this is the token count that drives LLM prefill/KV cache estimates."
+            ),
+        },
+    }
     assert summary["answer"] == "A"
     assert summary["latency_ms"]["total_median"] == 90.0
     assert summary["latency_ms"]["ttft_median"] == 25.0
@@ -331,6 +394,92 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
     assert summary["tokens"]["llm_actual_visual_tokens"] == 40
     assert summary["compute"]["siglip_total_macs_reduction_ratio"] == 4.0
     assert summary["compute"]["mllm_kv_cache_reduction_ratio"] == 2.5
+
+
+def test_build_autogaze_token_summary_separates_encoder_patches_and_llm_tokens():
+    token_metrics = {
+        "video_sampled_frames": 32,
+        "thumbnail_sampled_frames": 16,
+        "spatial_tiles_per_video": [8],
+        "temporal_chunks_per_video": [2],
+        "encoder_patches_per_frame_multiscale": 1060,
+        "encoder_raw_tile_patch_tokens": 271360,
+        "encoder_autogaze_selected_tile_patch_tokens": 27136,
+        "autogaze_input_patch_tokens": 271360,
+        "autogaze_selected_patch_tokens": 27136,
+        "autogaze_removed_patch_tokens": 244224,
+        "autogaze_patch_reduction_ratio": 10.0,
+        "encoder_raw_thumbnail_patch_tokens": 16960,
+        "encoder_autogaze_selected_thumbnail_patch_tokens": 16960,
+        "encoder_raw_patch_tokens": 288320,
+        "encoder_autogaze_selected_patch_tokens": 44096,
+        "encoder_token_reduction_ratio": 288320 / 44096,
+        "llm_keep_all_visual_tokens_estimated": 32096,
+        "llm_actual_visual_tokens": 4896,
+        "llm_visual_token_reduction_ratio": 32096 / 4896,
+    }
+
+    summary = build_autogaze_token_summary(token_metrics)
+
+    assert summary["frame_basis"]["video_sampled_frames"] == 32
+    assert summary["autogaze_selection_patch_tokens"]["input_patch_tokens"] == 271360
+    assert summary["autogaze_selection_patch_tokens"]["selected_patch_tokens"] == 27136
+    assert summary["autogaze_selection_patch_tokens"]["removed_patch_tokens"] == 244224
+    assert summary["autogaze_selection_patch_tokens"]["reduction_ratio"] == 10.0
+    assert summary["encoder_patch_tokens_before_siglip"]["raw_total_patch_tokens"] == 288320
+    assert summary["encoder_patch_tokens_before_siglip"]["selected_total_patch_tokens"] == 44096
+    assert summary["encoder_patch_tokens_before_siglip"]["removed_total_patch_tokens"] == 244224
+    assert summary["encoder_patch_tokens_before_siglip"]["reduction_percent"] == 84.705882
+    assert summary["llm_visual_tokens_after_token_shuffle"]["keep_all_visual_tokens_estimated"] == 32096
+    assert summary["llm_visual_tokens_after_token_shuffle"]["actual_visual_tokens"] == 4896
+    assert summary["llm_visual_tokens_after_token_shuffle"]["removed_visual_tokens_estimated"] == 27200
+
+
+def test_summarize_token_budget_rows_reports_benchmark_medians():
+    rows = [
+        {
+            "status": "ok",
+            "token_metrics": {
+                "video_sampled_frames": 32,
+                "encoder_raw_patch_tokens": 100,
+                "encoder_autogaze_selected_patch_tokens": 25,
+                "autogaze_input_patch_tokens": 80,
+                "autogaze_selected_patch_tokens": 20,
+                "encoder_token_reduction_ratio": 4.0,
+                "llm_keep_all_visual_tokens_estimated": 40,
+                "llm_actual_visual_tokens": 10,
+                "llm_visual_token_reduction_ratio": 4.0,
+            },
+        },
+        {
+            "status": "ok",
+            "token_metrics": {
+                "video_sampled_frames": 32,
+                "encoder_raw_patch_tokens": 200,
+                "encoder_autogaze_selected_patch_tokens": 100,
+                "autogaze_input_patch_tokens": 160,
+                "autogaze_selected_patch_tokens": 80,
+                "encoder_token_reduction_ratio": 2.0,
+                "llm_keep_all_visual_tokens_estimated": 80,
+                "llm_actual_visual_tokens": 40,
+                "llm_visual_token_reduction_ratio": 2.0,
+            },
+        },
+        {"status": "failed", "error": "oom"},
+    ]
+
+    summary = summarize_token_budget_rows(rows)
+
+    assert summary["rows_with_token_metrics"] == 2
+    assert summary["median"]["video_sampled_frames"] == 32
+    assert summary["median"]["encoder_raw_patch_tokens"] == 150
+    assert summary["median"]["encoder_autogaze_selected_patch_tokens"] == 62.5
+    assert summary["median"]["encoder_removed_patch_tokens"] == 87.5
+    assert summary["median"]["autogaze_input_patch_tokens"] == 120
+    assert summary["median"]["autogaze_selected_patch_tokens"] == 50
+    assert summary["median"]["autogaze_removed_patch_tokens"] == 70
+    assert summary["median"]["encoder_token_reduction_ratio"] == 3.0
+    assert summary["median"]["llm_visual_token_reduction_ratio"] == 3.0
 
 
 def test_build_video_input_summary_reports_source_sample_and_resize_context():

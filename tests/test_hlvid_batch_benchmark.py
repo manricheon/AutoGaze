@@ -155,8 +155,15 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
             "llm_forward_ms": 30.0,
             "ttft_ms": 50.0,
             "llm_peak_memory_bytes": 1000,
-            "token_metrics": {"llm_actual_visual_tokens": 100, "encoder_raw_patch_tokens": 900},
-        }
+            "token_metrics": {
+                "llm_actual_visual_tokens": 100,
+                "llm_keep_all_visual_tokens_estimated": 100,
+                    "encoder_raw_patch_tokens": 900,
+                    "encoder_autogaze_selected_patch_tokens": 900,
+                    "autogaze_input_patch_tokens": 800,
+                    "autogaze_selected_patch_tokens": 800,
+                },
+            }
     ]
     autogaze_rows = [
         {
@@ -170,7 +177,12 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
             "llm_peak_memory_bytes": 500,
             "token_metrics": {
                 "llm_actual_visual_tokens": 40,
+                "llm_keep_all_visual_tokens_estimated": 100,
                 "llm_visual_token_reduction_ratio": 2.5,
+                "encoder_raw_patch_tokens": 900,
+                "encoder_autogaze_selected_patch_tokens": 300,
+                "autogaze_input_patch_tokens": 800,
+                "autogaze_selected_patch_tokens": 200,
                 "encoder_token_reduction_ratio": 3.0,
             },
             "compute_metrics": {
@@ -187,6 +199,14 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
     assert report["gains"]["latency_speedup_median"]["total_ms"] == 100.0 / 60.0
     assert report["gains"]["memory_reduction_ratio_median"]["llm_peak_memory_bytes"] == 2.0
     assert report["gains"]["autogaze_token_reduction_median"]["llm_visual_token_reduction_ratio"] == 2.5
+    assert report["autogaze"]["tokens"]["token_metrics.encoder_raw_patch_tokens"]["median"] == 900.0
+    assert report["autogaze"]["tokens"]["token_metrics.encoder_autogaze_selected_patch_tokens"]["median"] == 300.0
+    assert report["autogaze"]["tokens"]["token_metrics.autogaze_input_patch_tokens"]["median"] == 800.0
+    assert report["autogaze"]["tokens"]["token_metrics.autogaze_selected_patch_tokens"]["median"] == 200.0
+    assert report["gains"]["autogaze_token_reduction_median"]["encoder_raw_patch_tokens"] == 900.0
+    assert report["gains"]["autogaze_token_reduction_median"]["encoder_autogaze_selected_patch_tokens"] == 300.0
+    assert report["gains"]["autogaze_token_reduction_median"]["autogaze_input_patch_tokens"] == 800.0
+    assert report["gains"]["autogaze_token_reduction_median"]["autogaze_selected_patch_tokens"] == 200.0
     assert report["gains"]["compute_reduction_median"]["siglip_total_macs"] == 4.0
 
 
