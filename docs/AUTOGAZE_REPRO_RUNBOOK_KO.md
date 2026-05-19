@@ -113,6 +113,14 @@ NVILA runner는 output JSON에 모듈별 timing을 기록합니다. 중요한 �
 
 raw output JSON이 너무 길면 `--print-summary --summary-json <path>`를 붙이세요. 전체 raw JSON은 `--output-json`에 그대로 저장하고, 터미널과 summary file에는 답변과 함께 `prompt`, `question`, `video_input_summary`, `autogaze_token_summary`, `key_autogaze_effect`를 별도로 정리합니다. `single` 모드에서는 `prompt`가 실행에 사용한 `--prompt` 원문이고, HLVid row 기반 실행에서는 per-row `question`이 `predictions.jsonl`과 `scored_predictions.jsonl`에 보존됩니다. `video_input_summary`에는 원본 총 프레임 수, 원본 해상도, 요청한 video/thumbnail frame 수, 실제 processor tensor 기준 frame 수, runner resize 적용 여부, resize 후 processor 입력 해상도, decode 전략/읽은 frame 수, spatial tile/temporal chunk 수가 들어갑니다. `autogaze_token_summary`에는 사용한 프레임/타일 기준 raw patch budget과 AutoGaze가 실제 유지한 patch 수, TokenShuffle 이후 LLM visual token 수가 나뉘어 들어갑니다. `key_autogaze_effect`에는 AutoGaze 전후 차이를 가장 잘 보여주는 encoder patch 수, LLM visual token 수, reduction ratio/percent, SigLIP/MLLM 계산량 감소 추정치, 핵심 latency/memory median이 모입니다. 상세 분석용 `latency_ms`, `memory_bytes`, `tokens`, `compute` 섹션도 함께 남깁니다.
 
+결과를 공유용 Markdown으로 바꾸려면 `repro.markdown_report`를 사용하세요. single inference JSON, HLVid summary/gain report JSON, stream-profile JSON을 입력으로 받을 수 있고, 모델 pipeline, video/input 정보, frame/patch/tokenization, step-by-step module metrics, 핵심 latency/token/memory, benchmark score를 한 파일에 정리합니다.
+
+```bash
+.venv/bin/python -m repro.markdown_report \
+  --input-json outputs/autogaze_repro/hlvid_autogaze_gain_report.json \
+  --output-md outputs/autogaze_repro/hlvid_autogaze_gain_report.md
+```
+
 단일 실행의 비디오 입력 조건을 빠르게 확인할 때는 아래 필드를 먼저 보세요. raw JSON에는 top-level `video_input_summary`와 `result.video_input_summary`가 모두 있고, compact summary JSON에도 같은 `video_input_summary`가 들어갑니다.
 
 | 질문 | 볼 필드 |
@@ -927,4 +935,5 @@ ratio와 percent는 의도가 다릅니다. `*_ratio_*`는 `before_or_keep_all /
 .venv/bin/python scripts/run_hlvid_folder_benchmark.py --help
 .venv/bin/python -m repro.nvila_runner --help
 .venv/bin/python -m repro.report --help
+.venv/bin/python -m repro.markdown_report --help
 ```
