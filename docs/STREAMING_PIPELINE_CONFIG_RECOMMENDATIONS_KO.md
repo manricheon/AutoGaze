@@ -280,6 +280,17 @@ SigLIP까지 포함한 MPS smoke:
 | 896 square | 16f, 8thumb, 1tile, patch16, both | 5.88s | 2.33s | 0.19s | 2.88s | 35.9x | 2.84x | 0.6/13.0 MB |
 | 896 square | 64f, 32thumb, 1tile, patch16, both | 25.25s | 7.94s | 1.05s | 15.21s | 41.8x | 2.86x | 0.7/13.0 MB |
 | HLVid 4K seek | 16f, 8thumb, 1tile, patch16, gazed | 6.42s | 3.58s | 0.29s | n/a | 15.3x | 2.65x | 0.9 MB |
+| HLVid 4K seek | 128f, 64thumb, 1tile, patch16, both | 43.74s* | 10.84s | 1.01s | 14.86s | 16.1x | 2.67x | 0.9/13.0 MB |
+| HLVid 720p seek | 128f, 64thumb, 1tile, patch16, both | 41.92s* | 10.03s | 0.74s | 14.83s | 16.1x | 2.67x | 0.9/13.0 MB |
+
+`both` 모드의 총 pre-LLM 시간은 gazed SigLIP와 keep-all SigLIP을 한 실행에서 둘 다 돌린 합산이므로 end-to-end 비교값이 아닙니다. 같은 output에서 branch별로 빼서 보면 아래가 더 해석하기 쉽습니다.
+
+| 입력 | keep-all SigLIP only | AutoGaze forward + gazed SigLIP | 순수 모델 forward speedup | 추정 keep-all stream | 추정 AutoGaze stream | 추정 stream speedup |
+|---|---:|---:|---:|---:|---:|---:|
+| HLVid 4K 128f | 14.86s | 11.85s | 1.25x | 31.64s | 28.88s | 1.10x |
+| HLVid 720p 128f | 14.83s | 10.78s | 1.38x | 30.92s | 27.09s | 1.14x |
+
+여기서 "순수 모델 forward"는 `siglip_keep_all_forward / (tile_autogaze_forward + siglip_gazed_forward)`입니다. AutoGaze tensorize까지 넣으면 4K는 `1.23x`, 720p는 `1.35x`입니다. 즉 HLVid 128프레임/1tile/MPS에서는 SigLIP 자체는 `14.8-19.9x` 빨라지지만, AutoGaze forward가 약 `10-11s` 들어서 vision-only 순이득은 아직 작습니다. 장점은 token/compute 감소입니다: tile patch `16.1x`, LLM visual token lower-bound `2.72x`, SigLIP attention MACs `29.1x`, SigLIP total MACs `4.10x` 감소입니다. full MLLM에서 prefill/KV cache 이득을 확인해야 최종 latency claim을 만들 수 있습니다.
 
 추가 실측 파일:
 
@@ -287,6 +298,9 @@ SigLIP까지 포함한 MPS smoke:
 - `outputs/autogaze_repro/security_64f_1tile_siglip_google_both_mps.json`
 - `outputs/autogaze_repro/hlvid_4k_16f_1tile_siglip_google_gazed_mps.json`
 - `outputs/autogaze_repro/hlvid_4k_16f_1tile_siglip_google_gazed_seek_mps.json`
+- `outputs/autogaze_repro/hlvid_4k_128f_1tile_siglip_google_both_seek_mps.json`
+- `outputs/autogaze_repro/hlvid_720p_128f_1tile_siglip_google_both_seek_mps.json`
+- `outputs/autogaze_repro/hlvid_128f_siglip_autogaze_tradeoff_report.json`
 
 MPS timing은 첫 실행의 graph compile/cache 상태에 따라 흔들립니다. 같은 command를 한 번 더 돌리면 특히 SigLIP gazed 시간이 낮아질 수 있으므로, CUDA에서 최종 claim을 만들 때는 warmup 후 반복 측정하세요.
 
@@ -506,4 +520,21 @@ stream-profile에서 후보를 줄인 뒤 full NVILA는 같은 조합으로 `--m
 - `token_metrics.encoder_token_reduction_ratio`
 - `token_metrics.llm_keep_all_visual_tokens_estimated`
 - `token_metrics.llm_autogaze_visual_tokens_lower_bound_estimated`
+- `compute_metrics.siglip_encoder.keep_all_to_actual_attention_macs_ratio`
+- `compute_metrics.siglip_encoder.keep_all_to_actual_mlp_macs_ratio`
+- `compute_metrics.siglip_encoder.keep_all_to_actual_total_macs_ratio`
 - full NVILA에서는 `result.siglip_vision_ms`, `result.mm_projector_ms`, `result.llm_forward_ms`, `result.ttft_ms`
+- full NVILA에서는 `compute_metrics.mllm.actual_prefill_context_tokens`, `compute_metrics.mllm.prefill_context_reduction_ratio`, `compute_metrics.mllm.kv_cache_reduction_ratio`, `result.ttft_peak_memory_bytes`, `result.llm_peak_memory_bytes`
+
+코드에서 측정 위치를 확인할 때는 아래를 기준으로 보면 됩니다.
+
+| 측정 항목 | 코드 위치 |
+| --- | --- |
+| stream stage timer | [StageProfiler:L45](../repro/nvila_runner.py#L45), [run_stream_profile:L1822](../repro/nvila_runner.py#L1822) |
+| AutoGaze tensorize/forward | [run_autogaze_on_stream_tile_sequences:L1576](../repro/nvila_runner.py#L1576) |
+| gazed/keep-all SigLIP forward | [run_siglip_on_stream_batch:L1527](../repro/nvila_runner.py#L1527) |
+| stream token/patch metrics | [build_stream_profile_token_metrics:L313](../repro/nvila_runner.py#L313) |
+| stream compute metrics | [build_stream_profile_compute_metrics:L362](../repro/nvila_runner.py#L362) |
+| full NVILA SigLIP/projector/LLM timing hook | [ProfilePatches:L81](../repro/nvila_runner.py#L81), [forward hooks:L95-L100](../repro/nvila_runner.py#L95-L100) |
+| TTFT/LLM memory | [timed_generate:L1337](../repro/nvila_runner.py#L1337), [generate_one memory fields:L2227-L2302](../repro/nvila_runner.py#L2227-L2302) |
+| HLVid batch gain report | [summarize_run:L194](../repro/hlvid_batch_benchmark.py#L194), [build_gain_report:L205](../repro/hlvid_batch_benchmark.py#L205) |

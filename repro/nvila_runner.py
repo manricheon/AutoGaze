@@ -21,8 +21,16 @@ from omegaconf import OmegaConf
 from PIL import Image
 from transformers import AutoModel, AutoProcessor
 
-from repro.common import append_jsonl, environment_metadata, resolve_device, synchronize, write_json, write_jsonl
-from repro.hlvid import load_hlvid_manifest, parse_choice, score_predictions
+from repro.common import (
+    append_jsonl,
+    compute_stats,
+    environment_metadata,
+    resolve_device,
+    synchronize,
+    write_json,
+    write_jsonl,
+)
+from repro.hlvid import load_hlvid_manifest, parse_choice, read_manifest_file, score_predictions
 
 DEFAULT_MODEL = "nvidia/NVILA-8B-HD-Video"
 DEFAULT_EXAMPLE_VIDEO = "https://huggingface.co/datasets/bfshi/HLVid/resolve/main/example/clip_av_video_5_001.mp4"
@@ -40,6 +48,36 @@ NVILA_TARGET_PATCH_SIZE = 14
 NVILA_TOKEN_SHUFFLE = 9
 NVILA_CONTEXT_LIMIT = 40960
 AUTOGAZE_CHUNK_FRAMES = 16
+REPEAT_SUMMARY_FIELDS = (
+    "total_ms",
+    "video_preprocess_ms",
+    "video_decode_ms",
+    "video_tiling_ms",
+    "autogaze_ms",
+    "autogaze_forward_ms",
+    "vision_encoder_ms",
+    "siglip_vision_ms",
+    "mm_projector_ms",
+    "llm_forward_ms",
+    "ttft_ms",
+    "decode_estimated_ms",
+    "processor_peak_memory_bytes",
+    "ttft_peak_memory_bytes",
+    "llm_peak_memory_bytes",
+    "peak_memory_bytes",
+    "token_metrics.encoder_token_reduction_ratio",
+    "token_metrics.encoder_tile_token_reduction_ratio",
+    "token_metrics.llm_visual_token_reduction_ratio",
+    "token_metrics.llm_actual_visual_tokens",
+    "token_metrics.llm_keep_all_visual_tokens_estimated",
+    "compute_metrics.siglip_encoder.keep_all_to_actual_attention_macs_ratio",
+    "compute_metrics.siglip_encoder.keep_all_to_actual_mlp_macs_ratio",
+    "compute_metrics.siglip_encoder.keep_all_to_actual_total_macs_ratio",
+    "compute_metrics.mllm.prefill_context_reduction_ratio",
+    "compute_metrics.mllm.kv_cache_reduction_ratio",
+    "compute_metrics.mllm.prefill_attention_pair_reduction_ratio",
+    "compute_metrics.mllm.prefill_total_macs_reduction_ratio",
+)
 
 
 class StageProfiler:
@@ -169,6 +207,45 @@ def parse_int_sequence(value: str | list[int] | tuple[int, ...] | None) -> list[
         return [int(item) for item in value]
     parsed = [int(part) for part in re.findall(r"\d+", value)]
     return parsed or None
+
+
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("value must be >= 1")
+    return parsed
+
+
+def non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be >= 0")
+    return parsed
+
+
+def metric_value(row: dict[str, Any], dotted_path: str) -> Any:
+    value: Any = row
+    for part in dotted_path.split("."):
+        if not isinstance(value, dict):
+            return None
+        value = value.get(part)
+    return value
+
+
+def summarize_repeat_results(results: list[dict[str, Any]]) -> dict[str, dict[str, float | int]]:
+    summary: dict[str, dict[str, float | int]] = {}
+    for field in REPEAT_SUMMARY_FIELDS:
+        values: list[float] = []
+        for result in results:
+            value = metric_value(result, field)
+            if value is None:
+                continue
+            try:
+                values.append(float(value))
+            except (TypeError, ValueError):
+                continue
+        summary[field] = compute_stats(values)
+    return summary
 
 
 def uniform_sample_indices(total_frames: int, sample_count: int) -> list[int]:
@@ -356,6 +433,103 @@ def build_stream_profile_token_metrics(plan: dict[str, Any], tile_summary: dict[
         "llm_actual_visual_tokens": None,
         "llm_actual_visual_tokens_after_autogaze": None,
         "llm_visual_token_reduction_ratio": None,
+    }
+
+
+def build_stream_profile_compute_metrics(
+    plan: dict[str, Any],
+    tile_summary: dict[str, Any],
+    token_metrics: dict[str, Any],
+    *,
+    siglip_info: dict[str, Any] | None = None,
+    dtype_bytes: int = 4,
+) -> dict[str, Any]:
+    siglip_info = siglip_info or {}
+    hidden_size = int(siglip_info.get("hidden_size") or 1152)
+    intermediate_size = int(siglip_info.get("intermediate_size") or 4304)
+    num_hidden_layers = int(siglip_info.get("num_hidden_layers") or 27)
+    num_attention_heads = int(siglip_info.get("num_attention_heads") or 16)
+    patch_tokens = int(plan["tokens"]["encoder_patches_per_frame_multiscale"])
+    tile_sequences = int(plan["chunking"]["tile_sequences"])
+    chunk_frames = int(plan["chunking"]["chunk_frames"])
+    thumbnail_frames = int(plan["sampling"]["thumbnail_frames"])
+    keep_all_tile_sequence_tokens = tile_sequences * chunk_frames * patch_tokens
+    keep_all_tile_attention_pairs = tile_sequences * (chunk_frames * patch_tokens) ** 2
+    thumbnail_sequence_tokens = thumbnail_frames * patch_tokens
+    thumbnail_attention_pairs = thumbnail_frames * patch_tokens * patch_tokens
+
+    actual_tile_sequence_tokens = int(
+        tile_summary.get("siglip_gazed_sequence_slots_sum")
+        or tile_summary.get("total_gaze_slots")
+        or keep_all_tile_sequence_tokens
+    )
+    actual_tile_attention_pairs = int(
+        tile_summary.get("siglip_gazed_sequence_slots_squared_sum")
+        or (
+            tile_sequences
+            * math.ceil(actual_tile_sequence_tokens / max(tile_sequences, 1))
+            * math.ceil(actual_tile_sequence_tokens / max(tile_sequences, 1))
+        )
+    )
+
+    keep_all = estimate_siglip_encoder_compute_from_sums(
+        sequence_count=tile_sequences + thumbnail_frames,
+        sequence_tokens=keep_all_tile_sequence_tokens + thumbnail_sequence_tokens,
+        dense_attention_pairs=keep_all_tile_attention_pairs + thumbnail_attention_pairs,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        num_hidden_layers=num_hidden_layers,
+        num_attention_heads=num_attention_heads,
+        dtype_bytes=dtype_bytes,
+    )
+    actual = estimate_siglip_encoder_compute_from_sums(
+        sequence_count=tile_sequences + thumbnail_frames,
+        sequence_tokens=actual_tile_sequence_tokens + thumbnail_sequence_tokens,
+        dense_attention_pairs=actual_tile_attention_pairs + thumbnail_attention_pairs,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        num_hidden_layers=num_hidden_layers,
+        num_attention_heads=num_attention_heads,
+        dtype_bytes=dtype_bytes,
+    )
+
+    return {
+        "metric_type": "estimated_macs_and_bytes_from_stream_token_counts",
+        "note": (
+            "stream-profile does not run NVILA projector/LLM. SigLIP compute fields are analytical estimates; "
+            "timing_ms.siglip_* fields are measured only when --stream-run-siglip is enabled."
+        ),
+        "siglip_encoder": {
+            "keep_all": keep_all,
+            "actual": actual,
+            "keep_all_to_actual_token_ratio": _safe_ratio(
+                keep_all["sequence_tokens"], actual["sequence_tokens"]
+            ),
+            "keep_all_to_actual_dense_attention_pair_ratio": _safe_ratio(
+                keep_all["dense_attention_pairs"], actual["dense_attention_pairs"]
+            ),
+            "keep_all_to_actual_attention_macs_ratio": _safe_ratio(
+                keep_all["attention_quadratic_macs_estimated"],
+                actual["attention_quadratic_macs_estimated"],
+            ),
+            "keep_all_to_actual_mlp_macs_ratio": _safe_ratio(
+                keep_all["mlp_macs_estimated"], actual["mlp_macs_estimated"]
+            ),
+            "keep_all_to_actual_total_macs_ratio": _safe_ratio(
+                keep_all["total_macs_estimated"], actual["total_macs_estimated"]
+            ),
+        },
+        "mllm": {
+            "full_llm_not_run_in_stream_profile": True,
+            "keep_all_visual_tokens_estimated": token_metrics["llm_keep_all_visual_tokens_estimated"],
+            "autogaze_visual_tokens_lower_bound_estimated": token_metrics[
+                "llm_autogaze_visual_tokens_lower_bound_estimated"
+            ],
+            "note": (
+                "Run single/hlvid mode with --measure-ttft to get actual prefill context, KV cache estimate, "
+                "TTFT, and LLM peak memory."
+            ),
+        },
     }
 
 
@@ -770,12 +944,315 @@ def _safe_ratio(numerator: int | None, denominator: int | None) -> float | None:
     return numerator / denominator
 
 
+def _config_int(config: Any, key: str, default: int = 0) -> int:
+    value = getattr(config, key, default)
+    if value is None:
+        return default
+    return int(value)
+
+
+def _model_dtype_bytes(model: Any, default: int = 2) -> int:
+    try:
+        return int(next(model.parameters()).element_size())
+    except Exception:
+        pass
+
+    dtype = getattr(getattr(model, "config", None), "torch_dtype", None)
+    dtype_name = str(dtype).lower()
+    if "float32" in dtype_name or "fp32" in dtype_name:
+        return 4
+    if "float64" in dtype_name or "fp64" in dtype_name:
+        return 8
+    if "int8" in dtype_name or "float8" in dtype_name:
+        return 1
+    return default
+
+
 def _visual_frame_count(tensor: torch.Tensor) -> int:
     if tensor.ndim >= 5:
         return int(tensor.shape[0]) * int(tensor.shape[1])
     if tensor.ndim >= 1:
         return int(tensor.shape[0])
     return 0
+
+
+def _sequence_lengths_from_padding_masks(value: Any) -> list[int]:
+    lengths: list[int] = []
+    for tensor in _iter_tensors(value):
+        if tensor.numel() == 0:
+            continue
+        if tensor.ndim == 1:
+            lengths.append(int(tensor.shape[0]))
+            continue
+        rows = tensor.reshape(-1, int(tensor.shape[-1]))
+        lengths.extend([int(rows.shape[-1])] * int(rows.shape[0]))
+    return lengths
+
+
+def _keep_all_siglip_sequence_lengths(payload: dict[str, Any], patches_per_frame_value: int) -> list[int]:
+    lengths: list[int] = []
+    for tensor in _tensor_sequence(payload.get("pixel_values_videos_tiles")):
+        if tensor.ndim >= 5:
+            lengths.extend([int(tensor.shape[1]) * patches_per_frame_value] * int(tensor.shape[0]))
+    for tensor in _tensor_sequence(payload.get("pixel_values_videos_thumbnails")):
+        if tensor.ndim >= 5:
+            lengths.extend([int(tensor.shape[1]) * patches_per_frame_value] * int(tensor.shape[0]))
+        elif tensor.ndim >= 1:
+            lengths.extend([patches_per_frame_value] * int(tensor.shape[0]))
+    return lengths
+
+
+def _actual_siglip_sequence_lengths(payload: dict[str, Any], patches_per_frame_value: int) -> list[int]:
+    lengths = _sequence_lengths_from_padding_masks(_gazing_padding_payload(payload, "if_padded_gazing_tiles"))
+    lengths.extend(_sequence_lengths_from_padding_masks(_gazing_padding_payload(payload, "if_padded_gazing_thumbnails")))
+    if lengths:
+        return lengths
+    return _keep_all_siglip_sequence_lengths(payload, patches_per_frame_value)
+
+
+def estimate_siglip_encoder_compute(
+    *,
+    sequence_lengths: list[int],
+    hidden_size: int,
+    intermediate_size: int,
+    num_hidden_layers: int,
+    num_attention_heads: int,
+    dtype_bytes: int,
+) -> dict[str, int]:
+    """Estimate dense SigLIP transformer MACs and major activation sizes."""
+
+    sequence_count = len(sequence_lengths)
+    sequence_tokens = int(sum(sequence_lengths))
+    dense_attention_pairs = int(sum(length * length for length in sequence_lengths))
+    return estimate_siglip_encoder_compute_from_sums(
+        sequence_count=sequence_count,
+        sequence_tokens=sequence_tokens,
+        dense_attention_pairs=dense_attention_pairs,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        num_hidden_layers=num_hidden_layers,
+        num_attention_heads=num_attention_heads,
+        dtype_bytes=dtype_bytes,
+    )
+
+
+def estimate_siglip_encoder_compute_from_sums(
+    *,
+    sequence_count: int,
+    sequence_tokens: int,
+    dense_attention_pairs: int,
+    hidden_size: int,
+    intermediate_size: int,
+    num_hidden_layers: int,
+    num_attention_heads: int,
+    dtype_bytes: int,
+) -> dict[str, int]:
+    attention_projection_macs = int(num_hidden_layers * 4 * sequence_tokens * hidden_size * hidden_size)
+    attention_quadratic_macs = int(num_hidden_layers * 2 * dense_attention_pairs * hidden_size)
+    mlp_macs = int(num_hidden_layers * 2 * sequence_tokens * hidden_size * intermediate_size)
+    total_macs = attention_projection_macs + attention_quadratic_macs + mlp_macs
+
+    return {
+        "sequence_count": sequence_count,
+        "sequence_tokens": sequence_tokens,
+        "dense_attention_pairs": dense_attention_pairs,
+        "hidden_size": int(hidden_size),
+        "intermediate_size": int(intermediate_size),
+        "num_hidden_layers": int(num_hidden_layers),
+        "num_attention_heads": int(num_attention_heads),
+        "dtype_bytes": int(dtype_bytes),
+        "attention_projection_macs_estimated": attention_projection_macs,
+        "attention_quadratic_macs_estimated": attention_quadratic_macs,
+        "mlp_macs_estimated": mlp_macs,
+        "total_macs_estimated": total_macs,
+        "hidden_state_bytes_estimated": int(sequence_tokens * hidden_size * dtype_bytes),
+        "attention_score_bytes_estimated": int(dense_attention_pairs * num_attention_heads * dtype_bytes),
+        "mlp_intermediate_bytes_estimated": int(sequence_tokens * intermediate_size * dtype_bytes),
+    }
+
+
+def estimate_llm_prefill_compute(
+    *,
+    context_tokens: int,
+    hidden_size: int,
+    intermediate_size: int,
+    num_hidden_layers: int,
+    num_attention_heads: int,
+    num_key_value_heads: int,
+    dtype_bytes: int,
+) -> dict[str, int]:
+    head_dim = hidden_size // max(num_attention_heads, 1)
+    kv_hidden_size = num_key_value_heads * head_dim
+    causal_attention_pairs = context_tokens * (context_tokens + 1) // 2
+    attention_projection_macs = int(
+        num_hidden_layers
+        * context_tokens
+        * (
+            hidden_size * hidden_size
+            + 2 * hidden_size * kv_hidden_size
+            + hidden_size * hidden_size
+        )
+    )
+    attention_quadratic_macs = int(num_hidden_layers * 2 * causal_attention_pairs * hidden_size)
+    mlp_macs = int(num_hidden_layers * 3 * context_tokens * hidden_size * intermediate_size)
+    total_macs = attention_projection_macs + attention_quadratic_macs + mlp_macs
+    kv_cache_bytes = int(num_hidden_layers * 2 * context_tokens * num_key_value_heads * head_dim * dtype_bytes)
+
+    return {
+        "context_tokens": int(context_tokens),
+        "causal_attention_pairs": int(causal_attention_pairs),
+        "hidden_size": int(hidden_size),
+        "intermediate_size": int(intermediate_size),
+        "num_hidden_layers": int(num_hidden_layers),
+        "num_attention_heads": int(num_attention_heads),
+        "num_key_value_heads": int(num_key_value_heads),
+        "head_dim": int(head_dim),
+        "dtype_bytes": int(dtype_bytes),
+        "attention_projection_macs_estimated": attention_projection_macs,
+        "attention_quadratic_macs_estimated": attention_quadratic_macs,
+        "mlp_macs_estimated": mlp_macs,
+        "total_macs_estimated": total_macs,
+        "kv_cache_bytes_after_prefill_estimated": kv_cache_bytes,
+        "attention_score_bytes_estimated": int(causal_attention_pairs * num_attention_heads * dtype_bytes),
+    }
+
+
+def build_autogaze_effect_metrics(
+    payload: dict[str, Any],
+    *,
+    model: Any,
+    token_metrics: dict[str, Any],
+    input_token_count: int,
+    dtype_bytes: int | None = None,
+    patches_per_frame_value: int | None = None,
+    token_shuffle: int = NVILA_TOKEN_SHUFFLE,
+) -> dict[str, Any]:
+    dtype_bytes = int(dtype_bytes or _model_dtype_bytes(model))
+    patches_value = int(patches_per_frame_value or model_patches_per_frame(model))
+
+    vision_config = getattr(getattr(model, "vision_tower", None), "config", None)
+    hidden_size = _config_int(vision_config, "hidden_size", 1152)
+    intermediate_size = _config_int(vision_config, "intermediate_size", 4304)
+    vision_layers = _config_int(vision_config, "num_hidden_layers", 27)
+    vision_heads = _config_int(vision_config, "num_attention_heads", 16)
+
+    keep_all_sequence_lengths = _keep_all_siglip_sequence_lengths(payload, patches_value)
+    actual_sequence_lengths = _actual_siglip_sequence_lengths(payload, patches_value)
+    keep_all_siglip = estimate_siglip_encoder_compute(
+        sequence_lengths=keep_all_sequence_lengths,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        num_hidden_layers=vision_layers,
+        num_attention_heads=vision_heads,
+        dtype_bytes=dtype_bytes,
+    )
+    actual_siglip = estimate_siglip_encoder_compute(
+        sequence_lengths=actual_sequence_lengths,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        num_hidden_layers=vision_layers,
+        num_attention_heads=vision_heads,
+        dtype_bytes=dtype_bytes,
+    )
+
+    text_config = getattr(getattr(model, "config", None), "text_config", None)
+    text_hidden_size = _config_int(text_config, "hidden_size", 4096)
+    text_intermediate_size = _config_int(text_config, "intermediate_size", 11008)
+    text_layers = _config_int(text_config, "num_hidden_layers", 32)
+    text_heads = _config_int(text_config, "num_attention_heads", 32)
+    text_kv_heads = _config_int(text_config, "num_key_value_heads", text_heads)
+
+    actual_visual_tokens = token_metrics.get("llm_actual_visual_tokens")
+    keep_all_visual_tokens = int(token_metrics.get("llm_keep_all_visual_tokens_estimated") or 0)
+    text_tokens = None
+    keep_all_context = None
+    if actual_visual_tokens is not None:
+        actual_visual_tokens = int(actual_visual_tokens)
+        text_tokens = max(int(input_token_count) - actual_visual_tokens, 0)
+        keep_all_context = text_tokens + keep_all_visual_tokens
+    actual_prefill = estimate_llm_prefill_compute(
+        context_tokens=int(input_token_count),
+        hidden_size=text_hidden_size,
+        intermediate_size=text_intermediate_size,
+        num_hidden_layers=text_layers,
+        num_attention_heads=text_heads,
+        num_key_value_heads=text_kv_heads,
+        dtype_bytes=dtype_bytes,
+    )
+    keep_all_prefill = (
+        estimate_llm_prefill_compute(
+            context_tokens=int(keep_all_context),
+            hidden_size=text_hidden_size,
+            intermediate_size=text_intermediate_size,
+            num_hidden_layers=text_layers,
+            num_attention_heads=text_heads,
+            num_key_value_heads=text_kv_heads,
+            dtype_bytes=dtype_bytes,
+        )
+        if keep_all_context is not None
+        else None
+    )
+
+    return {
+        "metric_type": "estimated_macs_and_bytes_from_token_counts",
+        "note": (
+            "MAC/byte fields are analytical estimates from model config and token counts. "
+            "Use stage timings and CUDA peak memory fields for measured runtime values."
+        ),
+        "siglip_encoder": {
+            "token_shuffle": int(token_shuffle),
+            "keep_all": keep_all_siglip,
+            "actual": actual_siglip,
+            "keep_all_to_actual_token_ratio": _safe_ratio(
+                keep_all_siglip["sequence_tokens"], actual_siglip["sequence_tokens"]
+            ),
+            "keep_all_to_actual_dense_attention_pair_ratio": _safe_ratio(
+                keep_all_siglip["dense_attention_pairs"], actual_siglip["dense_attention_pairs"]
+            ),
+            "keep_all_to_actual_attention_macs_ratio": _safe_ratio(
+                keep_all_siglip["attention_quadratic_macs_estimated"],
+                actual_siglip["attention_quadratic_macs_estimated"],
+            ),
+            "keep_all_to_actual_mlp_macs_ratio": _safe_ratio(
+                keep_all_siglip["mlp_macs_estimated"], actual_siglip["mlp_macs_estimated"]
+            ),
+            "keep_all_to_actual_total_macs_ratio": _safe_ratio(
+                keep_all_siglip["total_macs_estimated"], actual_siglip["total_macs_estimated"]
+            ),
+        },
+        "mllm": {
+            "prefill_explanation": (
+                "Prefill is the first LLM forward over the entire prompt plus visual token sequence. "
+                "It builds the KV cache used by subsequent token-by-token decode."
+            ),
+            "actual_prefill_context_tokens": int(input_token_count),
+            "actual_visual_tokens": actual_visual_tokens,
+            "text_tokens_estimated": text_tokens,
+            "keep_all_visual_tokens_estimated": keep_all_visual_tokens,
+            "keep_all_prefill_context_tokens_estimated": keep_all_context,
+            "prefill_context_reduction_ratio": _safe_ratio(keep_all_context, int(input_token_count)),
+            "actual": actual_prefill,
+            "keep_all_estimated": keep_all_prefill,
+            "actual_kv_cache_bytes_after_prefill_estimated": actual_prefill[
+                "kv_cache_bytes_after_prefill_estimated"
+            ],
+            "keep_all_kv_cache_bytes_after_prefill_estimated": (
+                keep_all_prefill["kv_cache_bytes_after_prefill_estimated"] if keep_all_prefill else None
+            ),
+            "kv_cache_reduction_ratio": _safe_ratio(
+                keep_all_prefill["kv_cache_bytes_after_prefill_estimated"] if keep_all_prefill else None,
+                actual_prefill["kv_cache_bytes_after_prefill_estimated"],
+            ),
+            "prefill_attention_pair_reduction_ratio": _safe_ratio(
+                keep_all_prefill["causal_attention_pairs"] if keep_all_prefill else None,
+                actual_prefill["causal_attention_pairs"],
+            ),
+            "prefill_total_macs_reduction_ratio": _safe_ratio(
+                keep_all_prefill["total_macs_estimated"] if keep_all_prefill else None,
+                actual_prefill["total_macs_estimated"],
+            ),
+        },
+    }
 
 
 def compute_visual_token_metrics(
@@ -1087,6 +1564,8 @@ def summarize_stream_chunks(chunks: list[dict[str, Any]]) -> dict[str, Any]:
     for key in (
         "siglip_gazed_forward_ms",
         "siglip_keep_all_forward_ms",
+        "siglip_gazed_sequence_slots_sum",
+        "siglip_gazed_sequence_slots_squared_sum",
     ):
         values = [float(chunk.get(key, 0.0) or 0.0) for chunk in chunks]
         summary[key] = sum(values)
@@ -1204,6 +1683,8 @@ def run_autogaze_on_stream_tile_sequences(
     siglip_keep_all_hidden_bytes_peak = 0
     siglip_gazed_last_hidden_shape = None
     siglip_keep_all_last_hidden_shape = None
+    siglip_gazed_sequence_slots_sum = 0
+    siglip_gazed_sequence_slots_squared_sum = 0
 
     with torch.inference_mode():
         for start in range(0, len(tile_sequences), max_batch_size):
@@ -1238,6 +1719,10 @@ def run_autogaze_on_stream_tile_sequences(
             selected += int(summary["selected_non_padded_patches"])
             padded += int(summary["padded_gazing_positions"])
             total_slots += int(summary["total_gaze_slots"])
+            if isinstance(outputs.get("if_padded_gazing"), torch.Tensor):
+                slots = int(outputs["if_padded_gazing"].shape[-1])
+                siglip_gazed_sequence_slots_sum += int(batch.shape[0]) * slots
+                siglip_gazed_sequence_slots_squared_sum += int(batch.shape[0]) * slots * slots
             forward_ms += elapsed_ms
 
             if siglip_model is not None:
@@ -1282,6 +1767,8 @@ def run_autogaze_on_stream_tile_sequences(
             "siglip_keep_all_hidden_bytes_peak": siglip_keep_all_hidden_bytes_peak,
             "siglip_gazed_last_hidden_shape": siglip_gazed_last_hidden_shape,
             "siglip_keep_all_last_hidden_shape": siglip_keep_all_last_hidden_shape,
+            "siglip_gazed_sequence_slots_sum": siglip_gazed_sequence_slots_sum,
+            "siglip_gazed_sequence_slots_squared_sum": siglip_gazed_sequence_slots_squared_sum,
         },
         tensor_bytes_peak,
     )
@@ -1295,6 +1782,7 @@ def build_keep_all_stream_chunk_summary(
 ) -> tuple[dict[str, Any], int]:
     def build_summary():
         raw_budget = len(tile_sequences) * len(tile_sequences[0]) * patches_per_frame_value
+        sequence_slots = len(tile_sequences[0]) * patches_per_frame_value
         return {
             "tile_sequences": len(tile_sequences),
             "raw_patch_budget": raw_budget,
@@ -1304,6 +1792,8 @@ def build_keep_all_stream_chunk_summary(
             "token_reduction_ratio": 1.0,
             "autogaze_tensorize_ms": 0.0,
             "autogaze_forward_ms": 0.0,
+            "siglip_gazed_sequence_slots_sum": len(tile_sequences) * sequence_slots,
+            "siglip_gazed_sequence_slots_squared_sum": len(tile_sequences) * sequence_slots * sequence_slots,
         }
 
     summary, elapsed_ms = _measure_elapsed(profiler.device or torch.device("cpu"), build_summary)
@@ -1392,6 +1882,7 @@ def build_stream_siglip_model(
         "max_embed_batch_size": max_embed_batch_size,
         "attn_implementation": attn_implementation,
         "hidden_size": int(getattr(model.config, "hidden_size", 0) or 0),
+        "intermediate_size": int(getattr(model.config, "intermediate_size", 0) or 0),
         "num_hidden_layers": int(getattr(model.config, "num_hidden_layers", 0) or 0),
         "num_attention_heads": int(getattr(model.config, "num_attention_heads", 0) or 0),
     }
@@ -1711,6 +2202,13 @@ def run_stream_profile(args: argparse.Namespace) -> None:
 
     tile_summary = summarize_stream_chunks(temporal_chunks)
     token_metrics = build_stream_profile_token_metrics(plan, tile_summary)
+    compute_metrics = build_stream_profile_compute_metrics(
+        plan,
+        tile_summary,
+        token_metrics,
+        siglip_info=siglip_info,
+        dtype_bytes=int(torch.empty((), dtype=dtype).element_size()),
+    )
     stage_timings = profiler.as_dict()
     total_measured_ms = sum(float(value["total_ms"]) for value in stage_timings.values())
     if siglip_info.get("enabled"):
@@ -1760,6 +2258,7 @@ def run_stream_profile(args: argparse.Namespace) -> None:
         },
         "gaze": tile_summary,
         "token_metrics": token_metrics,
+        "compute_metrics": compute_metrics,
         "timing_ms": {
             "video_decode_scan": stage_total(stage_timings, "video_decode_scan"),
             "video_keyframe_index_scan": stage_total(stage_timings, "video_keyframe_index_scan"),
@@ -1822,6 +2321,16 @@ def generate_one(model, processor, video: str, prompt: str, device: torch.device
             patches_per_frame_by_scale=model_patches_per_frame_by_scale(model),
             token_shuffle=NVILA_TOKEN_SHUFFLE,
         )
+        input_token_count = int(inputs["input_ids"].shape[1])
+        compute_metrics = build_autogaze_effect_metrics(
+            inputs,
+            model=model,
+            token_metrics=token_metrics,
+            input_token_count=input_token_count,
+            dtype_bytes=_model_dtype_bytes(model),
+            patches_per_frame_value=model_patches_per_frame(model),
+            token_shuffle=NVILA_TOKEN_SHUFFLE,
+        )
         gaze_metrics = extract_gaze_metrics(inputs)
 
         target_device = input_device(model, device)
@@ -1829,9 +2338,11 @@ def generate_one(model, processor, video: str, prompt: str, device: torch.device
 
         ttft_ms = None
         ttft_timings = None
+        ttft_peak_memory_bytes = None
         if args.measure_ttft:
             one_token = timed_generate(model, inputs, processor, device, max_new_tokens=1)
             ttft_ms = one_token["generate_ms"]
+            ttft_peak_memory_bytes = one_token["peak_memory_bytes"]
             ttft_timings = profiler.as_dict()
             profiler.reset()
 
@@ -1853,9 +2364,10 @@ def generate_one(model, processor, video: str, prompt: str, device: torch.device
         "gazing_mode": args.gazing_mode,
         "autogaze_target_scales": parse_int_sequence(getattr(args, "autogaze_target_scales", None)),
         "autogaze_target_patch_size": getattr(args, "autogaze_target_patch_size", None),
-        "input_token_count": int(inputs["input_ids"].shape[1]),
+        "input_token_count": input_token_count,
         "input_shapes": tensor_shapes(inputs),
         "token_metrics": token_metrics,
+        "compute_metrics": compute_metrics,
         "video_preprocess_ms": preprocess_ms,
         "video_decode_ms": stage_total(processor_timings, "video_decode_sampling"),
         "video_tiling_ms": stage_total(processor_timings, "video_tiling_and_tensorize"),
@@ -1863,6 +2375,8 @@ def generate_one(model, processor, video: str, prompt: str, device: torch.device
         "autogaze_forward_ms": stage_total(processor_timings, "autogaze_forward_batched"),
         "processor_peak_memory_bytes": processor_peak_memory_bytes,
         "ttft_ms": ttft_ms,
+        "ttft_peak_memory_bytes": ttft_peak_memory_bytes,
+        "llm_peak_memory_bytes": result["peak_memory_bytes"],
         "ttft_stage_timings_ms": ttft_timings,
         "decode_estimated_ms": decode_estimated_ms,
         "total_ms": preprocess_ms + result["generate_ms"],
@@ -1887,7 +2401,18 @@ def generate_one(model, processor, video: str, prompt: str, device: torch.device
 def run_single(args: argparse.Namespace) -> None:
     device = resolve_device(args.device)
     model, processor = load_model_and_processor(args)
-    result = generate_one(model, processor, args.video, args.prompt, device, args)
+    warmup_runs = int(args.warmup_runs)
+    repeat_runs = int(args.repeat_runs)
+    for index in range(warmup_runs):
+        print(f"Warmup run {index + 1}/{warmup_runs}", file=sys.stderr)
+        generate_one(model, processor, args.video, args.prompt, device, args)
+    repeat_results: list[dict[str, Any]] = []
+    for index in range(repeat_runs):
+        print(f"Measured run {index + 1}/{repeat_runs}", file=sys.stderr)
+        run_result = generate_one(model, processor, args.video, args.prompt, device, args)
+        run_result["repeat_index"] = index
+        repeat_results.append(run_result)
+    result = repeat_results[-1]
     payload = {
         "metadata": environment_metadata(device),
         "model_path": args.model_path,
@@ -1900,6 +2425,15 @@ def run_single(args: argparse.Namespace) -> None:
         "prompt": args.prompt,
         "result": result,
     }
+    if warmup_runs or repeat_runs > 1:
+        payload["warmup_runs"] = warmup_runs
+        payload["repeat_runs"] = repeat_runs
+        payload["repeat_results"] = repeat_results
+        payload["repeat_summary"] = summarize_repeat_results(repeat_results)
+        payload["repeat_metric_note"] = (
+            "result is the last measured run for backward compatibility. "
+            "Use repeat_summary median/mean/min/max fields for warmup-aware latency and memory claims."
+        )
     write_json(args.output_json, payload)
     print(json.dumps(payload, indent=2, sort_keys=True))
 
@@ -1966,18 +2500,52 @@ def completed_question_ids(path: Path) -> set[Any]:
 
 def run_hlvid(args: argparse.Namespace) -> None:
     device = resolve_device(args.device)
-    rows = load_hlvid_manifest(split=args.split, limit=args.limit, config=args.config)
+    if args.manifest:
+        rows = read_manifest_file(args.manifest)
+        if args.limit is not None:
+            rows = rows[: args.limit]
+    else:
+        rows = load_hlvid_manifest(split=args.split, limit=args.limit, config=args.config)
     model, processor = load_model_and_processor(args)
     output_path = Path(args.predictions)
     completed_ids = completed_question_ids(output_path) if args.resume else set()
 
+    warmup_rows = [row for row in rows if row["question_id"] not in completed_ids] or rows[:1]
+    if warmup_rows and args.warmup_runs:
+        warmup_row = warmup_rows[0]
+        for index in range(args.warmup_runs):
+            print(f"HLVid warmup run {index + 1}/{args.warmup_runs}", file=sys.stderr)
+            generate_one(model, processor, warmup_row["video_path"], warmup_row["question"], device, args)
+
     for row in rows:
         if row["question_id"] in completed_ids:
             continue
-        result = generate_one(model, processor, row["video_path"], row["question"], device, args)
+        try:
+            result = generate_one(model, processor, row["video_path"], row["question"], device, args)
+        except Exception as exc:
+            if not args.continue_on_error:
+                raise
+            prediction = {
+                **row,
+                "status": "failed",
+                "error": repr(exc),
+                "model_path": args.model_path,
+                "autogaze_model": args.autogaze_model,
+                "num_video_frames": args.num_video_frames,
+                "num_video_frames_thumbnail": args.num_video_frames_thumbnail,
+                "max_tiles_video": args.max_tiles_video,
+                "gazing_mode": args.gazing_mode,
+                "video_resize": video_resize_config(args),
+                "autogaze_target_scales": parse_int_sequence(getattr(args, "autogaze_target_scales", None)),
+                "autogaze_target_patch_size": getattr(args, "autogaze_target_patch_size", None),
+                "task_loss_requirement_tile": args.task_loss_requirement_tile,
+            }
+            append_jsonl(output_path, [prediction])
+            continue
         prediction = {
             **row,
             **result,
+            "status": "ok",
             "model_path": args.model_path,
             "autogaze_model": args.autogaze_model,
             "num_video_frames": args.num_video_frames,
@@ -2041,6 +2609,8 @@ def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentPar
     parser.add_argument("--max-batch-size-siglip", type=int, default=32)
     parser.add_argument("--max-new-tokens", type=int, default=8)
     parser.add_argument("--measure-ttft", action="store_true")
+    parser.add_argument("--warmup-runs", type=non_negative_int, default=0)
+    parser.add_argument("--repeat-runs", type=positive_int, default=1)
     parser.add_argument("--stream-chunk-frames", type=int, default=AUTOGAZE_CHUNK_FRAMES)
     parser.add_argument("--stream-dtype", choices=["float32", "float16"], default="float32")
     parser.add_argument("--stream-decode-strategy", choices=["scan", "seek"], default="scan")
@@ -2054,7 +2624,9 @@ def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentPar
     parser.add_argument("--config", default="default")
     parser.add_argument("--split", default="test")
     parser.add_argument("--limit", type=int)
+    parser.add_argument("--manifest")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--continue-on-error", action="store_true")
     parser.add_argument("--preflight-width", type=int)
     parser.add_argument("--preflight-height", type=int)
     parser.add_argument("--preflight-source-frames", type=int)

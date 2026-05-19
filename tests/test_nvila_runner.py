@@ -9,11 +9,14 @@ from repro.nvila_runner import (
     StageProfiler,
     apply_resize_to_dimensions,
     autogaze_processor_size_kwargs,
+    build_autogaze_effect_metrics,
     build_seek_decode_groups,
     build_keep_all_gazing_info,
     build_parser,
+    build_stream_profile_compute_metrics,
     build_stream_profile_token_metrics,
     compute_visual_token_metrics,
+    estimate_siglip_encoder_compute,
     estimate_nvila_preflight,
     estimate_stream_profile_plan,
     extract_gaze_metrics,
@@ -27,6 +30,7 @@ from repro.nvila_runner import (
     repeat_last_stream_samples_after_eof,
     resolve_video,
     spatial_tile_grid,
+    summarize_repeat_results,
     summarize_stream_chunks,
     uniform_sample_indices,
 )
@@ -64,6 +68,49 @@ class DummyVisionTower:
 class DummyModel:
     def __init__(self, scales, patch_size=14):
         self.vision_tower = DummyVisionTower(scales, patch_size)
+
+
+class DummyTransformerConfig:
+    def __init__(
+        self,
+        *,
+        hidden_size,
+        intermediate_size,
+        num_hidden_layers,
+        num_attention_heads,
+        num_key_value_heads=None,
+        scales="56+112",
+        patch_size=14,
+    ):
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.num_hidden_layers = num_hidden_layers
+        self.num_attention_heads = num_attention_heads
+        self.num_key_value_heads = num_key_value_heads
+        self.scales = scales
+        self.patch_size = patch_size
+
+
+class DummyFullModel:
+    def __init__(self):
+        vision_config = DummyTransformerConfig(
+            hidden_size=8,
+            intermediate_size=16,
+            num_hidden_layers=2,
+            num_attention_heads=2,
+            scales=[14, 28],
+            patch_size=14,
+        )
+        text_config = DummyTransformerConfig(
+            hidden_size=16,
+            intermediate_size=32,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+        )
+        self.vision_tower = DummyVisionTower([14, 28], patch_size=14)
+        self.vision_tower.config = vision_config
+        self.config = argparse.Namespace(text_config=text_config)
 
 
 def test_processor_kwargs_match_nvila_quickstart_defaults():
@@ -110,6 +157,47 @@ def test_parse_args_accepts_gazing_mode_switch():
     args = parse_args(["--gazing-mode", "keep-all"])
 
     assert args.gazing_mode == "keep-all"
+
+
+def test_parse_args_accepts_warmup_and_repeat_runs():
+    args = parse_args(["--warmup-runs", "1", "--repeat-runs", "3"])
+
+    assert args.warmup_runs == 1
+    assert args.repeat_runs == 3
+
+
+def test_summarize_repeat_results_collects_latency_memory_token_and_compute_stats():
+    summary = summarize_repeat_results(
+        [
+            {
+                "total_ms": 100.0,
+                "ttft_ms": 40.0,
+                "llm_peak_memory_bytes": 1000,
+                "token_metrics": {"llm_visual_token_reduction_ratio": 2.0},
+                "compute_metrics": {
+                    "siglip_encoder": {"keep_all_to_actual_total_macs_ratio": 3.0},
+                    "mllm": {"kv_cache_reduction_ratio": 2.5},
+                },
+            },
+            {
+                "total_ms": 80.0,
+                "ttft_ms": 30.0,
+                "llm_peak_memory_bytes": 800,
+                "token_metrics": {"llm_visual_token_reduction_ratio": 2.5},
+                "compute_metrics": {
+                    "siglip_encoder": {"keep_all_to_actual_total_macs_ratio": 4.0},
+                    "mllm": {"kv_cache_reduction_ratio": 3.5},
+                },
+            },
+        ]
+    )
+
+    assert summary["total_ms"]["median"] == 90.0
+    assert summary["ttft_ms"]["min"] == 30.0
+    assert summary["llm_peak_memory_bytes"]["max"] == 1000.0
+    assert summary["token_metrics.llm_visual_token_reduction_ratio"]["mean"] == 2.25
+    assert summary["compute_metrics.siglip_encoder.keep_all_to_actual_total_macs_ratio"]["median"] == 3.5
+    assert summary["compute_metrics.mllm.kv_cache_reduction_ratio"]["median"] == 3.0
 
 
 def test_parse_args_accepts_video_and_autogaze_resize_options():
@@ -357,6 +445,47 @@ def test_build_stream_profile_token_metrics_compares_autogaze_and_keep_all_token
     assert metrics["encoder_token_reduction_ratio"] == 2.0
 
 
+def test_build_stream_profile_compute_metrics_reports_siglip_estimated_costs():
+    plan = estimate_stream_profile_plan(
+        width=1280,
+        height=720,
+        source_frames=300,
+        num_video_frames=32,
+        num_video_frames_thumbnail=16,
+        max_tiles_video=1,
+        chunk_frames=16,
+        scales=[56, 112],
+        patch_size=14,
+    )
+    tile_summary = {
+        "raw_patch_budget": 32 * 80,
+        "selected_non_padded_patches": 640,
+        "padded_gazing_positions": 0,
+        "total_gaze_slots": 640,
+        "siglip_gazed_sequence_slots_sum": 640,
+        "siglip_gazed_sequence_slots_squared_sum": 2 * 320 * 320,
+    }
+    token_metrics = build_stream_profile_token_metrics(plan, tile_summary)
+
+    metrics = build_stream_profile_compute_metrics(
+        plan,
+        tile_summary,
+        token_metrics,
+        siglip_info={
+            "hidden_size": 8,
+            "intermediate_size": 16,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 2,
+        },
+        dtype_bytes=2,
+    )
+
+    assert metrics["siglip_encoder"]["actual"]["sequence_tokens"] == 640 + 16 * 80
+    assert metrics["siglip_encoder"]["keep_all"]["sequence_tokens"] == 32 * 80 + 16 * 80
+    assert metrics["siglip_encoder"]["keep_all_to_actual_attention_macs_ratio"] > 1
+    assert metrics["mllm"]["full_llm_not_run_in_stream_profile"] is True
+
+
 def test_build_keep_all_gazing_info_selects_every_patch_for_siglip():
     info = build_keep_all_gazing_info(
         batch_size=2,
@@ -383,6 +512,8 @@ def test_summarize_stream_chunks_sums_siglip_time_but_peaks_siglip_memory():
                 "total_gaze_slots": 5,
                 "siglip_gazed_forward_ms": 10.0,
                 "siglip_gazed_hidden_bytes_peak": 100,
+                "siglip_gazed_sequence_slots_sum": 5,
+                "siglip_gazed_sequence_slots_squared_sum": 25,
             },
             {
                 "tile_sequences": 1,
@@ -392,12 +523,16 @@ def test_summarize_stream_chunks_sums_siglip_time_but_peaks_siglip_memory():
                 "total_gaze_slots": 10,
                 "siglip_gazed_forward_ms": 12.0,
                 "siglip_gazed_hidden_bytes_peak": 80,
+                "siglip_gazed_sequence_slots_sum": 10,
+                "siglip_gazed_sequence_slots_squared_sum": 100,
             },
         ]
     )
 
     assert summary["siglip_gazed_forward_ms"] == 22.0
     assert summary["siglip_gazed_hidden_bytes_peak"] == 100
+    assert summary["siglip_gazed_sequence_slots_sum"] == 15
+    assert summary["siglip_gazed_sequence_slots_squared_sum"] == 125
 
 
 def test_repeat_last_stream_samples_after_eof_fills_missing_decoded_tail_samples():
@@ -492,6 +627,68 @@ def test_compute_visual_token_metrics_compares_keep_all_and_autogaze_tokens():
     assert metrics["llm_keep_all_visual_tokens_estimated"] == 10
     assert metrics["llm_actual_visual_tokens"] == 2
     assert metrics["llm_visual_token_reduction_ratio"] == 5.0
+
+
+def test_estimate_siglip_encoder_compute_splits_attention_and_mlp_costs():
+    metrics = estimate_siglip_encoder_compute(
+        sequence_lengths=[4, 2],
+        hidden_size=8,
+        intermediate_size=16,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        dtype_bytes=2,
+    )
+
+    assert metrics["sequence_count"] == 2
+    assert metrics["sequence_tokens"] == 6
+    assert metrics["dense_attention_pairs"] == 20
+    assert metrics["attention_projection_macs_estimated"] == 3072
+    assert metrics["attention_quadratic_macs_estimated"] == 640
+    assert metrics["mlp_macs_estimated"] == 3072
+    assert metrics["total_macs_estimated"] == 6784
+    assert metrics["hidden_state_bytes_estimated"] == 96
+    assert metrics["attention_score_bytes_estimated"] == 80
+    assert metrics["mlp_intermediate_bytes_estimated"] == 192
+
+
+def test_build_autogaze_effect_metrics_reports_siglip_and_mllm_reductions():
+    payload = {
+        "input_ids": torch.tensor([[11, 32000, 12, 32000, 13]]),
+        "pixel_values_videos_tiles": [torch.zeros(2, 2, 3, 4, 4)],
+        "pixel_values_videos_thumbnails": [torch.zeros(1, 1, 3, 4, 4)],
+        "num_spatial_tiles_each_video": [2],
+        "gazing_info": {
+            "if_padded_gazing_tiles": [torch.tensor([[False, True, False], [True, False, False]])],
+            "if_padded_gazing_thumbnails": [torch.tensor([[False, True]])],
+        },
+    }
+    token_metrics = compute_visual_token_metrics(
+        payload,
+        video_token_id=32000,
+        patches_per_frame_value=4,
+        patches_per_frame_by_scale={"14": 1, "28": 4},
+        token_shuffle=2,
+    )
+
+    metrics = build_autogaze_effect_metrics(
+        payload,
+        model=DummyFullModel(),
+        token_metrics=token_metrics,
+        input_token_count=5,
+        dtype_bytes=2,
+        patches_per_frame_value=4,
+        token_shuffle=2,
+    )
+
+    assert metrics["siglip_encoder"]["actual"]["sequence_tokens"] == 8
+    assert metrics["siglip_encoder"]["keep_all"]["sequence_tokens"] == 20
+    assert metrics["siglip_encoder"]["keep_all_to_actual_total_macs_ratio"] > 1
+    assert metrics["mllm"]["actual_prefill_context_tokens"] == 5
+    assert metrics["mllm"]["actual_visual_tokens"] == 2
+    assert metrics["mllm"]["text_tokens_estimated"] == 3
+    assert metrics["mllm"]["keep_all_prefill_context_tokens_estimated"] == 13
+    assert metrics["mllm"]["prefill_context_reduction_ratio"] == 2.6
+    assert metrics["mllm"]["actual_kv_cache_bytes_after_prefill_estimated"] == 320
 
 
 def test_model_patches_per_frame_accepts_plus_separated_nvila_scales():

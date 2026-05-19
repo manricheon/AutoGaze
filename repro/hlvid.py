@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import re
 from pathlib import Path
@@ -97,8 +98,22 @@ def score_predictions(rows: list[dict[str, Any]]) -> tuple[dict[str, Any], list[
     correct = 0
     scored = 0
     parse_failed = 0
+    failed = 0
+    skipped = 0
 
     for row in rows:
+        status = row.get("status")
+        if status in {"failed", "skipped"}:
+            out = dict(row)
+            out["parsed_answer"] = None
+            out["expected_answer"] = parse_choice(str(row.get("answer", "")))
+            out["correct"] = False
+            out["parse_status"] = f"{status}_run"
+            failed += int(status == "failed")
+            skipped += int(status == "skipped")
+            scored_rows.append(out)
+            continue
+
         parsed = parse_choice(row.get("raw_output"))
         expected = parse_choice(str(row.get("answer", "")))
         out = dict(row)
@@ -120,6 +135,8 @@ def score_predictions(rows: list[dict[str, Any]]) -> tuple[dict[str, Any], list[
         "scored": scored,
         "correct": correct,
         "parse_failed": parse_failed,
+        "failed": failed,
+        "skipped": skipped,
         "accuracy_scored": correct / scored if scored else 0.0,
         "accuracy_total": correct / len(rows) if rows else 0.0,
     }
@@ -131,6 +148,34 @@ def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
     if not source.exists():
         return []
     return [json.loads(line) for line in source.read_text().splitlines() if line.strip()]
+
+
+def read_manifest_file(path: str | Path) -> list[dict[str, Any]]:
+    source = Path(path)
+    suffix = source.suffix.lower()
+    if suffix == ".jsonl":
+        rows = read_jsonl(source)
+    elif suffix == ".json":
+        payload = json.loads(source.read_text())
+        if isinstance(payload, dict):
+            payload = payload.get("rows", payload.get("data", []))
+        if not isinstance(payload, list):
+            raise ValueError(f"HLVid JSON manifest must be a list or contain rows/data: {source}")
+        rows = payload
+    elif suffix == ".csv":
+        with source.open(newline="") as f:
+            rows = list(csv.DictReader(f))
+    elif suffix == ".parquet":
+        try:
+            import pandas as pd
+        except ModuleNotFoundError as exc:  # pragma: no cover - optional local dataset format
+            raise RuntimeError("Reading parquet manifests requires pandas/pyarrow in the environment.") from exc
+        rows = pd.read_parquet(source).to_dict(orient="records")
+    else:
+        raise ValueError(f"Unsupported HLVid manifest extension: {source.suffix}")
+
+    validate_manifest_rows(rows)
+    return [normalize_row(row) for row in rows]
 
 
 def build_manifest(args: argparse.Namespace) -> None:

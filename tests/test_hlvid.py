@@ -1,6 +1,7 @@
 from repro.hlvid import (
     REQUIRED_COLUMNS,
     parse_choice,
+    read_manifest_file,
     score_predictions,
     validate_manifest_rows,
     viewer_row_to_manifest,
@@ -43,6 +44,41 @@ def test_score_predictions_tracks_parse_failures_separately():
     assert summary["parse_failed"] == 1
     assert summary["accuracy_scored"] == 0.5
     assert scored[2]["parse_status"] == "failed"
+
+
+def test_score_predictions_counts_model_failures_without_parse_failures():
+    rows = [
+        {"answer": "A", "raw_output": "A", "status": "ok"},
+        {"answer": "B", "raw_output": None, "status": "failed", "error": "OOM"},
+    ]
+
+    summary, scored = score_predictions(rows)
+
+    assert summary["total"] == 2
+    assert summary["failed"] == 1
+    assert summary["parse_failed"] == 0
+    assert summary["scored"] == 1
+    assert scored[1]["parse_status"] == "failed_run"
+
+
+def test_read_manifest_file_supports_jsonl_and_validates_rows(tmp_path):
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text(
+        '{"question_id": 1, "category": "av", "video_path": "clip.mp4", '
+        '"question": "Q? A. a B. b C. c D. d", "answer": "A"}\n'
+    )
+
+    rows = read_manifest_file(manifest)
+
+    assert rows == [
+        {
+            "question_id": 1,
+            "category": "av",
+            "video_path": "clip.mp4",
+            "question": "Q? A. a B. b C. c D. d",
+            "answer": "A",
+        }
+    ]
 
 
 def test_viewer_row_to_manifest_uses_dataset_viewer_row_payload():

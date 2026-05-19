@@ -293,6 +293,8 @@ def _row_with_result(row: dict[str, Any], result_path: str | Path) -> dict[str, 
     timing = payload.get("timing_ms", {})
     memory = payload.get("memory_bytes", {})
     tokens = payload.get("token_metrics", {})
+    compute = payload.get("compute_metrics", {})
+    siglip_compute = compute.get("siglip_encoder", {}) if isinstance(compute, dict) else {}
     gaze = payload.get("gaze", {})
     sampling = payload.get("sampling", {})
     return {
@@ -319,6 +321,11 @@ def _row_with_result(row: dict[str, Any], result_path: str | Path) -> dict[str, 
         "llm_autogaze_visual_tokens_lower_bound_estimated": tokens.get(
             "llm_autogaze_visual_tokens_lower_bound_estimated"
         ),
+        "siglip_attention_macs_reduction_ratio": siglip_compute.get(
+            "keep_all_to_actual_attention_macs_ratio"
+        ),
+        "siglip_mlp_macs_reduction_ratio": siglip_compute.get("keep_all_to_actual_mlp_macs_ratio"),
+        "siglip_total_macs_reduction_ratio": siglip_compute.get("keep_all_to_actual_total_macs_ratio"),
         "gaze_token_reduction_ratio": gaze.get("token_reduction_ratio"),
         "measured_decode_strategy": sampling.get("decode_strategy"),
         "measured_decode_frames_read": sampling.get("decode_frames_read"),
