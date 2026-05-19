@@ -159,7 +159,9 @@ def test_score_predictions_includes_latency_memory_token_and_compute_summaries()
             "raw_output": "A",
             "total_ms": 100.0,
             "generate_ms": 88.0,
-            "video_preprocess_ms": 12.0,
+            "video_preprocess_ms": 20.0,
+            "video_preprocess_without_autogaze_ms": 6.0,
+            "autogaze_total_ms": 14.0,
             "video_decode_ms": 10.0,
             "autogaze_ms": 14.0,
             "gazing_info_total_ms": 14.0,
@@ -195,7 +197,9 @@ def test_score_predictions_includes_latency_memory_token_and_compute_summaries()
             "raw_output": "B",
             "total_ms": 60.0,
             "generate_ms": 52.0,
-            "video_preprocess_ms": 8.0,
+            "video_preprocess_ms": 14.0,
+            "video_preprocess_without_autogaze_ms": 4.0,
+            "autogaze_total_ms": 10.0,
             "video_decode_ms": 6.0,
             "autogaze_ms": 10.0,
             "gazing_info_total_ms": 10.0,
@@ -242,16 +246,20 @@ def test_score_predictions_includes_latency_memory_token_and_compute_summaries()
     assert summary["compute"]["compute_metrics.siglip_encoder.keep_all_to_actual_total_macs_ratio"]["median"] == 3.5
     assert summary["readable_performance_summary"]["latency_ms_median"] == {
         "total_ms": 80.0,
-        "preprocess_total_ms": 10.0,
+        "preprocess_without_autogaze_ms": 5.0,
+        "preprocess_total_ms": 17.0,
         "autogaze_ms": 12.0,
+        "autogaze_total_ms": 12.0,
         "vit_encoder_ms": 30.0,
         "llm_ms": 24.0,
     }
     assert summary["readable_performance_summary"]["key_metrics_median"] == {
         "latency_ms": {
             "total_ms": 80.0,
-            "preprocess_total_ms": 10.0,
+            "preprocess_without_autogaze_ms": 5.0,
+            "preprocess_total_ms": 17.0,
             "autogaze_ms": 12.0,
+            "autogaze_total_ms": 12.0,
             "vit_encoder_ms": 30.0,
             "llm_ms": 24.0,
         },
@@ -276,8 +284,17 @@ def test_score_predictions_includes_latency_memory_token_and_compute_summaries()
         },
     }
     assert summary["readable_performance_summary"]["latency_accounting"]["additive_formula"] == (
-        "total_ms = video_preprocess_ms + generate_ms"
+        "total_ms = video_preprocess_without_autogaze_ms + autogaze_total_ms + generate_ms"
     )
+    assert (
+        summary["readable_performance_summary"]["latency_accounting"]["hierarchy"]["quick_answers"][
+            "where_is_video_decode_ms_included"
+        ]
+        == "video_preprocess_without_autogaze_ms"
+    )
+    assert summary["readable_performance_summary"]["latency_ms_detail_median"][
+        "video_preprocess_without_autogaze_ms"
+    ] == 5.0
     assert "video_decode_ms" in summary["readable_performance_summary"]["latency_accounting"]["do_not_sum_with_total_ms"]
     assert summary["readable_performance_summary"]["latency_ms_detail_median"]["generate_ms"] == 70.0
     assert summary["readable_performance_summary"]["latency_ms_detail_median"]["video_decode_ms"] == 8.0

@@ -20,6 +20,8 @@ LATENCY_FIELDS = (
     "total_ms",
     "generate_ms",
     "video_preprocess_ms",
+    "video_preprocess_without_autogaze_ms",
+    "autogaze_total_ms",
     "video_decode_ms",
     "video_tiling_ms",
     "autogaze_ms",
@@ -35,8 +37,10 @@ LATENCY_FIELDS = (
 )
 MODULE_LATENCY_FIELDS = (
     ("total_ms", "total_ms"),
+    ("preprocess_without_autogaze_ms", "video_preprocess_without_autogaze_ms"),
     ("preprocess_total_ms", "video_preprocess_ms"),
     ("autogaze_ms", "autogaze_ms"),
+    ("autogaze_total_ms", "autogaze_total_ms"),
     ("vit_encoder_ms", "siglip_vision_ms"),
     ("llm_ms", "llm_forward_ms"),
 )
@@ -255,11 +259,172 @@ def key_medians(
     return {label: median_from_stats(stats, field) for label, field in fields}
 
 
+LATENCY_HIERARCHY_ASCII = """total_ms = video_preprocess_without_autogaze_ms + autogaze_total_ms + generate_ms
+|-- video_preprocess_without_autogaze_ms
+|   |-- video_decode_ms (included; not an extra total term)
+|   |-- video_tiling_ms (included; not an extra total term)
+|   `-- other processor/tokenization overhead
+|-- autogaze_total_ms
+|   `-- autogaze_model_forward_ms / autogaze_forward_ms (model forward only)
+`-- generate_ms
+    |-- vision_encoder_ms
+    |   |-- siglip_vision_ms
+    |   `-- mm_projector_ms
+    |-- llm_forward_ms
+    `-- generation_decode_after_ttft_estimated_ms (generation-side estimate, not video decode)
+ttft_ms: separate 1-token measurement pass, excluded from total_ms"""
+
+
+def first_metric_value(metrics: dict[str, Any], *fields: str) -> Any:
+    for field in fields:
+        value = metrics.get(field)
+        if value is not None:
+            return value
+    return None
+
+
+def latency_hierarchy_summary(metrics: dict[str, Any] | None = None) -> dict[str, Any]:
+    metrics = metrics or {}
+    autogaze_total_ms = first_metric_value(metrics, "autogaze_total_ms", "gazing_info_total_ms", "autogaze_ms")
+    preprocess_without_autogaze_ms = first_metric_value(
+        metrics,
+        "video_preprocess_without_autogaze_ms",
+    )
+    return {
+        "total_formula": "total_ms = video_preprocess_without_autogaze_ms + autogaze_total_ms + generate_ms",
+        "legacy_inclusive_formula": "total_ms = video_preprocess_ms + generate_ms",
+        "ascii_tree": LATENCY_HIERARCHY_ASCII,
+        "quick_answers": {
+            "what_total_ms_is": (
+                "End-to-end latency: video_preprocess_without_autogaze_ms plus "
+                "autogaze_total_ms plus generate_ms."
+            ),
+            "what_generate_ms_includes": (
+                "NVILA model.generate after preprocessing: vision_encoder_ms plus llm_forward_ms."
+            ),
+            "is_autogaze_in_generate_ms": False,
+            "where_is_autogaze_ms_included": "autogaze_total_ms",
+            "legacy_inclusive_preprocess_field": "video_preprocess_ms",
+            "is_video_decode_in_preprocess_ms": True,
+            "where_is_video_decode_ms_included": "video_preprocess_without_autogaze_ms",
+            "is_ttft_in_total_ms": False,
+        },
+        "nodes": {
+            "total_ms": {
+                "value_ms": metrics.get("total_ms"),
+                "adds": ["video_preprocess_without_autogaze_ms", "autogaze_total_ms", "generate_ms"],
+                "description": "End-to-end latency for one measured run.",
+            },
+            "video_preprocess_without_autogaze_ms": {
+                "value_ms": preprocess_without_autogaze_ms,
+                "included_in": "total_ms",
+                "includes": ["video_decode_ms", "video_tiling_ms"],
+                "description": "Preprocess work excluding the AutoGaze stage.",
+            },
+            "video_preprocess_ms": {
+                "value_ms": metrics.get("video_preprocess_ms"),
+                "legacy": True,
+                "includes": ["video_preprocess_without_autogaze_ms", "autogaze_total_ms"],
+                "description": "Legacy inclusive preprocess field kept for backward compatibility.",
+            },
+            "video_decode_ms": {
+                "value_ms": metrics.get("video_decode_ms"),
+                "included_in": "video_preprocess_without_autogaze_ms",
+                "add_to_total_ms": False,
+                "description": "Video frame decode/sample/resize timing when measured.",
+            },
+            "video_tiling_ms": {
+                "value_ms": metrics.get("video_tiling_ms"),
+                "included_in": "video_preprocess_without_autogaze_ms",
+                "add_to_total_ms": False,
+                "description": "Dynamic tiling, thumbnail processing, and tensorization timing.",
+            },
+            "autogaze_total_ms": {
+                "value_ms": autogaze_total_ms,
+                "included_in": "total_ms",
+                "aliases": ["gazing_info_total_ms", "autogaze_ms"],
+                "includes": ["autogaze_model_forward_ms"],
+                "description": "AutoGaze stage total: model forward plus gaze-info bookkeeping.",
+            },
+            "gazing_info_total_ms": {
+                "value_ms": first_metric_value(metrics, "gazing_info_total_ms", "autogaze_ms"),
+                "aliases": ["autogaze_ms"],
+                "included_in": "autogaze_total_ms",
+                "add_to_total_ms": False,
+                "description": "AutoGaze stage total: model forward plus gaze-info bookkeeping.",
+            },
+            "autogaze_model_forward_ms": {
+                "value_ms": first_metric_value(metrics, "autogaze_model_forward_ms", "autogaze_forward_ms"),
+                "aliases": ["autogaze_forward_ms"],
+                "included_in": "autogaze_total_ms",
+                "add_to_total_ms": False,
+                "description": "AutoGaze model forward-only timing over batched tile tensors.",
+            },
+            "generate_ms": {
+                "value_ms": metrics.get("generate_ms"),
+                "includes": [
+                    "vision_encoder_ms",
+                    "llm_forward_ms",
+                    "generation_decode_after_ttft_estimated_ms",
+                ],
+                "description": "NVILA model.generate after preprocessing; AutoGaze is not included.",
+            },
+            "vision_encoder_ms": {
+                "value_ms": metrics.get("vision_encoder_ms"),
+                "included_in": "generate_ms",
+                "includes": ["siglip_vision_ms", "mm_projector_ms"],
+                "add_to_total_ms": False,
+                "description": "Vision path inside generate, including SigLIP and projector hooks.",
+            },
+            "siglip_vision_ms": {
+                "value_ms": metrics.get("siglip_vision_ms"),
+                "included_in": "vision_encoder_ms",
+                "add_to_total_ms": False,
+                "description": "Pure SigLIP/ViT vision tower forward timing.",
+            },
+            "mm_projector_ms": {
+                "value_ms": metrics.get("mm_projector_ms"),
+                "included_in": "vision_encoder_ms",
+                "add_to_total_ms": False,
+                "description": "Projection from visual features to LLM hidden dimension.",
+            },
+            "llm_forward_ms": {
+                "value_ms": metrics.get("llm_forward_ms"),
+                "included_in": "generate_ms",
+                "add_to_total_ms": False,
+                "description": "Accumulated LLM forward calls during full generation.",
+            },
+            "generation_decode_after_ttft_estimated_ms": {
+                "value_ms": first_metric_value(
+                    metrics,
+                    "generation_decode_after_ttft_estimated_ms",
+                    "decode_estimated_ms",
+                ),
+                "aliases": ["decode_estimated_ms"],
+                "included_in": "generate_ms",
+                "add_to_total_ms": False,
+                "description": "Estimated generation-side decode time; not video decode.",
+            },
+            "ttft_ms": {
+                "value_ms": metrics.get("ttft_ms"),
+                "included_in": None,
+                "relationship_to_total_ms": "separate_measurement",
+                "add_to_total_ms": False,
+                "description": "Separate 1-token pass for first-token latency; excluded from total_ms.",
+            },
+        },
+    }
+
+
 def latency_accounting_summary() -> dict[str, Any]:
     return {
-        "additive_formula": "total_ms = video_preprocess_ms + generate_ms",
-        "additive_fields": ["video_preprocess_ms", "generate_ms"],
+        "additive_formula": "total_ms = video_preprocess_without_autogaze_ms + autogaze_total_ms + generate_ms",
+        "additive_fields": ["video_preprocess_without_autogaze_ms", "autogaze_total_ms", "generate_ms"],
+        "legacy_inclusive_formula": "total_ms = video_preprocess_ms + generate_ms",
+        "legacy_inclusive_fields": ["video_preprocess_ms", "generate_ms"],
+        "hierarchy": latency_hierarchy_summary(),
         "nested_preprocess_fields": [
+            "video_preprocess_ms",
             "video_decode_ms",
             "video_tiling_ms",
             "autogaze_ms",
@@ -282,7 +447,7 @@ def latency_accounting_summary() -> dict[str, Any]:
         "do_not_sum_with_total_ms": [
             field
             for field in LATENCY_FIELDS
-            if field not in {"total_ms", "video_preprocess_ms", "generate_ms"}
+            if field not in {"total_ms", "video_preprocess_without_autogaze_ms", "autogaze_total_ms", "generate_ms"}
         ],
     }
 
@@ -311,9 +476,10 @@ def summarize_prediction_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "latency_accounting": latency_accounting_summary(),
             "latency_field_note": (
                 "Summary-level latency is intentionally coarse: "
-                "preprocess_total=video_preprocess_ms, autogaze=autogaze_ms, "
+                "preprocess_without_autogaze=video_preprocess_without_autogaze_ms, "
+                "preprocess_total=legacy inclusive video_preprocess_ms, autogaze=autogaze_total_ms, "
                 "vit_encoder=siglip_vision_ms, llm=llm_forward_ms. "
-                "These fields are not additive because preprocess_total includes processor work. "
+                "The primary additive formula separates preprocess_without_autogaze, autogaze_total, and generate. "
                 "Use latency_accounting.additive_formula for the only additive total formula, "
                 "and use latency_ms_detail_median or top-level latency_ms for finer breakdowns."
             ),

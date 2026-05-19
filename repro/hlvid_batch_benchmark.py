@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from repro.common import compute_stats, write_csv, write_json
-from repro.hlvid import read_jsonl, read_manifest_file, score_predictions
+from repro.hlvid import latency_accounting_summary, read_jsonl, read_manifest_file, score_predictions
 
 
 MANIFEST_PATTERNS = (
@@ -41,6 +41,8 @@ LATENCY_FIELDS = (
     "total_ms",
     "generate_ms",
     "video_preprocess_ms",
+    "video_preprocess_without_autogaze_ms",
+    "autogaze_total_ms",
     "video_decode_ms",
     "video_tiling_ms",
     "autogaze_ms",
@@ -56,8 +58,10 @@ LATENCY_FIELDS = (
 )
 MODULE_LATENCY_FIELDS = (
     ("total_ms", "total_ms"),
+    ("preprocess_without_autogaze_ms", "video_preprocess_without_autogaze_ms"),
     ("preprocess_total_ms", "video_preprocess_ms"),
     ("autogaze_ms", "autogaze_ms"),
+    ("autogaze_total_ms", "autogaze_total_ms"),
     ("vit_encoder_ms", "siglip_vision_ms"),
     ("llm_ms", "llm_forward_ms"),
 )
@@ -292,40 +296,13 @@ def build_readable_summary(
             "tokens": tokens,
             "memory_bytes": key_memory,
         },
-        "latency_accounting": {
-            "additive_formula": "total_ms = video_preprocess_ms + generate_ms",
-            "additive_fields": ["video_preprocess_ms", "generate_ms"],
-            "nested_preprocess_fields": [
-                "video_decode_ms",
-                "video_tiling_ms",
-                "autogaze_ms",
-                "gazing_info_total_ms",
-                "autogaze_forward_ms",
-                "autogaze_model_forward_ms",
-            ],
-            "nested_generate_fields": [
-                "vision_encoder_ms",
-                "siglip_vision_ms",
-                "mm_projector_ms",
-                "llm_forward_ms",
-                "ttft_ms",
-                "generation_decode_after_ttft_estimated_ms",
-            ],
-            "decode_alias_note": (
-                "generation_decode_after_ttft_estimated_ms is generate_ms - ttft_ms. "
-                "It is generation decode time, not video decode time."
-            ),
-            "do_not_sum_with_total_ms": [
-                field
-                for field in LATENCY_FIELDS
-                if field not in {"total_ms", "video_preprocess_ms", "generate_ms"}
-            ],
-        },
+        "latency_accounting": latency_accounting_summary(),
         "latency_field_note": (
             "Summary-level latency is intentionally coarse: "
-            "preprocess_total=video_preprocess_ms, autogaze=autogaze_ms, "
+            "preprocess_without_autogaze=video_preprocess_without_autogaze_ms, "
+            "preprocess_total=legacy inclusive video_preprocess_ms, autogaze=autogaze_total_ms, "
             "vit_encoder=siglip_vision_ms, llm=llm_forward_ms. "
-            "These fields are not additive because preprocess_total includes processor work. "
+            "The primary additive formula separates preprocess_without_autogaze, autogaze_total, and generate. "
             "Use latency_accounting.additive_formula for the only additive total formula, "
             "and use latency_ms_detail_median or per-mode latency_ms for finer breakdowns."
         ),

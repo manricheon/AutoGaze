@@ -166,6 +166,8 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
             "total_ms": 100.0,
             "generate_ms": 80.0,
             "video_preprocess_ms": 20.0,
+            "video_preprocess_without_autogaze_ms": 19.0,
+            "autogaze_total_ms": 1.0,
             "autogaze_ms": 1.0,
             "gazing_info_total_ms": 1.0,
             "siglip_vision_ms": 40.0,
@@ -197,6 +199,8 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
             "total_ms": 60.0,
             "generate_ms": 35.0,
             "video_preprocess_ms": 25.0,
+            "video_preprocess_without_autogaze_ms": 13.0,
+            "autogaze_total_ms": 12.0,
             "autogaze_ms": 12.0,
             "gazing_info_total_ms": 12.0,
             "autogaze_model_forward_ms": 10.0,
@@ -248,7 +252,13 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
         "reduction_percent_of_keep_all": 40.0,
     }
     assert report["readable_summary"]["latency_accounting"]["additive_formula"] == (
-        "total_ms = video_preprocess_ms + generate_ms"
+        "total_ms = video_preprocess_without_autogaze_ms + autogaze_total_ms + generate_ms"
+    )
+    assert (
+        report["readable_summary"]["latency_accounting"]["hierarchy"]["quick_answers"][
+            "what_generate_ms_includes"
+        ]
+        == "NVILA model.generate after preprocessing: vision_encoder_ms plus llm_forward_ms."
     )
     assert "video_decode_ms" in report["readable_summary"]["latency_accounting"]["do_not_sum_with_total_ms"]
     assert report["readable_summary"]["latency_ms_detail_median"]["generate_ms"] == {
@@ -263,7 +273,19 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
         "speedup_ratio_keep_all_over_autogaze": 20.0 / 25.0,
         "reduction_percent_of_keep_all": -25.0,
     }
+    assert report["readable_summary"]["latency_ms_median"]["preprocess_without_autogaze_ms"] == {
+        "keep_all": 19.0,
+        "autogaze": 13.0,
+        "speedup_ratio_keep_all_over_autogaze": 19.0 / 13.0,
+        "reduction_percent_of_keep_all": (19.0 - 13.0) / 19.0 * 100,
+    }
     assert report["readable_summary"]["latency_ms_median"]["autogaze_ms"] == {
+        "keep_all": 1.0,
+        "autogaze": 12.0,
+        "speedup_ratio_keep_all_over_autogaze": 1.0 / 12.0,
+        "reduction_percent_of_keep_all": -1100.0,
+    }
+    assert report["readable_summary"]["latency_ms_median"]["autogaze_total_ms"] == {
         "keep_all": 1.0,
         "autogaze": 12.0,
         "speedup_ratio_keep_all_over_autogaze": 1.0 / 12.0,

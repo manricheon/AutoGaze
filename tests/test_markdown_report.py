@@ -27,8 +27,10 @@ def test_render_single_markdown_report_includes_pipeline_and_key_metrics(tmp_pat
         "key_metrics_summary": {
             "latency_ms": {
                 "total_median": 9000,
+                "preprocess_without_autogaze_median": 2200,
                 "preprocess_total_median": 3000,
                 "autogaze_median": 800,
+                "autogaze_total_median": 800,
                 "vit_encoder_median": 1200,
                 "llm_median": 4000,
             },
@@ -53,9 +55,13 @@ def test_render_single_markdown_report_includes_pipeline_and_key_metrics(tmp_pat
             },
             "latency_accounting": {
                 "additive_total_ms": {
-                    "formula": "total_ms = video_preprocess_ms + generate_ms",
+                    "formula": (
+                        "total_ms = video_preprocess_without_autogaze_ms + "
+                        "autogaze_total_ms + generate_ms"
+                    ),
                     "total_ms": 9000,
-                    "video_preprocess_ms": 3000,
+                    "video_preprocess_without_autogaze_ms": 2200,
+                    "autogaze_total_ms": 800,
                     "generate_ms": 6000,
                     "recomputed_total_ms": 9000,
                     "delta_ms": 0,
@@ -64,11 +70,30 @@ def test_render_single_markdown_report_includes_pipeline_and_key_metrics(tmp_pat
                 "nested_preprocess_breakdown_ms": {
                     "video_decode_ms": {
                         "value": 700,
-                        "included_in": "video_preprocess_ms",
+                        "included_in": "video_preprocess_without_autogaze_ms",
                         "add_to_total_ms": False,
                     },
                 },
                 "do_not_sum_with_total_ms": ["video_decode_ms"],
+                "hierarchy": {
+                    "total_formula": (
+                        "total_ms = video_preprocess_without_autogaze_ms + "
+                        "autogaze_total_ms + generate_ms"
+                    ),
+                    "ascii_tree": (
+                        "total_ms = video_preprocess_without_autogaze_ms + autogaze_total_ms + generate_ms\n"
+                        "|-- video_preprocess_without_autogaze_ms\n"
+                        "|-- autogaze_total_ms\n"
+                        "`-- generate_ms"
+                    ),
+                    "quick_answers": {
+                        "what_total_ms_is": "End-to-end latency.",
+                        "what_generate_ms_includes": (
+                            "NVILA model.generate after preprocessing: vision_encoder_ms plus llm_forward_ms."
+                        ),
+                        "where_is_autogaze_ms_included": "autogaze_total_ms",
+                    },
+                },
             },
         },
     }
@@ -89,7 +114,9 @@ def test_render_single_markdown_report_includes_pipeline_and_key_metrics(tmp_pat
     assert "llm_peak_median" in markdown
     assert "## Step-by-step Pipeline Metrics" in markdown
     assert "## Latency Accounting" in markdown
-    assert "total_ms = video_preprocess_ms + generate_ms" in markdown
+    assert "### Time Hierarchy" in markdown
+    assert "total_ms = video_preprocess_without_autogaze_ms + autogaze_total_ms + generate_ms" in markdown
+    assert "where_is_autogaze_ms_included" in markdown
     assert "video_decode_ms" in markdown
 
     output = tmp_path / "report.md"

@@ -141,8 +141,10 @@ def key_metrics_from_stream_profile(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "latency_ms": {
             "total_ms": preprocess_total + autogaze_total + (vit_total or 0.0),
+            "preprocess_without_autogaze_ms": preprocess_total,
             "preprocess_total_ms": preprocess_total,
             "autogaze_ms": autogaze_total,
+            "autogaze_total_ms": autogaze_total,
             "vit_encoder_ms": vit_total,
             "llm_ms": None,
         },
@@ -189,8 +191,10 @@ def key_metrics(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "latency_ms": {
             "total_ms": result.get("total_ms"),
+            "preprocess_without_autogaze_ms": result.get("video_preprocess_without_autogaze_ms"),
             "preprocess_total_ms": result.get("video_preprocess_ms"),
             "autogaze_ms": result.get("autogaze_ms"),
+            "autogaze_total_ms": result.get("autogaze_total_ms"),
             "vit_encoder_ms": result.get("siglip_vision_ms"),
             "llm_ms": result.get("llm_forward_ms"),
         },
@@ -298,6 +302,22 @@ def render_latency_accounting_section(payload: dict[str, Any], metrics: dict[str
     if not accounting:
         return ""
 
+    sections = ["## Latency Accounting"]
+    hierarchy = as_mapping(accounting.get("hierarchy"))
+    if hierarchy:
+        ascii_tree = hierarchy.get("ascii_tree")
+        if ascii_tree:
+            sections.append(f"### Time Hierarchy\n\n```text\n{ascii_tree}\n```")
+        quick_answers = as_mapping(hierarchy.get("quick_answers"))
+        if quick_answers:
+            sections.append(
+                "### Quick Answers\n\n"
+                + markdown_table(
+                    ["Question", "Answer"],
+                    [[key, value] for key, value in quick_answers.items()],
+                )
+            )
+
     rows: list[list[Any]] = []
     additive = as_mapping(accounting.get("additive_total_ms"))
     if additive:
@@ -305,13 +325,31 @@ def render_latency_accounting_section(payload: dict[str, Any], metrics: dict[str
             [
                 ["additive formula", additive.get("formula"), "Only these top-level fields recompute total latency."],
                 ["total_ms", additive.get("total_ms"), "End-to-end measured latency."],
-                ["video_preprocess_ms", additive.get("video_preprocess_ms"), "Decode/tile/AutoGaze processor phase."],
+                [
+                    "video_preprocess_without_autogaze_ms",
+                    additive.get("video_preprocess_without_autogaze_ms"),
+                    "Decode/tile/tokenization processor phase excluding AutoGaze.",
+                ],
+                ["autogaze_total_ms", additive.get("autogaze_total_ms"), "AutoGaze stage total."],
                 ["generate_ms", additive.get("generate_ms"), "Full NVILA generation phase."],
-                ["recomputed_total_ms", additive.get("recomputed_total_ms"), "video_preprocess_ms + generate_ms."],
+                [
+                    "recomputed_total_ms",
+                    additive.get("recomputed_total_ms"),
+                    "video_preprocess_without_autogaze_ms + autogaze_total_ms + generate_ms.",
+                ],
                 ["delta_ms", additive.get("delta_ms"), "Difference between recorded total and recomputed total."],
                 ["ttft_ms", additive.get("ttft_ms_excluded_from_total"), "Separate 1-token pass; do not add to total_ms."],
             ]
         )
+        legacy = as_mapping(accounting.get("legacy_inclusive_total_ms"))
+        if legacy:
+            rows.extend(
+                [
+                    ["legacy formula", legacy.get("formula"), "Backward-compatible inclusive preprocess view."],
+                    ["legacy video_preprocess_ms", legacy.get("video_preprocess_ms"), "Includes AutoGaze."],
+                    ["legacy recomputed_total_ms", legacy.get("recomputed_total_ms"), "video_preprocess_ms + generate_ms."],
+                ]
+            )
     elif accounting.get("additive_formula"):
         rows.append(
             [
@@ -350,7 +388,8 @@ def render_latency_accounting_section(payload: dict[str, Any], metrics: dict[str
         if accounting.get(note_name):
             rows.append([note_name, accounting.get(note_name), ""])
 
-    return "## Latency Accounting\n\n" + markdown_table(["Field", "Value", "Meaning"], rows)
+    sections.append("### Accounting Fields\n\n" + markdown_table(["Field", "Value", "Meaning"], rows))
+    return "\n\n".join(sections)
 
 
 def video_info(payload: dict[str, Any]) -> dict[str, Any]:

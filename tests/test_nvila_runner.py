@@ -65,6 +65,8 @@ def test_build_latency_accounting_separates_additive_total_from_nested_breakdown
         {
             "total_ms": 100.0,
             "video_preprocess_ms": 30.0,
+            "video_preprocess_without_autogaze_ms": 23.0,
+            "autogaze_total_ms": 7.0,
             "generate_ms": 70.0,
             "ttft_ms": 12.0,
             "video_decode_ms": 5.0,
@@ -76,6 +78,16 @@ def test_build_latency_accounting_separates_additive_total_from_nested_breakdown
     )
 
     assert accounting["additive_total_ms"] == {
+        "formula": "total_ms = video_preprocess_without_autogaze_ms + autogaze_total_ms + generate_ms",
+        "total_ms": 100.0,
+        "video_preprocess_without_autogaze_ms": 23.0,
+        "autogaze_total_ms": 7.0,
+        "generate_ms": 70.0,
+        "recomputed_total_ms": 100.0,
+        "delta_ms": 0.0,
+        "ttft_ms_excluded_from_total": 12.0,
+    }
+    assert accounting["legacy_inclusive_total_ms"] == {
         "formula": "total_ms = video_preprocess_ms + generate_ms",
         "total_ms": 100.0,
         "video_preprocess_ms": 30.0,
@@ -86,14 +98,31 @@ def test_build_latency_accounting_separates_additive_total_from_nested_breakdown
     }
     assert accounting["nested_preprocess_breakdown_ms"]["video_decode_ms"] == {
         "value": 5.0,
-        "included_in": "video_preprocess_ms",
+        "included_in": "video_preprocess_without_autogaze_ms",
         "add_to_total_ms": False,
     }
     assert accounting["nested_preprocess_breakdown_ms"]["autogaze_model_forward_ms"] == {
         "value": 5.0,
-        "included_in": "gazing_info_total_ms",
+        "included_in": "autogaze_total_ms",
         "add_to_total_ms": False,
     }
+    hierarchy = accounting["hierarchy"]
+    assert (
+        hierarchy["total_formula"]
+        == "total_ms = video_preprocess_without_autogaze_ms + autogaze_total_ms + generate_ms"
+    )
+    assert hierarchy["quick_answers"]["is_autogaze_in_generate_ms"] is False
+    assert hierarchy["quick_answers"]["where_is_autogaze_ms_included"] == "autogaze_total_ms"
+    assert hierarchy["quick_answers"]["legacy_inclusive_preprocess_field"] == "video_preprocess_ms"
+    assert hierarchy["quick_answers"]["is_video_decode_in_preprocess_ms"] is True
+    assert hierarchy["nodes"]["video_decode_ms"]["included_in"] == "video_preprocess_without_autogaze_ms"
+    assert hierarchy["nodes"]["autogaze_total_ms"]["included_in"] == "total_ms"
+    assert hierarchy["nodes"]["generate_ms"]["includes"] == [
+        "vision_encoder_ms",
+        "llm_forward_ms",
+        "generation_decode_after_ttft_estimated_ms",
+    ]
+    assert "video_preprocess_without_autogaze_ms + autogaze_total_ms + generate_ms" in hierarchy["ascii_tree"]
     assert "video_decode_ms" in accounting["do_not_sum_with_total_ms"]
 
 
@@ -303,6 +332,8 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
             "generate_ms": 87.0,
             "ttft_ms": 30.0,
             "video_preprocess_ms": 13.0,
+            "video_preprocess_without_autogaze_ms": 1.0,
+            "autogaze_total_ms": 12.0,
             "video_decode_ms": 2.0,
             "video_tiling_ms": 11.0,
             "autogaze_ms": 12.0,
@@ -363,6 +394,8 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
             "generate_ms": {"median": 77.0},
             "ttft_ms": {"median": 25.0},
             "video_preprocess_ms": {"median": 13.0},
+            "video_preprocess_without_autogaze_ms": {"median": 1.0},
+            "autogaze_total_ms": {"median": 12.0},
             "video_decode_ms": {"median": 2.0},
             "autogaze_ms": {"median": 12.0},
             "autogaze_forward_ms": {"median": 10.0},
@@ -487,25 +520,29 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
     assert summary["module_latency_ms"] == {
         "total_median": 90.0,
         "generate_median": 77.0,
+        "preprocess_without_autogaze_median": 1.0,
         "preprocess_total_median": 13.0,
         "autogaze_median": 12.0,
+        "autogaze_total_median": 12.0,
         "gazing_info_total_median": 12.0,
         "autogaze_model_forward_median": 10.0,
         "vit_encoder_median": 18.0,
         "llm_median": 45.0,
         "field_note": (
             "Summary-level module latency is intentionally coarse. "
-            "preprocess_total=video_preprocess_ms, autogaze=autogaze_ms, "
+            "preprocess_without_autogaze=video_preprocess_without_autogaze_ms, "
+            "preprocess_total=legacy inclusive video_preprocess_ms, autogaze=autogaze_total_ms, "
             "gazing_info_total=gazing_info_total_ms, "
             "autogaze_model_forward=autogaze_model_forward_ms, "
             "vit_encoder=siglip_vision_ms, llm=llm_forward_ms. "
-            "These fields are not additive because preprocess_total includes processor work."
+            "The primary additive formula is preprocess_without_autogaze + autogaze_total + generate."
         ),
     }
     assert summary["latency_accounting"]["additive_total_ms"] == {
-        "formula": "total_ms = video_preprocess_ms + generate_ms",
+        "formula": "total_ms = video_preprocess_without_autogaze_ms + autogaze_total_ms + generate_ms",
         "total_ms": 90.0,
-        "video_preprocess_ms": 13.0,
+        "video_preprocess_without_autogaze_ms": 1.0,
+        "autogaze_total_ms": 12.0,
         "generate_ms": 77.0,
         "recomputed_total_ms": 90.0,
         "delta_ms": 0.0,
@@ -513,15 +550,17 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
     }
     assert summary["latency_accounting"]["nested_preprocess_breakdown_ms"]["video_decode_ms"] == {
         "value": 2.0,
-        "included_in": "video_preprocess_ms",
+        "included_in": "video_preprocess_without_autogaze_ms",
         "add_to_total_ms": False,
     }
     assert summary["key_metrics_summary"] == {
         "latency_ms": {
             "total_median": 90.0,
             "generate_median": 77.0,
+            "preprocess_without_autogaze_median": 1.0,
             "preprocess_total_median": 13.0,
             "autogaze_median": 12.0,
+            "autogaze_total_median": 12.0,
             "gazing_info_total_median": 12.0,
             "autogaze_model_forward_median": 10.0,
             "vit_encoder_median": 18.0,

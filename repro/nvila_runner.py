@@ -30,7 +30,13 @@ from repro.common import (
     write_json,
     write_jsonl,
 )
-from repro.hlvid import load_hlvid_manifest, parse_choice, read_manifest_file, score_predictions
+from repro.hlvid import (
+    latency_hierarchy_summary,
+    load_hlvid_manifest,
+    parse_choice,
+    read_manifest_file,
+    score_predictions,
+)
 from repro.gaze_visualization import safe_label, write_gaze_visualization_artifacts
 
 DEFAULT_MODEL = "nvidia/NVILA-8B-HD-Video"
@@ -53,6 +59,8 @@ REPEAT_SUMMARY_FIELDS = (
     "total_ms",
     "generate_ms",
     "video_preprocess_ms",
+    "video_preprocess_without_autogaze_ms",
+    "autogaze_total_ms",
     "video_decode_ms",
     "video_tiling_ms",
     "autogaze_ms",
@@ -312,50 +320,106 @@ def _sum_if_present(*values: Any) -> float | None:
     return total
 
 
+def _subtract_if_present(total: Any, part: Any) -> float | None:
+    if total is None:
+        return None
+    try:
+        total_value = float(total)
+    except (TypeError, ValueError):
+        return None
+    if part is None:
+        return total_value
+    try:
+        part_value = float(part)
+    except (TypeError, ValueError):
+        return None
+    difference = total_value - part_value
+    if difference < 0:
+        return None
+    return difference
+
+
 def build_latency_accounting(metrics: dict[str, Any]) -> dict[str, Any]:
     total_ms = metrics.get("total_ms")
     preprocess_ms = metrics.get("video_preprocess_ms")
     generate_ms = metrics.get("generate_ms")
     ttft_ms = metrics.get("ttft_ms")
     gazing_info_ms = _first_metric(metrics, "gazing_info_total_ms", "autogaze_ms")
+    autogaze_total_ms = _first_metric(metrics, "autogaze_total_ms", "gazing_info_total_ms", "autogaze_ms")
+    preprocess_without_autogaze_ms = _first_metric(metrics, "video_preprocess_without_autogaze_ms")
+    if preprocess_without_autogaze_ms is None:
+        preprocess_without_autogaze_ms = _subtract_if_present(preprocess_ms, autogaze_total_ms)
     autogaze_forward_ms = _first_metric(metrics, "autogaze_model_forward_ms", "autogaze_forward_ms")
     generation_decode_estimated_ms = _first_metric(
         metrics,
         "generation_decode_after_ttft_estimated_ms",
         "decode_estimated_ms",
     )
-    recomputed_total = _sum_if_present(preprocess_ms, generate_ms)
+    recomputed_total = _sum_if_present(preprocess_without_autogaze_ms, autogaze_total_ms, generate_ms)
     delta = _numeric_delta(total_ms, recomputed_total) if recomputed_total is not None else None
+    legacy_recomputed_total = _sum_if_present(preprocess_ms, generate_ms)
+    legacy_delta = _numeric_delta(total_ms, legacy_recomputed_total) if legacy_recomputed_total is not None else None
+    hierarchy_metrics = {
+        **metrics,
+        "video_preprocess_without_autogaze_ms": preprocess_without_autogaze_ms,
+        "autogaze_total_ms": autogaze_total_ms,
+    }
 
     return {
         "additive_total_ms": {
-            "formula": "total_ms = video_preprocess_ms + generate_ms",
+            "formula": "total_ms = video_preprocess_without_autogaze_ms + autogaze_total_ms + generate_ms",
             "total_ms": total_ms,
-            "video_preprocess_ms": preprocess_ms,
+            "video_preprocess_without_autogaze_ms": preprocess_without_autogaze_ms,
+            "autogaze_total_ms": autogaze_total_ms,
             "generate_ms": generate_ms,
             "recomputed_total_ms": recomputed_total,
             "delta_ms": delta,
             "ttft_ms_excluded_from_total": ttft_ms,
         },
+        "legacy_inclusive_total_ms": {
+            "formula": "total_ms = video_preprocess_ms + generate_ms",
+            "total_ms": total_ms,
+            "video_preprocess_ms": preprocess_ms,
+            "generate_ms": generate_ms,
+            "recomputed_total_ms": legacy_recomputed_total,
+            "delta_ms": legacy_delta,
+            "ttft_ms_excluded_from_total": ttft_ms,
+        },
         "nested_preprocess_breakdown_ms": {
+            "video_preprocess_ms": {
+                "value": preprocess_ms,
+                "relationship": "legacy inclusive field",
+                "includes": ["video_preprocess_without_autogaze_ms", "autogaze_total_ms"],
+                "add_to_total_ms": False,
+            },
+            "video_preprocess_without_autogaze_ms": {
+                "value": preprocess_without_autogaze_ms,
+                "included_in": "total_ms",
+                "add_to_total_ms": True,
+            },
             "video_decode_ms": {
                 "value": metrics.get("video_decode_ms"),
-                "included_in": "video_preprocess_ms",
+                "included_in": "video_preprocess_without_autogaze_ms",
                 "add_to_total_ms": False,
             },
             "video_tiling_ms": {
                 "value": metrics.get("video_tiling_ms"),
-                "included_in": "video_preprocess_ms",
+                "included_in": "video_preprocess_without_autogaze_ms",
                 "add_to_total_ms": False,
+            },
+            "autogaze_total_ms": {
+                "value": autogaze_total_ms,
+                "included_in": "total_ms",
+                "add_to_total_ms": True,
             },
             "gazing_info_total_ms": {
                 "value": gazing_info_ms,
-                "included_in": "video_preprocess_ms",
+                "included_in": "autogaze_total_ms",
                 "add_to_total_ms": False,
             },
             "autogaze_model_forward_ms": {
                 "value": autogaze_forward_ms,
-                "included_in": "gazing_info_total_ms",
+                "included_in": "autogaze_total_ms",
                 "add_to_total_ms": False,
             },
         },
@@ -388,6 +452,7 @@ def build_latency_accounting(metrics: dict[str, Any]) -> dict[str, Any]:
             },
         },
         "do_not_sum_with_total_ms": [
+            "video_preprocess_ms",
             "video_decode_ms",
             "video_tiling_ms",
             "autogaze_ms",
@@ -404,8 +469,10 @@ def build_latency_accounting(metrics: dict[str, Any]) -> dict[str, Any]:
         ],
         "note": (
             "Only additive_total_ms fields are intended for recomputing total latency. "
-            "Nested fields explain where time was spent inside preprocess or generate and must not be added again."
+            "video_preprocess_ms is kept as a legacy inclusive field; the primary breakdown separates "
+            "preprocess_without_autogaze, autogaze_total, and generate."
         ),
+        "hierarchy": latency_hierarchy_summary(hierarchy_metrics),
     }
 
 
@@ -629,6 +696,16 @@ def build_single_summary(payload: dict[str, Any]) -> dict[str, Any]:
     gazing_info_total_median = summary_metric(payload, "gazing_info_total_ms")
     if gazing_info_total_median is None:
         gazing_info_total_median = summary_metric(payload, "autogaze_ms")
+    autogaze_total_median = summary_metric(payload, "autogaze_total_ms")
+    if autogaze_total_median is None:
+        autogaze_total_median = gazing_info_total_median
+    preprocess_total_median = summary_metric(payload, "video_preprocess_ms")
+    preprocess_without_autogaze_median = summary_metric(payload, "video_preprocess_without_autogaze_ms")
+    if preprocess_without_autogaze_median is None:
+        preprocess_without_autogaze_median = _subtract_if_present(
+            preprocess_total_median,
+            autogaze_total_median,
+        )
     autogaze_model_forward_median = summary_metric(payload, "autogaze_model_forward_ms")
     if autogaze_model_forward_median is None:
         autogaze_model_forward_median = summary_metric(payload, "autogaze_forward_ms")
@@ -641,8 +718,10 @@ def build_single_summary(payload: dict[str, Any]) -> dict[str, Any]:
     module_latency = {
         "total_median": summary_metric(payload, "total_ms"),
         "generate_median": summary_metric(payload, "generate_ms"),
-        "preprocess_total_median": summary_metric(payload, "video_preprocess_ms"),
+        "preprocess_without_autogaze_median": preprocess_without_autogaze_median,
+        "preprocess_total_median": preprocess_total_median,
         "autogaze_median": summary_metric(payload, "autogaze_ms"),
+        "autogaze_total_median": autogaze_total_median,
         "gazing_info_total_median": gazing_info_total_median,
         "autogaze_model_forward_median": autogaze_model_forward_median,
         "vit_encoder_median": summary_metric(payload, "siglip_vision_ms"),
@@ -651,7 +730,9 @@ def build_single_summary(payload: dict[str, Any]) -> dict[str, Any]:
     latency_accounting = build_latency_accounting(
         {
             "total_ms": summary_metric(payload, "total_ms"),
-            "video_preprocess_ms": summary_metric(payload, "video_preprocess_ms"),
+            "video_preprocess_ms": preprocess_total_median,
+            "video_preprocess_without_autogaze_ms": preprocess_without_autogaze_median,
+            "autogaze_total_ms": autogaze_total_median,
             "generate_ms": summary_metric(payload, "generate_ms"),
             "ttft_ms": summary_metric(payload, "ttft_ms"),
             "video_decode_ms": summary_metric(payload, "video_decode_ms"),
@@ -699,7 +780,7 @@ def build_single_summary(payload: dict[str, Any]) -> dict[str, Any]:
             "gazing_mode": payload.get("gazing_mode"),
             "total_ms_median": summary_metric(payload, "total_ms"),
             "ttft_ms_median": summary_metric(payload, "ttft_ms"),
-            "autogaze_total_ms_median": summary_metric(payload, "autogaze_ms"),
+            "autogaze_total_ms_median": autogaze_total_median,
             "autogaze_forward_ms_median": summary_metric(payload, "autogaze_forward_ms"),
             "gazing_info_total_ms_median": gazing_info_total_median,
             "autogaze_model_forward_ms_median": autogaze_model_forward_median,
@@ -736,11 +817,12 @@ def build_single_summary(payload: dict[str, Any]) -> dict[str, Any]:
             **module_latency,
             "field_note": (
                 "Summary-level module latency is intentionally coarse. "
-                "preprocess_total=video_preprocess_ms, autogaze=autogaze_ms, "
+                "preprocess_without_autogaze=video_preprocess_without_autogaze_ms, "
+                "preprocess_total=legacy inclusive video_preprocess_ms, autogaze=autogaze_total_ms, "
                 "gazing_info_total=gazing_info_total_ms, "
                 "autogaze_model_forward=autogaze_model_forward_ms, "
                 "vit_encoder=siglip_vision_ms, llm=llm_forward_ms. "
-                "These fields are not additive because preprocess_total includes processor work."
+                "The primary additive formula is preprocess_without_autogaze + autogaze_total + generate."
             ),
         },
         "latency_accounting": latency_accounting,
@@ -756,9 +838,11 @@ def build_single_summary(payload: dict[str, Any]) -> dict[str, Any]:
             "ttft_median": summary_metric(payload, "ttft_ms"),
             "decode_estimated_median": summary_metric(payload, "decode_estimated_ms"),
             "generation_decode_after_ttft_estimated_median": generation_decode_after_ttft_estimated_median,
+            "preprocess_without_autogaze_median": preprocess_without_autogaze_median,
+            "preprocess_total_median": preprocess_total_median,
             "video_decode_median": summary_metric(payload, "video_decode_ms"),
             "video_tiling_median": summary_metric(payload, "video_tiling_ms"),
-            "autogaze_total_median": summary_metric(payload, "autogaze_ms"),
+            "autogaze_total_median": autogaze_total_median,
             "autogaze_forward_median": summary_metric(payload, "autogaze_forward_ms"),
             "gazing_info_total_median": gazing_info_total_median,
             "autogaze_model_forward_median": autogaze_model_forward_median,
@@ -3370,6 +3454,8 @@ def generate_one(
     video_decode_ms = stage_total(processor_timings, "video_decode_sampling")
     video_tiling_ms = stage_total(processor_timings, "video_tiling_and_tensorize")
     gazing_info_total_ms = stage_total(processor_timings, "autogaze_total")
+    autogaze_total_ms = gazing_info_total_ms if gazing_info_total_ms is not None else 0.0
+    video_preprocess_without_autogaze_ms = max(preprocess_ms - autogaze_total_ms, 0.0)
     autogaze_model_forward_ms = stage_total(processor_timings, "autogaze_forward_batched")
     vision_encoder_ms = stage_total(generate_timings, "vision_encode_total")
     siglip_vision_ms = stage_total(generate_timings, "siglip_vision_tower")
@@ -3379,6 +3465,8 @@ def generate_one(
         {
             "total_ms": preprocess_ms + result["generate_ms"],
             "video_preprocess_ms": preprocess_ms,
+            "video_preprocess_without_autogaze_ms": video_preprocess_without_autogaze_ms,
+            "autogaze_total_ms": autogaze_total_ms,
             "generate_ms": result["generate_ms"],
             "ttft_ms": ttft_ms,
             "video_decode_ms": video_decode_ms,
@@ -3410,6 +3498,8 @@ def generate_one(
         "compute_metrics": compute_metrics,
         "visualization": visualization,
         "video_preprocess_ms": preprocess_ms,
+        "video_preprocess_without_autogaze_ms": video_preprocess_without_autogaze_ms,
+        "autogaze_total_ms": autogaze_total_ms,
         "video_decode_ms": video_decode_ms,
         "video_tiling_ms": video_tiling_ms,
         "autogaze_ms": gazing_info_total_ms,
