@@ -125,7 +125,7 @@ raw output JSON이 너무 길면 `--print-summary --summary-json <path>`를 붙�
   --output-md outputs/autogaze_repro/hlvid_autogaze_gain_report.md
 ```
 
-선택된 프레임과 AutoGaze patch mask를 눈으로 확인하려면 `--visualization-output-dir`를 붙이세요. 실행이 끝난 뒤 선택된 프레임만 이어 붙인 `<label>_selected_frames.mp4`, AutoGaze가 선택한 tile patch를 scale별 색상 mask로 표시한 `<label>_autogaze_overlay.mp4`, 실제 `gazing_info`와 frame별 overlay box를 담은 `<label>_gazing_info.json`을 저장합니다. 기본 overlay video는 selected-frame video와 같은 해상도로 저장됩니다. patch 좌표는 processor가 실제로 쓰는 `cols * 392 x rows * 392` tile canvas에서 계산한 뒤 selected-frame 크기로 매핑합니다. 오버레이는 외곽선을 굵게 그리지 않고 alpha mask만 적용합니다. 현재 runner에서는 thumbnail patch는 keep-all이므로 JSON에는 남기되 overlay video에는 tile AutoGaze 선택만 그립니다.
+선택된 프레임과 AutoGaze patch mask를 눈으로 확인하려면 `--visualization-output-dir`를 붙이세요. 실행이 끝난 뒤 사람이 보기 좋은 selected-frame 기준 `<label>_selected_frames.mp4`, selected-frame 위에 AutoGaze tile patch를 scale별 색상 mask로 표시한 `<label>_autogaze_overlay.mp4`, 실제 NVILA processor 입력 해상도 기준 `<label>_processor_frames.mp4`, processor-frame 위에 같은 AutoGaze mask를 표시한 `<label>_processor_autogaze_overlay.mp4`, 실제 `gazing_info`와 frame별 overlay box를 담은 `<label>_gazing_info.json`을 저장합니다. 기본 selected overlay video는 selected-frame video와 같은 해상도로 저장되고, processor overlay video는 `video_input_summary.processor_input_width/height` 기준으로 저장됩니다. patch 좌표는 processor가 실제로 쓰는 `cols * 392 x rows * 392` tile canvas에서 계산한 뒤 selected-frame 크기와 processor-frame 크기로 각각 매핑합니다. 오버레이는 외곽선을 굵게 그리지 않고 alpha mask만 적용합니다. 현재 runner에서는 thumbnail patch는 keep-all이므로 JSON에는 남기되 overlay video에는 tile AutoGaze 선택만 그립니다.
 
 ```bash
 .venv/bin/python -m repro.nvila_runner \
@@ -142,7 +142,7 @@ raw output JSON이 너무 길면 `--print-summary --summary-json <path>`를 붙�
   --output-json outputs/autogaze_repro/nvila_single_with_viz.json
 ```
 
-`--gazing-mode keep-all`에서도 같은 옵션을 사용할 수 있습니다. 이 경우 선택 프레임 비디오는 저장되고 overlay는 `skipped_keep_all`로 기록됩니다. HLVid benchmark에서는 `repro.nvila_runner --mode hlvid`에 직접 같은 옵션을 붙이거나, batch wrapper에 `--visualization-output-dir`를 전달하면 keep-all/autogaze 양쪽 runner로 전달됩니다. 시각화 생성 시간은 `total_ms` 같은 benchmark latency에 포함하지 않고, 결과 JSON의 `result.visualization` 또는 per-row `visualization`에서 저장 경로와 decode 정보를 확인합니다. 관련 구현은 [gaze_visualization.py](../repro/gaze_visualization.py), runner 연결은 [nvila_runner.py](../repro/nvila_runner.py), batch forwarding은 [hlvid_batch_benchmark.py](../repro/hlvid_batch_benchmark.py)를 보세요.
+`--gazing-mode keep-all`에서도 같은 옵션을 사용할 수 있습니다. 이 경우 selected/processor frame 비디오는 저장되고 overlay는 `skipped_keep_all`로 기록됩니다. HLVid benchmark에서는 `repro.nvila_runner --mode hlvid`에 직접 같은 옵션을 붙이거나, batch wrapper에 `--visualization-output-dir`를 전달하면 keep-all/autogaze 양쪽 runner로 전달됩니다. 시각화 생성 시간은 `total_ms` 같은 benchmark latency에 포함하지 않고, 결과 JSON의 `result.visualization` 또는 per-row `visualization`에서 저장 경로와 decode 정보를 확인합니다. 관련 구현은 [gaze_visualization.py](../repro/gaze_visualization.py), runner 연결은 [nvila_runner.py](../repro/nvila_runner.py), batch forwarding은 [hlvid_batch_benchmark.py](../repro/hlvid_batch_benchmark.py)를 보세요.
 
 단일 실행의 비디오 입력 조건을 빠르게 확인할 때는 아래 필드를 먼저 보세요. raw JSON에는 top-level `video_input_summary`와 `result.video_input_summary`가 모두 있고, compact summary JSON에도 같은 `video_input_summary`가 들어갑니다.
 

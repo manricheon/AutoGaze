@@ -136,14 +136,27 @@ def test_write_gaze_visualization_artifacts_saves_selected_sized_overlay_and_man
     assert manifest["status"] == "written"
     assert manifest["selected_frames_video"].endswith("single_clip_selected_frames.mp4")
     assert manifest["overlay_video"].endswith("single_clip_autogaze_overlay.mp4")
+    assert manifest["processor_frames_video"].endswith("single_clip_processor_frames.mp4")
+    assert manifest["processor_overlay_video"].endswith("single_clip_processor_autogaze_overlay.mp4")
     assert manifest["gazing_info_json"].endswith("single_clip_gazing_info.json")
     assert (tmp_path / "single_clip_selected_frames.mp4").exists()
     assert (tmp_path / "single_clip_autogaze_overlay.mp4").exists()
+    assert (tmp_path / "single_clip_processor_frames.mp4").exists()
+    assert (tmp_path / "single_clip_processor_autogaze_overlay.mp4").exists()
     assert video_size(tmp_path / "single_clip_selected_frames.mp4") == (196, 196)
     assert video_size(tmp_path / "single_clip_autogaze_overlay.mp4") == (196, 196)
+    assert video_size(tmp_path / "single_clip_processor_frames.mp4") == (392, 392)
+    assert video_size(tmp_path / "single_clip_processor_autogaze_overlay.mp4") == (392, 392)
     raw = json.loads((tmp_path / "single_clip_gazing_info.json").read_text())
     assert raw["sampled_frame_indices"] == [0, 9]
     assert raw["overlay_render_size"] == [196, 196]
     assert raw["overlay_coordinate_space"] == "selected_frame"
+    assert raw["processor_frames_video"].endswith("single_clip_processor_frames.mp4")
+    assert raw["processor_overlay_video"].endswith("single_clip_processor_autogaze_overlay.mp4")
+    assert raw["processor_overlay_status"] == "written"
+    assert raw["processor_overlay_render_size"] == [392, 392]
+    assert raw["processor_overlay_coordinate_space"] == "processor_input_frame"
     assert raw["overlay_records_by_frame"]["0"][0]["scale"] == 56
     assert raw["overlay_records_by_frame"]["0"][0]["bbox"] == [0, 0, 49, 49]
+    assert raw["processor_overlay_records_by_frame"]["0"][0]["scale"] == 56
+    assert raw["processor_overlay_records_by_frame"]["0"][0]["bbox"] == [0, 0, 98, 98]

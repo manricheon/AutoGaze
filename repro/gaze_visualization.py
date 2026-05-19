@@ -310,14 +310,23 @@ def write_gaze_visualization_artifacts(
     label = safe_label(label)
     selected_path = output_dir / f"{label}_selected_frames.mp4"
     overlay_path = output_dir / f"{label}_autogaze_overlay.mp4"
+    processor_path = output_dir / f"{label}_processor_frames.mp4"
+    processor_overlay_path = output_dir / f"{label}_processor_autogaze_overlay.mp4"
     gazing_json_path = output_dir / f"{label}_gazing_info.json"
 
     selected_video = write_video(selected_frames, selected_path, fps=fps)
+    processor_video = write_video(overlay_base_frames, processor_path, fps=fps) if overlay_base_frames else None
     overlay_status = "skipped"
     overlay_video = None
+    processor_overlay_status = "skipped"
+    processor_overlay_video = None
     overlay_records_by_frame: dict[int, list[dict[str, Any]]] = {index: [] for index in range(len(selected_frames))}
+    processor_overlay_records_by_frame: dict[int, list[dict[str, Any]]] = {
+        index: [] for index in range(len(overlay_base_frames))
+    }
     tile_canvas_size = (int(grid_cols) * int(tile_size), int(grid_rows) * int(tile_size))
     overlay_render_size = list(selected_frames[0].size) if selected_frames else None
+    processor_overlay_render_size = list(overlay_base_frames[0].size) if overlay_base_frames else None
 
     if gazing_mode == "autogaze" and gazing_info is not None:
         tile_records_by_frame = build_gaze_overlay_records(
@@ -338,6 +347,14 @@ def write_gaze_visualization_artifacts(
             )
             for index, frame in enumerate(selected_frames)
         }
+        processor_overlay_records_by_frame = {
+            index: scale_overlay_records(
+                tile_records_by_frame.get(index, []),
+                source_size=tile_canvas_size,
+                target_size=frame.size,
+            )
+            for index, frame in enumerate(overlay_base_frames)
+        }
         overlay_frames = [
             render_overlay_frame(
                 frame.convert("RGB"),
@@ -348,10 +365,25 @@ def write_gaze_visualization_artifacts(
         ]
         overlay_video = write_video(overlay_frames, overlay_path, fps=fps)
         overlay_status = "written"
+        if overlay_base_frames:
+            processor_overlay_frames = [
+                render_overlay_frame(
+                    frame.convert("RGB"),
+                    processor_overlay_records_by_frame.get(index, []),
+                    alpha=alpha,
+                )
+                for index, frame in enumerate(overlay_base_frames)
+            ]
+            processor_overlay_video = write_video(processor_overlay_frames, processor_overlay_path, fps=fps)
+            processor_overlay_status = "written"
+        else:
+            processor_overlay_status = "skipped_missing_processor_frames"
     elif gazing_mode != "autogaze":
         overlay_status = "skipped_keep_all"
+        processor_overlay_status = "skipped_keep_all"
     elif gazing_info is None:
         overlay_status = "skipped_missing_gazing_info"
+        processor_overlay_status = "skipped_missing_gazing_info"
 
     raw = {
         "video": video,
@@ -361,22 +393,31 @@ def write_gaze_visualization_artifacts(
         "selected_frames_video": selected_video,
         "overlay_video": overlay_video,
         "overlay_status": overlay_status,
+        "processor_frames_video": processor_video,
+        "processor_overlay_video": processor_overlay_video,
+        "processor_overlay_status": processor_overlay_status,
         "spatial_tiles": int(spatial_tiles),
         "grid_cols": int(grid_cols),
         "grid_rows": int(grid_rows),
         "tile_size": int(tile_size),
         "overlay_coordinate_space": "selected_frame",
         "overlay_render_size": overlay_render_size,
+        "processor_overlay_coordinate_space": "processor_input_frame",
+        "processor_overlay_render_size": processor_overlay_render_size,
         "overlay_tile_canvas_size": [tile_canvas_size[0], tile_canvas_size[1]],
         "overlay_base_frame_count": len(overlay_base_frames),
         "scales": [int(scale) for scale in scales],
         "patch_size": int(patch_size),
         "scale_colors": palette_for_scales(scales),
         "overlay_records_by_frame": {str(key): value for key, value in overlay_records_by_frame.items()},
+        "processor_overlay_records_by_frame": {
+            str(key): value for key, value in processor_overlay_records_by_frame.items()
+        },
         "gazing_info": serialize_gazing_info(gazing_info),
         "note": (
-            "Overlay boxes are drawn on the processor tile canvas. Thumbnail patches are keep-all in this "
-            "runner and are saved in gazing_info when present, but are not drawn on the tile overlay video."
+            "Overlay boxes are computed on the processor tile canvas, then mapped onto both selected-frame "
+            "and processor-input-frame videos. Thumbnail patches are keep-all in this runner and are saved "
+            "in gazing_info when present, but are not drawn on the tile overlay videos."
         ),
     }
     gazing_json_path.write_text(json.dumps(raw, indent=2, sort_keys=True, ensure_ascii=False))
@@ -386,10 +427,16 @@ def write_gaze_visualization_artifacts(
         "selected_frames_video": selected_video,
         "overlay_video": overlay_video,
         "overlay_status": overlay_status,
+        "processor_frames_video": processor_video,
+        "processor_overlay_video": processor_overlay_video,
+        "processor_overlay_status": processor_overlay_status,
         "gazing_info_json": str(gazing_json_path),
         "sampled_frame_count": len(selected_frames),
         "overlay_frame_count": len(selected_frames),
         "overlay_coordinate_space": "selected_frame",
         "overlay_render_size": overlay_render_size,
+        "processor_overlay_frame_count": len(overlay_base_frames),
+        "processor_overlay_coordinate_space": "processor_input_frame",
+        "processor_overlay_render_size": processor_overlay_render_size,
         "scale_colors": palette_for_scales(scales),
     }

@@ -2444,8 +2444,10 @@ def maybe_write_generation_visualization(
             {
                 "selected_video_decode": selected_decode,
                 "overlay_video_decode": overlay_decode,
+                "processor_video_decode": overlay_decode,
                 "selected_video_resize": selected_resize,
                 "overlay_video_resize": overlay_resize,
+                "processor_video_resize": overlay_resize,
                 "processor_tile_grid": grid,
             }
         )
