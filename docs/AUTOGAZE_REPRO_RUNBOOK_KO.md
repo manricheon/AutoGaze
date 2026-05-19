@@ -230,7 +230,7 @@ LLM visual-token 기준:
 - `token_metrics.llm_actual_visual_tokens`: AutoGaze/keep-all padding strategy가 반영된 processor output의 실제 visual placeholder token 수
 - `token_metrics.llm_visual_token_reduction_ratio`: keep-all 예상 LLM visual token 수를 실제 visual token 수로 나눈 값
 
-HLVid `--mode hlvid` summary에는 `question_count`, `question_samples`, `benchmark_samples`, `token_budget_summary`가 추가됩니다. `question_samples`는 질문 원문 확인용이고, `benchmark_samples`는 대상 비디오, 질문, 모델 답변, parsed 답변, 정답, 정오 여부를 같이 보여주는 읽기 쉬운 샘플 표입니다. summary가 너무 커지지 않도록 앞쪽 샘플만 담고, 전체 row의 질문/정답/모델 출력은 `predictions.jsonl`과 `scored_predictions.jsonl`에 남깁니다. `token_budget_summary`는 성공한 row들의 `token_metrics`에서 median/mean을 모은 것이고, `failed` row는 token metric이 없으므로 집계에서 빠집니다. `scripts/run_hlvid_folder_benchmark.py`의 최종 gain report에서도 top-level `benchmark_samples.keep_all`, `benchmark_samples.autogaze`, `autogaze.tokens`와 `gains.autogaze_token_reduction_median`에 raw/selected patch 수와 LLM visual token 수가 함께 들어갑니다.
+HLVid `--mode hlvid` summary에는 `question_count`, `question_samples`, `benchmark_samples`, `latency_ms`, `memory_bytes`, `tokens`, `compute`, `readable_performance_summary`, `token_budget_summary`가 추가됩니다. `question_samples`는 질문 원문 확인용이고, `benchmark_samples`는 대상 비디오, 질문, 모델 답변, parsed 답변, 정답, 정오 여부를 같이 보여주는 읽기 쉬운 샘플 표입니다. `latency_ms`/`memory_bytes`/`tokens`/`compute`는 각 metric의 count/mean/median/min/max이고, `readable_performance_summary`는 median만 모아둔 빠른 확인용입니다. summary가 너무 커지지 않도록 앞쪽 샘플만 담고, 전체 row의 질문/정답/모델 출력은 `predictions.jsonl`과 `scored_predictions.jsonl`에 남깁니다. `token_budget_summary`는 성공한 row들의 `token_metrics`에서 median/mean을 모은 것이고, `failed` row는 token metric이 없으므로 집계에서 빠집니다. `scripts/run_hlvid_folder_benchmark.py`의 최종 gain report에서도 top-level `benchmark_samples.keep_all`, `benchmark_samples.autogaze`, `autogaze.tokens`와 `gains.autogaze_token_reduction_median`에 raw/selected patch 수와 LLM visual token 수가 함께 들어갑니다.
 
 계산량/메모리 추정치는 `compute_metrics`에 있습니다. 이 값은 profiler가 직접 센 FLOPs가 아니라, token 수와 hidden size/layer 수를 이용한 analytical MAC estimate입니다.
 
@@ -888,7 +888,7 @@ CUDA full benchmark 예시:
 
 - `hlvid_keep_all_predictions.jsonl`: AutoGaze 미적용 baseline per-sample 결과
 - `hlvid_autogaze_predictions.jsonl`: AutoGaze 적용 per-sample 결과
-- `hlvid_keep_all_summary.json`, `hlvid_autogaze_summary.json`: 각 run의 HLVid scoring summary
+- `hlvid_keep_all_summary.json`, `hlvid_autogaze_summary.json`: 각 run의 HLVid scoring summary와 per-mode latency/memory/token/compute summary
 - `hlvid_autogaze_gain_report.json`: keep-all 대비 AutoGaze gain report
 - `hlvid_autogaze_gain_report.csv`: 리더 보고용 single-row 요약
 

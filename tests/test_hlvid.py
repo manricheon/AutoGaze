@@ -152,6 +152,64 @@ def test_score_predictions_adds_readable_benchmark_samples():
     assert "model_answer" in summary["benchmark_sample_note"]
 
 
+def test_score_predictions_includes_latency_memory_token_and_compute_summaries():
+    rows = [
+        {
+            "answer": "A",
+            "raw_output": "A",
+            "total_ms": 100.0,
+            "video_decode_ms": 10.0,
+            "siglip_vision_ms": 40.0,
+            "llm_forward_ms": 30.0,
+            "llm_peak_memory_bytes": 1000,
+            "token_metrics": {
+                "encoder_raw_patch_tokens": 900,
+                "encoder_autogaze_selected_patch_tokens": 300,
+                "llm_keep_all_visual_tokens_estimated": 100,
+                "llm_actual_visual_tokens": 40,
+                "llm_visual_token_reduction_ratio": 2.5,
+            },
+            "compute_metrics": {
+                "siglip_encoder": {"keep_all_to_actual_total_macs_ratio": 4.0},
+                "mllm": {"kv_cache_reduction_ratio": 2.5},
+            },
+        },
+        {
+            "answer": "B",
+            "raw_output": "B",
+            "total_ms": 60.0,
+            "video_decode_ms": 6.0,
+            "siglip_vision_ms": 20.0,
+            "llm_forward_ms": 18.0,
+            "llm_peak_memory_bytes": 700,
+            "token_metrics": {
+                "encoder_raw_patch_tokens": 800,
+                "encoder_autogaze_selected_patch_tokens": 200,
+                "llm_keep_all_visual_tokens_estimated": 90,
+                "llm_actual_visual_tokens": 30,
+                "llm_visual_token_reduction_ratio": 3.0,
+            },
+            "compute_metrics": {
+                "siglip_encoder": {"keep_all_to_actual_total_macs_ratio": 3.0},
+                "mllm": {"kv_cache_reduction_ratio": 3.0},
+            },
+        },
+    ]
+
+    summary, _ = score_predictions(rows)
+
+    assert summary["latency_ms"]["total_ms"]["median"] == 80.0
+    assert summary["latency_ms"]["video_decode_ms"]["median"] == 8.0
+    assert summary["latency_ms"]["siglip_vision_ms"]["median"] == 30.0
+    assert summary["latency_ms"]["llm_forward_ms"]["median"] == 24.0
+    assert summary["memory_bytes"]["llm_peak_memory_bytes"]["median"] == 850.0
+    assert summary["tokens"]["token_metrics.encoder_raw_patch_tokens"]["median"] == 850.0
+    assert summary["tokens"]["token_metrics.encoder_autogaze_selected_patch_tokens"]["median"] == 250.0
+    assert summary["compute"]["compute_metrics.siglip_encoder.keep_all_to_actual_total_macs_ratio"]["median"] == 3.5
+    assert summary["readable_performance_summary"]["latency_ms_median"]["total_ms"] == 80.0
+    assert summary["readable_performance_summary"]["tokens_median"]["llm_visual_tokens_after_actual"] == 35.0
+
+
 def test_read_manifest_file_supports_jsonl_and_validates_rows(tmp_path):
     manifest = tmp_path / "manifest.jsonl"
     manifest.write_text(

@@ -9,13 +9,59 @@ from typing import Any
 
 import requests
 
-from repro.common import write_json, write_jsonl
+from repro.common import compute_stats, write_json, write_jsonl
 
 REQUIRED_COLUMNS = ("question_id", "category", "video_path", "question", "answer")
 CHOICE_RE = re.compile(r"\b([ABCD])\b", re.IGNORECASE)
 DATASET_VIEWER_ROWS_URL = "https://datasets-server.huggingface.co/rows"
 QUESTION_SUMMARY_SAMPLE_LIMIT = 5
 BENCHMARK_SAMPLE_LIMIT = 5
+LATENCY_FIELDS = (
+    "total_ms",
+    "video_preprocess_ms",
+    "video_decode_ms",
+    "video_tiling_ms",
+    "autogaze_forward_ms",
+    "vision_encoder_ms",
+    "siglip_vision_ms",
+    "mm_projector_ms",
+    "llm_forward_ms",
+    "ttft_ms",
+)
+MEMORY_FIELDS = (
+    "processor_peak_memory_bytes",
+    "ttft_peak_memory_bytes",
+    "llm_peak_memory_bytes",
+    "peak_memory_bytes",
+)
+TOKEN_FIELDS = (
+    "token_metrics.video_sampled_frames",
+    "token_metrics.thumbnail_sampled_frames",
+    "token_metrics.encoder_raw_tile_patch_tokens",
+    "token_metrics.encoder_autogaze_selected_tile_patch_tokens",
+    "token_metrics.autogaze_input_tile_frame_instances",
+    "token_metrics.autogaze_input_patch_tokens",
+    "token_metrics.autogaze_selected_patch_tokens",
+    "token_metrics.autogaze_removed_patch_tokens",
+    "token_metrics.autogaze_patch_reduction_ratio",
+    "token_metrics.encoder_raw_thumbnail_patch_tokens",
+    "token_metrics.encoder_autogaze_selected_thumbnail_patch_tokens",
+    "token_metrics.encoder_raw_patch_tokens",
+    "token_metrics.encoder_autogaze_selected_patch_tokens",
+    "token_metrics.encoder_token_reduction_ratio",
+    "token_metrics.encoder_tile_token_reduction_ratio",
+    "token_metrics.llm_keep_all_visual_tokens_estimated",
+    "token_metrics.llm_actual_visual_tokens",
+    "token_metrics.llm_visual_token_reduction_ratio",
+)
+COMPUTE_FIELDS = (
+    "compute_metrics.siglip_encoder.keep_all_to_actual_attention_macs_ratio",
+    "compute_metrics.siglip_encoder.keep_all_to_actual_mlp_macs_ratio",
+    "compute_metrics.siglip_encoder.keep_all_to_actual_total_macs_ratio",
+    "compute_metrics.mllm.kv_cache_reduction_ratio",
+    "compute_metrics.mllm.prefill_attention_pair_reduction_ratio",
+    "compute_metrics.mllm.prefill_total_macs_reduction_ratio",
+)
 
 
 def parse_choice(text: str | None) -> str | None:
@@ -138,6 +184,98 @@ def build_benchmark_samples(scored_rows: list[dict[str, Any]]) -> list[dict[str,
     return samples
 
 
+def metric_value(row: dict[str, Any], dotted_path: str) -> Any:
+    value: Any = row
+    for part in dotted_path.split("."):
+        if not isinstance(value, dict):
+            return None
+        value = value.get(part)
+    return value
+
+
+def numeric_values(rows: list[dict[str, Any]], field: str) -> list[float]:
+    values: list[float] = []
+    for row in rows:
+        value = metric_value(row, field)
+        if value is None:
+            continue
+        try:
+            values.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    return values
+
+
+def stats_by_field(rows: list[dict[str, Any]], fields: tuple[str, ...]) -> dict[str, dict[str, float | int]]:
+    return {field: compute_stats(numeric_values(rows, field)) for field in fields}
+
+
+def median_from_stats(stats: dict[str, dict[str, float | int]], field: str) -> float | int | None:
+    field_stats = stats.get(field)
+    if not field_stats:
+        return None
+    return field_stats.get("median")
+
+
+def summarize_prediction_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    latency = stats_by_field(rows, LATENCY_FIELDS)
+    memory = stats_by_field(rows, MEMORY_FIELDS)
+    tokens = stats_by_field(rows, TOKEN_FIELDS)
+    compute = stats_by_field(rows, COMPUTE_FIELDS)
+    return {
+        "latency_ms": latency,
+        "memory_bytes": memory,
+        "tokens": tokens,
+        "compute": compute,
+        "readable_performance_summary": {
+            "latency_ms_median": {field: latency[field]["median"] for field in LATENCY_FIELDS},
+            "memory_bytes_median": {field: memory[field]["median"] for field in MEMORY_FIELDS},
+            "tokens_median": {
+                "video_sampled_frames": median_from_stats(tokens, "token_metrics.video_sampled_frames"),
+                "thumbnail_sampled_frames": median_from_stats(
+                    tokens,
+                    "token_metrics.thumbnail_sampled_frames",
+                ),
+                "encoder_patch_tokens_before_keep_all_or_raw": median_from_stats(
+                    tokens,
+                    "token_metrics.encoder_raw_patch_tokens",
+                ),
+                "encoder_patch_tokens_after_autogaze": median_from_stats(
+                    tokens,
+                    "token_metrics.encoder_autogaze_selected_patch_tokens",
+                ),
+                "autogaze_input_tile_patch_tokens": median_from_stats(
+                    tokens,
+                    "token_metrics.autogaze_input_patch_tokens",
+                ),
+                "autogaze_selected_tile_patch_tokens": median_from_stats(
+                    tokens,
+                    "token_metrics.autogaze_selected_patch_tokens",
+                ),
+                "llm_visual_tokens_before_keep_all_estimated": median_from_stats(
+                    tokens,
+                    "token_metrics.llm_keep_all_visual_tokens_estimated",
+                ),
+                "llm_visual_tokens_after_actual": median_from_stats(
+                    tokens,
+                    "token_metrics.llm_actual_visual_tokens",
+                ),
+                "llm_visual_token_reduction_ratio": median_from_stats(
+                    tokens,
+                    "token_metrics.llm_visual_token_reduction_ratio",
+                ),
+            },
+            "compute_median": {
+                field: compute[field]["median"] for field in COMPUTE_FIELDS
+            },
+            "metric_note": (
+                "Per-mode HLVid summary medians are computed from prediction rows only. "
+                "Warmup runs are excluded, and failed rows only contribute metrics that were recorded."
+            ),
+        },
+    }
+
+
 def score_predictions(rows: list[dict[str, Any]]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     scored_rows: list[dict[str, Any]] = []
     correct = 0
@@ -196,6 +334,7 @@ def score_predictions(rows: list[dict[str, Any]]) -> tuple[dict[str, Any], list[
             "parsed_model_answer, correct_answer, and correctness. Full rows remain in JSONL."
         ),
     }
+    summary.update(summarize_prediction_metrics(scored_rows))
     return summary, scored_rows
 
 
