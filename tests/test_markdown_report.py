@@ -51,6 +51,25 @@ def test_render_single_markdown_report_includes_pipeline_and_key_metrics(tmp_pat
                 "llm_peak_median": 3_500_000_000,
                 "overall_peak_median": 4_000_000_000,
             },
+            "latency_accounting": {
+                "additive_total_ms": {
+                    "formula": "total_ms = video_preprocess_ms + generate_ms",
+                    "total_ms": 9000,
+                    "video_preprocess_ms": 3000,
+                    "generate_ms": 6000,
+                    "recomputed_total_ms": 9000,
+                    "delta_ms": 0,
+                    "ttft_ms_excluded_from_total": 1800,
+                },
+                "nested_preprocess_breakdown_ms": {
+                    "video_decode_ms": {
+                        "value": 700,
+                        "included_in": "video_preprocess_ms",
+                        "add_to_total_ms": False,
+                    },
+                },
+                "do_not_sum_with_total_ms": ["video_decode_ms"],
+            },
         },
     }
 
@@ -69,6 +88,9 @@ def test_render_single_markdown_report_includes_pipeline_and_key_metrics(tmp_pat
     assert "encoder_patch_tokens_before_keep_all_or_raw" in markdown
     assert "llm_peak_median" in markdown
     assert "## Step-by-step Pipeline Metrics" in markdown
+    assert "## Latency Accounting" in markdown
+    assert "total_ms = video_preprocess_ms + generate_ms" in markdown
+    assert "video_decode_ms" in markdown
 
     output = tmp_path / "report.md"
     input_json = tmp_path / "single.json"
@@ -91,6 +113,26 @@ def test_render_benchmark_markdown_report_includes_scores_and_comparison_tables(
             "accuracy": {"accuracy_scored": 0.60, "correct": 6, "scored": 10, "failed": 1},
         },
         "readable_summary": {
+            "latency_ms_detail_median": {
+                "total_ms": {
+                    "keep_all": 10000,
+                    "autogaze": 7000,
+                    "speedup_ratio_keep_all_over_autogaze": 1.43,
+                    "reduction_percent_of_keep_all": 30,
+                },
+                "video_decode_ms": {
+                    "keep_all": 1200,
+                    "autogaze": 1100,
+                    "speedup_ratio_keep_all_over_autogaze": 1.09,
+                    "reduction_percent_of_keep_all": 8.33,
+                },
+                "gazing_info_total_ms": {
+                    "keep_all": 0,
+                    "autogaze": 900,
+                    "speedup_ratio_keep_all_over_autogaze": 0,
+                    "reduction_percent_of_keep_all": None,
+                },
+            },
             "key_metrics_median": {
                 "latency_ms": {
                     "total_ms": {
@@ -122,7 +164,52 @@ def test_render_benchmark_markdown_report_includes_scores_and_comparison_tables(
                         "reduction_percent_of_keep_all": 37.5,
                     },
                 },
-            }
+            },
+            "latency_accounting": {
+                "additive_formula": "total_ms = video_preprocess_ms + generate_ms",
+                "additive_fields": ["video_preprocess_ms", "generate_ms"],
+                "do_not_sum_with_total_ms": ["video_decode_ms", "autogaze_ms", "ttft_ms"],
+            },
+        },
+        "correctness_comparison": {
+            "counts": {
+                "total_unique": 4,
+                "paired": 4,
+                "both_correct": 1,
+                "keep_all_only_correct": 1,
+                "autogaze_only_correct": 1,
+                "both_wrong": 1,
+                "keep_all_missing": 0,
+                "autogaze_missing": 0,
+            },
+            "paired_rates": {
+                "both_correct": 0.25,
+                "keep_all_only_correct": 0.25,
+                "autogaze_only_correct": 0.25,
+                "both_wrong": 0.25,
+            },
+            "samples": [
+                {
+                    "target_video": "clip2.mp4",
+                    "question": "What happened?",
+                    "correct_answer": "B",
+                    "keep_all_answer": "B",
+                    "keep_all_correct": True,
+                    "autogaze_answer": "A",
+                    "autogaze_correct": False,
+                    "bucket": "keep_all_only_correct",
+                },
+                {
+                    "target_video": "clip3.mp4",
+                    "question": "Where is it?",
+                    "correct_answer": "C",
+                    "keep_all_answer": "A",
+                    "keep_all_correct": False,
+                    "autogaze_answer": "C",
+                    "autogaze_correct": True,
+                    "bucket": "autogaze_only_correct",
+                },
+            ],
         },
         "benchmark_samples": {
             "autogaze": [
@@ -149,6 +236,92 @@ def test_render_benchmark_markdown_report_includes_scores_and_comparison_tables(
     assert "llm_peak" in markdown
     assert "## Benchmark Samples" in markdown
     assert "clip.mp4" in markdown
+    assert "## Latency Accounting" in markdown
+    assert "## Module Detail Metrics" in markdown
+    assert "| Metric | Keep-all | AutoGaze | Speedup | Reduction % |" in markdown
+    assert "| total_ms | 10,000 | 7,000 | 1.43 | 30 |" in markdown
+    assert "| gazing_info_total_ms | 0 | 900 | 0 | - |" in markdown
+    assert "## Benchmark Correctness Comparison" in markdown
+    assert "| keep_all_only_correct | 1 | 0.25 |" in markdown
+    assert "| autogaze_only_correct | 1 | 0.25 |" in markdown
+    assert "| clip2.mp4 | What happened? | B | B | true | A | false | keep_all_only_correct |" in markdown
+
+
+def test_render_benchmark_markdown_keeps_detail_latency_when_autogaze_is_skipped():
+    payload = {
+        "keep_all": {
+            "accuracy": {"accuracy_scored": 0.50, "correct": 5, "scored": 10, "failed": 0},
+        },
+        "autogaze": {
+            "accuracy": {"accuracy_scored": 0.0, "correct": 0, "scored": 0, "failed": 0},
+        },
+        "readable_summary": {
+            "mode_status": {"keep_all": "available", "autogaze": "skipped_or_missing"},
+            "latency_ms_detail_median": {
+                "total_ms": {
+                    "keep_all": 10000,
+                    "autogaze": None,
+                    "speedup_ratio_keep_all_over_autogaze": None,
+                    "reduction_percent_of_keep_all": None,
+                },
+                "video_decode_ms": {
+                    "keep_all": 1200,
+                    "autogaze": None,
+                    "speedup_ratio_keep_all_over_autogaze": None,
+                    "reduction_percent_of_keep_all": None,
+                },
+            },
+            "key_metrics_median": {
+                "latency_ms": {
+                    "total_ms": {
+                        "keep_all": 10000,
+                        "autogaze": None,
+                        "speedup_ratio_keep_all_over_autogaze": None,
+                        "reduction_percent_of_keep_all": None,
+                    },
+                },
+            },
+        },
+        "correctness_comparison": {
+            "counts": {
+                "total_unique": 1,
+                "paired": 0,
+                "both_correct": 0,
+                "keep_all_only_correct": 0,
+                "autogaze_only_correct": 0,
+                "both_wrong": 0,
+                "keep_all_missing": 0,
+                "autogaze_missing": 1,
+            },
+            "paired_rates": {
+                "both_correct": None,
+                "keep_all_only_correct": None,
+                "autogaze_only_correct": None,
+                "both_wrong": None,
+            },
+            "samples": [
+                {
+                    "target_video": "clip-only.mp4",
+                    "question": "What happened?",
+                    "correct_answer": "A",
+                    "keep_all_answer": "A",
+                    "keep_all_correct": True,
+                    "autogaze_answer": None,
+                    "autogaze_correct": None,
+                    "bucket": "autogaze_missing",
+                }
+            ],
+        },
+    }
+
+    markdown = render_markdown_report(payload, source_path="hlvid_gain_keep_all_only.json")
+
+    assert "## Module Detail Metrics" in markdown
+    assert "| Metric | Keep-all | AutoGaze | Speedup | Reduction % |" in markdown
+    assert "| total_ms | 10,000 | - | - | - |" in markdown
+    assert "| video_decode_ms | 1,200 | - | - | - |" in markdown
+    assert "| autogaze_missing | 1 | - |" in markdown
+    assert "| clip-only.mp4 | What happened? | A | A | true | - | - | autogaze_missing |" in markdown
 
 
 def test_render_stream_profile_markdown_keeps_source_and_effective_resolution_separate():

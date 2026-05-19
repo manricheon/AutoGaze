@@ -10,6 +10,7 @@ from repro.nvila_runner import (
     apply_resize_to_dimensions,
     autogaze_processor_size_kwargs,
     build_autogaze_effect_metrics,
+    build_latency_accounting,
     build_seek_decode_groups,
     build_keep_all_gazing_info,
     build_parser,
@@ -57,6 +58,43 @@ def make_args(**overrides):
     }
     values.update(overrides)
     return argparse.Namespace(**values)
+
+
+def test_build_latency_accounting_separates_additive_total_from_nested_breakdown():
+    accounting = build_latency_accounting(
+        {
+            "total_ms": 100.0,
+            "video_preprocess_ms": 30.0,
+            "generate_ms": 70.0,
+            "ttft_ms": 12.0,
+            "video_decode_ms": 5.0,
+            "video_tiling_ms": 20.0,
+            "gazing_info_total_ms": 7.0,
+            "autogaze_model_forward_ms": 5.0,
+            "generation_decode_after_ttft_estimated_ms": 58.0,
+        }
+    )
+
+    assert accounting["additive_total_ms"] == {
+        "formula": "total_ms = video_preprocess_ms + generate_ms",
+        "total_ms": 100.0,
+        "video_preprocess_ms": 30.0,
+        "generate_ms": 70.0,
+        "recomputed_total_ms": 100.0,
+        "delta_ms": 0.0,
+        "ttft_ms_excluded_from_total": 12.0,
+    }
+    assert accounting["nested_preprocess_breakdown_ms"]["video_decode_ms"] == {
+        "value": 5.0,
+        "included_in": "video_preprocess_ms",
+        "add_to_total_ms": False,
+    }
+    assert accounting["nested_preprocess_breakdown_ms"]["autogaze_model_forward_ms"] == {
+        "value": 5.0,
+        "included_in": "gazing_info_total_ms",
+        "add_to_total_ms": False,
+    }
+    assert "video_decode_ms" in accounting["do_not_sum_with_total_ms"]
 
 
 class DummyVisionConfig:
@@ -262,11 +300,16 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
             "raw_output": "A",
             "generated_tokens": 4,
             "total_ms": 100.0,
+            "generate_ms": 87.0,
             "ttft_ms": 30.0,
             "video_preprocess_ms": 13.0,
+            "video_decode_ms": 2.0,
             "video_tiling_ms": 11.0,
             "autogaze_ms": 12.0,
             "autogaze_forward_ms": 10.0,
+            "gazing_info_total_ms": 12.0,
+            "autogaze_model_forward_ms": 10.0,
+            "generation_decode_after_ttft_estimated_ms": 57.0,
             "siglip_vision_ms": 20.0,
             "mm_projector_ms": 3.0,
             "llm_forward_ms": 50.0,
@@ -317,10 +360,15 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
         },
         "repeat_summary": {
             "total_ms": {"median": 90.0},
+            "generate_ms": {"median": 77.0},
             "ttft_ms": {"median": 25.0},
             "video_preprocess_ms": {"median": 13.0},
+            "video_decode_ms": {"median": 2.0},
             "autogaze_ms": {"median": 12.0},
             "autogaze_forward_ms": {"median": 10.0},
+            "gazing_info_total_ms": {"median": 12.0},
+            "autogaze_model_forward_ms": {"median": 10.0},
+            "generation_decode_after_ttft_estimated_ms": {"median": 52.0},
             "siglip_vision_ms": {"median": 18.0},
             "llm_forward_ms": {"median": 45.0},
             "processor_peak_memory_bytes": {"median": 1400.0},
@@ -338,6 +386,8 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
         "ttft_ms_median": 25.0,
         "autogaze_total_ms_median": 12.0,
         "autogaze_forward_ms_median": 10.0,
+        "gazing_info_total_ms_median": 12.0,
+        "autogaze_model_forward_ms_median": 10.0,
         "siglip_vision_ms_median": 18.0,
         "llm_forward_ms_median": 45.0,
         "encoder_patch_tokens_before_keep_all": 80,
@@ -436,25 +486,48 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
     assert summary["question"] == "What does the sign say?"
     assert summary["module_latency_ms"] == {
         "total_median": 90.0,
+        "generate_median": 77.0,
         "preprocess_total_median": 13.0,
         "autogaze_median": 12.0,
+        "gazing_info_total_median": 12.0,
+        "autogaze_model_forward_median": 10.0,
         "vit_encoder_median": 18.0,
         "llm_median": 45.0,
         "field_note": (
             "Summary-level module latency is intentionally coarse. "
             "preprocess_total=video_preprocess_ms, autogaze=autogaze_ms, "
+            "gazing_info_total=gazing_info_total_ms, "
+            "autogaze_model_forward=autogaze_model_forward_ms, "
             "vit_encoder=siglip_vision_ms, llm=llm_forward_ms. "
             "These fields are not additive because preprocess_total includes processor work."
         ),
     }
+    assert summary["latency_accounting"]["additive_total_ms"] == {
+        "formula": "total_ms = video_preprocess_ms + generate_ms",
+        "total_ms": 90.0,
+        "video_preprocess_ms": 13.0,
+        "generate_ms": 77.0,
+        "recomputed_total_ms": 90.0,
+        "delta_ms": 0.0,
+        "ttft_ms_excluded_from_total": 25.0,
+    }
+    assert summary["latency_accounting"]["nested_preprocess_breakdown_ms"]["video_decode_ms"] == {
+        "value": 2.0,
+        "included_in": "video_preprocess_ms",
+        "add_to_total_ms": False,
+    }
     assert summary["key_metrics_summary"] == {
         "latency_ms": {
             "total_median": 90.0,
+            "generate_median": 77.0,
             "preprocess_total_median": 13.0,
             "autogaze_median": 12.0,
+            "gazing_info_total_median": 12.0,
+            "autogaze_model_forward_median": 10.0,
             "vit_encoder_median": 18.0,
             "llm_median": 45.0,
         },
+        "latency_accounting": summary["latency_accounting"],
         "tokens": {
             "video_sampled_frames": 8,
             "thumbnail_sampled_frames": 4,

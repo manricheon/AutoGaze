@@ -51,17 +51,21 @@ NVILA_CONTEXT_LIMIT = 40960
 AUTOGAZE_CHUNK_FRAMES = 16
 REPEAT_SUMMARY_FIELDS = (
     "total_ms",
+    "generate_ms",
     "video_preprocess_ms",
     "video_decode_ms",
     "video_tiling_ms",
     "autogaze_ms",
+    "gazing_info_total_ms",
     "autogaze_forward_ms",
+    "autogaze_model_forward_ms",
     "vision_encoder_ms",
     "siglip_vision_ms",
     "mm_projector_ms",
     "llm_forward_ms",
     "ttft_ms",
     "decode_estimated_ms",
+    "generation_decode_after_ttft_estimated_ms",
     "processor_peak_memory_bytes",
     "ttft_peak_memory_bytes",
     "llm_peak_memory_bytes",
@@ -288,6 +292,123 @@ def summary_metric(payload: dict[str, Any], field: str, stat: str = "median") ->
     return metric_value(payload.get("result", {}), field)
 
 
+def _first_metric(metrics: dict[str, Any], *fields: str) -> Any:
+    for field in fields:
+        value = metrics.get(field)
+        if value is not None:
+            return value
+    return None
+
+
+def _sum_if_present(*values: Any) -> float | None:
+    total = 0.0
+    for value in values:
+        if value is None:
+            return None
+        try:
+            total += float(value)
+        except (TypeError, ValueError):
+            return None
+    return total
+
+
+def build_latency_accounting(metrics: dict[str, Any]) -> dict[str, Any]:
+    total_ms = metrics.get("total_ms")
+    preprocess_ms = metrics.get("video_preprocess_ms")
+    generate_ms = metrics.get("generate_ms")
+    ttft_ms = metrics.get("ttft_ms")
+    gazing_info_ms = _first_metric(metrics, "gazing_info_total_ms", "autogaze_ms")
+    autogaze_forward_ms = _first_metric(metrics, "autogaze_model_forward_ms", "autogaze_forward_ms")
+    generation_decode_estimated_ms = _first_metric(
+        metrics,
+        "generation_decode_after_ttft_estimated_ms",
+        "decode_estimated_ms",
+    )
+    recomputed_total = _sum_if_present(preprocess_ms, generate_ms)
+    delta = _numeric_delta(total_ms, recomputed_total) if recomputed_total is not None else None
+
+    return {
+        "additive_total_ms": {
+            "formula": "total_ms = video_preprocess_ms + generate_ms",
+            "total_ms": total_ms,
+            "video_preprocess_ms": preprocess_ms,
+            "generate_ms": generate_ms,
+            "recomputed_total_ms": recomputed_total,
+            "delta_ms": delta,
+            "ttft_ms_excluded_from_total": ttft_ms,
+        },
+        "nested_preprocess_breakdown_ms": {
+            "video_decode_ms": {
+                "value": metrics.get("video_decode_ms"),
+                "included_in": "video_preprocess_ms",
+                "add_to_total_ms": False,
+            },
+            "video_tiling_ms": {
+                "value": metrics.get("video_tiling_ms"),
+                "included_in": "video_preprocess_ms",
+                "add_to_total_ms": False,
+            },
+            "gazing_info_total_ms": {
+                "value": gazing_info_ms,
+                "included_in": "video_preprocess_ms",
+                "add_to_total_ms": False,
+            },
+            "autogaze_model_forward_ms": {
+                "value": autogaze_forward_ms,
+                "included_in": "gazing_info_total_ms",
+                "add_to_total_ms": False,
+            },
+        },
+        "nested_generate_breakdown_ms": {
+            "vision_encoder_ms": {
+                "value": metrics.get("vision_encoder_ms"),
+                "included_in": "generate_ms",
+                "add_to_total_ms": False,
+            },
+            "siglip_vision_ms": {
+                "value": metrics.get("siglip_vision_ms"),
+                "included_in": "vision_encoder_ms",
+                "add_to_total_ms": False,
+            },
+            "mm_projector_ms": {
+                "value": metrics.get("mm_projector_ms"),
+                "included_in": "vision_encoder_ms",
+                "add_to_total_ms": False,
+            },
+            "llm_forward_ms": {
+                "value": metrics.get("llm_forward_ms"),
+                "included_in": "generate_ms",
+                "add_to_total_ms": False,
+            },
+            "generation_decode_after_ttft_estimated_ms": {
+                "value": generation_decode_estimated_ms,
+                "included_in": "generate_ms",
+                "add_to_total_ms": False,
+                "note": "This is generation decode time estimated as generate_ms - ttft_ms, not video decode time.",
+            },
+        },
+        "do_not_sum_with_total_ms": [
+            "video_decode_ms",
+            "video_tiling_ms",
+            "autogaze_ms",
+            "gazing_info_total_ms",
+            "autogaze_forward_ms",
+            "autogaze_model_forward_ms",
+            "vision_encoder_ms",
+            "siglip_vision_ms",
+            "mm_projector_ms",
+            "llm_forward_ms",
+            "ttft_ms",
+            "decode_estimated_ms",
+            "generation_decode_after_ttft_estimated_ms",
+        ],
+        "note": (
+            "Only additive_total_ms fields are intended for recomputing total latency. "
+            "Nested fields explain where time was spent inside preprocess or generate and must not be added again."
+        ),
+    }
+
+
 def _numeric_delta(before: Any, after: Any) -> float | int | None:
     if before is None or after is None:
         return None
@@ -505,13 +626,45 @@ def build_single_summary(payload: dict[str, Any]) -> dict[str, Any]:
     encoder_selected_patch_tokens = token_metrics.get("encoder_autogaze_selected_patch_tokens")
     llm_keep_all_visual_tokens = token_metrics.get("llm_keep_all_visual_tokens_estimated")
     llm_actual_visual_tokens = token_metrics.get("llm_actual_visual_tokens")
+    gazing_info_total_median = summary_metric(payload, "gazing_info_total_ms")
+    if gazing_info_total_median is None:
+        gazing_info_total_median = summary_metric(payload, "autogaze_ms")
+    autogaze_model_forward_median = summary_metric(payload, "autogaze_model_forward_ms")
+    if autogaze_model_forward_median is None:
+        autogaze_model_forward_median = summary_metric(payload, "autogaze_forward_ms")
+    generation_decode_after_ttft_estimated_median = summary_metric(
+        payload,
+        "generation_decode_after_ttft_estimated_ms",
+    )
+    if generation_decode_after_ttft_estimated_median is None:
+        generation_decode_after_ttft_estimated_median = summary_metric(payload, "decode_estimated_ms")
     module_latency = {
         "total_median": summary_metric(payload, "total_ms"),
+        "generate_median": summary_metric(payload, "generate_ms"),
         "preprocess_total_median": summary_metric(payload, "video_preprocess_ms"),
         "autogaze_median": summary_metric(payload, "autogaze_ms"),
+        "gazing_info_total_median": gazing_info_total_median,
+        "autogaze_model_forward_median": autogaze_model_forward_median,
         "vit_encoder_median": summary_metric(payload, "siglip_vision_ms"),
         "llm_median": summary_metric(payload, "llm_forward_ms"),
     }
+    latency_accounting = build_latency_accounting(
+        {
+            "total_ms": summary_metric(payload, "total_ms"),
+            "video_preprocess_ms": summary_metric(payload, "video_preprocess_ms"),
+            "generate_ms": summary_metric(payload, "generate_ms"),
+            "ttft_ms": summary_metric(payload, "ttft_ms"),
+            "video_decode_ms": summary_metric(payload, "video_decode_ms"),
+            "video_tiling_ms": summary_metric(payload, "video_tiling_ms"),
+            "gazing_info_total_ms": gazing_info_total_median,
+            "autogaze_model_forward_ms": autogaze_model_forward_median,
+            "vision_encoder_ms": summary_metric(payload, "vision_encoder_ms"),
+            "siglip_vision_ms": summary_metric(payload, "siglip_vision_ms"),
+            "mm_projector_ms": summary_metric(payload, "mm_projector_ms"),
+            "llm_forward_ms": summary_metric(payload, "llm_forward_ms"),
+            "generation_decode_after_ttft_estimated_ms": generation_decode_after_ttft_estimated_median,
+        }
+    )
     key_token_summary = {
         "video_sampled_frames": token_metrics.get("video_sampled_frames"),
         "thumbnail_sampled_frames": token_metrics.get("thumbnail_sampled_frames"),
@@ -548,6 +701,8 @@ def build_single_summary(payload: dict[str, Any]) -> dict[str, Any]:
             "ttft_ms_median": summary_metric(payload, "ttft_ms"),
             "autogaze_total_ms_median": summary_metric(payload, "autogaze_ms"),
             "autogaze_forward_ms_median": summary_metric(payload, "autogaze_forward_ms"),
+            "gazing_info_total_ms_median": gazing_info_total_median,
+            "autogaze_model_forward_ms_median": autogaze_model_forward_median,
             "siglip_vision_ms_median": summary_metric(payload, "siglip_vision_ms"),
             "llm_forward_ms_median": summary_metric(payload, "llm_forward_ms"),
             "encoder_patch_tokens_before_keep_all": encoder_raw_patch_tokens,
@@ -582,23 +737,31 @@ def build_single_summary(payload: dict[str, Any]) -> dict[str, Any]:
             "field_note": (
                 "Summary-level module latency is intentionally coarse. "
                 "preprocess_total=video_preprocess_ms, autogaze=autogaze_ms, "
+                "gazing_info_total=gazing_info_total_ms, "
+                "autogaze_model_forward=autogaze_model_forward_ms, "
                 "vit_encoder=siglip_vision_ms, llm=llm_forward_ms. "
                 "These fields are not additive because preprocess_total includes processor work."
             ),
         },
+        "latency_accounting": latency_accounting,
         "key_metrics_summary": {
             "latency_ms": module_latency,
+            "latency_accounting": latency_accounting,
             "tokens": key_token_summary,
             "memory_bytes": key_memory_summary,
         },
         "latency_ms": {
             "total_median": summary_metric(payload, "total_ms"),
+            "generate_median": summary_metric(payload, "generate_ms"),
             "ttft_median": summary_metric(payload, "ttft_ms"),
             "decode_estimated_median": summary_metric(payload, "decode_estimated_ms"),
+            "generation_decode_after_ttft_estimated_median": generation_decode_after_ttft_estimated_median,
             "video_decode_median": summary_metric(payload, "video_decode_ms"),
             "video_tiling_median": summary_metric(payload, "video_tiling_ms"),
             "autogaze_total_median": summary_metric(payload, "autogaze_ms"),
             "autogaze_forward_median": summary_metric(payload, "autogaze_forward_ms"),
+            "gazing_info_total_median": gazing_info_total_median,
+            "autogaze_model_forward_median": autogaze_model_forward_median,
             "siglip_vision_median": summary_metric(payload, "siglip_vision_ms"),
             "mm_projector_median": summary_metric(payload, "mm_projector_ms"),
             "llm_forward_median": summary_metric(payload, "llm_forward_ms"),
@@ -3202,6 +3365,31 @@ def generate_one(
     if video_input_info["mode"] == "preloaded_resized_frames":
         preprocess_ms += stage_total(processor_timings, "video_decode_sampling") or 0.0
     decode_estimated_ms = max(result["generate_ms"] - ttft_ms, 0.0) if ttft_ms is not None else None
+    video_decode_ms = stage_total(processor_timings, "video_decode_sampling")
+    video_tiling_ms = stage_total(processor_timings, "video_tiling_and_tensorize")
+    gazing_info_total_ms = stage_total(processor_timings, "autogaze_total")
+    autogaze_model_forward_ms = stage_total(processor_timings, "autogaze_forward_batched")
+    vision_encoder_ms = stage_total(generate_timings, "vision_encode_total")
+    siglip_vision_ms = stage_total(generate_timings, "siglip_vision_tower")
+    mm_projector_ms = stage_total(generate_timings, "mm_projector")
+    llm_forward_ms = stage_total(generate_timings, "llm_forward")
+    latency_accounting = build_latency_accounting(
+        {
+            "total_ms": preprocess_ms + result["generate_ms"],
+            "video_preprocess_ms": preprocess_ms,
+            "generate_ms": result["generate_ms"],
+            "ttft_ms": ttft_ms,
+            "video_decode_ms": video_decode_ms,
+            "video_tiling_ms": video_tiling_ms,
+            "gazing_info_total_ms": gazing_info_total_ms,
+            "autogaze_model_forward_ms": autogaze_model_forward_ms,
+            "vision_encoder_ms": vision_encoder_ms,
+            "siglip_vision_ms": siglip_vision_ms,
+            "mm_projector_ms": mm_projector_ms,
+            "llm_forward_ms": llm_forward_ms,
+            "generation_decode_after_ttft_estimated_ms": decode_estimated_ms,
+        }
+    )
 
     return {
         **result,
@@ -3220,26 +3408,30 @@ def generate_one(
         "compute_metrics": compute_metrics,
         "visualization": visualization,
         "video_preprocess_ms": preprocess_ms,
-        "video_decode_ms": stage_total(processor_timings, "video_decode_sampling"),
-        "video_tiling_ms": stage_total(processor_timings, "video_tiling_and_tensorize"),
-        "autogaze_ms": stage_total(processor_timings, "autogaze_total"),
-        "autogaze_forward_ms": stage_total(processor_timings, "autogaze_forward_batched"),
+        "video_decode_ms": video_decode_ms,
+        "video_tiling_ms": video_tiling_ms,
+        "autogaze_ms": gazing_info_total_ms,
+        "gazing_info_total_ms": gazing_info_total_ms,
+        "autogaze_forward_ms": autogaze_model_forward_ms,
+        "autogaze_model_forward_ms": autogaze_model_forward_ms,
         "processor_peak_memory_bytes": processor_peak_memory_bytes,
         "ttft_ms": ttft_ms,
         "ttft_peak_memory_bytes": ttft_peak_memory_bytes,
         "llm_peak_memory_bytes": result["peak_memory_bytes"],
         "ttft_stage_timings_ms": ttft_timings,
         "decode_estimated_ms": decode_estimated_ms,
+        "generation_decode_after_ttft_estimated_ms": decode_estimated_ms,
         "total_ms": preprocess_ms + result["generate_ms"],
+        "latency_accounting": latency_accounting,
         "stage_timings_ms": {
             "processor": processor_timings,
             "ttft": ttft_timings,
             "generate": generate_timings,
         },
-        "vision_encoder_ms": stage_total(generate_timings, "vision_encode_total"),
-        "siglip_vision_ms": stage_total(generate_timings, "siglip_vision_tower"),
-        "mm_projector_ms": stage_total(generate_timings, "mm_projector"),
-        "llm_forward_ms": stage_total(generate_timings, "llm_forward"),
+        "vision_encoder_ms": vision_encoder_ms,
+        "siglip_vision_ms": siglip_vision_ms,
+        "mm_projector_ms": mm_projector_ms,
+        "llm_forward_ms": llm_forward_ms,
         "mllm_prefill_ms": ttft_ms,
         "metric_note": (
             "Stage timings are collected by wrapping public NVILA remote-code methods at runtime. "

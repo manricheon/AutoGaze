@@ -35,19 +35,24 @@ VIDEO_ROOT_CANDIDATES = (
     ".",
 )
 VIDEO_ARCHIVE_PATTERN = "videos_part_*.tar"
+CORRECTNESS_COMPARISON_SAMPLE_LIMIT = 20
 
 LATENCY_FIELDS = (
     "total_ms",
+    "generate_ms",
     "video_preprocess_ms",
     "video_decode_ms",
     "video_tiling_ms",
     "autogaze_ms",
+    "gazing_info_total_ms",
     "autogaze_forward_ms",
+    "autogaze_model_forward_ms",
     "vision_encoder_ms",
     "siglip_vision_ms",
     "mm_projector_ms",
     "llm_forward_ms",
     "ttft_ms",
+    "generation_decode_after_ttft_estimated_ms",
 )
 MODULE_LATENCY_FIELDS = (
     ("total_ms", "total_ms"),
@@ -287,12 +292,42 @@ def build_readable_summary(
             "tokens": tokens,
             "memory_bytes": key_memory,
         },
+        "latency_accounting": {
+            "additive_formula": "total_ms = video_preprocess_ms + generate_ms",
+            "additive_fields": ["video_preprocess_ms", "generate_ms"],
+            "nested_preprocess_fields": [
+                "video_decode_ms",
+                "video_tiling_ms",
+                "autogaze_ms",
+                "gazing_info_total_ms",
+                "autogaze_forward_ms",
+                "autogaze_model_forward_ms",
+            ],
+            "nested_generate_fields": [
+                "vision_encoder_ms",
+                "siglip_vision_ms",
+                "mm_projector_ms",
+                "llm_forward_ms",
+                "ttft_ms",
+                "generation_decode_after_ttft_estimated_ms",
+            ],
+            "decode_alias_note": (
+                "generation_decode_after_ttft_estimated_ms is generate_ms - ttft_ms. "
+                "It is generation decode time, not video decode time."
+            ),
+            "do_not_sum_with_total_ms": [
+                field
+                for field in LATENCY_FIELDS
+                if field not in {"total_ms", "video_preprocess_ms", "generate_ms"}
+            ],
+        },
         "latency_field_note": (
             "Summary-level latency is intentionally coarse: "
             "preprocess_total=video_preprocess_ms, autogaze=autogaze_ms, "
             "vit_encoder=siglip_vision_ms, llm=llm_forward_ms. "
             "These fields are not additive because preprocess_total includes processor work. "
-            "Use latency_ms_detail_median or per-mode latency_ms for finer breakdowns."
+            "Use latency_accounting.additive_formula for the only additive total formula, "
+            "and use latency_ms_detail_median or per-mode latency_ms for finer breakdowns."
         ),
         "memory_bytes_median": memory,
         "tokens_median": tokens,
@@ -558,6 +593,128 @@ def summarize_run(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _comparison_pair_key(row: dict[str, Any]) -> tuple[str, Any]:
+    if row.get("question_id") is not None:
+        return ("question_id", row.get("question_id"))
+    if row.get("video_path") is not None or row.get("question") is not None:
+        return ("video_question", f"{row.get('video_path')}::{row.get('question')}")
+    return ("row", row.get("raw_output"))
+
+
+def _sort_pair_key(key: tuple[str, Any]) -> tuple[str, int, Any]:
+    key_type, value = key
+    if key_type == "question_id":
+        try:
+            return (key_type, 0, int(value))
+        except (TypeError, ValueError):
+            return (key_type, 1, str(value))
+    return (key_type, 1, str(value))
+
+
+def _index_scored_rows(rows: list[dict[str, Any]]) -> dict[tuple[str, Any], dict[str, Any]]:
+    return {_comparison_pair_key(row): row for row in rows}
+
+
+def _first_present_row(*rows: dict[str, Any] | None) -> dict[str, Any]:
+    for row in rows:
+        if row is not None:
+            return row
+    return {}
+
+
+def _correctness_bucket(
+    keep_all_row: dict[str, Any] | None,
+    autogaze_row: dict[str, Any] | None,
+) -> str:
+    if keep_all_row is None:
+        return "keep_all_missing"
+    if autogaze_row is None:
+        return "autogaze_missing"
+    keep_all_correct = bool(keep_all_row.get("correct"))
+    autogaze_correct = bool(autogaze_row.get("correct"))
+    if keep_all_correct and autogaze_correct:
+        return "both_correct"
+    if keep_all_correct and not autogaze_correct:
+        return "keep_all_only_correct"
+    if autogaze_correct and not keep_all_correct:
+        return "autogaze_only_correct"
+    return "both_wrong"
+
+
+def _paired_rate(count: int, paired: int) -> float | None:
+    if paired == 0:
+        return None
+    return count / paired
+
+
+def build_correctness_comparison(
+    keep_all_rows: list[dict[str, Any]],
+    autogaze_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    _, keep_all_scored_rows = score_predictions(keep_all_rows)
+    _, autogaze_scored_rows = score_predictions(autogaze_rows)
+    keep_all_by_key = _index_scored_rows(keep_all_scored_rows)
+    autogaze_by_key = _index_scored_rows(autogaze_scored_rows)
+    keys = sorted(set(keep_all_by_key) | set(autogaze_by_key), key=_sort_pair_key)
+    counts = {
+        "total_unique": len(keys),
+        "paired": 0,
+        "both_correct": 0,
+        "keep_all_only_correct": 0,
+        "autogaze_only_correct": 0,
+        "both_wrong": 0,
+        "keep_all_missing": 0,
+        "autogaze_missing": 0,
+    }
+    samples: list[dict[str, Any]] = []
+    for key in keys:
+        keep_all_row = keep_all_by_key.get(key)
+        autogaze_row = autogaze_by_key.get(key)
+        bucket = _correctness_bucket(keep_all_row, autogaze_row)
+        counts[bucket] += 1
+        if keep_all_row is not None and autogaze_row is not None:
+            counts["paired"] += 1
+        source_row = _first_present_row(keep_all_row, autogaze_row)
+        if len(samples) >= CORRECTNESS_COMPARISON_SAMPLE_LIMIT:
+            continue
+        samples.append(
+            {
+                "bucket": bucket,
+                "pair_key_type": key[0],
+                "pair_key": key[1],
+                "question_id": source_row.get("question_id"),
+                "target_video": source_row.get("video_path", source_row.get("video")),
+                "question": source_row.get("question", source_row.get("prompt")),
+                "correct_answer": source_row.get("expected_answer"),
+                "ground_truth_answer": source_row.get("answer"),
+                "keep_all_answer": keep_all_row.get("raw_output") if keep_all_row else None,
+                "keep_all_parsed_answer": keep_all_row.get("parsed_answer") if keep_all_row else None,
+                "keep_all_correct": keep_all_row.get("correct") if keep_all_row else None,
+                "keep_all_status": keep_all_row.get("status", "ok") if keep_all_row else "missing",
+                "autogaze_answer": autogaze_row.get("raw_output") if autogaze_row else None,
+                "autogaze_parsed_answer": autogaze_row.get("parsed_answer") if autogaze_row else None,
+                "autogaze_correct": autogaze_row.get("correct") if autogaze_row else None,
+                "autogaze_status": autogaze_row.get("status", "ok") if autogaze_row else "missing",
+            }
+        )
+    paired = counts["paired"]
+    return {
+        "counts": counts,
+        "paired_rates": {
+            "both_correct": _paired_rate(counts["both_correct"], paired),
+            "keep_all_only_correct": _paired_rate(counts["keep_all_only_correct"], paired),
+            "autogaze_only_correct": _paired_rate(counts["autogaze_only_correct"], paired),
+            "both_wrong": _paired_rate(counts["both_wrong"], paired),
+        },
+        "samples": samples,
+        "sample_limit": CORRECTNESS_COMPARISON_SAMPLE_LIMIT,
+        "note": (
+            "Rows are paired by question_id when available, otherwise by video_path and question. "
+            "Paired rates use only rows where both keep-all and AutoGaze outputs exist."
+        ),
+    }
+
+
 def build_gain_report(
     *,
     keep_all_rows: list[dict[str, Any]],
@@ -566,6 +723,10 @@ def build_gain_report(
     keep_all = summarize_run(keep_all_rows)
     autogaze = summarize_run(autogaze_rows)
     readable_summary = build_readable_summary(
+        keep_all_rows=keep_all_rows,
+        autogaze_rows=autogaze_rows,
+    )
+    correctness_comparison = build_correctness_comparison(
         keep_all_rows=keep_all_rows,
         autogaze_rows=autogaze_rows,
     )
@@ -617,9 +778,11 @@ def build_gain_report(
         "keep_all": keep_all,
         "autogaze": autogaze,
         "readable_summary": readable_summary,
+        "correctness_comparison": correctness_comparison,
         "benchmark_samples": {
             "keep_all": keep_all["accuracy"].get("benchmark_samples", []),
             "autogaze": autogaze["accuracy"].get("benchmark_samples", []),
+            "correctness_comparison": correctness_comparison["samples"],
             "note": (
                 "Readable per-sample benchmark context copied from the scoring summaries. "
                 "Full per-row outputs are in hlvid_*_predictions.jsonl and hlvid_*_scored.jsonl."
@@ -655,6 +818,8 @@ def flatten_metric_row(report: dict[str, Any]) -> dict[str, Any]:
         row[f"gain_token_{field}_median"] = value
     for field, value in report["gains"].get("compute_reduction_median", {}).items():
         row[f"gain_compute_{field}_median"] = value
+    for field, value in report.get("correctness_comparison", {}).get("counts", {}).items():
+        row[f"correctness_{field}"] = value
     return row
 
 

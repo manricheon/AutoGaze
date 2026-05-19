@@ -158,11 +158,16 @@ def test_score_predictions_includes_latency_memory_token_and_compute_summaries()
             "answer": "A",
             "raw_output": "A",
             "total_ms": 100.0,
+            "generate_ms": 88.0,
             "video_preprocess_ms": 12.0,
             "video_decode_ms": 10.0,
             "autogaze_ms": 14.0,
+            "gazing_info_total_ms": 14.0,
+            "autogaze_model_forward_ms": 11.0,
             "siglip_vision_ms": 40.0,
             "llm_forward_ms": 30.0,
+            "ttft_ms": 50.0,
+            "generation_decode_after_ttft_estimated_ms": 38.0,
             "processor_peak_memory_bytes": 1300,
             "ttft_peak_memory_bytes": 1200,
             "llm_peak_memory_bytes": 1000,
@@ -189,11 +194,16 @@ def test_score_predictions_includes_latency_memory_token_and_compute_summaries()
             "answer": "B",
             "raw_output": "B",
             "total_ms": 60.0,
+            "generate_ms": 52.0,
             "video_preprocess_ms": 8.0,
             "video_decode_ms": 6.0,
             "autogaze_ms": 10.0,
+            "gazing_info_total_ms": 10.0,
+            "autogaze_model_forward_ms": 8.0,
             "siglip_vision_ms": 20.0,
             "llm_forward_ms": 18.0,
+            "ttft_ms": 30.0,
+            "generation_decode_after_ttft_estimated_ms": 22.0,
             "processor_peak_memory_bytes": 900,
             "ttft_peak_memory_bytes": 800,
             "llm_peak_memory_bytes": 700,
@@ -221,7 +231,9 @@ def test_score_predictions_includes_latency_memory_token_and_compute_summaries()
     summary, _ = score_predictions(rows)
 
     assert summary["latency_ms"]["total_ms"]["median"] == 80.0
+    assert summary["latency_ms"]["generate_ms"]["median"] == 70.0
     assert summary["latency_ms"]["video_decode_ms"]["median"] == 8.0
+    assert summary["latency_ms"]["autogaze_model_forward_ms"]["median"] == 9.5
     assert summary["latency_ms"]["siglip_vision_ms"]["median"] == 30.0
     assert summary["latency_ms"]["llm_forward_ms"]["median"] == 24.0
     assert summary["memory_bytes"]["llm_peak_memory_bytes"]["median"] == 850.0
@@ -263,6 +275,11 @@ def test_score_predictions_includes_latency_memory_token_and_compute_summaries()
             "overall_peak": 1250.0,
         },
     }
+    assert summary["readable_performance_summary"]["latency_accounting"]["additive_formula"] == (
+        "total_ms = video_preprocess_ms + generate_ms"
+    )
+    assert "video_decode_ms" in summary["readable_performance_summary"]["latency_accounting"]["do_not_sum_with_total_ms"]
+    assert summary["readable_performance_summary"]["latency_ms_detail_median"]["generate_ms"] == 70.0
     assert summary["readable_performance_summary"]["latency_ms_detail_median"]["video_decode_ms"] == 8.0
     assert summary["readable_performance_summary"]["tokens_median"]["llm_visual_tokens_after_actual"] == 35.0
 

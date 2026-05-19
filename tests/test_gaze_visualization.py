@@ -1,5 +1,6 @@
 import json
 
+import av
 import torch
 from PIL import Image
 
@@ -82,11 +83,25 @@ def test_render_overlay_frame_draws_scale_colored_patch_masks():
 
     assert rendered.size == frame.size
     assert rendered.getpixel((20, 20)) != (255, 255, 255)
+    assert rendered.getpixel((0, 0)) != (255, 69, 58)
     assert rendered.getpixel((180, 180)) == (255, 255, 255)
 
 
-def test_write_gaze_visualization_artifacts_saves_selected_overlay_and_manifest(tmp_path):
+def video_size(path):
+    container = av.open(str(path))
+    try:
+        stream = container.streams.video[0]
+        return int(stream.width), int(stream.height)
+    finally:
+        container.close()
+
+
+def test_write_gaze_visualization_artifacts_saves_selected_sized_overlay_and_manifest(tmp_path):
     frames = [
+        Image.new("RGB", (196, 196), "white"),
+        Image.new("RGB", (196, 196), "gray"),
+    ]
+    processor_frames = [
         Image.new("RGB", (392, 392), "white"),
         Image.new("RGB", (392, 392), "gray"),
     ]
@@ -102,7 +117,7 @@ def test_write_gaze_visualization_artifacts_saves_selected_overlay_and_manifest(
 
     manifest = write_gaze_visualization_artifacts(
         selected_frames=frames,
-        overlay_base_frames=frames,
+        overlay_base_frames=processor_frames,
         output_dir=tmp_path,
         label="single_clip",
         video="clip.mp4",
@@ -124,6 +139,11 @@ def test_write_gaze_visualization_artifacts_saves_selected_overlay_and_manifest(
     assert manifest["gazing_info_json"].endswith("single_clip_gazing_info.json")
     assert (tmp_path / "single_clip_selected_frames.mp4").exists()
     assert (tmp_path / "single_clip_autogaze_overlay.mp4").exists()
+    assert video_size(tmp_path / "single_clip_selected_frames.mp4") == (196, 196)
+    assert video_size(tmp_path / "single_clip_autogaze_overlay.mp4") == (196, 196)
     raw = json.loads((tmp_path / "single_clip_gazing_info.json").read_text())
     assert raw["sampled_frame_indices"] == [0, 9]
+    assert raw["overlay_render_size"] == [196, 196]
+    assert raw["overlay_coordinate_space"] == "selected_frame"
     assert raw["overlay_records_by_frame"]["0"][0]["scale"] == 56
+    assert raw["overlay_records_by_frame"]["0"][0]["bbox"] == [0, 0, 49, 49]

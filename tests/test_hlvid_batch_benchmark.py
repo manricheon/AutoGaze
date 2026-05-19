@@ -164,11 +164,14 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
             "answer": "A",
             "raw_output": "A",
             "total_ms": 100.0,
+            "generate_ms": 80.0,
             "video_preprocess_ms": 20.0,
             "autogaze_ms": 1.0,
+            "gazing_info_total_ms": 1.0,
             "siglip_vision_ms": 40.0,
             "llm_forward_ms": 30.0,
             "ttft_ms": 50.0,
+            "generation_decode_after_ttft_estimated_ms": 30.0,
             "processor_peak_memory_bytes": 2000,
             "ttft_peak_memory_bytes": 1500,
             "llm_peak_memory_bytes": 1000,
@@ -192,11 +195,15 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
             "answer": "A",
             "raw_output": "A",
             "total_ms": 60.0,
+            "generate_ms": 35.0,
             "video_preprocess_ms": 25.0,
             "autogaze_ms": 12.0,
+            "gazing_info_total_ms": 12.0,
+            "autogaze_model_forward_ms": 10.0,
             "siglip_vision_ms": 15.0,
             "llm_forward_ms": 20.0,
             "ttft_ms": 25.0,
+            "generation_decode_after_ttft_estimated_ms": 10.0,
             "processor_peak_memory_bytes": 1500,
             "ttft_peak_memory_bytes": 1200,
             "llm_peak_memory_bytes": 500,
@@ -239,6 +246,16 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
         "autogaze": 60.0,
         "speedup_ratio_keep_all_over_autogaze": 100.0 / 60.0,
         "reduction_percent_of_keep_all": 40.0,
+    }
+    assert report["readable_summary"]["latency_accounting"]["additive_formula"] == (
+        "total_ms = video_preprocess_ms + generate_ms"
+    )
+    assert "video_decode_ms" in report["readable_summary"]["latency_accounting"]["do_not_sum_with_total_ms"]
+    assert report["readable_summary"]["latency_ms_detail_median"]["generate_ms"] == {
+        "keep_all": 80.0,
+        "autogaze": 35.0,
+        "speedup_ratio_keep_all_over_autogaze": 80.0 / 35.0,
+        "reduction_percent_of_keep_all": 56.25,
     }
     assert report["readable_summary"]["latency_ms_median"]["preprocess_total_ms"] == {
         "keep_all": 20.0,
@@ -391,11 +408,130 @@ def test_build_gain_report_marks_keep_all_as_missing_when_skipped():
     assert report["gains"]["reduction_percent_median"]["latency_ms"]["total_ms"] is None
 
 
+def test_build_gain_report_splits_paired_correctness_between_modes():
+    keep_all_rows = [
+        {
+            "question_id": 1,
+            "video_path": "clip1.mp4",
+            "question": "Q1? A. a B. b C. c D. d",
+            "answer": "A",
+            "raw_output": "A",
+        },
+        {
+            "question_id": 2,
+            "video_path": "clip2.mp4",
+            "question": "Q2? A. a B. b C. c D. d",
+            "answer": "B",
+            "raw_output": "B",
+        },
+        {
+            "question_id": 3,
+            "video_path": "clip3.mp4",
+            "question": "Q3? A. a B. b C. c D. d",
+            "answer": "C",
+            "raw_output": "A",
+        },
+        {
+            "question_id": 4,
+            "video_path": "clip4.mp4",
+            "question": "Q4? A. a B. b C. c D. d",
+            "answer": "D",
+            "raw_output": "A",
+        },
+        {
+            "question_id": 6,
+            "video_path": "clip6.mp4",
+            "question": "Q6? A. a B. b C. c D. d",
+            "answer": "B",
+            "raw_output": "B",
+        },
+    ]
+    autogaze_rows = [
+        {
+            "question_id": 1,
+            "video_path": "clip1.mp4",
+            "question": "Q1? A. a B. b C. c D. d",
+            "answer": "A",
+            "raw_output": "A",
+        },
+        {
+            "question_id": 2,
+            "video_path": "clip2.mp4",
+            "question": "Q2? A. a B. b C. c D. d",
+            "answer": "B",
+            "raw_output": "A",
+        },
+        {
+            "question_id": 3,
+            "video_path": "clip3.mp4",
+            "question": "Q3? A. a B. b C. c D. d",
+            "answer": "C",
+            "raw_output": "C",
+        },
+        {
+            "question_id": 4,
+            "video_path": "clip4.mp4",
+            "question": "Q4? A. a B. b C. c D. d",
+            "answer": "D",
+            "raw_output": "A",
+        },
+        {
+            "question_id": 5,
+            "video_path": "clip5.mp4",
+            "question": "Q5? A. a B. b C. c D. d",
+            "answer": "A",
+            "raw_output": "A",
+        },
+    ]
+
+    report = build_gain_report(keep_all_rows=keep_all_rows, autogaze_rows=autogaze_rows)
+
+    comparison = report["correctness_comparison"]
+    assert comparison["counts"] == {
+        "total_unique": 6,
+        "paired": 4,
+        "both_correct": 1,
+        "keep_all_only_correct": 1,
+        "autogaze_only_correct": 1,
+        "both_wrong": 1,
+        "keep_all_missing": 1,
+        "autogaze_missing": 1,
+    }
+    assert comparison["paired_rates"] == {
+        "both_correct": 0.25,
+        "keep_all_only_correct": 0.25,
+        "autogaze_only_correct": 0.25,
+        "both_wrong": 0.25,
+    }
+    assert [sample["bucket"] for sample in comparison["samples"][:6]] == [
+        "both_correct",
+        "keep_all_only_correct",
+        "autogaze_only_correct",
+        "both_wrong",
+        "keep_all_missing",
+        "autogaze_missing",
+    ]
+    assert comparison["samples"][1]["keep_all_correct"] is True
+    assert comparison["samples"][1]["autogaze_correct"] is False
+    assert comparison["samples"][2]["keep_all_answer"] == "A"
+    assert comparison["samples"][2]["autogaze_answer"] == "C"
+    assert report["benchmark_samples"]["correctness_comparison"] == comparison["samples"]
+
+
 def test_flatten_metric_row_creates_csv_friendly_summary():
     report = {
         "gains": {"latency_speedup_median": {"total_ms": 2.0}},
         "autogaze": {"accuracy": {"accuracy_scored": 0.5}},
         "keep_all": {"accuracy": {"accuracy_scored": 0.4}},
+        "correctness_comparison": {
+            "counts": {
+                "paired": 10,
+                "both_correct": 4,
+                "keep_all_only_correct": 2,
+                "autogaze_only_correct": 1,
+                "both_wrong": 3,
+            }
+        },
     }
 
     row = flatten_metric_row(report)
@@ -403,3 +539,8 @@ def test_flatten_metric_row_creates_csv_friendly_summary():
     assert row["autogaze_accuracy_scored"] == 0.5
     assert row["keep_all_accuracy_scored"] == 0.4
     assert row["gain_latency_total_ms_speedup_median"] == 2.0
+    assert row["correctness_paired"] == 10
+    assert row["correctness_both_correct"] == 4
+    assert row["correctness_keep_all_only_correct"] == 2
+    assert row["correctness_autogaze_only_correct"] == 1
+    assert row["correctness_both_wrong"] == 3

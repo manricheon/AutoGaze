@@ -18,16 +18,20 @@ QUESTION_SUMMARY_SAMPLE_LIMIT = 5
 BENCHMARK_SAMPLE_LIMIT = 5
 LATENCY_FIELDS = (
     "total_ms",
+    "generate_ms",
     "video_preprocess_ms",
     "video_decode_ms",
     "video_tiling_ms",
     "autogaze_ms",
+    "gazing_info_total_ms",
     "autogaze_forward_ms",
+    "autogaze_model_forward_ms",
     "vision_encoder_ms",
     "siglip_vision_ms",
     "mm_projector_ms",
     "llm_forward_ms",
     "ttft_ms",
+    "generation_decode_after_ttft_estimated_ms",
 )
 MODULE_LATENCY_FIELDS = (
     ("total_ms", "total_ms"),
@@ -251,6 +255,38 @@ def key_medians(
     return {label: median_from_stats(stats, field) for label, field in fields}
 
 
+def latency_accounting_summary() -> dict[str, Any]:
+    return {
+        "additive_formula": "total_ms = video_preprocess_ms + generate_ms",
+        "additive_fields": ["video_preprocess_ms", "generate_ms"],
+        "nested_preprocess_fields": [
+            "video_decode_ms",
+            "video_tiling_ms",
+            "autogaze_ms",
+            "gazing_info_total_ms",
+            "autogaze_forward_ms",
+            "autogaze_model_forward_ms",
+        ],
+        "nested_generate_fields": [
+            "vision_encoder_ms",
+            "siglip_vision_ms",
+            "mm_projector_ms",
+            "llm_forward_ms",
+            "ttft_ms",
+            "generation_decode_after_ttft_estimated_ms",
+        ],
+        "decode_alias_note": (
+            "generation_decode_after_ttft_estimated_ms is generate_ms - ttft_ms. "
+            "It is generation decode time, not video decode time."
+        ),
+        "do_not_sum_with_total_ms": [
+            field
+            for field in LATENCY_FIELDS
+            if field not in {"total_ms", "video_preprocess_ms", "generate_ms"}
+        ],
+    }
+
+
 def summarize_prediction_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     latency = stats_by_field(rows, LATENCY_FIELDS)
     memory = stats_by_field(rows, MEMORY_FIELDS)
@@ -272,12 +308,14 @@ def summarize_prediction_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
             },
             "latency_ms_median": latency_summary,
             "latency_ms_detail_median": {field: latency[field]["median"] for field in LATENCY_FIELDS},
+            "latency_accounting": latency_accounting_summary(),
             "latency_field_note": (
                 "Summary-level latency is intentionally coarse: "
                 "preprocess_total=video_preprocess_ms, autogaze=autogaze_ms, "
                 "vit_encoder=siglip_vision_ms, llm=llm_forward_ms. "
                 "These fields are not additive because preprocess_total includes processor work. "
-                "Use latency_ms_detail_median or top-level latency_ms for finer breakdowns."
+                "Use latency_accounting.additive_formula for the only additive total formula, "
+                "and use latency_ms_detail_median or top-level latency_ms for finer breakdowns."
             ),
             "memory_bytes_median": {field: memory[field]["median"] for field in MEMORY_FIELDS},
             "tokens_median": token_summary,

@@ -279,6 +279,80 @@ def render_key_metrics_section(metrics: dict[str, Any]) -> str:
     return "\n\n".join(sections)
 
 
+def _latency_accounting(payload: dict[str, Any], metrics: dict[str, Any]) -> dict[str, Any]:
+    for value in (
+        payload.get("latency_accounting"),
+        metrics.get("latency_accounting"),
+        get_path(payload, "readable_summary.latency_accounting"),
+        get_path(payload, "readable_performance_summary.latency_accounting"),
+    ):
+        if isinstance(value, dict) and value:
+            return value
+    result = result_payload(payload)
+    value = result.get("latency_accounting") if isinstance(result, dict) else None
+    return value if isinstance(value, dict) else {}
+
+
+def render_latency_accounting_section(payload: dict[str, Any], metrics: dict[str, Any]) -> str:
+    accounting = _latency_accounting(payload, metrics)
+    if not accounting:
+        return ""
+
+    rows: list[list[Any]] = []
+    additive = as_mapping(accounting.get("additive_total_ms"))
+    if additive:
+        rows.extend(
+            [
+                ["additive formula", additive.get("formula"), "Only these top-level fields recompute total latency."],
+                ["total_ms", additive.get("total_ms"), "End-to-end measured latency."],
+                ["video_preprocess_ms", additive.get("video_preprocess_ms"), "Decode/tile/AutoGaze processor phase."],
+                ["generate_ms", additive.get("generate_ms"), "Full NVILA generation phase."],
+                ["recomputed_total_ms", additive.get("recomputed_total_ms"), "video_preprocess_ms + generate_ms."],
+                ["delta_ms", additive.get("delta_ms"), "Difference between recorded total and recomputed total."],
+                ["ttft_ms", additive.get("ttft_ms_excluded_from_total"), "Separate 1-token pass; do not add to total_ms."],
+            ]
+        )
+    elif accounting.get("additive_formula"):
+        rows.append(
+            [
+                "additive formula",
+                accounting.get("additive_formula"),
+                "Only this formula should be used to recompute total latency.",
+            ]
+        )
+        rows.append(["additive fields", accounting.get("additive_fields"), "Fields that sum to total_ms."])
+
+    for group_name, label in (
+        ("nested_preprocess_breakdown_ms", "preprocess child"),
+        ("nested_generate_breakdown_ms", "generate child"),
+    ):
+        group = as_mapping(accounting.get(group_name))
+        for name, detail in group.items():
+            detail_map = as_mapping(detail)
+            rows.append(
+                [
+                    f"{label}: {name}",
+                    detail_map.get("value"),
+                    f"included_in={detail_map.get('included_in')}; add_to_total={detail_map.get('add_to_total_ms')}",
+                ]
+            )
+
+    for field_name, label in (
+        ("nested_preprocess_fields", "nested preprocess fields"),
+        ("nested_generate_fields", "nested generate fields"),
+        ("do_not_sum_with_total_ms", "do not sum with total_ms"),
+    ):
+        value = accounting.get(field_name)
+        if value:
+            rows.append([label, value, "Breakdown fields for diagnosis, not extra additive terms."])
+
+    for note_name in ("decode_alias_note", "note"):
+        if accounting.get(note_name):
+            rows.append([note_name, accounting.get(note_name), ""])
+
+    return "## Latency Accounting\n\n" + markdown_table(["Field", "Value", "Meaning"], rows)
+
+
 def video_info(payload: dict[str, Any]) -> dict[str, Any]:
     result = result_payload(payload)
     summary = as_mapping(result.get("video_input_summary"))
@@ -465,6 +539,72 @@ def render_benchmark_samples(payload: dict[str, Any]) -> str:
     )
 
 
+def render_correctness_comparison(payload: dict[str, Any]) -> str:
+    comparison = as_mapping(payload.get("correctness_comparison"))
+    if not comparison:
+        return ""
+    counts = as_mapping(comparison.get("counts"))
+    paired_rates = as_mapping(comparison.get("paired_rates"))
+    count_rows = []
+    for bucket in (
+        "total_unique",
+        "paired",
+        "both_correct",
+        "keep_all_only_correct",
+        "autogaze_only_correct",
+        "both_wrong",
+        "keep_all_missing",
+        "autogaze_missing",
+    ):
+        if bucket not in counts:
+            continue
+        count_rows.append([bucket, counts.get(bucket), paired_rates.get(bucket)])
+
+    sample_rows = []
+    samples = comparison.get("samples")
+    if isinstance(samples, list):
+        for sample in samples[:10]:
+            if not isinstance(sample, dict):
+                continue
+            sample_rows.append(
+                [
+                    sample.get("target_video"),
+                    sample.get("question"),
+                    sample.get("correct_answer"),
+                    sample.get("keep_all_answer"),
+                    sample.get("keep_all_correct"),
+                    sample.get("autogaze_answer"),
+                    sample.get("autogaze_correct"),
+                    sample.get("bucket"),
+                ]
+            )
+
+    sections = ["## Benchmark Correctness Comparison"]
+    if count_rows:
+        sections.append(markdown_table(["Bucket", "Count", "Paired rate"], count_rows))
+    if sample_rows:
+        sections.append(
+            markdown_table(
+                [
+                    "Video",
+                    "Question",
+                    "Correct answer",
+                    "Keep-all answer",
+                    "Keep-all correct",
+                    "AutoGaze answer",
+                    "AutoGaze correct",
+                    "Bucket",
+                ],
+                sample_rows,
+            )
+        )
+    return "\n\n".join(sections)
+
+
+def is_mode_comparison_metric(value: Any) -> bool:
+    return isinstance(value, dict) and ("keep_all" in value or "autogaze" in value)
+
+
 def render_module_details(payload: dict[str, Any]) -> str:
     detail = get_path(payload, "readable_performance_summary.latency_ms_detail_median")
     if detail is None:
@@ -473,6 +613,30 @@ def render_module_details(payload: dict[str, Any]) -> str:
         detail = payload.get("stage_timings_ms")
     if not isinstance(detail, dict):
         return ""
+
+    if any(is_mode_comparison_metric(value) for value in detail.values()):
+        rows = []
+        for name, value in detail.items():
+            if is_mode_comparison_metric(value):
+                rows.append(
+                    [
+                        name,
+                        value.get("keep_all"),
+                        value.get("autogaze"),
+                        first_present(
+                            value.get("speedup_ratio_keep_all_over_autogaze"),
+                            value.get("reduction_ratio_keep_all_over_autogaze"),
+                        ),
+                        value.get("reduction_percent_of_keep_all"),
+                    ]
+                )
+            else:
+                rows.append([name, value, None, None, None])
+        return "## Module Detail Metrics\n\n" + markdown_table(
+            ["Metric", "Keep-all", "AutoGaze", "Speedup", "Reduction %"],
+            rows,
+        )
+
     rows = []
     for name, value in detail.items():
         if isinstance(value, dict):
@@ -515,7 +679,9 @@ def render_markdown_report(
         render_input_tokenization(payload, metrics),
         render_step_pipeline_metrics(payload, metrics),
         render_key_metrics_section(metrics),
+        render_latency_accounting_section(payload, metrics),
         render_benchmark_score(payload),
+        render_correctness_comparison(payload),
         render_benchmark_samples(payload),
         render_module_details(payload),
     ]

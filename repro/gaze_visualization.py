@@ -211,7 +211,7 @@ def render_overlay_frame(
     for record in records:
         color = [int(component) for component in record.get("color", [255, 69, 58])[:3]]
         bbox = [int(value) for value in record["bbox"]]
-        draw.rectangle(bbox, fill=tuple(color + [fill_alpha]), outline=tuple(color + [255]), width=2)
+        draw.rectangle(bbox, fill=tuple(color + [fill_alpha]))
     return Image.alpha_composite(base, overlay).convert("RGB")
 
 
@@ -259,8 +259,31 @@ def write_video(
     return str(path)
 
 
-def _canvas_frame(frame: Image.Image, *, grid_cols: int, grid_rows: int, tile_size: int) -> Image.Image:
-    return frame.convert("RGB").resize((int(grid_cols) * int(tile_size), int(grid_rows) * int(tile_size)))
+def scale_overlay_records(
+    records: Sequence[dict[str, Any]],
+    *,
+    source_size: tuple[int, int],
+    target_size: tuple[int, int],
+) -> list[dict[str, Any]]:
+    source_width, source_height = source_size
+    target_width, target_height = target_size
+    if source_width <= 0 or source_height <= 0:
+        raise ValueError("source_size must be positive")
+    x_scale = target_width / source_width
+    y_scale = target_height / source_height
+    scaled: list[dict[str, Any]] = []
+    for record in records:
+        x0, y0, x1, y1 = [int(value) for value in record["bbox"]]
+        scaled_record = dict(record)
+        scaled_record["source_bbox"] = [x0, y0, x1, y1]
+        scaled_record["bbox"] = [
+            int(round(x0 * x_scale)),
+            int(round(y0 * y_scale)),
+            int(round(x1 * x_scale)),
+            int(round(y1 * y_scale)),
+        ]
+        scaled.append(scaled_record)
+    return scaled
 
 
 def write_gaze_visualization_artifacts(
@@ -292,28 +315,36 @@ def write_gaze_visualization_artifacts(
     selected_video = write_video(selected_frames, selected_path, fps=fps)
     overlay_status = "skipped"
     overlay_video = None
-    overlay_records_by_frame: dict[int, list[dict[str, Any]]] = {
-        index: [] for index in range(len(overlay_base_frames))
-    }
+    overlay_records_by_frame: dict[int, list[dict[str, Any]]] = {index: [] for index in range(len(selected_frames))}
+    tile_canvas_size = (int(grid_cols) * int(tile_size), int(grid_rows) * int(tile_size))
+    overlay_render_size = list(selected_frames[0].size) if selected_frames else None
 
     if gazing_mode == "autogaze" and gazing_info is not None:
-        overlay_records_by_frame = build_gaze_overlay_records(
+        tile_records_by_frame = build_gaze_overlay_records(
             gazing_info=gazing_info,
             video_index=0,
-            num_video_frames=len(overlay_base_frames),
+            num_video_frames=len(selected_frames),
             spatial_tiles=spatial_tiles,
             grid_cols=grid_cols,
             scales=scales,
             patch_size=patch_size,
             tile_size=tile_size,
         )
+        overlay_records_by_frame = {
+            index: scale_overlay_records(
+                tile_records_by_frame.get(index, []),
+                source_size=tile_canvas_size,
+                target_size=frame.size,
+            )
+            for index, frame in enumerate(selected_frames)
+        }
         overlay_frames = [
             render_overlay_frame(
-                _canvas_frame(frame, grid_cols=grid_cols, grid_rows=grid_rows, tile_size=tile_size),
+                frame.convert("RGB"),
                 overlay_records_by_frame.get(index, []),
                 alpha=alpha,
             )
-            for index, frame in enumerate(overlay_base_frames)
+            for index, frame in enumerate(selected_frames)
         ]
         overlay_video = write_video(overlay_frames, overlay_path, fps=fps)
         overlay_status = "written"
@@ -334,6 +365,10 @@ def write_gaze_visualization_artifacts(
         "grid_cols": int(grid_cols),
         "grid_rows": int(grid_rows),
         "tile_size": int(tile_size),
+        "overlay_coordinate_space": "selected_frame",
+        "overlay_render_size": overlay_render_size,
+        "overlay_tile_canvas_size": [tile_canvas_size[0], tile_canvas_size[1]],
+        "overlay_base_frame_count": len(overlay_base_frames),
         "scales": [int(scale) for scale in scales],
         "patch_size": int(patch_size),
         "scale_colors": palette_for_scales(scales),
@@ -353,6 +388,8 @@ def write_gaze_visualization_artifacts(
         "overlay_status": overlay_status,
         "gazing_info_json": str(gazing_json_path),
         "sampled_frame_count": len(selected_frames),
-        "overlay_frame_count": len(overlay_base_frames),
+        "overlay_frame_count": len(selected_frames),
+        "overlay_coordinate_space": "selected_frame",
+        "overlay_render_size": overlay_render_size,
         "scale_colors": palette_for_scales(scales),
     }
