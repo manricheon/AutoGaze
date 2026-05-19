@@ -164,6 +164,23 @@ def test_parse_args_accepts_gazing_mode_switch():
     assert args.gazing_mode == "keep-all"
 
 
+def test_parse_args_accepts_gaze_visualization_options():
+    args = parse_args(
+        [
+            "--visualization-output-dir",
+            "outputs/viz",
+            "--visualization-fps",
+            "6",
+            "--visualization-selected-max-long-side",
+            "720",
+        ]
+    )
+
+    assert args.visualization_output_dir == "outputs/viz"
+    assert args.visualization_fps == 6
+    assert args.visualization_selected_max_long_side == 720
+
+
 def test_parse_args_accepts_warmup_and_repeat_runs():
     args = parse_args(["--warmup-runs", "1", "--repeat-runs", "3"])
 

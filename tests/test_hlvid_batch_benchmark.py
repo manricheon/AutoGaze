@@ -115,6 +115,10 @@ def test_build_runner_command_includes_local_manifest_and_measurement_flags(tmp_
         video_decode_strategy="auto",
         autogaze_target_scales="56+112+196+392",
         autogaze_target_patch_size=14,
+        visualization_output_dir=str(tmp_path / "viz"),
+        visualization_fps=5,
+        visualization_alpha=0.25,
+        visualization_selected_max_long_side=720,
         task_loss_requirement_tile=0.7,
         continue_on_error=True,
         limit=3,
@@ -145,6 +149,10 @@ def test_build_runner_command_includes_local_manifest_and_measurement_flags(tmp_
     assert "1" in command
     assert "--video-decode-strategy" in command
     assert "auto" in command
+    assert "--visualization-output-dir" in command
+    assert str(tmp_path / "viz") in command
+    assert "--visualization-selected-max-long-side" in command
+    assert "720" in command
 
 
 def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():

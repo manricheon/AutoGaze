@@ -31,6 +31,7 @@ from repro.common import (
     write_jsonl,
 )
 from repro.hlvid import load_hlvid_manifest, parse_choice, read_manifest_file, score_predictions
+from repro.gaze_visualization import safe_label, write_gaze_visualization_artifacts
 
 DEFAULT_MODEL = "nvidia/NVILA-8B-HD-Video"
 DEFAULT_EXAMPLE_VIDEO = "https://huggingface.co/datasets/bfshi/HLVid/resolve/main/example/clip_av_video_5_001.mp4"
@@ -2146,6 +2147,154 @@ def processor_videos_argument(video_payload: Any, video_input_info: dict[str, An
     return video_payload
 
 
+def _model_patch_size(model: Any, args: argparse.Namespace) -> int:
+    target_patch_size = getattr(args, "autogaze_target_patch_size", None)
+    if target_patch_size is not None:
+        return int(target_patch_size)
+    vision_tower = getattr(model, "vision_tower", None)
+    config = getattr(vision_tower, "config", None)
+    return int(getattr(config, "patch_size", NVILA_TARGET_PATCH_SIZE) or NVILA_TARGET_PATCH_SIZE)
+
+
+def _model_scales(model: Any, args: argparse.Namespace) -> list[int]:
+    target_scales = parse_int_sequence(getattr(args, "autogaze_target_scales", None))
+    if target_scales is not None:
+        return target_scales
+    try:
+        return [int(scale) for scale in model_patches_per_frame_by_scale(model).keys()]
+    except Exception:
+        return list(NVILA_TARGET_SCALES)
+
+
+def _visualization_selected_resize(
+    metadata: dict[str, Any],
+    args: argparse.Namespace,
+) -> dict[str, int | str]:
+    max_long_side = getattr(args, "visualization_selected_max_long_side", None)
+    if max_long_side is None:
+        return apply_resize_to_dimensions(
+            width=int(metadata["width"]),
+            height=int(metadata["height"]),
+            shortest_edge=None,
+            longest_edge=None,
+            exact_width=None,
+            exact_height=None,
+        )
+    return apply_resize_to_dimensions(
+        width=int(metadata["width"]),
+        height=int(metadata["height"]),
+        shortest_edge=None,
+        longest_edge=int(max_long_side),
+        exact_width=None,
+        exact_height=None,
+    )
+
+
+def _visualization_label(args: argparse.Namespace, video: str, gazing_mode: str) -> str:
+    label = getattr(args, "_visualization_run_label", None)
+    if label:
+        return safe_label(str(label))
+    return safe_label(f"single_{Path(video).stem}_{gazing_mode}")
+
+
+def maybe_write_generation_visualization(
+    *,
+    args: argparse.Namespace,
+    model: Any,
+    resolved_video: str,
+    source_metadata: dict[str, Any] | None,
+    video_input_summary: dict[str, Any],
+    processor_inputs: dict[str, Any],
+) -> dict[str, Any] | None:
+    output_dir = getattr(args, "visualization_output_dir", None)
+    if not output_dir:
+        return None
+    if resolved_video.startswith("http://") or resolved_video.startswith("https://"):
+        return {
+            "status": "skipped",
+            "reason": "visualization_requires_local_video_path",
+            "video": resolved_video,
+        }
+    if not Path(resolved_video).exists():
+        return {
+            "status": "skipped",
+            "reason": "resolved_video_not_found",
+            "video": resolved_video,
+        }
+    if not source_metadata or source_metadata.get("frames") is None:
+        return {
+            "status": "skipped",
+            "reason": "source_frame_count_unavailable",
+            "video": resolved_video,
+        }
+
+    try:
+        sampled_frame_indices = uniform_sample_indices(
+            int(source_metadata["frames"]),
+            int(args.num_video_frames),
+        )
+        selected_resize = _visualization_selected_resize(source_metadata, args)
+        selected_frames, selected_decode = load_sampled_video_frames(
+            resolved_video,
+            int(args.num_video_frames),
+            selected_resize,
+            decode_strategy=getattr(args, "video_decode_strategy", "auto"),
+        )
+
+        overlay_resize = {
+            "width": int(video_input_summary["processor_input_width"]),
+            "height": int(video_input_summary["processor_input_height"]),
+            "mode": "visualization_processor_input",
+        }
+        overlay_base_frames, overlay_decode = load_sampled_video_frames(
+            resolved_video,
+            int(args.num_video_frames),
+            overlay_resize,
+            decode_strategy=getattr(args, "video_decode_strategy", "auto"),
+        )
+
+        grid = spatial_tile_grid(
+            width=int(video_input_summary["processor_input_width"]),
+            height=int(video_input_summary["processor_input_height"]),
+            max_tiles_video=int(args.max_tiles_video),
+            image_size=NVILA_IMAGE_SIZE,
+        )
+        manifest = write_gaze_visualization_artifacts(
+            selected_frames=selected_frames,
+            overlay_base_frames=overlay_base_frames,
+            output_dir=output_dir,
+            label=_visualization_label(args, resolved_video, args.gazing_mode),
+            video=resolved_video,
+            sampled_frame_indices=sampled_frame_indices,
+            gazing_mode=args.gazing_mode,
+            gazing_info=processor_inputs.get("gazing_info"),
+            spatial_tiles=int(grid["tiles"]),
+            grid_cols=int(grid["cols"]),
+            grid_rows=int(grid["rows"]),
+            scales=_model_scales(model, args),
+            patch_size=_model_patch_size(model, args),
+            tile_size=NVILA_IMAGE_SIZE,
+            fps=float(getattr(args, "visualization_fps", 4.0)),
+            alpha=float(getattr(args, "visualization_alpha", 0.35)),
+        )
+        manifest.update(
+            {
+                "selected_video_decode": selected_decode,
+                "overlay_video_decode": overlay_decode,
+                "selected_video_resize": selected_resize,
+                "overlay_video_resize": overlay_resize,
+                "processor_tile_grid": grid,
+            }
+        )
+        return manifest
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "error": repr(exc),
+            "video": resolved_video,
+        }
+
+
 def build_spatial_tile_sequences(
     frames: list[Image.Image],
     *,
@@ -2958,7 +3107,16 @@ def run_stream_profile(args: argparse.Namespace) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
-def generate_one(model, processor, video: str, prompt: str, device: torch.device, args: argparse.Namespace) -> dict[str, Any]:
+def generate_one(
+    model,
+    processor,
+    video: str,
+    prompt: str,
+    device: torch.device,
+    args: argparse.Namespace,
+    *,
+    enable_visualization: bool = True,
+) -> dict[str, Any]:
     video_token = processor.tokenizer.video_token
     resolved_video = resolve_video(video, args)
 
@@ -2982,6 +3140,7 @@ def generate_one(model, processor, video: str, prompt: str, device: torch.device
         profiler.reset()
 
         inputs = dict(inputs)
+        processor_inputs = inputs
         token_metrics = compute_visual_token_metrics(
             inputs,
             video_token_id=resolve_video_token_id(model, processor),
@@ -3028,6 +3187,17 @@ def generate_one(model, processor, video: str, prompt: str, device: torch.device
         generate_timings = profiler.as_dict()
         profiler.reset()
 
+        visualization = None
+        if enable_visualization:
+            visualization = maybe_write_generation_visualization(
+                args=args,
+                model=model,
+                resolved_video=resolved_video,
+                source_metadata=source_metadata,
+                video_input_summary=video_input_summary,
+                processor_inputs=processor_inputs,
+            )
+
     preprocess_ms = stage_total(processor_timings, "processor_total") or 0.0
     if video_input_info["mode"] == "preloaded_resized_frames":
         preprocess_ms += stage_total(processor_timings, "video_decode_sampling") or 0.0
@@ -3048,6 +3218,7 @@ def generate_one(model, processor, video: str, prompt: str, device: torch.device
         "token_metrics": token_metrics,
         "autogaze_token_summary": build_autogaze_token_summary(token_metrics),
         "compute_metrics": compute_metrics,
+        "visualization": visualization,
         "video_preprocess_ms": preprocess_ms,
         "video_decode_ms": stage_total(processor_timings, "video_decode_sampling"),
         "video_tiling_ms": stage_total(processor_timings, "video_tiling_and_tensorize"),
@@ -3085,11 +3256,19 @@ def run_single(args: argparse.Namespace) -> None:
     repeat_runs = int(args.repeat_runs)
     for index in range(warmup_runs):
         print(f"Warmup run {index + 1}/{warmup_runs}", file=sys.stderr)
-        generate_one(model, processor, args.video, args.prompt, device, args)
+        generate_one(model, processor, args.video, args.prompt, device, args, enable_visualization=False)
     repeat_results: list[dict[str, Any]] = []
     for index in range(repeat_runs):
         print(f"Measured run {index + 1}/{repeat_runs}", file=sys.stderr)
-        run_result = generate_one(model, processor, args.video, args.prompt, device, args)
+        run_result = generate_one(
+            model,
+            processor,
+            args.video,
+            args.prompt,
+            device,
+            args,
+            enable_visualization=index == repeat_runs - 1,
+        )
         run_result["repeat_index"] = index
         repeat_results.append(run_result)
     result = repeat_results[-1]
@@ -3203,13 +3382,32 @@ def run_hlvid(args: argparse.Namespace) -> None:
         warmup_row = warmup_rows[0]
         for index in range(args.warmup_runs):
             print(f"HLVid warmup run {index + 1}/{args.warmup_runs}", file=sys.stderr)
-            generate_one(model, processor, warmup_row["video_path"], warmup_row["question"], device, args)
+            generate_one(
+                model,
+                processor,
+                warmup_row["video_path"],
+                warmup_row["question"],
+                device,
+                args,
+                enable_visualization=False,
+            )
 
     for row in rows:
         if row["question_id"] in completed_ids:
             continue
         try:
-            result = generate_one(model, processor, row["video_path"], row["question"], device, args)
+            previous_label = getattr(args, "_visualization_run_label", None)
+            args._visualization_run_label = (
+                f"hlvid_{row['question_id']}_{Path(str(row['video_path'])).stem}_{args.gazing_mode}"
+            )
+            try:
+                result = generate_one(model, processor, row["video_path"], row["question"], device, args)
+            finally:
+                if previous_label is None:
+                    if hasattr(args, "_visualization_run_label"):
+                        delattr(args, "_visualization_run_label")
+                else:
+                    args._visualization_run_label = previous_label
         except Exception as exc:
             if not args.continue_on_error:
                 raise
@@ -3301,6 +3499,10 @@ def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentPar
     parser.add_argument("--measure-ttft", action="store_true")
     parser.add_argument("--warmup-runs", type=non_negative_int, default=0)
     parser.add_argument("--repeat-runs", type=positive_int, default=1)
+    parser.add_argument("--visualization-output-dir")
+    parser.add_argument("--visualization-fps", type=float, default=4.0)
+    parser.add_argument("--visualization-alpha", type=float, default=0.35)
+    parser.add_argument("--visualization-selected-max-long-side", type=int)
     parser.add_argument("--stream-chunk-frames", type=int, default=AUTOGAZE_CHUNK_FRAMES)
     parser.add_argument("--stream-dtype", choices=["float32", "float16"], default="float32")
     parser.add_argument("--stream-decode-strategy", choices=["scan", "seek"], default="scan")

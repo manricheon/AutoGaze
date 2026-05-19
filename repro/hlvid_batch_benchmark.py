@@ -530,6 +530,19 @@ def build_runner_command(
         command.extend(["--autogaze-target-scales", str(args.autogaze_target_scales)])
     if getattr(args, "autogaze_target_patch_size", None) is not None:
         command.extend(["--autogaze-target-patch-size", str(args.autogaze_target_patch_size)])
+    if getattr(args, "visualization_output_dir", None) is not None:
+        command.extend(["--visualization-output-dir", str(args.visualization_output_dir)])
+    if getattr(args, "visualization_fps", None) is not None:
+        command.extend(["--visualization-fps", str(args.visualization_fps)])
+    if getattr(args, "visualization_alpha", None) is not None:
+        command.extend(["--visualization-alpha", str(args.visualization_alpha)])
+    if getattr(args, "visualization_selected_max_long_side", None) is not None:
+        command.extend(
+            [
+                "--visualization-selected-max-long-side",
+                str(args.visualization_selected_max_long_side),
+            ]
+        )
     command.extend(getattr(args, "extra_runner_args", []) or [])
     return command
 
@@ -768,6 +781,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--video-decode-strategy", choices=["auto", "seek", "scan"], default="auto")
     parser.add_argument("--autogaze-target-scales")
     parser.add_argument("--autogaze-target-patch-size", type=int)
+    parser.add_argument("--visualization-output-dir")
+    parser.add_argument("--visualization-fps", type=float)
+    parser.add_argument("--visualization-alpha", type=float)
+    parser.add_argument("--visualization-selected-max-long-side", type=int)
     parser.add_argument("--python-executable", default=sys.executable)
     parser.add_argument("--extra-runner-args", nargs="*", default=[])
     return parser
