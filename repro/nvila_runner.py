@@ -504,6 +504,32 @@ def build_single_summary(payload: dict[str, Any]) -> dict[str, Any]:
     encoder_selected_patch_tokens = token_metrics.get("encoder_autogaze_selected_patch_tokens")
     llm_keep_all_visual_tokens = token_metrics.get("llm_keep_all_visual_tokens_estimated")
     llm_actual_visual_tokens = token_metrics.get("llm_actual_visual_tokens")
+    module_latency = {
+        "total_median": summary_metric(payload, "total_ms"),
+        "preprocess_total_median": summary_metric(payload, "video_preprocess_ms"),
+        "autogaze_median": summary_metric(payload, "autogaze_ms"),
+        "vit_encoder_median": summary_metric(payload, "siglip_vision_ms"),
+        "llm_median": summary_metric(payload, "llm_forward_ms"),
+    }
+    key_token_summary = {
+        "video_sampled_frames": token_metrics.get("video_sampled_frames"),
+        "thumbnail_sampled_frames": token_metrics.get("thumbnail_sampled_frames"),
+        "encoder_patch_tokens_before_keep_all_or_raw": encoder_raw_patch_tokens,
+        "encoder_patch_tokens_after_autogaze": encoder_selected_patch_tokens,
+        "encoder_token_reduction_ratio": token_metrics.get("encoder_token_reduction_ratio"),
+        "autogaze_input_tile_patch_tokens": token_metrics.get("autogaze_input_patch_tokens"),
+        "autogaze_selected_tile_patch_tokens": token_metrics.get("autogaze_selected_patch_tokens"),
+        "autogaze_patch_reduction_ratio": token_metrics.get("autogaze_patch_reduction_ratio"),
+        "llm_visual_tokens_before_keep_all_estimated": llm_keep_all_visual_tokens,
+        "llm_visual_tokens_after_actual": llm_actual_visual_tokens,
+        "llm_visual_token_reduction_ratio": token_metrics.get("llm_visual_token_reduction_ratio"),
+    }
+    key_memory_summary = {
+        "processor_peak_median": summary_metric(payload, "processor_peak_memory_bytes"),
+        "ttft_peak_median": summary_metric(payload, "ttft_peak_memory_bytes"),
+        "llm_peak_median": summary_metric(payload, "llm_peak_memory_bytes"),
+        "overall_peak_median": summary_metric(payload, "peak_memory_bytes"),
+    }
     question = payload.get("question")
     if question is None and isinstance(result, dict):
         question = result.get("question")
@@ -550,6 +576,20 @@ def build_single_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "answer": result.get("raw_output"),
         "parsed_answer": result.get("parsed_answer"),
         "generated_tokens": result.get("generated_tokens"),
+        "module_latency_ms": {
+            **module_latency,
+            "field_note": (
+                "Summary-level module latency is intentionally coarse. "
+                "preprocess_total=video_preprocess_ms, autogaze=autogaze_ms, "
+                "vit_encoder=siglip_vision_ms, llm=llm_forward_ms. "
+                "These fields are not additive because preprocess_total includes processor work."
+            ),
+        },
+        "key_metrics_summary": {
+            "latency_ms": module_latency,
+            "tokens": key_token_summary,
+            "memory_bytes": key_memory_summary,
+        },
         "latency_ms": {
             "total_median": summary_metric(payload, "total_ms"),
             "ttft_median": summary_metric(payload, "ttft_ms"),
@@ -566,6 +606,7 @@ def build_single_summary(payload: dict[str, Any]) -> dict[str, Any]:
             "processor_peak_median": summary_metric(payload, "processor_peak_memory_bytes"),
             "ttft_peak_median": summary_metric(payload, "ttft_peak_memory_bytes"),
             "llm_peak_median": summary_metric(payload, "llm_peak_memory_bytes"),
+            "overall_peak_median": summary_metric(payload, "peak_memory_bytes"),
         },
         "tokens": {
             "encoder_raw_patch_tokens": token_metrics.get("encoder_raw_patch_tokens"),

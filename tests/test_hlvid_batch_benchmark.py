@@ -156,10 +156,15 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
             "answer": "A",
             "raw_output": "A",
             "total_ms": 100.0,
+            "video_preprocess_ms": 20.0,
+            "autogaze_ms": 1.0,
             "siglip_vision_ms": 40.0,
             "llm_forward_ms": 30.0,
             "ttft_ms": 50.0,
+            "processor_peak_memory_bytes": 2000,
+            "ttft_peak_memory_bytes": 1500,
             "llm_peak_memory_bytes": 1000,
+            "peak_memory_bytes": 2500,
             "token_metrics": {
                 "llm_actual_visual_tokens": 100,
                 "llm_keep_all_visual_tokens_estimated": 100,
@@ -179,10 +184,15 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
             "answer": "A",
             "raw_output": "A",
             "total_ms": 60.0,
+            "video_preprocess_ms": 25.0,
+            "autogaze_ms": 12.0,
             "siglip_vision_ms": 15.0,
             "llm_forward_ms": 20.0,
             "ttft_ms": 25.0,
+            "processor_peak_memory_bytes": 1500,
+            "ttft_peak_memory_bytes": 1200,
             "llm_peak_memory_bytes": 500,
+            "peak_memory_bytes": 1600,
             "token_metrics": {
                 "llm_actual_visual_tokens": 40,
                 "llm_keep_all_visual_tokens_estimated": 100,
@@ -222,11 +232,59 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
         "speedup_ratio_keep_all_over_autogaze": 100.0 / 60.0,
         "reduction_percent_of_keep_all": 40.0,
     }
-    assert report["readable_summary"]["latency_ms_median"]["siglip_vision_ms"] == {
+    assert report["readable_summary"]["latency_ms_median"]["preprocess_total_ms"] == {
+        "keep_all": 20.0,
+        "autogaze": 25.0,
+        "speedup_ratio_keep_all_over_autogaze": 20.0 / 25.0,
+        "reduction_percent_of_keep_all": -25.0,
+    }
+    assert report["readable_summary"]["latency_ms_median"]["autogaze_ms"] == {
+        "keep_all": 1.0,
+        "autogaze": 12.0,
+        "speedup_ratio_keep_all_over_autogaze": 1.0 / 12.0,
+        "reduction_percent_of_keep_all": -1100.0,
+    }
+    assert report["readable_summary"]["latency_ms_median"]["vit_encoder_ms"] == {
         "keep_all": 40.0,
         "autogaze": 15.0,
         "speedup_ratio_keep_all_over_autogaze": 40.0 / 15.0,
         "reduction_percent_of_keep_all": 62.5,
+    }
+    assert report["readable_summary"]["latency_ms_median"]["llm_ms"] == {
+        "keep_all": 30.0,
+        "autogaze": 20.0,
+        "speedup_ratio_keep_all_over_autogaze": 30.0 / 20.0,
+        "reduction_percent_of_keep_all": 100.0 / 3.0,
+    }
+    assert report["readable_summary"]["latency_ms_detail_median"]["siglip_vision_ms"] == {
+        "keep_all": 40.0,
+        "autogaze": 15.0,
+        "speedup_ratio_keep_all_over_autogaze": 40.0 / 15.0,
+        "reduction_percent_of_keep_all": 62.5,
+    }
+    assert report["readable_summary"]["key_metrics_median"]["latency_ms"]["total_ms"] == {
+        "keep_all": 100.0,
+        "autogaze": 60.0,
+        "speedup_ratio_keep_all_over_autogaze": 100.0 / 60.0,
+        "reduction_percent_of_keep_all": 40.0,
+    }
+    assert report["readable_summary"]["key_metrics_median"]["tokens"]["llm_visual_tokens"] == {
+        "before_keep_all_estimated": 100.0,
+        "after_autogaze_actual": 40.0,
+        "reduction_ratio_before_over_after": 2.5,
+        "reduction_percent_of_before": 60.0,
+    }
+    assert report["readable_summary"]["key_metrics_median"]["memory_bytes"]["llm_peak"] == {
+        "keep_all": 1000.0,
+        "autogaze": 500.0,
+        "reduction_ratio_keep_all_over_autogaze": 2.0,
+        "reduction_percent_of_keep_all": 50.0,
+    }
+    assert report["readable_summary"]["key_metrics_median"]["memory_bytes"]["overall_peak"] == {
+        "keep_all": 2500.0,
+        "autogaze": 1600.0,
+        "reduction_ratio_keep_all_over_autogaze": 2500.0 / 1600.0,
+        "reduction_percent_of_keep_all": 36.0,
     }
     assert report["readable_summary"]["memory_bytes_median"]["llm_peak_memory_bytes"] == {
         "keep_all": 1000.0,

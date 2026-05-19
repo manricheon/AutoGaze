@@ -21,12 +21,39 @@ LATENCY_FIELDS = (
     "video_preprocess_ms",
     "video_decode_ms",
     "video_tiling_ms",
+    "autogaze_ms",
     "autogaze_forward_ms",
     "vision_encoder_ms",
     "siglip_vision_ms",
     "mm_projector_ms",
     "llm_forward_ms",
     "ttft_ms",
+)
+MODULE_LATENCY_FIELDS = (
+    ("total_ms", "total_ms"),
+    ("preprocess_total_ms", "video_preprocess_ms"),
+    ("autogaze_ms", "autogaze_ms"),
+    ("vit_encoder_ms", "siglip_vision_ms"),
+    ("llm_ms", "llm_forward_ms"),
+)
+KEY_TOKEN_FIELDS = (
+    ("video_sampled_frames", "token_metrics.video_sampled_frames"),
+    ("thumbnail_sampled_frames", "token_metrics.thumbnail_sampled_frames"),
+    ("encoder_patch_tokens_before_keep_all_or_raw", "token_metrics.encoder_raw_patch_tokens"),
+    ("encoder_patch_tokens_after_autogaze", "token_metrics.encoder_autogaze_selected_patch_tokens"),
+    ("encoder_token_reduction_ratio", "token_metrics.encoder_token_reduction_ratio"),
+    ("autogaze_input_tile_patch_tokens", "token_metrics.autogaze_input_patch_tokens"),
+    ("autogaze_selected_tile_patch_tokens", "token_metrics.autogaze_selected_patch_tokens"),
+    ("autogaze_patch_reduction_ratio", "token_metrics.autogaze_patch_reduction_ratio"),
+    ("llm_visual_tokens_before_keep_all_estimated", "token_metrics.llm_keep_all_visual_tokens_estimated"),
+    ("llm_visual_tokens_after_actual", "token_metrics.llm_actual_visual_tokens"),
+    ("llm_visual_token_reduction_ratio", "token_metrics.llm_visual_token_reduction_ratio"),
+)
+KEY_MEMORY_FIELDS = (
+    ("processor_peak", "processor_peak_memory_bytes"),
+    ("ttft_peak", "ttft_peak_memory_bytes"),
+    ("llm_peak", "llm_peak_memory_bytes"),
+    ("overall_peak", "peak_memory_bytes"),
 )
 MEMORY_FIELDS = (
     "processor_peak_memory_bytes",
@@ -217,54 +244,43 @@ def median_from_stats(stats: dict[str, dict[str, float | int]], field: str) -> f
     return field_stats.get("median")
 
 
+def key_medians(
+    stats: dict[str, dict[str, float | int]],
+    fields: tuple[tuple[str, str], ...],
+) -> dict[str, float | int | None]:
+    return {label: median_from_stats(stats, field) for label, field in fields}
+
+
 def summarize_prediction_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     latency = stats_by_field(rows, LATENCY_FIELDS)
     memory = stats_by_field(rows, MEMORY_FIELDS)
     tokens = stats_by_field(rows, TOKEN_FIELDS)
     compute = stats_by_field(rows, COMPUTE_FIELDS)
+    latency_summary = key_medians(latency, MODULE_LATENCY_FIELDS)
+    token_summary = key_medians(tokens, KEY_TOKEN_FIELDS)
+    memory_summary = key_medians(memory, KEY_MEMORY_FIELDS)
     return {
         "latency_ms": latency,
         "memory_bytes": memory,
         "tokens": tokens,
         "compute": compute,
         "readable_performance_summary": {
-            "latency_ms_median": {field: latency[field]["median"] for field in LATENCY_FIELDS},
-            "memory_bytes_median": {field: memory[field]["median"] for field in MEMORY_FIELDS},
-            "tokens_median": {
-                "video_sampled_frames": median_from_stats(tokens, "token_metrics.video_sampled_frames"),
-                "thumbnail_sampled_frames": median_from_stats(
-                    tokens,
-                    "token_metrics.thumbnail_sampled_frames",
-                ),
-                "encoder_patch_tokens_before_keep_all_or_raw": median_from_stats(
-                    tokens,
-                    "token_metrics.encoder_raw_patch_tokens",
-                ),
-                "encoder_patch_tokens_after_autogaze": median_from_stats(
-                    tokens,
-                    "token_metrics.encoder_autogaze_selected_patch_tokens",
-                ),
-                "autogaze_input_tile_patch_tokens": median_from_stats(
-                    tokens,
-                    "token_metrics.autogaze_input_patch_tokens",
-                ),
-                "autogaze_selected_tile_patch_tokens": median_from_stats(
-                    tokens,
-                    "token_metrics.autogaze_selected_patch_tokens",
-                ),
-                "llm_visual_tokens_before_keep_all_estimated": median_from_stats(
-                    tokens,
-                    "token_metrics.llm_keep_all_visual_tokens_estimated",
-                ),
-                "llm_visual_tokens_after_actual": median_from_stats(
-                    tokens,
-                    "token_metrics.llm_actual_visual_tokens",
-                ),
-                "llm_visual_token_reduction_ratio": median_from_stats(
-                    tokens,
-                    "token_metrics.llm_visual_token_reduction_ratio",
-                ),
+            "key_metrics_median": {
+                "latency_ms": latency_summary,
+                "tokens": token_summary,
+                "memory_bytes": memory_summary,
             },
+            "latency_ms_median": latency_summary,
+            "latency_ms_detail_median": {field: latency[field]["median"] for field in LATENCY_FIELDS},
+            "latency_field_note": (
+                "Summary-level latency is intentionally coarse: "
+                "preprocess_total=video_preprocess_ms, autogaze=autogaze_ms, "
+                "vit_encoder=siglip_vision_ms, llm=llm_forward_ms. "
+                "These fields are not additive because preprocess_total includes processor work. "
+                "Use latency_ms_detail_median or top-level latency_ms for finer breakdowns."
+            ),
+            "memory_bytes_median": {field: memory[field]["median"] for field in MEMORY_FIELDS},
+            "tokens_median": token_summary,
             "compute_median": {
                 field: compute[field]["median"] for field in COMPUTE_FIELDS
             },

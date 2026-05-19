@@ -41,12 +41,26 @@ LATENCY_FIELDS = (
     "video_preprocess_ms",
     "video_decode_ms",
     "video_tiling_ms",
+    "autogaze_ms",
     "autogaze_forward_ms",
     "vision_encoder_ms",
     "siglip_vision_ms",
     "mm_projector_ms",
     "llm_forward_ms",
     "ttft_ms",
+)
+MODULE_LATENCY_FIELDS = (
+    ("total_ms", "total_ms"),
+    ("preprocess_total_ms", "video_preprocess_ms"),
+    ("autogaze_ms", "autogaze_ms"),
+    ("vit_encoder_ms", "siglip_vision_ms"),
+    ("llm_ms", "llm_forward_ms"),
+)
+KEY_MEMORY_FIELDS = (
+    ("processor_peak", "processor_peak_memory_bytes"),
+    ("ttft_peak", "ttft_peak_memory_bytes"),
+    ("llm_peak", "llm_peak_memory_bytes"),
+    ("overall_peak", "peak_memory_bytes"),
 )
 MEMORY_FIELDS = (
     "processor_peak_memory_bytes",
@@ -188,7 +202,7 @@ def build_readable_summary(
     keep_all_rows: list[dict[str, Any]],
     autogaze_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    latency = {
+    latency_detail = {
         field: _comparison_summary(
             keep_all_rows,
             autogaze_rows,
@@ -196,6 +210,15 @@ def build_readable_summary(
             ratio_key="speedup_ratio_keep_all_over_autogaze",
         )
         for field in LATENCY_FIELDS
+    }
+    latency = {
+        label: _comparison_summary(
+            keep_all_rows,
+            autogaze_rows,
+            field,
+            ratio_key="speedup_ratio_keep_all_over_autogaze",
+        )
+        for label, field in MODULE_LATENCY_FIELDS
     }
     memory = {
         field: _comparison_summary(
@@ -205,6 +228,15 @@ def build_readable_summary(
             ratio_key="reduction_ratio_keep_all_over_autogaze",
         )
         for field in MEMORY_FIELDS
+    }
+    key_memory = {
+        label: _comparison_summary(
+            keep_all_rows,
+            autogaze_rows,
+            field,
+            ratio_key="reduction_ratio_keep_all_over_autogaze",
+        )
+        for label, field in KEY_MEMORY_FIELDS
     }
     tokens = {
         "encoder_patches": _autogaze_before_after_summary(
@@ -249,6 +281,19 @@ def build_readable_summary(
             ),
         },
         "latency_ms_median": latency,
+        "latency_ms_detail_median": latency_detail,
+        "key_metrics_median": {
+            "latency_ms": latency,
+            "tokens": tokens,
+            "memory_bytes": key_memory,
+        },
+        "latency_field_note": (
+            "Summary-level latency is intentionally coarse: "
+            "preprocess_total=video_preprocess_ms, autogaze=autogaze_ms, "
+            "vit_encoder=siglip_vision_ms, llm=llm_forward_ms. "
+            "These fields are not additive because preprocess_total includes processor work. "
+            "Use latency_ms_detail_median or per-mode latency_ms for finer breakdowns."
+        ),
         "memory_bytes_median": memory,
         "tokens_median": tokens,
         "ratio_note": (

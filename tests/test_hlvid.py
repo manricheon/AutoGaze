@@ -158,13 +158,24 @@ def test_score_predictions_includes_latency_memory_token_and_compute_summaries()
             "answer": "A",
             "raw_output": "A",
             "total_ms": 100.0,
+            "video_preprocess_ms": 12.0,
             "video_decode_ms": 10.0,
+            "autogaze_ms": 14.0,
             "siglip_vision_ms": 40.0,
             "llm_forward_ms": 30.0,
+            "processor_peak_memory_bytes": 1300,
+            "ttft_peak_memory_bytes": 1200,
             "llm_peak_memory_bytes": 1000,
+            "peak_memory_bytes": 1500,
             "token_metrics": {
+                "video_sampled_frames": 128,
+                "thumbnail_sampled_frames": 64,
                 "encoder_raw_patch_tokens": 900,
                 "encoder_autogaze_selected_patch_tokens": 300,
+                "encoder_token_reduction_ratio": 3.0,
+                "autogaze_input_patch_tokens": 800,
+                "autogaze_selected_patch_tokens": 200,
+                "autogaze_patch_reduction_ratio": 4.0,
                 "llm_keep_all_visual_tokens_estimated": 100,
                 "llm_actual_visual_tokens": 40,
                 "llm_visual_token_reduction_ratio": 2.5,
@@ -178,13 +189,24 @@ def test_score_predictions_includes_latency_memory_token_and_compute_summaries()
             "answer": "B",
             "raw_output": "B",
             "total_ms": 60.0,
+            "video_preprocess_ms": 8.0,
             "video_decode_ms": 6.0,
+            "autogaze_ms": 10.0,
             "siglip_vision_ms": 20.0,
             "llm_forward_ms": 18.0,
+            "processor_peak_memory_bytes": 900,
+            "ttft_peak_memory_bytes": 800,
             "llm_peak_memory_bytes": 700,
+            "peak_memory_bytes": 1000,
             "token_metrics": {
+                "video_sampled_frames": 96,
+                "thumbnail_sampled_frames": 48,
                 "encoder_raw_patch_tokens": 800,
                 "encoder_autogaze_selected_patch_tokens": 200,
+                "encoder_token_reduction_ratio": 4.0,
+                "autogaze_input_patch_tokens": 700,
+                "autogaze_selected_patch_tokens": 175,
+                "autogaze_patch_reduction_ratio": 4.0,
                 "llm_keep_all_visual_tokens_estimated": 90,
                 "llm_actual_visual_tokens": 30,
                 "llm_visual_token_reduction_ratio": 3.0,
@@ -206,7 +228,42 @@ def test_score_predictions_includes_latency_memory_token_and_compute_summaries()
     assert summary["tokens"]["token_metrics.encoder_raw_patch_tokens"]["median"] == 850.0
     assert summary["tokens"]["token_metrics.encoder_autogaze_selected_patch_tokens"]["median"] == 250.0
     assert summary["compute"]["compute_metrics.siglip_encoder.keep_all_to_actual_total_macs_ratio"]["median"] == 3.5
-    assert summary["readable_performance_summary"]["latency_ms_median"]["total_ms"] == 80.0
+    assert summary["readable_performance_summary"]["latency_ms_median"] == {
+        "total_ms": 80.0,
+        "preprocess_total_ms": 10.0,
+        "autogaze_ms": 12.0,
+        "vit_encoder_ms": 30.0,
+        "llm_ms": 24.0,
+    }
+    assert summary["readable_performance_summary"]["key_metrics_median"] == {
+        "latency_ms": {
+            "total_ms": 80.0,
+            "preprocess_total_ms": 10.0,
+            "autogaze_ms": 12.0,
+            "vit_encoder_ms": 30.0,
+            "llm_ms": 24.0,
+        },
+        "tokens": {
+            "video_sampled_frames": 112.0,
+            "thumbnail_sampled_frames": 56.0,
+            "encoder_patch_tokens_before_keep_all_or_raw": 850.0,
+            "encoder_patch_tokens_after_autogaze": 250.0,
+            "encoder_token_reduction_ratio": 3.5,
+            "autogaze_input_tile_patch_tokens": 750.0,
+            "autogaze_selected_tile_patch_tokens": 187.5,
+            "autogaze_patch_reduction_ratio": 4.0,
+            "llm_visual_tokens_before_keep_all_estimated": 95.0,
+            "llm_visual_tokens_after_actual": 35.0,
+            "llm_visual_token_reduction_ratio": 2.75,
+        },
+        "memory_bytes": {
+            "processor_peak": 1100.0,
+            "ttft_peak": 1000.0,
+            "llm_peak": 850.0,
+            "overall_peak": 1250.0,
+        },
+    }
+    assert summary["readable_performance_summary"]["latency_ms_detail_median"]["video_decode_ms"] == 8.0
     assert summary["readable_performance_summary"]["tokens_median"]["llm_visual_tokens_after_actual"] == 35.0
 
 

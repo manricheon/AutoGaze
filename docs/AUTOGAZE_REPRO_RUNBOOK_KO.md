@@ -230,7 +230,7 @@ LLM visual-token 기준:
 - `token_metrics.llm_actual_visual_tokens`: AutoGaze/keep-all padding strategy가 반영된 processor output의 실제 visual placeholder token 수
 - `token_metrics.llm_visual_token_reduction_ratio`: keep-all 예상 LLM visual token 수를 실제 visual token 수로 나눈 값
 
-HLVid `--mode hlvid` summary에는 `question_count`, `question_samples`, `benchmark_samples`, `latency_ms`, `memory_bytes`, `tokens`, `compute`, `readable_performance_summary`, `token_budget_summary`가 추가됩니다. `question_samples`는 질문 원문 확인용이고, `benchmark_samples`는 대상 비디오, 질문, 모델 답변, parsed 답변, 정답, 정오 여부를 같이 보여주는 읽기 쉬운 샘플 표입니다. `latency_ms`/`memory_bytes`/`tokens`/`compute`는 각 metric의 count/mean/median/min/max이고, `readable_performance_summary`는 median만 모아둔 빠른 확인용입니다. summary가 너무 커지지 않도록 앞쪽 샘플만 담고, 전체 row의 질문/정답/모델 출력은 `predictions.jsonl`과 `scored_predictions.jsonl`에 남깁니다. `token_budget_summary`는 성공한 row들의 `token_metrics`에서 median/mean을 모은 것이고, `failed` row는 token metric이 없으므로 집계에서 빠집니다. `scripts/run_hlvid_folder_benchmark.py`의 최종 gain report에서도 top-level `benchmark_samples.keep_all`, `benchmark_samples.autogaze`, `autogaze.tokens`와 `gains.autogaze_token_reduction_median`에 raw/selected patch 수와 LLM visual token 수가 함께 들어갑니다.
+HLVid `--mode hlvid` summary에는 `question_count`, `question_samples`, `benchmark_samples`, `latency_ms`, `memory_bytes`, `tokens`, `compute`, `readable_performance_summary`, `token_budget_summary`가 추가됩니다. `question_samples`는 질문 원문 확인용이고, `benchmark_samples`는 대상 비디오, 질문, 모델 답변, parsed 답변, 정답, 정오 여부를 같이 보여주는 읽기 쉬운 샘플 표입니다. `latency_ms`/`memory_bytes`/`tokens`/`compute`는 각 metric의 count/mean/median/min/max이고, `readable_performance_summary.key_metrics_median`에는 중요한 latency/token/memory median만 모읍니다. latency는 `total_ms`, `preprocess_total_ms`, `autogaze_ms`, `vit_encoder_ms`, `llm_ms`, token은 sampled frame 수, encoder patch before/after, AutoGaze input/selected patch, LLM visual token before/after와 reduction ratio, memory는 `processor_peak`, `ttft_peak`, `llm_peak`, `overall_peak`입니다. `preprocess_total_ms`는 processor work를 포함하므로 latency 다섯 항목은 서로 더해서 총합을 만드는 additive breakdown이 아니라, 큰 병목을 빠르게 보는 coarse view입니다. 세부 decode/tile/projector/TTFT median은 `readable_performance_summary.latency_ms_detail_median` 또는 top-level `latency_ms`에서 확인합니다. summary가 너무 커지지 않도록 앞쪽 샘플만 담고, 전체 row의 질문/정답/모델 출력은 `predictions.jsonl`과 `scored_predictions.jsonl`에 남깁니다. `token_budget_summary`는 성공한 row들의 `token_metrics`에서 median/mean을 모은 것이고, `failed` row는 token metric이 없으므로 집계에서 빠집니다. `scripts/run_hlvid_folder_benchmark.py`의 최종 gain report에서도 top-level `benchmark_samples.keep_all`, `benchmark_samples.autogaze`, `autogaze.tokens`와 `gains.autogaze_token_reduction_median`에 raw/selected patch 수와 LLM visual token 수가 함께 들어갑니다.
 
 계산량/메모리 추정치는 `compute_metrics`에 있습니다. 이 값은 profiler가 직접 센 FLOPs가 아니라, token 수와 hidden size/layer 수를 이용한 analytical MAC estimate입니다.
 
@@ -900,7 +900,9 @@ CUDA full benchmark 예시:
 
 `hlvid_autogaze_gain_report.json`에서 우선 볼 항목:
 
-- `readable_summary.latency_ms_median`: `total_ms`, `video_decode_ms`, `video_tiling_ms`, `autogaze_forward_ms`, `siglip_vision_ms`, `mm_projector_ms`, `llm_forward_ms`, `ttft_ms`를 keep-all/autogaze median과 함께 보여줍니다.
+- `readable_summary.key_metrics_median`: 중요한 latency/token/memory를 한 번에 보는 첫 번째 섹션입니다.
+- `readable_summary.latency_ms_median`: `total_ms`, `preprocess_total_ms`, `autogaze_ms`, `vit_encoder_ms`, `llm_ms`를 keep-all/autogaze median과 함께 보여줍니다.
+- `readable_summary.latency_ms_detail_median`: decode, tiling, AutoGaze forward-only, SigLIP, projector, TTFT 같은 세부 latency median입니다.
 - `readable_summary.memory_bytes_median`: CUDA peak memory를 keep-all/autogaze median으로 비교합니다.
 - `readable_summary.tokens_median`: encoder patch, AutoGaze input tile patch, LLM visual token을 before/after 형태로 보여줍니다.
 - `gains.accuracy_scored_delta`: AutoGaze와 keep-all의 HLVid accuracy 차이

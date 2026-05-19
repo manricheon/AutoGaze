@@ -246,13 +246,17 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
             "generated_tokens": 4,
             "total_ms": 100.0,
             "ttft_ms": 30.0,
+            "video_preprocess_ms": 13.0,
             "video_tiling_ms": 11.0,
             "autogaze_ms": 12.0,
             "autogaze_forward_ms": 10.0,
             "siglip_vision_ms": 20.0,
             "mm_projector_ms": 3.0,
             "llm_forward_ms": 50.0,
+            "processor_peak_memory_bytes": 1500,
+            "ttft_peak_memory_bytes": 1200,
             "llm_peak_memory_bytes": 1024,
+            "peak_memory_bytes": 1600,
             "video_input_summary": {
                 "source_frames": 240,
                 "source_resolution": "3840x2160",
@@ -297,11 +301,15 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
         "repeat_summary": {
             "total_ms": {"median": 90.0},
             "ttft_ms": {"median": 25.0},
+            "video_preprocess_ms": {"median": 13.0},
             "autogaze_ms": {"median": 12.0},
             "autogaze_forward_ms": {"median": 10.0},
             "siglip_vision_ms": {"median": 18.0},
             "llm_forward_ms": {"median": 45.0},
+            "processor_peak_memory_bytes": {"median": 1400.0},
+            "ttft_peak_memory_bytes": {"median": 1100.0},
             "llm_peak_memory_bytes": {"median": 900.0},
+            "peak_memory_bytes": {"median": 1500.0},
         },
     }
 
@@ -409,6 +417,47 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
     assert summary["answer"] == "A"
     assert summary["prompt"] == "What does the sign say? A. A B. B C. C D. D"
     assert summary["question"] == "What does the sign say?"
+    assert summary["module_latency_ms"] == {
+        "total_median": 90.0,
+        "preprocess_total_median": 13.0,
+        "autogaze_median": 12.0,
+        "vit_encoder_median": 18.0,
+        "llm_median": 45.0,
+        "field_note": (
+            "Summary-level module latency is intentionally coarse. "
+            "preprocess_total=video_preprocess_ms, autogaze=autogaze_ms, "
+            "vit_encoder=siglip_vision_ms, llm=llm_forward_ms. "
+            "These fields are not additive because preprocess_total includes processor work."
+        ),
+    }
+    assert summary["key_metrics_summary"] == {
+        "latency_ms": {
+            "total_median": 90.0,
+            "preprocess_total_median": 13.0,
+            "autogaze_median": 12.0,
+            "vit_encoder_median": 18.0,
+            "llm_median": 45.0,
+        },
+        "tokens": {
+            "video_sampled_frames": 8,
+            "thumbnail_sampled_frames": 4,
+            "encoder_patch_tokens_before_keep_all_or_raw": 80,
+            "encoder_patch_tokens_after_autogaze": 40,
+            "encoder_token_reduction_ratio": 2.0,
+            "autogaze_input_tile_patch_tokens": 64,
+            "autogaze_selected_tile_patch_tokens": 24,
+            "autogaze_patch_reduction_ratio": 64 / 24,
+            "llm_visual_tokens_before_keep_all_estimated": 80,
+            "llm_visual_tokens_after_actual": 40,
+            "llm_visual_token_reduction_ratio": 2.0,
+        },
+        "memory_bytes": {
+            "processor_peak_median": 1400.0,
+            "ttft_peak_median": 1100.0,
+            "llm_peak_median": 900.0,
+            "overall_peak_median": 1500.0,
+        },
+    }
     assert summary["latency_ms"]["total_median"] == 90.0
     assert summary["latency_ms"]["ttft_median"] == 25.0
     assert summary["latency_ms"]["autogaze_total_median"] == 12.0
