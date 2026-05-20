@@ -102,10 +102,11 @@ AutoGaze 자체가 빠른지/느린지를 보려면 아래 순서로 봐야 한�
    - 여기서 실제 90%/95% 감소가 나왔는지 확인한다.
 
 3. AutoGaze forward만 비교
+   - Quick Start native: `latency_ms.autogaze_forward.median`
    - Quick Start: `latency_ms.autogaze.median`
    - stream-profile: `timing_ms.tile_autogaze_forward`
    - single: `autogaze_model_forward_ms`
-   - 이 세 값이 “모델 forward” 기준의 1차 비교다.
+   - 이 값들이 “모델 forward” 기준의 1차 비교다.
 
 4. AutoGaze 주변 overhead 확인
    - stream-profile: `tile_autogaze_tensorize`, `spatial_tile_build`, `pre_llm_stream_total_measured`
@@ -122,7 +123,7 @@ AutoGaze 자체가 빠른지/느린지를 보려면 아래 순서로 봐야 한�
 
 ### Quick Start 기본 설정 기준: direct vs NVILA single sweep
 
-Quick Start 기본 설정 그대로 비교하려면 multiscale 옵션을 넣지 않는다. 즉 `--autogaze-target-scales`, `--autogaze-target-patch-size`를 비워 두고, 16프레임/224 단일 입력, `gazing_ratio=0.75`, `task_loss_requirement=0.7`, batch size 1을 기준으로 삼는다. 아래 명령은 stream-profile lane을 끄고, 원본 Quick Start direct AutoGaze와 현재 NVILA full `single` path만 gazing ratio별로 비교한다.
+Quick Start 기본 설정 그대로 비교하려면 multiscale 옵션을 넣지 않는다. 즉 `--autogaze-target-scales`, `--autogaze-target-patch-size`를 비워 두고, 16프레임/224 단일 입력, `gazing_ratio=0.75`, `task_loss_requirement=0.7`, batch size 1을 기준으로 삼는다. 아래 명령은 stream-profile lane을 끄고, README Quick Start 코드 흐름을 따른 native lane, 기존 direct wrapper lane, 현재 NVILA full `single` path를 gazing ratio별로 비교한다.
 
 ```bash
 .venv/bin/python -m repro.autogaze_timing_compare \
@@ -133,6 +134,7 @@ Quick Start 기본 설정 그대로 비교하려면 multiscale 옵션을 넣지 
   --max-tiles-video 1 \
   --max-batch-size-autogaze 16 \
   --quickstart-batch-size 1 \
+  --quickstart-native \
   --gazing-ratio-sweep 0.06,0.1,0.2,0.5,0.75,1.0 \
   --task-loss-sweep 0.7 \
   --skip-stream-profile \
@@ -142,14 +144,17 @@ Quick Start 기본 설정 그대로 비교하려면 multiscale 옵션을 넣지 
   --output-dir outputs/autogaze_repro/h100_quickstart_default_vs_nvila_single_gazing_sweep
 ```
 
-이 config의 목적은 “Quick Start 기본 AutoGaze forward”와 “NVILA processor hook 내부 AutoGaze forward”를 같은 gaze policy로 놓고 보는 것이다. sweep summary에서는 아래 필드를 우선 비교한다.
+이 config의 목적은 “README Quick Start 코드 그대로의 AutoGaze forward”, “현재 wrapper의 direct AutoGaze forward”, “NVILA processor hook 내부 AutoGaze forward”를 같은 gaze policy로 놓고 보는 것이다. native lane도 video decode/preprocess는 따로 기록하지만, 핵심 비교값인 `quickstart_native_autogaze_ms`에는 포함하지 않는다. sweep summary에서는 아래 필드를 우선 비교한다.
 
 | Field | 의미 |
 | --- | --- |
-| `quickstart_autogaze_ms` | 원본 Quick Start 방식 direct AutoGaze forward |
+| `quickstart_native_autogaze_ms` | README Quick Start 코드 흐름에서 AutoGaze forward만 측정한 값. decode/preprocess 제외 |
+| `quickstart_autogaze_ms` | 기존 `repro.autogaze_bench` wrapper의 direct AutoGaze forward |
 | `single_autogaze_forward_ms` | `nvila_runner --mode single`의 AutoGaze model forward |
 | `single_autogaze_total_ms` | NVILA processor에서 gaze-info 생성까지 포함한 AutoGaze 전체 overhead |
-| `quickstart_raw_patch_budget`, `single_raw_patch_budget` | 비교 입력 patch budget. 이 값이 다르면 latency만 직접 비교하면 안 된다. |
+| `quickstart_direct_vs_native_ratio` | wrapper와 README-style native path가 같은 수준인지 보는 sanity check |
+| `single_autogaze_forward_vs_native_ratio` | NVILA single forward가 native Quick Start 대비 몇 배인지 |
+| `quickstart_native_raw_patch_budget`, `quickstart_raw_patch_budget`, `single_raw_patch_budget` | 비교 입력 patch budget. 이 값이 다르면 latency만 직접 비교하면 안 된다. |
 | `quickstart_selected_patches`, `single_selected_patches` | 실제 선택된 patch 수 |
 | `quickstart_token_reduction_ratio`, `single_token_reduction_ratio` | patch/token 감소율 |
 | `single_autogaze_forward_vs_quickstart_ratio` | 같은 gaze policy에서 NVILA single forward가 Quick Start direct 대비 몇 배인지 |
@@ -203,6 +208,7 @@ sweep summary에서 먼저 볼 핵심 필드:
 
 | Field | 의미 |
 | --- | --- |
+| `quickstart_native_autogaze_ms` | `--quickstart-native`를 켠 경우 README-style Quick Start AutoGaze forward |
 | `quickstart_autogaze_ms` | 원본 Quick Start 방식 direct AutoGaze forward |
 | `stream_autogaze_forward_ms` | 현재 stream-profile의 AutoGaze forward |
 | `single_autogaze_forward_ms` | full NVILA processor hook 내부 AutoGaze forward |
@@ -227,7 +233,8 @@ dry-run으로 명령만 확인:
 
 | Level | Metric | Includes | Excludes | Purpose |
 | --- | --- | --- | --- | --- |
-| L0 | `latency_ms.autogaze.median` | direct AutoGaze model call | NVILA decode/tile pipeline | Quick Start 기준 sanity check |
+| L0a | `latency_ms.autogaze_forward.median` | README Quick Start 코드 흐름의 AutoGaze model call | video decode, transform, input move, model load | 원본 코드 경계 sanity check |
+| L0b | `latency_ms.autogaze.median` | wrapper direct AutoGaze model call | NVILA decode/tile pipeline | Quick Start wrapper sanity check |
 | L1 | `tile_autogaze_forward` | stream-profile AutoGaze model forward over tile sequences | decode/tile/tensorize | 현재 구현의 AutoGaze forward 비교 |
 | L2 | `pre_llm_stream_total_measured` | decode, frame conversion, tiling, tensorize, AutoGaze, optional SigLIP | NVILA projector/LLM | pre-LLM 전체 overhead |
 | L3 | `autogaze_model_forward_ms` | `nvila_runner --mode single`의 `_run_autogaze_batched` hook | parent gaze-info work | Quick Start direct와 가장 먼저 비교할 full-runner AutoGaze forward |
@@ -235,12 +242,13 @@ dry-run으로 명령만 확인:
 | L5 | `generate_ms` | full NVILA generate path | processor preprocessing | LLM 포함 end-to-end |
 
 `tile_autogaze_forward`와 `pre_llm_stream_total_measured`는 parent-child 관계다. 둘을 더하면 중복 계산이다.
-마찬가지로 single mode의 `autogaze_model_forward_ms`와 `autogaze_total_ms`도 parent-child 관계다. 3초 vs 300ms 의심을 볼 때는 먼저 Quick Start direct `latency_ms.autogaze.median`과 single `autogaze_model_forward_ms`를 비교하고, 그 다음 single `autogaze_total_ms`를 확인한다.
+마찬가지로 single mode의 `autogaze_model_forward_ms`와 `autogaze_total_ms`도 parent-child 관계다. 3초 vs 300ms 의심을 볼 때는 먼저 Quick Start native `latency_ms.autogaze_forward.median`, Quick Start direct `latency_ms.autogaze.median`, single `autogaze_model_forward_ms`를 비교하고, 그 다음 single `autogaze_total_ms`를 확인한다.
 
 ## 코드 위치
 
 | 항목 | 코드 |
 | --- | --- |
+| native Quick Start timer | [repro/autogaze_quickstart_native.py](</Users/mrc/Documents/New project/repro/autogaze_quickstart_native.py:1>) |
 | direct AutoGaze timer | [repro/autogaze_bench.py](</Users/mrc/Documents/New project/repro/autogaze_bench.py:151>) |
 | target device sync timer | [repro/common.py](</Users/mrc/Documents/New project/repro/common.py:61>) |
 | stream-profile stage timer | [repro/nvila_runner.py](</Users/mrc/Documents/New project/repro/nvila_runner.py:218>) |
@@ -322,14 +330,15 @@ MPS/로컬에서 NVILA single이 너무 무겁거나 CUDA 없이 smoke만 보고
 | Original Quick Start | `0.75` | `0.7` | 프레임별 최대 75% 패치까지 gaze 가능 |
 | NVILA processor default | `[0.2] + [0.06] * 15` | 기본 `0.6` | 첫 프레임은 20%, 이후 프레임은 6%로 훨씬 작은 탐색 예산 |
 
-그래서 H100에서 direct AutoGaze가 3초이고 `nvila_runner --mode single`의 `autogaze_model_forward_ms`가 300ms라면, 가장 먼저 봐야 할 것은 두 결과의 `autogaze_runtime_config`, `autogaze_input_patch_tokens`, `autogaze_selected_patch_tokens`, `total_gaze_slots`다. 특히 `gazing_ratio_tile`이 다르면 AutoGaze forward 시간은 apples-to-apples가 아니다.
+그래서 H100에서 direct AutoGaze가 3초이고 `nvila_runner --mode single`의 `autogaze_model_forward_ms`가 300ms라면, 먼저 `--quickstart-native`로 README-style 코드 흐름에서도 같은 시간이 나오는지 확인한다. 그 다음 세 결과의 `autogaze_runtime_config`, `autogaze_input_patch_tokens`, `autogaze_selected_patch_tokens`, `total_gaze_slots`를 비교한다. 특히 `gazing_ratio_tile`이 다르면 AutoGaze forward 시간은 apples-to-apples가 아니다.
 
-Quick Start direct, stream-profile, single을 한 번에 비교하는 권장 명령:
+Quick Start native, direct, stream-profile, single을 한 번에 비교하는 권장 명령:
 
 ```bash
 .venv/bin/python -m repro.autogaze_timing_compare \
   --device cuda \
   --dtype float16 \
+  --quickstart-native \
   --gazing-ratio 0.75 \
   --task-loss-requirement 0.7 \
   --warmup 3 \
@@ -389,6 +398,9 @@ Quick Start direct, stream-profile, single을 한 번에 비교하는 권장 명
 두 결과에서 비교할 필드:
 
 ```text
+quickstart_native.autogaze_ms
+quickstart_direct.autogaze_ms
+comparison.quickstart_direct_vs_native_ratio
 autogaze_runtime_config.gazing_ratio_tile
 autogaze_runtime_config.task_loss_requirement_tile
 token_metrics.autogaze_input_patch_tokens

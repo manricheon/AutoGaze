@@ -46,6 +46,7 @@ class CompareConfig:
     autogaze_target_scales: str | None = None
     autogaze_target_patch_size: int | None = None
     require_mps: bool = True
+    run_quickstart_native: bool = False
     run_stream_profile: bool = True
     run_single: bool = True
     max_new_tokens: int = 1
@@ -70,6 +71,10 @@ class CompareConfig:
     @property
     def quickstart_csv(self) -> Path:
         return self.output_dir / "quickstart_direct_autogaze.csv"
+
+    @property
+    def quickstart_native_json(self) -> Path:
+        return self.output_dir / "quickstart_native_autogaze.json"
 
     @property
     def stream_json(self) -> Path:
@@ -140,6 +145,41 @@ def build_quickstart_command(config: CompareConfig) -> list[str]:
         command.extend(["--target-patch-size", str(config.autogaze_target_patch_size)])
     if not config.quickstart_run_siglip:
         command.append("--skip-siglip")
+    return command
+
+
+def build_quickstart_native_command(config: CompareConfig) -> list[str]:
+    command = [
+        str(config.python),
+        "-m",
+        "repro.autogaze_quickstart_native",
+        "--autogaze-repo",
+        str(config.autogaze_repo),
+        "--autogaze-model",
+        str(config.autogaze_model),
+        "--video",
+        str(config.video),
+        "--device",
+        config.device,
+        "--dtype",
+        config.dtype,
+        "--frames",
+        str(config.frames),
+        "--gazing-ratio",
+        str(config.gazing_ratio),
+        "--task-loss-requirement",
+        str(config.task_loss_requirement),
+        "--warmup",
+        str(config.warmup),
+        "--repeat",
+        str(config.repeat),
+        "--output-json",
+        str(config.quickstart_native_json),
+    ]
+    if config.autogaze_target_scales:
+        command.extend(["--target-scales", config.autogaze_target_scales])
+    if config.autogaze_target_patch_size is not None:
+        command.extend(["--target-patch-size", str(config.autogaze_target_patch_size)])
     return command
 
 
@@ -332,8 +372,11 @@ def build_autogaze_latency_options_summary(
     quickstart_payload: dict[str, Any],
     stream_payload: dict[str, Any] | None,
     single_payload: dict[str, Any] | None,
+    quickstart_native_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     quick_options = quickstart_payload.get("autogaze_latency_options") or {}
+    native_options = quickstart_native_payload.get("autogaze_latency_options") if quickstart_native_payload else {}
+    native_options = native_options or {}
     stream_config = stream_payload.get("autogaze_runtime_config") if stream_payload else {}
     stream_config = stream_config or {}
     stream_sampling = stream_payload.get("sampling") if stream_payload else {}
@@ -353,6 +396,26 @@ def build_autogaze_latency_options_summary(
             "dtype": quick_options.get("dtype") or _metric(quickstart_payload, "input", "dtype"),
             "siglip_enabled": quick_options.get("siglip_enabled"),
         },
+        "quickstart_native": (
+            {
+                "batch_size": native_options.get("batch_size") or _metric(quickstart_native_payload, "input", "batch_size"),
+                "gazing_ratio": native_options.get("gazing_ratio")
+                or _metric(quickstart_native_payload, "input", "gazing_ratio"),
+                "task_loss_requirement": native_options.get("task_loss_requirement")
+                or _metric(quickstart_native_payload, "input", "task_loss_requirement"),
+                "target_scales": native_options.get("target_scales")
+                or _metric(quickstart_native_payload, "input", "target_scales"),
+                "target_patch_size": native_options.get("target_patch_size")
+                or _metric(quickstart_native_payload, "input", "target_patch_size"),
+                "frames": native_options.get("frames") or _metric(quickstart_native_payload, "input", "frames"),
+                "dtype": native_options.get("dtype") or _metric(quickstart_native_payload, "input", "dtype"),
+                "decode_preprocess_excluded_from_forward": native_options.get(
+                    "decode_preprocess_excluded_from_forward"
+                ),
+            }
+            if quickstart_native_payload
+            else None
+        ),
         "current_implementation_stream_profile": (
             {
                 "gazing_ratio_tile": stream_config.get("stream_gazing_ratio") or stream_config.get("gazing_ratio_tile"),
@@ -395,10 +458,23 @@ def summarize_comparison(
     quickstart_json: Path,
     stream_json: Path | None,
     single_json: Path | None = None,
+    quickstart_native_payload: dict[str, Any] | None = None,
+    quickstart_native_json: Path | None = None,
 ) -> dict[str, Any]:
     quick_autogaze_ms = _metric(quickstart_payload, "latency_ms", "autogaze", "median")
     quick_raw = _metric(quickstart_payload, "gaze", "raw_patch_budget")
     quick_selected = _metric(quickstart_payload, "gaze", "selected_non_padded_patches")
+    native_autogaze_ms = (
+        _metric(quickstart_native_payload, "latency_ms", "autogaze_forward", "median")
+        if quickstart_native_payload
+        else None
+    )
+    native_raw = _metric(quickstart_native_payload, "gaze", "raw_patch_budget") if quickstart_native_payload else None
+    native_selected = (
+        _metric(quickstart_native_payload, "gaze", "selected_non_padded_patches")
+        if quickstart_native_payload
+        else None
+    )
     stream_autogaze_ms = _metric(stream_payload, "timing_ms", "tile_autogaze_forward") if stream_payload else None
     stream_total_ms = _metric(stream_payload, "timing_ms", "pre_llm_stream_total_measured") if stream_payload else None
     stream_raw = _metric(stream_payload, "token_metrics", "autogaze_input_patch_tokens") if stream_payload else None
@@ -446,9 +522,13 @@ def summarize_comparison(
 
     summary = {
         "inputs": {
+            "quickstart_native_json": str(quickstart_native_json) if quickstart_native_json else None,
             "quickstart_json": str(quickstart_json),
             "stream_profile_json": str(stream_json) if stream_json else None,
             "single_json": str(single_json) if single_json else None,
+            "quickstart_native_video": _metric(quickstart_native_payload, "input", "video")
+            if quickstart_native_payload
+            else None,
             "quickstart_video": _metric(quickstart_payload, "input", "video"),
             "stream_video": stream_payload.get("video") if stream_payload else None,
             "single_video": single_payload.get("video") if single_payload else None,
@@ -457,6 +537,33 @@ def summarize_comparison(
             quickstart_payload,
             stream_payload,
             single_payload,
+            quickstart_native_payload,
+        ),
+        "quickstart_native": (
+            {
+                "device": _metric(quickstart_native_payload, "metadata", "device"),
+                "frames": _metric(quickstart_native_payload, "input", "frames"),
+                "batch_size": _metric(quickstart_native_payload, "input", "batch_size"),
+                "dtype": _metric(quickstart_native_payload, "input", "dtype"),
+                "autogaze_ms": native_autogaze_ms,
+                "video_decode_ms": _metric(quickstart_native_payload, "latency_ms", "video_decode", "median"),
+                "video_preprocess_ms": _metric(
+                    quickstart_native_payload,
+                    "latency_ms",
+                    "video_preprocess",
+                    "median",
+                ),
+                "input_to_device_ms": _metric(quickstart_native_payload, "latency_ms", "input_to_device", "median"),
+                "model_load_ms": _metric(quickstart_native_payload, "latency_ms", "model_load", "median"),
+                "processor_load_ms": _metric(quickstart_native_payload, "latency_ms", "processor_load", "median"),
+                "raw_patch_budget": native_raw,
+                "selected_patches": native_selected,
+                "total_gaze_slots": _metric(quickstart_native_payload, "gaze", "total_gaze_slots"),
+                "token_reduction_ratio": _metric(quickstart_native_payload, "gaze", "token_reduction_ratio"),
+                "metric_source": "latency_ms.autogaze_forward.median",
+            }
+            if quickstart_native_payload
+            else None
         ),
         "quickstart_direct": {
             "device": _metric(quickstart_payload, "metadata", "device"),
@@ -502,7 +609,11 @@ def summarize_comparison(
         ),
         "current_implementation_single": None,
         "comparison": {
+            "quickstart_direct_vs_native_ratio": _ratio(quick_autogaze_ms, native_autogaze_ms),
+            "quickstart_native_raw_patch_budget_ratio": _ratio(native_raw, quick_raw),
+            "quickstart_native_selected_patch_ratio": _ratio(native_selected, quick_selected),
             "stream_autogaze_forward_vs_quickstart_ratio": _ratio(stream_autogaze_ms, quick_autogaze_ms),
+            "stream_autogaze_forward_vs_native_ratio": _ratio(stream_autogaze_ms, native_autogaze_ms),
             "stream_total_vs_quickstart_autogaze_ratio": _ratio(stream_total_ms, quick_autogaze_ms),
             "raw_patch_budget_ratio": _ratio(stream_raw, quick_raw),
             "selected_patch_ratio": _ratio(stream_selected, quick_selected),
@@ -542,7 +653,9 @@ def summarize_comparison(
         summary["comparison"].update(
             {
                 "single_autogaze_forward_vs_quickstart_ratio": _ratio(single_autogaze_forward_ms, quick_autogaze_ms),
+                "single_autogaze_forward_vs_native_ratio": _ratio(single_autogaze_forward_ms, native_autogaze_ms),
                 "single_autogaze_total_vs_quickstart_ratio": _ratio(single_autogaze_total_ms, quick_autogaze_ms),
+                "single_autogaze_total_vs_native_ratio": _ratio(single_autogaze_total_ms, native_autogaze_ms),
                 "single_total_vs_quickstart_autogaze_ratio": _ratio(single_result.get("total_ms"), quick_autogaze_ms),
                 "single_raw_patch_budget_ratio": _ratio(single_raw, quick_raw),
                 "single_selected_patch_ratio": _ratio(single_selected, quick_selected),
@@ -552,6 +665,7 @@ def summarize_comparison(
 
 
 def write_markdown_report(summary: dict[str, Any], path: Path, commands: dict[str, list[str]]) -> None:
+    native = summary.get("quickstart_native")
     quick = summary["quickstart_direct"]
     stream = summary.get("current_implementation_stream_profile")
     single = summary.get("current_implementation_single")
@@ -564,6 +678,10 @@ def write_markdown_report(summary: dict[str, Any], path: Path, commands: dict[st
         "",
         "- Quick Start direct: original AutoGaze-style 16-frame call on `example_input.mp4`.",
     ]
+    if native:
+        lines.append(
+            "- Quick Start native: the README Quick Start video snippet, with decode/preprocess timed separately and excluded from AutoGaze forward."
+        )
     if stream:
         lines.append(
             "- Current implementation: `repro.nvila_runner --mode stream-profile` with the same video and frame count."
@@ -583,12 +701,18 @@ def write_markdown_report(summary: dict[str, Any], path: Path, commands: dict[st
             "",
             "| Path | Device | Frames | Raw patches | Selected patches | AutoGaze forward ms | AutoGaze total ms | Total measured ms | Reduction |",
             "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
-            (
-                f"| Quick Start direct | {quick.get('device')} | {quick.get('frames')} | "
-                f"{quick.get('raw_patch_budget')} | {quick.get('selected_patches')} | "
-                f"{quick.get('autogaze_ms')} |  |  | {quick.get('token_reduction_ratio')} |"
-            ),
         ]
+    )
+    if native:
+        lines.append(
+            f"| Quick Start native | {native.get('device')} | {native.get('frames')} | "
+            f"{native.get('raw_patch_budget')} | {native.get('selected_patches')} | "
+            f"{native.get('autogaze_ms')} |  |  | {native.get('token_reduction_ratio')} |"
+        )
+    lines.append(
+        f"| Quick Start direct | {quick.get('device')} | {quick.get('frames')} | "
+        f"{quick.get('raw_patch_budget')} | {quick.get('selected_patches')} | "
+        f"{quick.get('autogaze_ms')} |  |  | {quick.get('token_reduction_ratio')} |"
     )
     if stream:
         lines.append(
@@ -632,6 +756,14 @@ def write_markdown_report(summary: dict[str, Any], path: Path, commands: dict[st
                 ),
             ]
         )
+    if native:
+        lines.append(
+            (
+                "| Quick Start direct / Quick Start native | "
+                f"{comparison.get('quickstart_direct_vs_native_ratio')} | "
+                "Wrapper sanity check against README-style code path |"
+            )
+        )
     lines.extend(
         [
             (
@@ -639,6 +771,18 @@ def write_markdown_report(summary: dict[str, Any], path: Path, commands: dict[st
                 f"{comparison.get('single_autogaze_forward_vs_quickstart_ratio')} | "
                 "Full NVILA processor hook model-forward timing gap |"
             ),
+        ]
+    )
+    if native:
+        lines.append(
+            (
+                "| Single AutoGaze forward / Quick Start native | "
+                f"{comparison.get('single_autogaze_forward_vs_native_ratio')} | "
+                "Full NVILA processor hook gap against README-style code path |"
+            )
+        )
+    lines.extend(
+        [
             (
                 "| Single AutoGaze total / Quick Start AutoGaze | "
                 f"{comparison.get('single_autogaze_total_vs_quickstart_ratio')} | "
@@ -686,6 +830,22 @@ def write_markdown_report(summary: dict[str, Any], path: Path, commands: dict[st
                 "",
             ]
         )
+    if native:
+        lines.extend(
+            [
+                "## Quick Start Native Breakdown",
+                "",
+                "| Stage | ms | Included in AutoGaze forward? |",
+                "| --- | ---: | --- |",
+                f"| video decode | {native.get('video_decode_ms')} | no |",
+                f"| video preprocess | {native.get('video_preprocess_ms')} | no |",
+                f"| input to device | {native.get('input_to_device_ms')} | no |",
+                f"| AutoGaze forward | {native.get('autogaze_ms')} | yes |",
+                f"| model load | {native.get('model_load_ms')} | no |",
+                f"| processor load | {native.get('processor_load_ms')} | no |",
+                "",
+            ]
+        )
     lines.extend(
         [
             "## AutoGaze Runtime Config",
@@ -723,10 +883,17 @@ def write_markdown_report(summary: dict[str, Any], path: Path, commands: dict[st
         ]
     )
     quick_options = options.get("quickstart_direct", {})
+    native_options = options.get("quickstart_native") or {}
     stream_options = options.get("current_implementation_stream_profile") or {}
     single_options = options.get("current_implementation_single", {})
     lines.extend(
         [
+            (
+                f"| Quick Start native | batch_size={native_options.get('batch_size')} | "
+                f"{native_options.get('gazing_ratio')} | {native_options.get('task_loss_requirement')} | "
+                f"{native_options.get('target_scales')} | {native_options.get('target_patch_size')} | "
+                f"{native_options.get('frames')} |  | README-style path; decode/preprocess excluded from forward |"
+            ),
             (
                 f"| Quick Start direct | batch_size={quick_options.get('batch_size')} | "
                 f"{quick_options.get('gazing_ratio')} | {quick_options.get('task_loss_requirement')} | "
@@ -771,6 +938,17 @@ def write_markdown_report(summary: dict[str, Any], path: Path, commands: dict[st
             "",
         ]
     )
+    if "quickstart_native" in commands:
+        lines.extend(
+            [
+                "Quick Start native:",
+                "",
+                "```bash",
+                " ".join(commands["quickstart_native"]),
+                "```",
+                "",
+            ]
+        )
     if "stream_profile" in commands:
         lines.extend(
             [
@@ -860,12 +1038,14 @@ def validate_compare_config(config: CompareConfig) -> None:
 def run_comparison(config: CompareConfig, *, dry_run: bool = False) -> dict[str, Any]:
     validate_compare_config(config)
     config.output_dir.mkdir(parents=True, exist_ok=True)
+    quickstart_native_command = build_quickstart_native_command(config) if config.run_quickstart_native else None
     quickstart_command = build_quickstart_command(config)
     stream_command = build_stream_profile_command(config) if config.run_stream_profile else None
     single_command = build_single_command(config) if config.run_single else None
-    commands = {
-        "quickstart": quickstart_command,
-    }
+    commands = {}
+    if quickstart_native_command is not None:
+        commands["quickstart_native"] = quickstart_native_command
+    commands["quickstart"] = quickstart_command
     if stream_command is not None:
         commands["stream_profile"] = stream_command
     if single_command is not None:
@@ -876,6 +1056,8 @@ def run_comparison(config: CompareConfig, *, dry_run: bool = False) -> dict[str,
         return payload
 
     runtime = check_target_runtime(config)
+    if quickstart_native_command is not None:
+        run_command(quickstart_native_command, config)
     run_command(quickstart_command, config)
     if stream_command is not None:
         run_command(stream_command, config)
@@ -888,6 +1070,10 @@ def run_comparison(config: CompareConfig, *, dry_run: bool = False) -> dict[str,
         quickstart_json=config.quickstart_json,
         stream_json=config.stream_json if stream_command is not None else None,
         single_json=config.single_json if single_command is not None else None,
+        quickstart_native_payload=_read_json(config.quickstart_native_json)
+        if quickstart_native_command is not None
+        else None,
+        quickstart_native_json=config.quickstart_native_json if quickstart_native_command is not None else None,
     )
     summary["target_runtime"] = runtime
     summary["commands"] = commands
@@ -897,6 +1083,7 @@ def run_comparison(config: CompareConfig, *, dry_run: bool = False) -> dict[str,
 
 
 def compact_sweep_run(config: CompareConfig, summary: dict[str, Any]) -> dict[str, Any]:
+    native = summary.get("quickstart_native") or {}
     quick = summary.get("quickstart_direct") or {}
     stream = summary.get("current_implementation_stream_profile") or {}
     single = summary.get("current_implementation_single") or {}
@@ -909,26 +1096,34 @@ def compact_sweep_run(config: CompareConfig, summary: dict[str, Any]) -> dict[st
         "markdown_report": str(config.markdown_report),
         "commands": summary.get("commands"),
         "metrics": {
+            "quickstart_native_autogaze_ms": native.get("autogaze_ms"),
             "quickstart_autogaze_ms": quick.get("autogaze_ms"),
             "stream_autogaze_forward_ms": stream.get("autogaze_model_forward_ms"),
             "stream_pre_llm_total_ms": stream.get("pre_llm_stream_total_ms"),
             "single_autogaze_forward_ms": single.get("autogaze_model_forward_ms"),
             "single_autogaze_total_ms": single.get("autogaze_total_ms"),
             "single_total_ms": single.get("total_ms"),
+            "quickstart_native_raw_patch_budget": native.get("raw_patch_budget"),
             "quickstart_raw_patch_budget": quick.get("raw_patch_budget"),
             "stream_raw_patch_budget": stream.get("raw_patch_budget"),
             "single_raw_patch_budget": single.get("raw_patch_budget"),
+            "quickstart_native_selected_patches": native.get("selected_patches"),
             "quickstart_selected_patches": quick.get("selected_patches"),
             "stream_selected_patches": stream.get("selected_patches"),
             "single_selected_patches": single.get("selected_patches"),
+            "quickstart_native_token_reduction_ratio": native.get("token_reduction_ratio"),
             "quickstart_token_reduction_ratio": quick.get("token_reduction_ratio"),
             "stream_token_reduction_ratio": stream.get("token_reduction_ratio"),
             "single_token_reduction_ratio": single.get("token_reduction_ratio"),
+            "quickstart_direct_vs_native_ratio": comparison.get("quickstart_direct_vs_native_ratio"),
             "stream_autogaze_forward_vs_quickstart_ratio": comparison.get(
                 "stream_autogaze_forward_vs_quickstart_ratio"
             ),
             "single_autogaze_forward_vs_quickstart_ratio": comparison.get(
                 "single_autogaze_forward_vs_quickstart_ratio"
+            ),
+            "single_autogaze_forward_vs_native_ratio": comparison.get(
+                "single_autogaze_forward_vs_native_ratio"
             ),
         },
     }
@@ -938,9 +1133,13 @@ def compact_sweep_run(config: CompareConfig, summary: dict[str, Any]) -> dict[st
 
 
 def write_sweep_markdown_report(payload: dict[str, Any], path: Path) -> None:
+    native_enabled = bool(payload.get("sweep", {}).get("quickstart_native_enabled", False))
     stream_enabled = bool(payload.get("sweep", {}).get("stream_profile_enabled", True))
     single_enabled = bool(payload.get("sweep", {}).get("single_enabled", True))
-    lanes = ["Quick Start direct"]
+    lanes = []
+    if native_enabled:
+        lanes.append("Quick Start native")
+    lanes.append("Quick Start direct")
     if stream_enabled:
         lanes.append("stream-profile")
     if single_enabled:
@@ -957,22 +1156,24 @@ def write_sweep_markdown_report(payload: dict[str, Any], path: Path) -> None:
         "## Runs",
         "",
         (
-            "| Gazing ratio | Task loss | QuickStart ms | Stream AutoGaze ms | Stream total ms | "
-            "Single AutoGaze ms | Single total ms | QuickStart reduction | Stream reduction | Output |"
+            "| Gazing ratio | Task loss | Native ms | Direct ms | Stream AutoGaze ms | Stream total ms | "
+            "Single AutoGaze ms | Single total ms | Native/direct ratio | Single/native ratio | Direct reduction | Output |"
         ),
-        "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for run in payload["runs"]:
         metrics = run.get("metrics") or {}
         lines.append(
             f"| {run.get('gazing_ratio')} | {run.get('task_loss_requirement')} | "
+            f"{metrics.get('quickstart_native_autogaze_ms')} | "
             f"{metrics.get('quickstart_autogaze_ms')} | "
             f"{metrics.get('stream_autogaze_forward_ms')} | "
             f"{metrics.get('stream_pre_llm_total_ms')} | "
             f"{metrics.get('single_autogaze_forward_ms')} | "
             f"{metrics.get('single_total_ms')} | "
+            f"{metrics.get('quickstart_direct_vs_native_ratio')} | "
+            f"{metrics.get('single_autogaze_forward_vs_native_ratio')} | "
             f"{metrics.get('quickstart_token_reduction_ratio')} | "
-            f"{metrics.get('stream_token_reduction_ratio')} | "
             f"`{run.get('output_dir')}` |"
         )
     lines.extend(
@@ -980,9 +1181,9 @@ def write_sweep_markdown_report(payload: dict[str, Any], path: Path) -> None:
             "",
             "## Reading Order",
             "",
-            "1. Check `quickstart_raw_patch_budget`, `stream_raw_patch_budget`, and `single_raw_patch_budget` first.",
+            "1. Check `quickstart_native_raw_patch_budget`, `quickstart_raw_patch_budget`, `stream_raw_patch_budget`, and `single_raw_patch_budget` first.",
             "2. Then compare `selected_patches` and token reduction ratio for the same policy.",
-            "3. Use `quickstart_autogaze_ms` vs `single_autogaze_forward_ms` for the 3s vs 300ms sanity check.",
+            "3. Use `quickstart_native_autogaze_ms`, `quickstart_autogaze_ms`, and `single_autogaze_forward_ms` for the 3s vs 300ms sanity check.",
             "4. Use stream total only when you want decode/tile/tensorize overhead included.",
             "",
         ]
@@ -1012,6 +1213,7 @@ def run_sweep(
             "dry_run": dry_run,
             "root_output_dir": str(config.output_dir),
             "num_runs": len(runs),
+            "quickstart_native_enabled": config.run_quickstart_native,
             "stream_profile_enabled": config.run_stream_profile,
             "single_enabled": config.run_single,
             "gazing_ratios": [float(item) for item in gazing_ratios],
@@ -1040,6 +1242,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--device", choices=["mps", "cuda", "cpu"], default="mps")
     parser.add_argument("--dtype", choices=["float32", "float16"], default="float32")
     parser.add_argument("--frames", type=int, default=16)
+    parser.add_argument("--quickstart-native", action="store_true")
     parser.add_argument("--quickstart-batch-size", type=int, default=1)
     parser.add_argument("--quickstart-run-siglip", action="store_true")
     parser.add_argument("--thumbnail-frames", type=int, default=1)
@@ -1093,6 +1296,7 @@ def config_from_args(args: argparse.Namespace) -> CompareConfig:
         autogaze_target_scales=args.autogaze_target_scales,
         autogaze_target_patch_size=args.autogaze_target_patch_size,
         require_mps=not args.no_require_mps,
+        run_quickstart_native=args.quickstart_native,
         run_stream_profile=not args.skip_stream_profile,
         run_single=not args.skip_single,
         max_new_tokens=args.max_new_tokens,

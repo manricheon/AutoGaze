@@ -5,6 +5,7 @@ import pytest
 
 from repro.autogaze_timing_compare import (
     CompareConfig,
+    build_quickstart_native_command,
     build_quickstart_command,
     build_single_command,
     build_stream_profile_command,
@@ -61,6 +62,13 @@ def test_config_from_args_can_skip_stream_profile_lane():
     assert config.run_single is True
 
 
+def test_config_from_args_can_enable_quickstart_native_lane():
+    args = parse_args(["--quickstart-native"])
+    config = config_from_args(args)
+
+    assert config.run_quickstart_native is True
+
+
 def test_missing_subprocess_python_reports_cli_fix():
     config = CompareConfig(python=Path("/definitely/missing/python"), require_mps=False)
 
@@ -88,6 +96,7 @@ def test_build_commands_use_requested_mps_venv_and_local_weights(tmp_path):
     )
 
     quickstart = build_quickstart_command(config)
+    quickstart_native = build_quickstart_native_command(config)
     stream_profile = build_stream_profile_command(config)
     single = build_single_command(config)
 
@@ -108,6 +117,14 @@ def test_build_commands_use_requested_mps_venv_and_local_weights(tmp_path):
     assert "--skip-siglip" in quickstart
     assert quickstart[quickstart.index("--target-scales") + 1] == "56+112+196+392"
     assert quickstart[quickstart.index("--target-patch-size") + 1] == "14"
+    assert quickstart_native[:3] == [
+        "/Users/mrc/myresearch/AutoGaze/.venv/bin/python",
+        "-m",
+        "repro.autogaze_quickstart_native",
+    ]
+    assert quickstart_native[quickstart_native.index("--autogaze-model") + 1] == "/Users/mrc/myresearch/AutoGaze/weights/AutoGaze"
+    assert quickstart_native[quickstart_native.index("--target-scales") + 1] == "56+112+196+392"
+    assert quickstart_native[quickstart_native.index("--target-patch-size") + 1] == "14"
     assert stream_profile[stream_profile.index("--autogaze-model") + 1] == "/Users/mrc/myresearch/AutoGaze/weights/AutoGaze"
     assert stream_profile[stream_profile.index("--device") + 1] == "mps"
     assert stream_profile[stream_profile.index("--stream-chunk-frames") + 1] == "16"
@@ -143,6 +160,25 @@ def test_run_comparison_dry_run_can_compare_quickstart_to_single_without_stream(
     assert payload["commands"]["single"][payload["commands"]["single"].index("--mode") + 1] == "single"
 
 
+def test_run_comparison_dry_run_can_include_quickstart_native_lane(tmp_path):
+    config = CompareConfig(
+        python=Path("/Users/mrc/myresearch/AutoGaze/.venv/bin/python"),
+        workspace_root=Path("/workspace/autogaze-repro"),
+        output_dir=tmp_path,
+        run_quickstart_native=True,
+        run_stream_profile=False,
+    )
+
+    payload = run_comparison(config, dry_run=True)
+
+    assert set(payload["commands"]) == {"quickstart_native", "quickstart", "single"}
+    assert payload["commands"]["quickstart_native"][:3] == [
+        "/Users/mrc/myresearch/AutoGaze/.venv/bin/python",
+        "-m",
+        "repro.autogaze_quickstart_native",
+    ]
+
+
 def test_summarize_comparison_separates_quickstart_and_stream_profile_metrics(tmp_path):
     quickstart_payload = {
         "metadata": {"device": "mps"},
@@ -157,6 +193,27 @@ def test_summarize_comparison_separates_quickstart_and_stream_profile_metrics(tm
         },
         "latency_ms": {
             "autogaze": {"median": 100.0},
+        },
+        "gaze": {
+            "raw_patch_budget": 4240,
+            "selected_non_padded_patches": 212,
+            "total_gaze_slots": 348,
+            "token_reduction_ratio": 20.0,
+        },
+    }
+    quickstart_native_payload = {
+        "metadata": {"device": "mps"},
+        "input": {
+            "video": "example_input.mp4",
+            "frames": 16,
+            "dtype": "float32",
+            "gazing_ratio": 0.75,
+            "task_loss_requirement": 0.7,
+        },
+        "latency_ms": {
+            "autogaze_forward": {"median": 90.0},
+            "video_decode": {"median": 10.0},
+            "video_preprocess": {"median": 20.0},
         },
         "gaze": {
             "raw_patch_budget": 4240,
@@ -228,11 +285,14 @@ def test_summarize_comparison_separates_quickstart_and_stream_profile_metrics(tm
         quickstart_payload,
         stream_payload,
         single_payload,
+        quickstart_native_payload=quickstart_native_payload,
         quickstart_json=tmp_path / "quickstart.json",
         stream_json=tmp_path / "stream.json",
         single_json=tmp_path / "single.json",
+        quickstart_native_json=tmp_path / "native.json",
     )
 
+    assert summary["quickstart_native"]["autogaze_ms"] == 90.0
     assert summary["quickstart_direct"]["autogaze_ms"] == 100.0
     assert summary["quickstart_direct"]["batch_size"] == 1
     assert summary["quickstart_direct"]["siglip_full_ms"] is None
@@ -244,6 +304,8 @@ def test_summarize_comparison_separates_quickstart_and_stream_profile_metrics(tm
     assert summary["current_implementation_single"]["autogaze_total_ms"] == 340.0
     assert summary["current_implementation_single"]["generate_ms"] == 900.0
     assert summary["comparison"]["stream_autogaze_forward_vs_quickstart_ratio"] == 3.0
+    assert summary["comparison"]["quickstart_direct_vs_native_ratio"] == pytest.approx(100.0 / 90.0)
+    assert summary["comparison"]["single_autogaze_forward_vs_native_ratio"] == pytest.approx(310.0 / 90.0)
     assert summary["comparison"]["single_autogaze_forward_vs_quickstart_ratio"] == 3.1
     assert summary["comparison"]["single_autogaze_total_vs_quickstart_ratio"] == 3.4
     assert summary["comparison"]["stream_total_vs_quickstart_autogaze_ratio"] == 3.2
