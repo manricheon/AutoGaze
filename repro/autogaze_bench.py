@@ -112,6 +112,16 @@ def target_patches_per_frame(target_scales: list[int] | None, target_patch_size:
     return sum((int(scale) // int(target_patch_size)) ** 2 for scale in target_scales)
 
 
+def autogaze_transform_kwargs(target_scales: list[int] | None) -> dict[str, dict[str, int]]:
+    if not target_scales:
+        return {}
+    largest_scale = int(target_scales[-1])
+    return {
+        "size": {"height": largest_scale, "width": largest_scale},
+        "crop_size": {"height": largest_scale, "width": largest_scale},
+    }
+
+
 def run(args: argparse.Namespace) -> None:
     import torch
 
@@ -127,7 +137,10 @@ def run(args: argparse.Namespace) -> None:
     target_patch_size = getattr(args, "target_patch_size", None)
     target_patch_size = int(target_patch_size) if target_patch_size is not None else None
 
-    autogaze_transform = AutoGazeImageProcessor.from_pretrained(args.autogaze_model)
+    autogaze_transform = AutoGazeImageProcessor.from_pretrained(
+        args.autogaze_model,
+        **autogaze_transform_kwargs(target_scales),
+    )
     autogaze_model = AutoGaze.from_pretrained(args.autogaze_model).to(device)
     autogaze_model.eval()
 

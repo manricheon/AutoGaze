@@ -80,6 +80,8 @@ outputs/autogaze_repro/timing_compare/quickstart_vs_current_report.md
 
 질문한 batch size 영향에 대한 답은 “그렇다, 하지만 의미가 다르다”이다. Quick Start의 batch size 1은 단일 16-frame clip 하나를 넣는 기준이다. batch size를 키우면 한 번의 AutoGaze call에 여러 clip을 넣으므로 total latency는 보통 증가하지만, GPU에서는 samples/sec throughput이 좋아질 수 있다. 반면 NVILA의 `max_batch_size_autogaze`는 사용자 비디오 batch가 아니라 tile sequence batch다. 4K/다중 tile에서는 유의미하지만, 1-tile/16-frame smoke에서는 크게 줄어들 여지가 작다.
 
+`target_scales`를 넘기는 경우 AutoGaze 입력 tensor는 반드시 largest scale의 정사각형이어야 한다. 예를 들어 `56+112+196+392`와 patch size `14`를 쓰면 AutoGaze에 들어가는 video tensor의 `H`와 `W`가 모두 `392`여야 한다. `shortest_edge=392`처럼 aspect ratio를 유지하는 resize는 16:9 비디오에서 `697x392` 같은 직사각형을 만들 수 있고, 원본 AutoGaze의 `assert H == W == target_scales[-1]`에 걸린다. 현재 comparison direct path와 stream-profile path는 이 경우 AutoGaze 전처리를 `size={"height": 392, "width": 392}`로 강제한다.
+
 ## 속도 벤치마크 읽는 순서
 
 AutoGaze 자체가 빠른지/느린지를 보려면 아래 순서로 봐야 한다. 특히 H100에서 “Quick Start는 3초, `nvila_runner`는 300ms”처럼 보이면 거의 항상 측정 경계나 gaze policy가 다르다.

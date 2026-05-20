@@ -3993,7 +3993,7 @@ def build_stream_siglip_model(
 def autogaze_processor_size_kwargs(target_scales: list[int]) -> dict[str, dict[str, int]]:
     largest_scale = int(target_scales[-1])
     return {
-        "size": {"shortest_edge": largest_scale},
+        "size": {"height": largest_scale, "width": largest_scale},
         "crop_size": {"height": largest_scale, "width": largest_scale},
     }
 

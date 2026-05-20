@@ -1662,7 +1662,7 @@ def test_autogaze_processor_size_kwargs_match_largest_target_scale():
     kwargs = autogaze_processor_size_kwargs([56, 112, 196, 392])
 
     assert kwargs == {
-        "size": {"shortest_edge": 392},
+        "size": {"height": 392, "width": 392},
         "crop_size": {"height": 392, "width": 392},
     }
 

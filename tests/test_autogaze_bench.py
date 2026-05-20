@@ -3,6 +3,7 @@ from pathlib import Path
 
 from repro.autogaze_bench import (
     add_external_autogaze,
+    autogaze_transform_kwargs,
     flatten_video_batch_for_siglip_baseline,
     repeat_video_batch,
     select_siglip_vision_model_class,
@@ -65,6 +66,14 @@ def test_repeat_video_batch_repeats_single_quickstart_clip():
     repeated = repeat_video_batch(video, batch_size=3)
 
     assert list(repeated.shape) == [3, 2, 3, 4, 5]
+
+
+def test_autogaze_transform_kwargs_force_square_largest_target_scale():
+    assert autogaze_transform_kwargs([56, 112, 196, 392]) == {
+        "size": {"height": 392, "width": 392},
+        "crop_size": {"height": 392, "width": 392},
+    }
+    assert autogaze_transform_kwargs(None) == {}
 
 
 def test_select_siglip_vision_model_class_uses_config_model_type():
