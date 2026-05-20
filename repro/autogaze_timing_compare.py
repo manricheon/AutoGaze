@@ -46,6 +46,7 @@ class CompareConfig:
     autogaze_target_scales: str | None = None
     autogaze_target_patch_size: int | None = None
     require_mps: bool = True
+    run_stream_profile: bool = True
     run_single: bool = True
     max_new_tokens: int = 1
     prompt: str = "Question: What is visible in the video? A. road B. kitchen C. beach D. office Please answer with the letter."
@@ -329,12 +330,14 @@ def _single_result(single_payload: dict[str, Any] | None) -> dict[str, Any]:
 
 def build_autogaze_latency_options_summary(
     quickstart_payload: dict[str, Any],
-    stream_payload: dict[str, Any],
+    stream_payload: dict[str, Any] | None,
     single_payload: dict[str, Any] | None,
 ) -> dict[str, Any]:
     quick_options = quickstart_payload.get("autogaze_latency_options") or {}
-    stream_config = stream_payload.get("autogaze_runtime_config") or {}
-    stream_sampling = stream_payload.get("sampling") or {}
+    stream_config = stream_payload.get("autogaze_runtime_config") if stream_payload else {}
+    stream_config = stream_config or {}
+    stream_sampling = stream_payload.get("sampling") if stream_payload else {}
+    stream_sampling = stream_sampling or {}
     single_result = _single_result(single_payload)
     single_config = single_result.get("autogaze_runtime_config") or (single_payload or {}).get("autogaze_runtime_config") or {}
     return {
@@ -350,18 +353,22 @@ def build_autogaze_latency_options_summary(
             "dtype": quick_options.get("dtype") or _metric(quickstart_payload, "input", "dtype"),
             "siglip_enabled": quick_options.get("siglip_enabled"),
         },
-        "current_implementation_stream_profile": {
-            "gazing_ratio_tile": stream_config.get("stream_gazing_ratio") or stream_config.get("gazing_ratio_tile"),
-            "task_loss_requirement_tile": stream_config.get("task_loss_requirement_tile"),
-            "target_scales": stream_config.get("target_scales") or stream_payload.get("autogaze_target_scales"),
-            "target_patch_size": stream_config.get("target_patch_size") or stream_payload.get("autogaze_target_patch_size"),
-            "max_batch_size_autogaze": stream_config.get("max_batch_size_autogaze"),
-            "frames": stream_sampling.get("num_video_frames"),
-            "thumbnail_frames": stream_sampling.get("num_video_frames_thumbnail"),
-            "stream_chunk_frames": stream_sampling.get("stream_chunk_frames"),
-            "max_tiles_video": _metric(stream_payload, "stream_plan", "tiling", "spatial_tiles"),
-            "decode_strategy": stream_sampling.get("decode_strategy"),
-        },
+        "current_implementation_stream_profile": (
+            {
+                "gazing_ratio_tile": stream_config.get("stream_gazing_ratio") or stream_config.get("gazing_ratio_tile"),
+                "task_loss_requirement_tile": stream_config.get("task_loss_requirement_tile"),
+                "target_scales": stream_config.get("target_scales") or stream_payload.get("autogaze_target_scales"),
+                "target_patch_size": stream_config.get("target_patch_size") or stream_payload.get("autogaze_target_patch_size"),
+                "max_batch_size_autogaze": stream_config.get("max_batch_size_autogaze"),
+                "frames": stream_sampling.get("num_video_frames"),
+                "thumbnail_frames": stream_sampling.get("num_video_frames_thumbnail"),
+                "stream_chunk_frames": stream_sampling.get("stream_chunk_frames"),
+                "max_tiles_video": _metric(stream_payload, "stream_plan", "tiling", "spatial_tiles"),
+                "decode_strategy": stream_sampling.get("decode_strategy"),
+            }
+            if stream_payload
+            else None
+        ),
         "current_implementation_single": {
             "gazing_ratio_tile": single_config.get("gazing_ratio_tile"),
             "task_loss_requirement_tile": single_config.get("task_loss_requirement_tile"),
@@ -382,23 +389,23 @@ def build_autogaze_latency_options_summary(
 
 def summarize_comparison(
     quickstart_payload: dict[str, Any],
-    stream_payload: dict[str, Any],
+    stream_payload: dict[str, Any] | None,
     single_payload: dict[str, Any] | None = None,
     *,
     quickstart_json: Path,
-    stream_json: Path,
+    stream_json: Path | None,
     single_json: Path | None = None,
 ) -> dict[str, Any]:
     quick_autogaze_ms = _metric(quickstart_payload, "latency_ms", "autogaze", "median")
     quick_raw = _metric(quickstart_payload, "gaze", "raw_patch_budget")
     quick_selected = _metric(quickstart_payload, "gaze", "selected_non_padded_patches")
-    stream_autogaze_ms = _metric(stream_payload, "timing_ms", "tile_autogaze_forward")
-    stream_total_ms = _metric(stream_payload, "timing_ms", "pre_llm_stream_total_measured")
-    stream_raw = _metric(stream_payload, "token_metrics", "autogaze_input_patch_tokens")
-    if stream_raw is None:
+    stream_autogaze_ms = _metric(stream_payload, "timing_ms", "tile_autogaze_forward") if stream_payload else None
+    stream_total_ms = _metric(stream_payload, "timing_ms", "pre_llm_stream_total_measured") if stream_payload else None
+    stream_raw = _metric(stream_payload, "token_metrics", "autogaze_input_patch_tokens") if stream_payload else None
+    if stream_payload and stream_raw is None:
         stream_raw = _metric(stream_payload, "gaze", "raw_patch_budget")
-    stream_selected = _metric(stream_payload, "token_metrics", "autogaze_selected_patch_tokens")
-    if stream_selected is None:
+    stream_selected = _metric(stream_payload, "token_metrics", "autogaze_selected_patch_tokens") if stream_payload else None
+    if stream_payload and stream_selected is None:
         stream_selected = _metric(stream_payload, "gaze", "selected_non_padded_patches")
     single_result = _single_result(single_payload)
     single_token_metrics = single_result.get("token_metrics", {}) if isinstance(single_result, dict) else {}
@@ -419,13 +426,31 @@ def summarize_comparison(
     if single_selected is None:
         single_selected = single_token_metrics.get("encoder_autogaze_selected_patch_tokens")
 
+    interpretation = [
+        "Quick Start direct time measures only the direct AutoGaze model call in repro.autogaze_bench.",
+    ]
+    if stream_payload:
+        interpretation.append(
+            "Current stream-profile time measures the repo NVILA-style pre-LLM path: decode, resize if configured, tiling, tensorization, AutoGaze, and optional SigLIP."
+        )
+    if single_payload:
+        interpretation.append(
+            "Current single mode measures the full NVILA processor plus model.generate path, including vision encoder, projector, and LLM."
+        )
+    interpretation.extend(
+        [
+            "Use raw_patch_budget_ratio and tile_sequences before judging speed. If they are not 1, the workloads are not apples-to-apples.",
+            "For the 300ms vs 3s question, compare Quick Start direct against current_implementation_single.autogaze_model_forward_ms first, then autogaze_total_ms.",
+        ]
+    )
+
     summary = {
         "inputs": {
             "quickstart_json": str(quickstart_json),
-            "stream_profile_json": str(stream_json),
+            "stream_profile_json": str(stream_json) if stream_json else None,
             "single_json": str(single_json) if single_json else None,
             "quickstart_video": _metric(quickstart_payload, "input", "video"),
-            "stream_video": stream_payload.get("video"),
+            "stream_video": stream_payload.get("video") if stream_payload else None,
             "single_video": single_payload.get("video") if single_payload else None,
         },
         "autogaze_latency_options": build_autogaze_latency_options_summary(
@@ -448,29 +473,33 @@ def summarize_comparison(
             "token_reduction_ratio": _metric(quickstart_payload, "gaze", "token_reduction_ratio"),
             "metric_source": "latency_ms.autogaze.median",
         },
-        "current_implementation_stream_profile": {
-            "device": _metric(stream_payload, "metadata", "device"),
-            "frames": _metric(stream_payload, "sampling", "num_video_frames"),
-            "thumbnail_frames": _metric(stream_payload, "sampling", "thumbnail_frames_processed"),
-            "stream_chunk_frames": _metric(stream_payload, "sampling", "stream_chunk_frames"),
-            "autogaze_runtime_config": stream_payload.get("autogaze_runtime_config"),
-            "tile_sequences": _metric(stream_payload, "gaze", "tile_sequences")
-            or _metric(stream_payload, "token_metrics", "tile_sequences"),
-            "video_decode_ms": _metric(stream_payload, "timing_ms", "video_decode_scan")
-            or _metric(stream_payload, "timing_ms", "video_decode_seek"),
-            "spatial_tile_build_ms": _metric(stream_payload, "timing_ms", "spatial_tile_build"),
-            "autogaze_tensorize_ms": _metric(stream_payload, "timing_ms", "tile_autogaze_tensorize"),
-            "autogaze_model_forward_ms": stream_autogaze_ms,
-            "siglip_gazed_ms": _metric(stream_payload, "timing_ms", "siglip_gazed_forward"),
-            "siglip_keep_all_ms": _metric(stream_payload, "timing_ms", "siglip_keep_all_forward"),
-            "pre_llm_stream_total_ms": stream_total_ms,
-            "raw_patch_budget": stream_raw,
-            "selected_patches": stream_selected,
-            "total_gaze_slots": _metric(stream_payload, "gaze", "total_gaze_slots"),
-            "token_reduction_ratio": _metric(stream_payload, "token_metrics", "autogaze_patch_reduction_ratio")
-            or _metric(stream_payload, "gaze", "token_reduction_ratio"),
-            "metric_source": "timing_ms.tile_autogaze_forward",
-        },
+        "current_implementation_stream_profile": (
+            {
+                "device": _metric(stream_payload, "metadata", "device"),
+                "frames": _metric(stream_payload, "sampling", "num_video_frames"),
+                "thumbnail_frames": _metric(stream_payload, "sampling", "thumbnail_frames_processed"),
+                "stream_chunk_frames": _metric(stream_payload, "sampling", "stream_chunk_frames"),
+                "autogaze_runtime_config": stream_payload.get("autogaze_runtime_config"),
+                "tile_sequences": _metric(stream_payload, "gaze", "tile_sequences")
+                or _metric(stream_payload, "token_metrics", "tile_sequences"),
+                "video_decode_ms": _metric(stream_payload, "timing_ms", "video_decode_scan")
+                or _metric(stream_payload, "timing_ms", "video_decode_seek"),
+                "spatial_tile_build_ms": _metric(stream_payload, "timing_ms", "spatial_tile_build"),
+                "autogaze_tensorize_ms": _metric(stream_payload, "timing_ms", "tile_autogaze_tensorize"),
+                "autogaze_model_forward_ms": stream_autogaze_ms,
+                "siglip_gazed_ms": _metric(stream_payload, "timing_ms", "siglip_gazed_forward"),
+                "siglip_keep_all_ms": _metric(stream_payload, "timing_ms", "siglip_keep_all_forward"),
+                "pre_llm_stream_total_ms": stream_total_ms,
+                "raw_patch_budget": stream_raw,
+                "selected_patches": stream_selected,
+                "total_gaze_slots": _metric(stream_payload, "gaze", "total_gaze_slots"),
+                "token_reduction_ratio": _metric(stream_payload, "token_metrics", "autogaze_patch_reduction_ratio")
+                or _metric(stream_payload, "gaze", "token_reduction_ratio"),
+                "metric_source": "timing_ms.tile_autogaze_forward",
+            }
+            if stream_payload
+            else None
+        ),
         "current_implementation_single": None,
         "comparison": {
             "stream_autogaze_forward_vs_quickstart_ratio": _ratio(stream_autogaze_ms, quick_autogaze_ms),
@@ -483,13 +512,7 @@ def summarize_comparison(
             "single_raw_patch_budget_ratio": None,
             "single_selected_patch_ratio": None,
         },
-        "interpretation": [
-            "Quick Start direct time measures only the direct AutoGaze model call in repro.autogaze_bench.",
-            "Current stream-profile time measures the repo NVILA-style pre-LLM path: decode, resize if configured, tiling, tensorization, AutoGaze, and optional SigLIP.",
-            "Current single mode measures the full NVILA processor plus model.generate path, including vision encoder, projector, and LLM.",
-            "Use raw_patch_budget_ratio and tile_sequences before judging speed. If they are not 1, the workloads are not apples-to-apples.",
-            "For the 300ms vs 3s question, compare Quick Start direct against current_implementation_single.autogaze_model_forward_ms first, then autogaze_total_ms.",
-        ],
+        "interpretation": interpretation,
     }
     if single_payload:
         summary["current_implementation_single"] = {
@@ -530,7 +553,7 @@ def summarize_comparison(
 
 def write_markdown_report(summary: dict[str, Any], path: Path, commands: dict[str, list[str]]) -> None:
     quick = summary["quickstart_direct"]
-    stream = summary["current_implementation_stream_profile"]
+    stream = summary.get("current_implementation_stream_profile")
     single = summary.get("current_implementation_single")
     comparison = summary["comparison"]
     options = summary.get("autogaze_latency_options", {})
@@ -540,26 +563,40 @@ def write_markdown_report(summary: dict[str, Any], path: Path, commands: dict[st
         "## Scope",
         "",
         "- Quick Start direct: original AutoGaze-style 16-frame call on `example_input.mp4`.",
-        "- Current implementation: `repro.nvila_runner --mode stream-profile` with the same video and frame count.",
-        "- Current full path: `repro.nvila_runner --mode single` with the same video and frame count.",
-        "- The stream-profile lane validates pre-LLM boundaries; the single lane validates the real NVILA processor plus generate path.",
-        "",
-        "## Result Summary",
-        "",
-        "| Path | Device | Frames | Raw patches | Selected patches | AutoGaze forward ms | AutoGaze total ms | Total measured ms | Reduction |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
-        (
-            f"| Quick Start direct | {quick.get('device')} | {quick.get('frames')} | "
-            f"{quick.get('raw_patch_budget')} | {quick.get('selected_patches')} | "
-            f"{quick.get('autogaze_ms')} |  |  | {quick.get('token_reduction_ratio')} |"
-        ),
-        (
+    ]
+    if stream:
+        lines.append(
+            "- Current implementation: `repro.nvila_runner --mode stream-profile` with the same video and frame count."
+        )
+    if single:
+        lines.append("- Current full path: `repro.nvila_runner --mode single` with the same video and frame count.")
+    if stream and single:
+        lines.append(
+            "- The stream-profile lane validates pre-LLM boundaries; the single lane validates the real NVILA processor plus generate path."
+        )
+    elif single:
+        lines.append("- This run compares Quick Start direct against the non-streaming NVILA `single` generate path.")
+    lines.extend(
+        [
+            "",
+            "## Result Summary",
+            "",
+            "| Path | Device | Frames | Raw patches | Selected patches | AutoGaze forward ms | AutoGaze total ms | Total measured ms | Reduction |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            (
+                f"| Quick Start direct | {quick.get('device')} | {quick.get('frames')} | "
+                f"{quick.get('raw_patch_budget')} | {quick.get('selected_patches')} | "
+                f"{quick.get('autogaze_ms')} |  |  | {quick.get('token_reduction_ratio')} |"
+            ),
+        ]
+    )
+    if stream:
+        lines.append(
             f"| Current stream-profile | {stream.get('device')} | {stream.get('frames')} | "
             f"{stream.get('raw_patch_budget')} | {stream.get('selected_patches')} | "
             f"{stream.get('autogaze_model_forward_ms')} |  | {stream.get('pre_llm_stream_total_ms')} | "
             f"{stream.get('token_reduction_ratio')} |"
-        ),
-    ]
+        )
     if single:
         lines.append(
             f"| Current single | {single.get('device')} | {single.get('frames')} | "
@@ -574,11 +611,29 @@ def write_markdown_report(summary: dict[str, Any], path: Path, commands: dict[st
             "",
             "| Metric | Ratio | Meaning |",
             "| --- | ---: | --- |",
-            (
-                "| Stream AutoGaze forward / Quick Start AutoGaze | "
-                f"{comparison.get('stream_autogaze_forward_vs_quickstart_ratio')} | "
-                "Model-forward timing gap before decode/tile overhead |"
-            ),
+        ]
+    )
+    if stream:
+        lines.extend(
+            [
+                (
+                    "| Stream AutoGaze forward / Quick Start AutoGaze | "
+                    f"{comparison.get('stream_autogaze_forward_vs_quickstart_ratio')} | "
+                    "Model-forward timing gap before decode/tile overhead |"
+                ),
+                (
+                    "| Stream total / Quick Start AutoGaze | "
+                    f"{comparison.get('stream_total_vs_quickstart_autogaze_ratio')} | "
+                    "Pre-LLM pipeline overhead gap |"
+                ),
+                (
+                    "| Stream raw patches / Quick Start raw patches | "
+                    f"{comparison.get('raw_patch_budget_ratio')} | Workload size check |"
+                ),
+            ]
+        )
+    lines.extend(
+        [
             (
                 "| Single AutoGaze forward / Quick Start AutoGaze | "
                 f"{comparison.get('single_autogaze_forward_vs_quickstart_ratio')} | "
@@ -590,33 +645,29 @@ def write_markdown_report(summary: dict[str, Any], path: Path, commands: dict[st
                 "Full NVILA processor AutoGaze overhead gap |"
             ),
             (
-                "| Stream total / Quick Start AutoGaze | "
-                f"{comparison.get('stream_total_vs_quickstart_autogaze_ratio')} | "
-                "Pre-LLM pipeline overhead gap |"
-            ),
-            (
-                "| Stream raw patches / Quick Start raw patches | "
-                f"{comparison.get('raw_patch_budget_ratio')} | Workload size check |"
-            ),
-            (
                 "| Single raw patches / Quick Start raw patches | "
                 f"{comparison.get('single_raw_patch_budget_ratio')} | Full path workload size check |"
             ),
             "",
-            "## Current Stream-Profile Breakdown",
-            "",
-            "| Stage | ms |",
-            "| --- | ---: |",
-            f"| video decode | {stream.get('video_decode_ms')} |",
-            f"| spatial tile build | {stream.get('spatial_tile_build_ms')} |",
-            f"| AutoGaze tensorize | {stream.get('autogaze_tensorize_ms')} |",
-            f"| AutoGaze model forward | {stream.get('autogaze_model_forward_ms')} |",
-            f"| SigLIP gazed forward | {stream.get('siglip_gazed_ms')} |",
-            f"| SigLIP keep-all forward | {stream.get('siglip_keep_all_ms')} |",
-            f"| pre-LLM stream total | {stream.get('pre_llm_stream_total_ms')} |",
-            "",
         ]
     )
+    if stream:
+        lines.extend(
+            [
+                "## Current Stream-Profile Breakdown",
+                "",
+                "| Stage | ms |",
+                "| --- | ---: |",
+                f"| video decode | {stream.get('video_decode_ms')} |",
+                f"| spatial tile build | {stream.get('spatial_tile_build_ms')} |",
+                f"| AutoGaze tensorize | {stream.get('autogaze_tensorize_ms')} |",
+                f"| AutoGaze model forward | {stream.get('autogaze_model_forward_ms')} |",
+                f"| SigLIP gazed forward | {stream.get('siglip_gazed_ms')} |",
+                f"| SigLIP keep-all forward | {stream.get('siglip_keep_all_ms')} |",
+                f"| pre-LLM stream total | {stream.get('pre_llm_stream_total_ms')} |",
+                "",
+            ]
+        )
     if single:
         lines.extend(
             [
@@ -639,14 +690,19 @@ def write_markdown_report(summary: dict[str, Any], path: Path, commands: dict[st
         [
             "## AutoGaze Runtime Config",
             "",
-            "Stream-profile:",
-            "",
-            "```json",
-            json.dumps(stream.get("autogaze_runtime_config"), indent=2, ensure_ascii=False),
-            "```",
-            "",
         ]
     )
+    if stream:
+        lines.extend(
+            [
+                "Stream-profile:",
+                "",
+                "```json",
+                json.dumps(stream.get("autogaze_runtime_config"), indent=2, ensure_ascii=False),
+                "```",
+                "",
+            ]
+        )
     if single:
         lines.extend(
             [
@@ -667,7 +723,7 @@ def write_markdown_report(summary: dict[str, Any], path: Path, commands: dict[st
         ]
     )
     quick_options = options.get("quickstart_direct", {})
-    stream_options = options.get("current_implementation_stream_profile", {})
+    stream_options = options.get("current_implementation_stream_profile") or {}
     single_options = options.get("current_implementation_single", {})
     lines.extend(
         [
@@ -677,13 +733,20 @@ def write_markdown_report(summary: dict[str, Any], path: Path, commands: dict[st
                 f"{quick_options.get('target_scales')} | {quick_options.get('target_patch_size')} | "
                 f"{quick_options.get('frames')} |  | Lowest-latency single clip default is batch 1 |"
             ),
+        ]
+    )
+    if stream:
+        lines.append(
             (
                 f"| Stream-profile | max_batch_size_autogaze={stream_options.get('max_batch_size_autogaze')} | "
                 f"{stream_options.get('gazing_ratio_tile')} | {stream_options.get('task_loss_requirement_tile')} | "
                 f"{stream_options.get('target_scales')} | {stream_options.get('target_patch_size')} | "
                 f"{stream_options.get('frames')} | chunk={stream_options.get('stream_chunk_frames')}, tiles={stream_options.get('max_tiles_video')} | "
                 "Batches tile sequences before LLM |"
-            ),
+            )
+        )
+    lines.extend(
+        [
             (
                 f"| Single | max_batch_size_autogaze={single_options.get('max_batch_size_autogaze')} | "
                 f"{single_options.get('gazing_ratio_tile')} | {single_options.get('task_loss_requirement_tile')} | "
@@ -706,14 +769,19 @@ def write_markdown_report(summary: dict[str, Any], path: Path, commands: dict[st
             " ".join(commands["quickstart"]),
             "```",
             "",
-            "Current stream-profile:",
-            "",
-            "```bash",
-            " ".join(commands["stream_profile"]),
-            "```",
-            "",
         ]
     )
+    if "stream_profile" in commands:
+        lines.extend(
+            [
+                "Current stream-profile:",
+                "",
+                "```bash",
+                " ".join(commands["stream_profile"]),
+                "```",
+                "",
+            ]
+        )
     if "single" in commands:
         lines.extend(
             [
@@ -793,12 +861,13 @@ def run_comparison(config: CompareConfig, *, dry_run: bool = False) -> dict[str,
     validate_compare_config(config)
     config.output_dir.mkdir(parents=True, exist_ok=True)
     quickstart_command = build_quickstart_command(config)
-    stream_command = build_stream_profile_command(config)
+    stream_command = build_stream_profile_command(config) if config.run_stream_profile else None
     single_command = build_single_command(config) if config.run_single else None
     commands = {
         "quickstart": quickstart_command,
-        "stream_profile": stream_command,
     }
+    if stream_command is not None:
+        commands["stream_profile"] = stream_command
     if single_command is not None:
         commands["single"] = single_command
     if dry_run:
@@ -808,15 +877,16 @@ def run_comparison(config: CompareConfig, *, dry_run: bool = False) -> dict[str,
 
     runtime = check_target_runtime(config)
     run_command(quickstart_command, config)
-    run_command(stream_command, config)
+    if stream_command is not None:
+        run_command(stream_command, config)
     if single_command is not None:
         run_command(single_command, config)
     summary = summarize_comparison(
         _read_json(config.quickstart_json),
-        _read_json(config.stream_json),
+        _read_json(config.stream_json) if stream_command is not None else None,
         _read_json(config.single_json) if single_command is not None else None,
         quickstart_json=config.quickstart_json,
-        stream_json=config.stream_json,
+        stream_json=config.stream_json if stream_command is not None else None,
         single_json=config.single_json if single_command is not None else None,
     )
     summary["target_runtime"] = runtime
@@ -868,13 +938,20 @@ def compact_sweep_run(config: CompareConfig, summary: dict[str, Any]) -> dict[st
 
 
 def write_sweep_markdown_report(payload: dict[str, Any], path: Path) -> None:
+    stream_enabled = bool(payload.get("sweep", {}).get("stream_profile_enabled", True))
+    single_enabled = bool(payload.get("sweep", {}).get("single_enabled", True))
+    lanes = ["Quick Start direct"]
+    if stream_enabled:
+        lanes.append("stream-profile")
+    if single_enabled:
+        lanes.append("single")
     lines = [
         "# AutoGaze Policy Sweep",
         "",
         "## Scope",
         "",
         "- Sweeps `gazing_ratio` and `task_loss_requirement` with the same video/frame/tile settings.",
-        "- Each row runs Quick Start direct and stream-profile; single mode is included unless `--skip-single` is set.",
+        f"- Each row runs: {', '.join(lanes)}.",
         "- Compare latency only after checking raw/selected patch counts. Different patch budgets are not apples-to-apples.",
         "",
         "## Runs",
@@ -935,6 +1012,8 @@ def run_sweep(
             "dry_run": dry_run,
             "root_output_dir": str(config.output_dir),
             "num_runs": len(runs),
+            "stream_profile_enabled": config.run_stream_profile,
+            "single_enabled": config.run_single,
             "gazing_ratios": [float(item) for item in gazing_ratios],
             "task_loss_requirements": [float(item) for item in task_loss_requirements],
             "note": (
@@ -980,6 +1059,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--autogaze-target-patch-size", type=int)
     parser.add_argument("--max-new-tokens", type=int, default=1)
     parser.add_argument("--prompt", default=CompareConfig.prompt)
+    parser.add_argument("--skip-stream-profile", action="store_true")
     parser.add_argument("--skip-single", action="store_true")
     parser.add_argument("--no-require-mps", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -1013,6 +1093,7 @@ def config_from_args(args: argparse.Namespace) -> CompareConfig:
         autogaze_target_scales=args.autogaze_target_scales,
         autogaze_target_patch_size=args.autogaze_target_patch_size,
         require_mps=not args.no_require_mps,
+        run_stream_profile=not args.skip_stream_profile,
         run_single=not args.skip_single,
         max_new_tokens=args.max_new_tokens,
         prompt=args.prompt,

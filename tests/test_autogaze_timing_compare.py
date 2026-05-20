@@ -9,12 +9,15 @@ from repro.autogaze_timing_compare import (
     build_single_command,
     build_stream_profile_command,
     build_sweep_configs,
+    config_from_args,
     parse_args,
     parse_float_sweep,
     check_target_runtime,
+    run_comparison,
     run_sweep,
     summarize_comparison,
     validate_compare_config,
+    write_markdown_report,
 )
 
 
@@ -48,6 +51,14 @@ def test_validate_compare_config_allows_thumbnail_zero_when_single_lane_is_skipp
     config = CompareConfig(thumbnail_frames=0, run_single=False)
 
     validate_compare_config(config)
+
+
+def test_config_from_args_can_skip_stream_profile_lane():
+    args = parse_args(["--skip-stream-profile"])
+    config = config_from_args(args)
+
+    assert config.run_stream_profile is False
+    assert config.run_single is True
 
 
 def test_missing_subprocess_python_reports_cli_fix():
@@ -116,6 +127,20 @@ def test_build_commands_use_requested_mps_venv_and_local_weights(tmp_path):
     assert single[single.index("--num-video-frames-thumbnail") + 1] == "1"
     assert single[single.index("--max-tiles-video") + 1] == "1"
     assert "--measure-ttft" in single
+
+
+def test_run_comparison_dry_run_can_compare_quickstart_to_single_without_stream(tmp_path):
+    config = CompareConfig(
+        python=Path("/Users/mrc/myresearch/AutoGaze/.venv/bin/python"),
+        workspace_root=Path("/workspace/autogaze-repro"),
+        output_dir=tmp_path,
+        run_stream_profile=False,
+    )
+
+    payload = run_comparison(config, dry_run=True)
+
+    assert set(payload["commands"]) == {"quickstart", "single"}
+    assert payload["commands"]["single"][payload["commands"]["single"].index("--mode") + 1] == "single"
 
 
 def test_summarize_comparison_separates_quickstart_and_stream_profile_metrics(tmp_path):
@@ -224,6 +249,57 @@ def test_summarize_comparison_separates_quickstart_and_stream_profile_metrics(tm
     assert summary["comparison"]["stream_total_vs_quickstart_autogaze_ratio"] == 3.2
     assert summary["comparison"]["raw_patch_budget_ratio"] == 1.0
     assert summary["comparison"]["single_raw_patch_budget_ratio"] == 1.0
+
+
+def test_summarize_comparison_allows_quickstart_to_single_without_stream(tmp_path):
+    quickstart_payload = {
+        "metadata": {"device": "cuda"},
+        "input": {"video": "example_input.mp4", "frames": 16, "batch_size": 1, "dtype": "float16"},
+        "latency_ms": {"autogaze": {"median": 10.0}},
+        "gaze": {
+            "raw_patch_budget": 4240,
+            "selected_non_padded_patches": 424,
+            "total_gaze_slots": 424,
+            "token_reduction_ratio": 10.0,
+        },
+    }
+    single_payload = {
+        "metadata": {"device": "cuda"},
+        "video": "example_input.mp4",
+        "result": {
+            "autogaze_model_forward_ms": 20.0,
+            "autogaze_total_ms": 25.0,
+            "total_ms": 80.0,
+            "autogaze_runtime_config": {
+                "gazing_ratio_tile": 0.75,
+                "task_loss_requirement_tile": 0.7,
+                "max_batch_size_autogaze": 16,
+            },
+            "token_metrics": {
+                "video_sampled_frames": 16,
+                "thumbnail_sampled_frames": 1,
+                "autogaze_input_patch_tokens": 4240,
+                "autogaze_selected_patch_tokens": 424,
+                "autogaze_patch_reduction_ratio": 10.0,
+            },
+            "video_input_summary": {"spatial_tiles_per_video": 1},
+        },
+    }
+
+    summary = summarize_comparison(
+        quickstart_payload,
+        None,
+        single_payload,
+        quickstart_json=tmp_path / "quickstart.json",
+        stream_json=None,
+        single_json=tmp_path / "single.json",
+    )
+    report = tmp_path / "report.md"
+    write_markdown_report(summary, report, {"quickstart": ["quick"], "single": ["single"]})
+
+    assert summary["current_implementation_stream_profile"] is None
+    assert summary["comparison"]["single_autogaze_forward_vs_quickstart_ratio"] == 2.0
+    assert "Current stream-profile" not in report.read_text()
 
 
 def test_parse_float_sweep_uses_comma_separated_values_or_default():

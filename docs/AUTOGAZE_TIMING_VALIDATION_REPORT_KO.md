@@ -120,7 +120,54 @@ AutoGaze 자체가 빠른지/느린지를 보려면 아래 순서로 봐야 한�
 
 `gazing_ratio`와 `task_loss_requirement`가 latency에 주는 영향을 바로 보기 위해 comparison script에 sweep 모드를 추가했다.
 
-H100 권장 실행:
+### Quick Start 기본 설정 기준: direct vs NVILA single sweep
+
+Quick Start 기본 설정 그대로 비교하려면 multiscale 옵션을 넣지 않는다. 즉 `--autogaze-target-scales`, `--autogaze-target-patch-size`를 비워 두고, 16프레임/224 단일 입력, `gazing_ratio=0.75`, `task_loss_requirement=0.7`, batch size 1을 기준으로 삼는다. 아래 명령은 stream-profile lane을 끄고, 원본 Quick Start direct AutoGaze와 현재 NVILA full `single` path만 gazing ratio별로 비교한다.
+
+```bash
+.venv/bin/python -m repro.autogaze_timing_compare \
+  --device cuda \
+  --dtype float16 \
+  --frames 16 \
+  --thumbnail-frames 1 \
+  --max-tiles-video 1 \
+  --max-batch-size-autogaze 16 \
+  --quickstart-batch-size 1 \
+  --gazing-ratio-sweep 0.06,0.1,0.2,0.5,0.75,1.0 \
+  --task-loss-sweep 0.7 \
+  --skip-stream-profile \
+  --warmup 3 \
+  --repeat 10 \
+  --max-new-tokens 1 \
+  --output-dir outputs/autogaze_repro/h100_quickstart_default_vs_nvila_single_gazing_sweep
+```
+
+이 config의 목적은 “Quick Start 기본 AutoGaze forward”와 “NVILA processor hook 내부 AutoGaze forward”를 같은 gaze policy로 놓고 보는 것이다. sweep summary에서는 아래 필드를 우선 비교한다.
+
+| Field | 의미 |
+| --- | --- |
+| `quickstart_autogaze_ms` | 원본 Quick Start 방식 direct AutoGaze forward |
+| `single_autogaze_forward_ms` | `nvila_runner --mode single`의 AutoGaze model forward |
+| `single_autogaze_total_ms` | NVILA processor에서 gaze-info 생성까지 포함한 AutoGaze 전체 overhead |
+| `quickstart_raw_patch_budget`, `single_raw_patch_budget` | 비교 입력 patch budget. 이 값이 다르면 latency만 직접 비교하면 안 된다. |
+| `quickstart_selected_patches`, `single_selected_patches` | 실제 선택된 patch 수 |
+| `quickstart_token_reduction_ratio`, `single_token_reduction_ratio` | patch/token 감소율 |
+| `single_autogaze_forward_vs_quickstart_ratio` | 같은 gaze policy에서 NVILA single forward가 Quick Start direct 대비 몇 배인지 |
+
+산출물:
+
+```text
+outputs/autogaze_repro/h100_quickstart_default_vs_nvila_single_gazing_sweep/autogaze_policy_sweep_summary.json
+outputs/autogaze_repro/h100_quickstart_default_vs_nvila_single_gazing_sweep/autogaze_policy_sweep_report.md
+outputs/autogaze_repro/h100_quickstart_default_vs_nvila_single_gazing_sweep/gazing_0p75__loss_0p7/quickstart_vs_current_summary.json
+outputs/autogaze_repro/h100_quickstart_default_vs_nvila_single_gazing_sweep/gazing_0p75__loss_0p7/quickstart_vs_current_report.md
+```
+
+주의: full NVILA `single` lane을 포함하므로 `--thumbnail-frames 1` 이상이 필요하다. Quick Start 자체에는 thumbnail 개념이 없지만, public `NVILA-8B-HD-Video` processor/generate path가 thumbnail tensor 존재를 가정한다.
+
+### Multiscale/stream-profile 포함 H100 sweep
+
+아래는 Quick Start 기본 설정이 아니라, multiscale target scales와 stream-profile lane까지 포함해서 workload 차이를 함께 보는 실행이다.
 
 ```bash
 .venv/bin/python -m repro.autogaze_timing_compare \
