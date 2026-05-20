@@ -127,7 +127,7 @@ H100 권장 실행:
   --device cuda \
   --dtype float16 \
   --frames 16 \
-  --thumbnail-frames 0 \
+  --thumbnail-frames 1 \
   --max-tiles-video 1 \
   --stream-chunk-frames 16 \
   --max-batch-size-autogaze 16 \
@@ -140,6 +140,8 @@ H100 권장 실행:
   --repeat 10 \
   --output-dir outputs/autogaze_repro/h100_autogaze_policy_sweep
 ```
+
+`single` lane까지 같이 돌리는 H100 권장 명령에서는 `--thumbnail-frames 1` 이상을 써야 한다. public `NVILA-8B-HD-Video` processor/generate path가 thumbnail frame 존재를 가정해서, 0으로 두면 processor에서 integer division 또는 model tensor concat 단계에서 실패할 수 있다. AutoGaze-only / stream-profile 정책 sweep만 볼 때는 `--skip-single --thumbnail-frames 0` 조합을 사용할 수 있다.
 
 산출물:
 
@@ -168,6 +170,7 @@ dry-run으로 명령만 확인:
 .venv/bin/python -m repro.autogaze_timing_compare \
   --dry-run \
   --skip-single \
+  --thumbnail-frames 0 \
   --gazing-ratio-sweep 0.2,0.75 \
   --task-loss-sweep 0.6,0.7 \
   --output-dir outputs/autogaze_repro/timing_compare_dry_policy_sweep
@@ -302,7 +305,7 @@ Quick Start direct, stream-profile, single을 한 번에 비교하는 권장 명
   --gazing-ratio-tile 0.75 \
   --task-loss-requirement-tile 0.7 \
   --num-video-frames 16 \
-  --num-video-frames-thumbnail 0 \
+  --num-video-frames-thumbnail 1 \
   --max-tiles-video 1 \
   --max-batch-size-autogaze 16 \
   --max-new-tokens 1 \
@@ -326,7 +329,7 @@ Quick Start direct, stream-profile, single을 한 번에 비교하는 권장 명
   --gazing-mode autogaze \
   --task-loss-requirement-tile 0.6 \
   --num-video-frames 16 \
-  --num-video-frames-thumbnail 0 \
+  --num-video-frames-thumbnail 1 \
   --max-tiles-video 1 \
   --max-batch-size-autogaze 16 \
   --max-new-tokens 1 \

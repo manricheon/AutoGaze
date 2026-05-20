@@ -578,6 +578,23 @@ def apply_component_defaults(args: argparse.Namespace) -> argparse.Namespace:
     return args
 
 
+def validate_thumbnail_compatibility(args: argparse.Namespace) -> None:
+    if getattr(args, "mode", None) not in {"single", "hlvid"}:
+        return
+    if effective_model_family(args) != MODEL_FAMILY_HD_AUTOGAZE:
+        return
+    thumbnail_frames = int(getattr(args, "num_video_frames_thumbnail", 0) or 0)
+    if thumbnail_frames <= 0:
+        raise ValueError(
+            "Public NVILA-HD single/hlvid generate paths require "
+            "--num-video-frames-thumbnail >= 1. The remote processor samples thumbnail frames "
+            "with integer division and the model concatenates thumbnail tensors, so 0 thumbnails "
+            "can fail before generation. Use --num-video-frames-thumbnail 1 for full NVILA-HD "
+            "runs, or use --mode stream-profile for AutoGaze-only/streamed preprocessing checks "
+            "with 0 thumbnails."
+        )
+
+
 def paper_reference_for_args(args: argparse.Namespace) -> dict[str, Any]:
     preset = getattr(args, "paper_preset", None)
     if preset in PAPER_PRESET_CONFIGS:
@@ -5007,11 +5024,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     apply_pipeline_preset_alias(args)
     apply_paper_preset_defaults(args, provided_cli_options(argv))
     apply_component_defaults(args)
+    validate_thumbnail_compatibility(args)
     return args
 
 
 def main() -> None:
-    args = parse_args()
+    try:
+        args = parse_args()
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
     if args.mode == "preflight":
         run_preflight(args)
     elif args.mode == "stream-profile":

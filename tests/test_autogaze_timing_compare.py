@@ -14,6 +14,7 @@ from repro.autogaze_timing_compare import (
     check_target_runtime,
     run_sweep,
     summarize_comparison,
+    validate_compare_config,
 )
 
 
@@ -28,6 +29,25 @@ def test_default_paths_are_portable_repo_relative_paths():
 
     assert args.autogaze_repo == Path("external/AutoGaze")
     assert args.weights_root == Path("weights")
+
+
+def test_default_thumbnail_frames_keep_nvila_single_compatible():
+    args = parse_args([])
+
+    assert args.thumbnail_frames == 1
+
+
+def test_validate_compare_config_rejects_thumbnail_zero_for_single_lane():
+    config = CompareConfig(thumbnail_frames=0, run_single=True)
+
+    with pytest.raises(ValueError, match="thumbnail"):
+        validate_compare_config(config)
+
+
+def test_validate_compare_config_allows_thumbnail_zero_when_single_lane_is_skipped():
+    config = CompareConfig(thumbnail_frames=0, run_single=False)
+
+    validate_compare_config(config)
 
 
 def test_missing_subprocess_python_reports_cli_fix():
@@ -93,6 +113,7 @@ def test_build_commands_use_requested_mps_venv_and_local_weights(tmp_path):
     assert single[single.index("--gazing-ratio-tile") + 1] == "0.75"
     assert single[single.index("--task-loss-requirement-tile") + 1] == "0.7"
     assert single[single.index("--num-video-frames") + 1] == "16"
+    assert single[single.index("--num-video-frames-thumbnail") + 1] == "1"
     assert single[single.index("--max-tiles-video") + 1] == "1"
     assert "--measure-ttft" in single
 

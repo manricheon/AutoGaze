@@ -32,7 +32,7 @@ class CompareConfig:
     frames: int = 16
     quickstart_batch_size: int = 1
     quickstart_run_siglip: bool = False
-    thumbnail_frames: int = 0
+    thumbnail_frames: int = 1
     stream_chunk_frames: int = 16
     max_tiles_video: int = 1
     max_batch_size_autogaze: int = 16
@@ -779,7 +779,18 @@ def run_command(command: list[str], config: CompareConfig) -> None:
         ) from exc
 
 
+def validate_compare_config(config: CompareConfig) -> None:
+    if config.run_single and int(config.thumbnail_frames) <= 0:
+        raise ValueError(
+            "NVILA-HD single mode uses the public processor/generate path, which requires "
+            "--thumbnail-frames >= 1. Use --thumbnail-frames 1 when the single lane is enabled, "
+            "or add --skip-single for AutoGaze-only/stream-profile policy sweeps with "
+            "--thumbnail-frames 0."
+        )
+
+
 def run_comparison(config: CompareConfig, *, dry_run: bool = False) -> dict[str, Any]:
+    validate_compare_config(config)
     config.output_dir.mkdir(parents=True, exist_ok=True)
     quickstart_command = build_quickstart_command(config)
     stream_command = build_stream_profile_command(config)
@@ -952,7 +963,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--frames", type=int, default=16)
     parser.add_argument("--quickstart-batch-size", type=int, default=1)
     parser.add_argument("--quickstart-run-siglip", action="store_true")
-    parser.add_argument("--thumbnail-frames", type=int, default=0)
+    parser.add_argument("--thumbnail-frames", type=int, default=1)
     parser.add_argument("--stream-chunk-frames", type=int, default=16)
     parser.add_argument("--max-tiles-video", type=int, default=1)
     parser.add_argument("--max-batch-size-autogaze", type=int, default=16)
@@ -1011,15 +1022,18 @@ def config_from_args(args: argparse.Namespace) -> CompareConfig:
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     config = config_from_args(args)
-    if args.gazing_ratio_sweep or args.task_loss_sweep:
-        summary = run_sweep(
-            config,
-            gazing_ratios=parse_float_sweep(args.gazing_ratio_sweep, default=[config.gazing_ratio]),
-            task_loss_requirements=parse_float_sweep(args.task_loss_sweep, default=[config.task_loss_requirement]),
-            dry_run=args.dry_run,
-        )
-    else:
-        summary = run_comparison(config, dry_run=args.dry_run)
+    try:
+        if args.gazing_ratio_sweep or args.task_loss_sweep:
+            summary = run_sweep(
+                config,
+                gazing_ratios=parse_float_sweep(args.gazing_ratio_sweep, default=[config.gazing_ratio]),
+                task_loss_requirements=parse_float_sweep(args.task_loss_sweep, default=[config.task_loss_requirement]),
+                dry_run=args.dry_run,
+            )
+        else:
+            summary = run_comparison(config, dry_run=args.dry_run)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
     print(json.dumps(summary, indent=2, ensure_ascii=False))
 
 

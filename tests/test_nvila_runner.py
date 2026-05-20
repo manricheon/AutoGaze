@@ -2,6 +2,7 @@ import argparse
 from fractions import Fraction
 from pathlib import Path
 
+import pytest
 import torch
 from PIL import Image
 
@@ -262,6 +263,57 @@ def test_parse_args_applies_paper_hd_preset_defaults():
     assert args.max_tiles_video == 48
     assert args.video_resize_longest_edge == 3584
     assert args.gazing_mode == "autogaze"
+
+
+def test_parse_args_rejects_thumbnail_zero_for_hd_single_generate_path():
+    with pytest.raises(ValueError, match="num-video-frames-thumbnail"):
+        parse_args(
+            [
+                "--mode",
+                "single",
+                "--model-family",
+                MODEL_FAMILY_HD_AUTOGAZE,
+                "--num-video-frames-thumbnail",
+                "0",
+            ]
+        )
+
+
+def test_parse_args_rejects_thumbnail_zero_for_hd_hlvid_generate_path():
+    with pytest.raises(ValueError, match="num-video-frames-thumbnail"):
+        parse_args(
+            [
+                "--mode",
+                "hlvid",
+                "--model-family",
+                MODEL_FAMILY_HD_AUTOGAZE,
+                "--num-video-frames-thumbnail",
+                "0",
+            ]
+        )
+
+
+def test_parse_args_allows_thumbnail_zero_for_stream_profile():
+    args = parse_args(["--mode", "stream-profile", "--num-video-frames-thumbnail", "0"])
+
+    assert args.mode == "stream-profile"
+    assert args.num_video_frames_thumbnail == 0
+
+
+def test_parse_args_allows_thumbnail_zero_for_video_baseline_family():
+    args = parse_args(
+        [
+            "--mode",
+            "hlvid",
+            "--model-family",
+            MODEL_FAMILY_VIDEO_BASELINE,
+            "--num-video-frames-thumbnail",
+            "0",
+        ]
+    )
+
+    assert args.model_family == MODEL_FAMILY_VIDEO_BASELINE
+    assert args.num_video_frames_thumbnail == 0
 
 
 def test_cli_values_override_paper_preset_defaults():
