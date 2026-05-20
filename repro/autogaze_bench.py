@@ -122,6 +122,10 @@ def autogaze_transform_kwargs(target_scales: list[int] | None) -> dict[str, dict
     }
 
 
+def move_model_to_device_dtype(model: Any, device: Any, dtype: Any) -> Any:
+    return model.to(device=device, dtype=dtype)
+
+
 def run(args: argparse.Namespace) -> None:
     import torch
 
@@ -141,7 +145,7 @@ def run(args: argparse.Namespace) -> None:
         args.autogaze_model,
         **autogaze_transform_kwargs(target_scales),
     )
-    autogaze_model = AutoGaze.from_pretrained(args.autogaze_model).to(device)
+    autogaze_model = move_model_to_device_dtype(AutoGaze.from_pretrained(args.autogaze_model), device, dtype)
     autogaze_model.eval()
 
     frame_count = args.frames or int(autogaze_model.config.max_num_frames)

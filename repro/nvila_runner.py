@@ -2570,9 +2570,25 @@ def model_load_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "trust_remote_code": True,
         "device_map": args.device_map,
     }
+    torch_dtype = requested_torch_dtype(args)
+    if torch_dtype is not None:
+        kwargs["torch_dtype"] = torch_dtype
     if effective_model_family(args) == MODEL_FAMILY_HD_AUTOGAZE:
         kwargs["max_batch_size_siglip"] = args.max_batch_size_siglip
     return kwargs
+
+
+def requested_torch_dtype(args: argparse.Namespace) -> torch.dtype | None:
+    value = getattr(args, "dtype", None)
+    if value in (None, "auto"):
+        return None
+    if value == "float16":
+        return torch.float16
+    if value == "bfloat16":
+        return torch.bfloat16
+    if value == "float32":
+        return torch.float32
+    raise ValueError(f"Unsupported dtype: {value}")
 
 
 def load_model_and_processor(args: argparse.Namespace):
@@ -4040,6 +4056,8 @@ def run_stream_profile(args: argparse.Namespace) -> None:
     siglip_info: dict[str, Any] = {"enabled": False}
     dtype = stream_profile_dtype(args)
     if args.gazing_mode == "autogaze" or getattr(args, "stream_run_siglip", False):
+        from repro.autogaze_bench import move_model_to_device_dtype
+
         add_external_autogaze(args.autogaze_repo)
     if args.gazing_mode == "autogaze":
         from autogaze.models.autogaze import AutoGaze, AutoGazeImageProcessor
@@ -4048,7 +4066,7 @@ def run_stream_profile(args: argparse.Namespace) -> None:
             args.autogaze_model,
             **autogaze_processor_size_kwargs(target_scales),
         )
-        model = AutoGaze.from_pretrained(args.autogaze_model).to(device)
+        model = move_model_to_device_dtype(AutoGaze.from_pretrained(args.autogaze_model), device, dtype)
         model.eval()
     siglip_model, siglip_info = build_stream_siglip_model(
         args=args,
@@ -4912,6 +4930,7 @@ def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentPar
     parser.add_argument("--autogaze-model", default="nvidia/AutoGaze")
     parser.add_argument("--device", default="cuda", choices=["cpu", "mps", "cuda"])
     parser.add_argument("--device-map", default="auto")
+    parser.add_argument("--dtype", choices=["auto", "float32", "float16", "bfloat16"], default="auto")
     parser.add_argument("--video", default=DEFAULT_EXAMPLE_VIDEO)
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
     parser.add_argument("--num-video-frames", type=int, default=128)

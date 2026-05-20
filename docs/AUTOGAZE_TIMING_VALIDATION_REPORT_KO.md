@@ -82,6 +82,8 @@ outputs/autogaze_repro/timing_compare/quickstart_vs_current_report.md
 
 `target_scales`를 넘기는 경우 AutoGaze 입력 tensor는 반드시 largest scale의 정사각형이어야 한다. 예를 들어 `56+112+196+392`와 patch size `14`를 쓰면 AutoGaze에 들어가는 video tensor의 `H`와 `W`가 모두 `392`여야 한다. `shortest_edge=392`처럼 aspect ratio를 유지하는 resize는 16:9 비디오에서 `697x392` 같은 직사각형을 만들 수 있고, 원본 AutoGaze의 `assert H == W == target_scales[-1]`에 걸린다. 현재 comparison direct path와 stream-profile path는 이 경우 AutoGaze 전처리를 `size={"height": 392, "width": 392}`로 강제한다.
 
+CUDA `float16` 실험에서는 model dtype과 input tensor dtype도 같이 맞아야 한다. comparison script의 Quick Start direct, stream-profile AutoGaze, `nvila_runner --mode single`은 모두 같은 `--dtype`/`--stream-dtype` 설정을 전달한다. `nvila_runner --dtype float16`은 full NVILA model load에 `torch_dtype=torch.float16`을 전달하고, direct/stream AutoGaze model도 입력 tensor와 같은 dtype으로 올린다.
+
 ## 속도 벤치마크 읽는 순서
 
 AutoGaze 자체가 빠른지/느린지를 보려면 아래 순서로 봐야 한다. 특히 H100에서 “Quick Start는 3초, `nvila_runner`는 300ms”처럼 보이면 거의 항상 측정 경계나 gaze policy가 다르다.

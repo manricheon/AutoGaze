@@ -14,7 +14,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from repro.autogaze_bench import add_external_autogaze, summarize_gaze, tensor_bytes
+from repro.autogaze_bench import add_external_autogaze, move_model_to_device_dtype, summarize_gaze, tensor_bytes
 from repro.common import resolve_device, synchronize, write_json
 from repro.nvila_runner import spatial_tile_grid
 
@@ -193,7 +193,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
 
     transform = AutoGazeImageProcessor.from_pretrained(args.autogaze_model)
-    model = AutoGaze.from_pretrained(args.autogaze_model).to(device)
+    model = move_model_to_device_dtype(AutoGaze.from_pretrained(args.autogaze_model), device, dtype)
     model.eval()
 
     target_counts = Counter(sampled_indices)

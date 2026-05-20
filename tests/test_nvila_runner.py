@@ -63,6 +63,8 @@ def make_args(**overrides):
         "model_path": "nvidia/NVILA-8B-HD-Video",
         "model_family": "auto",
         "paper_preset": None,
+        "dtype": None,
+        "device_map": "auto",
         "video_resize_longest_edge": None,
         "autogaze_model": "nvidia/AutoGaze",
         "gazing_mode": "autogaze",
@@ -71,6 +73,7 @@ def make_args(**overrides):
         "autogaze_target_patch_size": None,
         "task_loss_requirement_tile": 0.6,
         "max_batch_size_autogaze": 16,
+        "max_batch_size_siglip": 32,
         "hlvid_repo": "bfshi/HLVid",
         "hlvid_video_root": "data/hlvid/videos",
     }
@@ -305,6 +308,14 @@ def test_baseline_model_load_kwargs_omit_hd_siglip_batch_kwarg():
 
     assert kwargs == {"trust_remote_code": True, "device_map": "auto"}
     assert "max_batch_size_siglip" not in kwargs
+
+
+def test_model_load_kwargs_uses_requested_torch_dtype():
+    args = make_args(dtype="float16", device_map="auto")
+
+    kwargs = model_load_kwargs(args)
+
+    assert kwargs["torch_dtype"] == torch.float16
 
 
 def test_run_identity_marks_paper_baseline_as_not_applicable():
@@ -567,6 +578,12 @@ def test_parse_args_accepts_warmup_and_repeat_runs():
 
     assert args.warmup_runs == 1
     assert args.repeat_runs == 3
+
+
+def test_parse_args_accepts_single_model_dtype():
+    args = parse_args(["--dtype", "float16"])
+
+    assert args.dtype == "float16"
 
 
 def test_summarize_repeat_results_collects_latency_memory_token_and_compute_stats():

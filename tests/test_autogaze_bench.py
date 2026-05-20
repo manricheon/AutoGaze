@@ -5,6 +5,7 @@ from repro.autogaze_bench import (
     add_external_autogaze,
     autogaze_transform_kwargs,
     flatten_video_batch_for_siglip_baseline,
+    move_model_to_device_dtype,
     repeat_video_batch,
     select_siglip_vision_model_class,
     summarize_gaze,
@@ -74,6 +75,23 @@ def test_autogaze_transform_kwargs_force_square_largest_target_scale():
         "crop_size": {"height": 392, "width": 392},
     }
     assert autogaze_transform_kwargs(None) == {}
+
+
+def test_move_model_to_device_dtype_passes_dtype_to_torch_module_to():
+    class FakeModel:
+        def __init__(self):
+            self.to_kwargs = None
+
+        def to(self, **kwargs):
+            self.to_kwargs = kwargs
+            return self
+
+    model = FakeModel()
+
+    moved = move_model_to_device_dtype(model, torch.device("cpu"), torch.float16)
+
+    assert moved is model
+    assert model.to_kwargs == {"device": torch.device("cpu"), "dtype": torch.float16}
 
 
 def test_select_siglip_vision_model_class_uses_config_model_type():
