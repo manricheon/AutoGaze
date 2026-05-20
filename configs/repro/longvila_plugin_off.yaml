@@ -1,0 +1,23 @@
+name: longvila_plugin_off
+description: >
+  Native LongVILA comparison run for future AutoGaze plugin experiments. This
+  records the off side of the on/off comparison without injecting AutoGaze
+  processor kwargs.
+
+experiment_identity:
+  model_family: longvila
+  token_selector: keep-all
+  autogaze_applicability: plugin_off_native
+  autogaze_integration_level: none
+
+flexible_runner:
+  args:
+    mode: inspect
+    model_path: weight/longvila
+    model_family: longvila
+    token_selector_adapter: keep-all
+    vision_encoder_adapter: longvila-siglip
+    mllm_adapter: longvila
+    autogaze_integration_level: none
+    num_video_frames: 128
+    output_json: outputs/autogaze_repro/flexible_longvila_plugin_off_inspect.json

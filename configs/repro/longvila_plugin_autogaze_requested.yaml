@@ -1,0 +1,24 @@
+name: longvila_plugin_autogaze_requested
+description: >
+  LongVILA with an AutoGaze token selector requested as a plugin experiment.
+  The current runner records this as planned_plugin until LongVILA-specific
+  feature-packing integration is implemented.
+
+experiment_identity:
+  model_family: longvila
+  token_selector: autogaze
+  autogaze_applicability: experimental_plugin_requested
+  autogaze_integration_level: planned_plugin
+
+flexible_runner:
+  args:
+    mode: inspect
+    model_path: weight/longvila
+    model_family: longvila
+    token_selector_adapter: autogaze
+    token_selector_path: weight/AutoGaze
+    vision_encoder_adapter: longvila-siglip
+    mllm_adapter: longvila
+    autogaze_integration_level: planned_plugin
+    num_video_frames: 128
+    output_json: outputs/autogaze_repro/flexible_longvila_plugin_autogaze_requested_inspect.json

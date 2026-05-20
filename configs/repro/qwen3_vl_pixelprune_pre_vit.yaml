@@ -1,0 +1,27 @@
+name: qwen3_vl_pixelprune_pre_vit
+description: >
+  Qwen3-VL PixelPrune pre-ViT pruning candidate. PixelPrune is applied before
+  loading the Qwen3-VL model and keeps the original encoder-MLLM pipeline
+  patched by the upstream PixelPrune hook.
+
+experiment_identity:
+  model_family: qwen3-vl
+  token_selector: keep-all
+  autogaze_applicability: plugin_off_native
+  autogaze_integration_level: pre_encoder_sparse
+  pre_encoder_prune_adapter: pixelprune
+
+flexible_runner:
+  args:
+    mode: single
+    dry_run: true
+    model_path: weight/Qwen3-VL-8B-Instruct
+    model_family: qwen3-vl
+    token_selector_adapter: keep-all
+    vision_encoder_adapter: qwen3-vl-vision
+    mllm_adapter: qwen3-vl
+    autogaze_integration_level: pre_encoder_sparse
+    pre_encoder_prune_adapter: pixelprune
+    pixelprune_threshold: 0.0
+    num_video_frames: 128
+    output_json: outputs/autogaze_repro/flexible_qwen3_vl_pixelprune_pre_vit_dry_run.json

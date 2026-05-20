@@ -1,0 +1,23 @@
+name: qwen3_vl_plugin_off
+description: >
+  Native Qwen3-VL comparison run for AutoGaze plugin experiments. This is the
+  off side of the on/off comparison and keeps the original Qwen3-VL vision
+  encoder + MLLM path intact.
+
+experiment_identity:
+  model_family: qwen3-vl
+  token_selector: keep-all
+  autogaze_applicability: plugin_off_native
+  autogaze_integration_level: none
+
+flexible_runner:
+  args:
+    mode: inspect
+    model_path: weight/Qwen3-VL-8B-Instruct
+    model_family: qwen3-vl
+    token_selector_adapter: keep-all
+    vision_encoder_adapter: qwen3-vl-vision
+    mllm_adapter: qwen3-vl
+    autogaze_integration_level: none
+    num_video_frames: 128
+    output_json: outputs/autogaze_repro/flexible_qwen3_vl_plugin_off_inspect.json

@@ -1,0 +1,23 @@
+name: qwen2_vl_plugin_off
+description: >
+  Native Qwen2-VL comparison run for AutoGaze plugin experiments. This keeps
+  the original Qwen2-VL vision encoder + MLLM path intact.
+
+experiment_identity:
+  model_family: qwen2-vl
+  token_selector: keep-all
+  autogaze_applicability: plugin_off_native
+  autogaze_integration_level: none
+
+flexible_runner:
+  args:
+    mode: single
+    dry_run: true
+    model_path: weight/Qwen2-VL
+    model_family: qwen2-vl
+    token_selector_adapter: keep-all
+    vision_encoder_adapter: qwen2-vl-vision
+    mllm_adapter: qwen2-vl
+    autogaze_integration_level: none
+    num_video_frames: 128
+    output_json: outputs/autogaze_repro/flexible_qwen2_vl_plugin_off_dry_run.json

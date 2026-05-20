@@ -1,0 +1,23 @@
+name: llava_onevision_plugin_off
+description: >
+  Native LLaVA-OneVision comparison run for AutoGaze plugin experiments. This
+  keeps the original SigLIP + Qwen2 language path intact.
+
+experiment_identity:
+  model_family: llava-onevision
+  token_selector: keep-all
+  autogaze_applicability: plugin_off_native
+  autogaze_integration_level: none
+
+flexible_runner:
+  args:
+    mode: single
+    dry_run: true
+    model_path: weight/llava-onevision-qwen2-7b-ov
+    model_family: llava-onevision
+    token_selector_adapter: keep-all
+    vision_encoder_adapter: llava-onevision-siglip
+    mllm_adapter: llava-onevision
+    autogaze_integration_level: none
+    num_video_frames: 128
+    output_json: outputs/autogaze_repro/flexible_llava_onevision_plugin_off_dry_run.json

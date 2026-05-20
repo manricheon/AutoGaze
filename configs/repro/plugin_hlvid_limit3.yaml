@@ -1,0 +1,32 @@
+description: >
+  HLVid limit-3 plugin comparison wrapper for extensibility checks. This runs
+  native/off modes where available and keeps AutoGaze-on modes as explicit
+  feature-packing probes until model-specific visual token insertion is wired.
+
+plugin_hlvid_benchmark:
+  module: repro.plugin_hlvid_benchmark
+  args:
+    manifest: /path/to/HLVid/data/test-00000-of-00001.parquet
+    video_root: /path/to/HLVid/videos
+    output_dir: outputs/autogaze_repro/plugin_hlvid_limit3
+    limit: 3
+    modes:
+      - nvila-video-off
+      - longvila-off
+      - internvl3-off
+      - qwen3-vl-off
+      - qwen3-vl-autogaze-probe
+    external_mllm_command: vila-infer
+    num_video_frames: 256
+    max_tiles_video: 8
+    max_new_tokens: 8
+    models:
+      nvila-video: weight/NVILA-8B-Video
+      longvila: weight/LongVILA
+      internvl3: weight/InternVL3
+      qwen3-vl: weight/Qwen3-VL-8B-Instruct
+
+outputs:
+  predictions: outputs/autogaze_repro/plugin_hlvid_limit3/plugin_hlvid_predictions.jsonl
+  summary: outputs/autogaze_repro/plugin_hlvid_limit3/plugin_hlvid_summary.json
+  markdown: outputs/autogaze_repro/plugin_hlvid_limit3/plugin_hlvid_report.md

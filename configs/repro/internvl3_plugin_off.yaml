@@ -1,0 +1,24 @@
+name: internvl3_plugin_off
+description: >
+  Native InternVL3 comparison run for AutoGaze plugin experiments. The runner
+  calls the local InternVL3 helper CLI, which follows the official
+  AutoModel/AutoTokenizer + pixel_values + num_patches_list chat path.
+
+experiment_identity:
+  model_family: internvl3
+  token_selector: keep-all
+  autogaze_applicability: plugin_off_native
+  autogaze_integration_level: none
+
+flexible_runner:
+  args:
+    mode: single
+    model_path: weight/InternVL3
+    model_family: internvl3
+    token_selector_adapter: keep-all
+    vision_encoder_adapter: internvl-dynamic-vision
+    mllm_adapter: internvl3
+    autogaze_integration_level: none
+    external_mllm_command: ".venv/bin/python -m repro.internvl3_off_infer"
+    num_video_frames: 128
+    output_json: outputs/autogaze_repro/flexible_internvl3_plugin_off_single.json

@@ -1,0 +1,25 @@
+name: qwen3_vl_plugin_autogaze_post_prune
+description: >
+  Qwen3-VL with AutoGaze requested as a post-encoder token prune experiment.
+  The original Qwen3-VL vision encoder is kept intact; AutoGaze-selected
+  visual tokens are intended to reduce MLLM context/prefill after vision
+  features are produced.
+
+experiment_identity:
+  model_family: qwen3-vl
+  token_selector: autogaze
+  autogaze_applicability: experimental_plugin_requested
+  autogaze_integration_level: post_encoder_token_prune
+
+flexible_runner:
+  args:
+    mode: single
+    model_path: weight/Qwen3-VL-8B-Instruct
+    model_family: qwen3-vl
+    token_selector_adapter: autogaze
+    token_selector_path: weight/AutoGaze
+    vision_encoder_adapter: qwen3-vl-vision
+    mllm_adapter: qwen3-vl
+    autogaze_integration_level: post_encoder_token_prune
+    num_video_frames: 128
+    output_json: outputs/autogaze_repro/flexible_qwen3_vl_autogaze_post_prune_probe.json

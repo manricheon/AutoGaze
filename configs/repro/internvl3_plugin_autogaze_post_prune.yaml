@@ -1,0 +1,24 @@
+name: internvl3_plugin_autogaze_post_prune
+description: >
+  InternVL3 AutoGaze post-encoder token prune candidate. InternVL uses dynamic
+  tiling style metadata such as num_patches_list, so pre-encoder sparse needs a
+  model-specific tiling probe before it can be claimed.
+
+experiment_identity:
+  model_family: internvl3
+  token_selector: autogaze
+  autogaze_applicability: experimental_plugin_requested
+  autogaze_integration_level: post_encoder_token_prune
+
+flexible_runner:
+  args:
+    mode: inspect
+    model_path: weight/InternVL3
+    model_family: internvl3
+    token_selector_adapter: autogaze
+    token_selector_path: weight/AutoGaze
+    vision_encoder_adapter: internvl-dynamic-vision
+    mllm_adapter: internvl3
+    autogaze_integration_level: post_encoder_token_prune
+    num_video_frames: 128
+    output_json: outputs/autogaze_repro/flexible_internvl3_autogaze_post_prune_inspect.json

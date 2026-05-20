@@ -1,0 +1,24 @@
+name: qwen25_vl_plugin_autogaze_post_prune
+description: >
+  Qwen2.5-VL AutoGaze post-encoder token prune candidate. Qwen2.5-VL exposes
+  pixel_values_videos and video_grid_thw, so the first AutoGaze-on path should
+  keep the vision encoder intact and prune visual tokens before MLLM prefill.
+
+experiment_identity:
+  model_family: qwen2.5-vl
+  token_selector: autogaze
+  autogaze_applicability: experimental_plugin_requested
+  autogaze_integration_level: post_encoder_token_prune
+
+flexible_runner:
+  args:
+    mode: inspect
+    model_path: weight/Qwen2.5-VL-7B-Instruct
+    model_family: qwen2.5-vl
+    token_selector_adapter: autogaze
+    token_selector_path: weight/AutoGaze
+    vision_encoder_adapter: qwen2.5-vl-vision
+    mllm_adapter: qwen2.5-vl
+    autogaze_integration_level: post_encoder_token_prune
+    num_video_frames: 128
+    output_json: outputs/autogaze_repro/flexible_qwen25_vl_autogaze_post_prune_inspect.json

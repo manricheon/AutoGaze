@@ -1,0 +1,23 @@
+name: qwen2_vl_plugin_autogaze_post_prune
+description: >
+  Qwen2-VL AutoGaze post-encoder token prune candidate. Qwen2-VL is treated as
+  a Qwen grid-family VLM using pixel_values_videos and video_grid_thw.
+
+experiment_identity:
+  model_family: qwen2-vl
+  token_selector: autogaze
+  autogaze_applicability: experimental_plugin_requested
+  autogaze_integration_level: post_encoder_token_prune
+
+flexible_runner:
+  args:
+    mode: inspect
+    model_path: weight/Qwen2-VL
+    model_family: qwen2-vl
+    token_selector_adapter: autogaze
+    token_selector_path: weight/AutoGaze
+    vision_encoder_adapter: qwen2-vl-vision
+    mllm_adapter: qwen2-vl
+    autogaze_integration_level: post_encoder_token_prune
+    num_video_frames: 128
+    output_json: outputs/autogaze_repro/flexible_qwen2_vl_autogaze_post_prune_inspect.json

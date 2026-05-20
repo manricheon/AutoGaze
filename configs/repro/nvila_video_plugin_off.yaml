@@ -1,0 +1,23 @@
+name: nvila_video_plugin_off
+description: >
+  Native NVILA-8B-Video comparison run for AutoGaze plugin experiments. This is
+  not the AutoGaze paper baseline; it is the "off" side of an untuned-model
+  on/off experiment.
+
+experiment_identity:
+  model_family: nvila-video-plugin
+  token_selector: keep-all
+  autogaze_applicability: plugin_off_native
+  autogaze_integration_level: none
+
+flexible_runner:
+  args:
+    mode: inspect
+    model_path: weight/NVILA-8B-Video
+    model_family: nvila-video-plugin
+    token_selector_adapter: keep-all
+    vision_encoder_adapter: nvila-video-vision
+    mllm_adapter: nvila-video
+    autogaze_integration_level: none
+    num_video_frames: 128
+    output_json: outputs/autogaze_repro/flexible_nvila_video_plugin_off_inspect.json

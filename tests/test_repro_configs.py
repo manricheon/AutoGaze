@@ -81,3 +81,83 @@ def test_streaming_pipeline_profiles_include_mps_and_cuda_recommendations():
     assert config.cuda.quality_4k.args.max_tiles_video == 16
     assert config.cuda.paper_probe_4k_256f.args.num_video_frames == 256
     assert config.cuda.paper_stress_4k_1024f.args.num_video_frames == 1024
+
+
+def test_plugin_experiment_configs_mark_on_off_identity():
+    root = Path(__file__).resolve().parents[1]
+    config_dir = root / "configs" / "repro"
+
+    expected = {
+        "nvila_video_plugin_off.yaml": ("nvila-video-plugin", "keep-all", "plugin_off_native", "none"),
+        "nvila_video_plugin_autogaze_requested.yaml": (
+            "nvila-video-plugin",
+            "autogaze",
+            "experimental_plugin_requested",
+            "planned_plugin",
+        ),
+        "longvila_plugin_off.yaml": ("longvila", "keep-all", "plugin_off_native", "none"),
+        "longvila_plugin_autogaze_requested.yaml": (
+            "longvila",
+            "autogaze",
+            "experimental_plugin_requested",
+            "planned_plugin",
+        ),
+        "qwen3_vl_plugin_off.yaml": ("qwen3-vl", "keep-all", "plugin_off_native", "none"),
+        "qwen3_vl_plugin_autogaze_post_prune.yaml": (
+            "qwen3-vl",
+            "autogaze",
+            "experimental_plugin_requested",
+            "post_encoder_token_prune",
+        ),
+        "qwen3_vl_pixelprune_pre_vit.yaml": ("qwen3-vl", "keep-all", "plugin_off_native", "pre_encoder_sparse"),
+        "qwen2_vl_plugin_off.yaml": ("qwen2-vl", "keep-all", "plugin_off_native", "none"),
+        "qwen2_vl_plugin_autogaze_post_prune.yaml": (
+            "qwen2-vl",
+            "autogaze",
+            "experimental_plugin_requested",
+            "post_encoder_token_prune",
+        ),
+        "qwen25_vl_plugin_off.yaml": ("qwen2.5-vl", "keep-all", "plugin_off_native", "none"),
+        "qwen25_vl_plugin_autogaze_post_prune.yaml": (
+            "qwen2.5-vl",
+            "autogaze",
+            "experimental_plugin_requested",
+            "post_encoder_token_prune",
+        ),
+        "llava_onevision_plugin_off.yaml": ("llava-onevision", "keep-all", "plugin_off_native", "none"),
+        "llava_onevision_plugin_autogaze_post_prune.yaml": (
+            "llava-onevision",
+            "autogaze",
+            "experimental_plugin_requested",
+            "post_encoder_token_prune",
+        ),
+        "internvl3_plugin_off.yaml": ("internvl3", "keep-all", "plugin_off_native", "none"),
+        "internvl3_plugin_autogaze_post_prune.yaml": (
+            "internvl3",
+            "autogaze",
+            "experimental_plugin_requested",
+            "post_encoder_token_prune",
+        ),
+    }
+
+    for filename, (family, selector, applicability, integration_level) in expected.items():
+        config = OmegaConf.load(config_dir / filename)
+        assert config.experiment_identity.model_family == family
+        assert config.experiment_identity.token_selector == selector
+        assert config.experiment_identity.autogaze_applicability == applicability
+        assert config.experiment_identity.autogaze_integration_level == integration_level
+        assert config.flexible_runner.args.mode in {"inspect", "single"}
+        assert config.flexible_runner.args.model_family == family
+        assert config.flexible_runner.args.token_selector_adapter == selector
+        assert config.flexible_runner.args.autogaze_integration_level == integration_level
+
+
+def test_plugin_hlvid_limit3_config_defines_comparison_modes():
+    root = Path(__file__).resolve().parents[1]
+    config = OmegaConf.load(root / "configs" / "repro" / "plugin_hlvid_limit3.yaml")
+
+    assert config.plugin_hlvid_benchmark.args.limit == 3
+    assert "nvila-video-off" in config.plugin_hlvid_benchmark.args.modes
+    assert "longvila-off" in config.plugin_hlvid_benchmark.args.modes
+    assert "internvl3-off" in config.plugin_hlvid_benchmark.args.modes
+    assert "qwen3-vl-autogaze-probe" in config.plugin_hlvid_benchmark.args.modes
