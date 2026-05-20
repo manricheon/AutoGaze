@@ -1,4 +1,7 @@
 from pathlib import Path
+import sys
+
+import pytest
 
 from repro.autogaze_timing_compare import (
     CompareConfig,
@@ -6,10 +9,32 @@ from repro.autogaze_timing_compare import (
     build_single_command,
     build_stream_profile_command,
     build_sweep_configs,
+    parse_args,
     parse_float_sweep,
+    check_target_runtime,
     run_sweep,
     summarize_comparison,
 )
+
+
+def test_default_subprocess_python_uses_current_interpreter():
+    args = parse_args([])
+
+    assert args.python == Path(sys.executable)
+
+
+def test_default_paths_are_portable_repo_relative_paths():
+    args = parse_args([])
+
+    assert args.autogaze_repo == Path("external/AutoGaze")
+    assert args.weights_root == Path("weights")
+
+
+def test_missing_subprocess_python_reports_cli_fix():
+    config = CompareConfig(python=Path("/definitely/missing/python"), require_mps=False)
+
+    with pytest.raises(RuntimeError, match="--python"):
+        check_target_runtime(config)
 
 
 def test_build_commands_use_requested_mps_venv_and_local_weights(tmp_path):

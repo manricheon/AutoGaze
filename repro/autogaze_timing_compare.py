@@ -12,9 +12,9 @@ from typing import Any
 from repro.common import write_json
 
 
-DEFAULT_AUTOGAZE_REPO = Path("/Users/mrc/myresearch/AutoGaze")
-DEFAULT_WEIGHTS_ROOT = DEFAULT_AUTOGAZE_REPO / "weights"
-DEFAULT_TARGET_PYTHON = DEFAULT_AUTOGAZE_REPO / ".venv" / "bin" / "python"
+DEFAULT_AUTOGAZE_REPO = Path(os.environ.get("AUTOGAZE_REPO", "external/AutoGaze"))
+DEFAULT_WEIGHTS_ROOT = Path(os.environ.get("AUTOGAZE_WEIGHTS_ROOT", "weights"))
+DEFAULT_TARGET_PYTHON = Path(os.environ.get("AUTOGAZE_TIMING_PYTHON", sys.executable))
 DEFAULT_VIDEO = DEFAULT_AUTOGAZE_REPO / "assets" / "example_input.mp4"
 DEFAULT_OUTPUT_DIR = Path("outputs/autogaze_repro/timing_compare")
 
@@ -742,14 +742,21 @@ def check_target_runtime(config: CompareConfig) -> dict[str, Any]:
         "'mps_built': torch.backends.mps.is_built()"
         "}))"
     )
-    result = subprocess.run(
-        [str(config.python), "-c", code],
-        cwd=str(config.workspace_root),
-        env=build_subprocess_env(config),
-        text=True,
-        capture_output=True,
-        check=True,
-    )
+    try:
+        result = subprocess.run(
+            [str(config.python), "-c", code],
+            cwd=str(config.workspace_root),
+            env=build_subprocess_env(config),
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"Python executable not found: {config.python}. "
+            "Run this script with the desired venv python, or pass --python /path/to/.venv/bin/python. "
+            "You can also set AUTOGAZE_TIMING_PYTHON."
+        ) from exc
     info = json.loads(result.stdout.strip().splitlines()[-1])
     if config.device == "mps" and config.require_mps and not info.get("mps_available"):
         raise RuntimeError(f"MPS requested but target runtime reports mps_available=False: {info}")
@@ -758,12 +765,18 @@ def check_target_runtime(config: CompareConfig) -> dict[str, Any]:
 
 def run_command(command: list[str], config: CompareConfig) -> None:
     print("+ " + " ".join(command), flush=True)
-    subprocess.run(
-        command,
-        cwd=str(config.workspace_root),
-        env=build_subprocess_env(config),
-        check=True,
-    )
+    try:
+        subprocess.run(
+            command,
+            cwd=str(config.workspace_root),
+            env=build_subprocess_env(config),
+            check=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"Subprocess executable not found: {command[0]}. "
+            "Use --python /path/to/.venv/bin/python if the target venv differs from the current interpreter."
+        ) from exc
 
 
 def run_comparison(config: CompareConfig, *, dry_run: bool = False) -> dict[str, Any]:

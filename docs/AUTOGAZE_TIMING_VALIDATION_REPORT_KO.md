@@ -3,8 +3,11 @@
 ## 결론 요약
 
 - 비교 스크립트: `repro.autogaze_timing_compare`
-- 지정된 venv: `/Users/mrc/myresearch/AutoGaze/.venv/bin/python`
-- 지정된 weights: `/Users/mrc/myresearch/AutoGaze/weights`
+- 기본 subprocess Python: 현재 이 스크립트를 실행한 interpreter. CUDA 머신에서는 보통 `.venv/bin/python -m repro.autogaze_timing_compare ...`로 실행하면 하위 Quick Start / stream-profile / single subprocess도 같은 venv를 쓴다.
+- 다른 venv를 강제로 쓰려면 `--python /path/to/.venv/bin/python` 또는 `AUTOGAZE_TIMING_PYTHON=/path/to/.venv/bin/python`을 지정한다.
+- 기본 AutoGaze repo path: `external/AutoGaze`
+- 기본 weights root: `weights`
+- 로컬 Mac timing audit처럼 별도 checkout/weights를 쓰려면 `--autogaze-repo /Users/mrc/myresearch/AutoGaze --weights-root /Users/mrc/myresearch/AutoGaze/weights`를 명시한다.
 - 현재 이 Codex 세션에서 target venv의 MPS 상태는 `mps_built=True`, `mps_available=False`다. 따라서 새 MPS 실행은 수행하지 못했고, 로컬 weights와 지정 venv를 쓰는 CPU smoke로 스크립트 동작을 검증했다.
 - CPU smoke 결과에서 Quick Start direct는 16프레임 224 입력 기준 raw patch `4,240`, 우리 stream-profile은 NVILA 멀티스케일 `[56,112,196,392]` 기준 raw patch `16,960`으로 4배 workload다. AutoGaze 시간이 더 커 보이는 1차 이유는 이 workload 차이를 같이 봐야 한다.
 
@@ -14,6 +17,15 @@
 
 ```bash
 .venv/bin/python -m repro.autogaze_timing_compare
+```
+
+위 명령의 하위 subprocess도 기본적으로 같은 `.venv/bin/python`을 사용한다. 예전처럼 Mac 로컬 AutoGaze venv를 직접 쓰고 싶을 때만 아래처럼 `--python`을 추가한다.
+
+```bash
+.venv/bin/python -m repro.autogaze_timing_compare \
+  --python /Users/mrc/myresearch/AutoGaze/.venv/bin/python \
+  --autogaze-repo /Users/mrc/myresearch/AutoGaze \
+  --weights-root /Users/mrc/myresearch/AutoGaze/weights
 ```
 
 MPS가 정상으로 잡히는 터미널에서는 위 명령이 아래 세 경로를 순서대로 실행한다.

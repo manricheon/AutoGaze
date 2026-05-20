@@ -7,6 +7,7 @@ __pycache__/
 
 external/
 weight/
+weights/
 inputs/
 outputs/
 data/hlvid/videos/
