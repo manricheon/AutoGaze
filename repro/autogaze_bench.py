@@ -122,6 +122,27 @@ def autogaze_transform_kwargs(target_scales: list[int] | None) -> dict[str, dict
     }
 
 
+def autogaze_forward_kwargs(
+    *,
+    gazing_ratio: float | list[float],
+    task_loss_requirement: float | None,
+    target_scales: list[int] | None,
+    target_patch_size: int | None,
+    generate_only: bool = False,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "gazing_ratio": gazing_ratio,
+        "task_loss_requirement": task_loss_requirement,
+    }
+    if target_scales is not None:
+        kwargs["target_scales"] = target_scales
+    if target_patch_size is not None:
+        kwargs["target_patch_size"] = int(target_patch_size)
+    if generate_only:
+        kwargs["generate_only"] = True
+    return kwargs
+
+
 def move_model_to_device_dtype(model: Any, device: Any, dtype: Any) -> Any:
     return model.to(device=device, dtype=dtype)
 
@@ -191,14 +212,13 @@ def run(args: argparse.Namespace) -> None:
         int(autogaze_model.num_vision_tokens_each_frame),
     )
     raw_patch_budget = int(batch_size * frame_count * patches_per_frame)
-    forward_kwargs: dict[str, Any] = {
-        "gazing_ratio": args.gazing_ratio,
-        "task_loss_requirement": args.task_loss_requirement,
-    }
-    if target_scales is not None:
-        forward_kwargs["target_scales"] = target_scales
-    if target_patch_size is not None:
-        forward_kwargs["target_patch_size"] = target_patch_size
+    forward_kwargs = autogaze_forward_kwargs(
+        gazing_ratio=args.gazing_ratio,
+        task_loss_requirement=args.task_loss_requirement,
+        target_scales=target_scales,
+        target_patch_size=target_patch_size,
+        generate_only=args.generate_only,
+    )
 
     with torch.inference_mode():
         for _ in range(args.warmup):
@@ -254,6 +274,7 @@ def run(args: argparse.Namespace) -> None:
             "task_loss_requirement": args.task_loss_requirement,
             "target_scales": target_scales,
             "target_patch_size": target_patch_size,
+            "generate_only": args.generate_only,
             "skip_siglip": args.skip_siglip,
             "dtype": args.dtype,
         },
@@ -263,6 +284,7 @@ def run(args: argparse.Namespace) -> None:
             "task_loss_requirement": args.task_loss_requirement,
             "target_scales": target_scales,
             "target_patch_size": target_patch_size,
+            "generate_only": args.generate_only,
             "patches_per_frame": patches_per_frame,
             "frames": frame_count,
             "dtype": args.dtype,
@@ -314,6 +336,7 @@ def main() -> None:
     parser.add_argument("--task-loss-requirement", type=float, default=0.7)
     parser.add_argument("--target-scales")
     parser.add_argument("--target-patch-size", type=int)
+    parser.add_argument("--generate-only", action="store_true")
     parser.add_argument("--skip-siglip", action="store_true")
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--repeat", type=int, default=3)

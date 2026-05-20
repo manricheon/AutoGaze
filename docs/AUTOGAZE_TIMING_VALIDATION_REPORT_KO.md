@@ -10,6 +10,7 @@
 - 로컬 Mac timing audit처럼 별도 checkout/weights를 쓰려면 `--autogaze-repo /Users/mrc/myresearch/AutoGaze --weights-root /Users/mrc/myresearch/AutoGaze/weights`를 명시한다.
 - 현재 이 Codex 세션에서 target venv의 MPS 상태는 `mps_built=True`, `mps_available=False`다. 따라서 새 MPS 실행은 수행하지 못했고, 로컬 weights와 지정 venv를 쓰는 CPU smoke로 스크립트 동작을 검증했다.
 - CPU smoke 결과에서 Quick Start direct는 16프레임 224 입력 기준 raw patch `4,240`, 우리 stream-profile은 NVILA 멀티스케일 `[56,112,196,392]` 기준 raw patch `16,960`으로 4배 workload다. AutoGaze 시간이 더 커 보이는 1차 이유는 이 workload 차이를 같이 봐야 한다.
+- `gazing_ratio`, `task_loss_requirement`, standalone AutoGaze와 NVILA 연결 시 token count 차이는 [AutoGaze Gazing Policy and NVILA Integration Notes](./AUTOGAZE_GAZING_POLICY_AND_NVILA_INTEGRATION_KO.md)에 따로 정리했다.
 
 ## 비교 스크립트
 
@@ -72,6 +73,7 @@ outputs/autogaze_repro/timing_compare/quickstart_vs_current_report.md
 | AutoGaze tile batch | 없음 | `--max-batch-size-autogaze`, 기본 `16` | NVILA에서 spatial tile sequence들을 몇 개씩 AutoGaze에 넣을지 결정한다. tile이 많을 때 GPU launch/throughput에는 유리할 수 있지만 peak memory가 늘고 단일 1-tile latency를 줄인다는 보장은 없다. |
 | gazing ratio | `--gazing-ratio` | `--gazing-ratio-tile`, stream은 `--stream-gazing-ratio` | 더 큰 ratio는 더 많은 patch를 탐색/선택할 수 있어서 AutoGaze forward와 후속 encoder workload가 커질 수 있다. Quick Start는 `0.75`, NVILA 기본은 `[0.2]+[0.06]*15`라서 반드시 맞춰야 한다. |
 | task loss threshold | `--task-loss-requirement` | `--task-loss-requirement-tile` | threshold가 낮거나 조건이 더 빡빡하면 더 오래 gaze할 수 있다. |
+| generate only | `--generate-only` | `--autogaze-generate-only` | AutoGaze가 patch index를 생성한 뒤, 학습용/log-prob 확인용 추가 forward를 생략한다. inference latency를 비교할 때는 이 값을 켜고/끄고 따로 비교해야 한다. |
 | target scales | `--autogaze-target-scales`가 comparison에서 direct에는 `--target-scales`로 전달됨 | `--autogaze-target-scales` | `[56,112,196,392]`처럼 multiscale이면 patch budget이 크게 증가한다. Quick Start 기본 224 단일 입력과 직접 비교하면 안 된다. |
 | target patch size | `--autogaze-target-patch-size`가 direct에는 `--target-patch-size`로 전달됨 | `--autogaze-target-patch-size` | scale/patch 조합이 patch positions per frame을 결정한다. |
 | sampled frames | `--frames` | `--num-video-frames` | 거의 선형적으로 AutoGaze 입력량에 영향을 준다. |
@@ -83,6 +85,8 @@ outputs/autogaze_repro/timing_compare/quickstart_vs_current_report.md
 `target_scales`를 넘기는 경우 AutoGaze 입력 tensor는 반드시 largest scale의 정사각형이어야 한다. 예를 들어 `56+112+196+392`와 patch size `14`를 쓰면 AutoGaze에 들어가는 video tensor의 `H`와 `W`가 모두 `392`여야 한다. `shortest_edge=392`처럼 aspect ratio를 유지하는 resize는 16:9 비디오에서 `697x392` 같은 직사각형을 만들 수 있고, 원본 AutoGaze의 `assert H == W == target_scales[-1]`에 걸린다. 현재 comparison direct path와 stream-profile path는 이 경우 AutoGaze 전처리를 `size={"height": 392, "width": 392}`로 강제한다.
 
 CUDA `float16` 실험에서는 model dtype과 input tensor dtype도 같이 맞아야 한다. comparison script의 Quick Start direct, stream-profile AutoGaze, `nvila_runner --mode single`은 모두 같은 `--dtype`/`--stream-dtype` 설정을 전달한다. `nvila_runner --dtype float16`은 full NVILA model load에 `torch_dtype=torch.float16`을 전달하고, direct/stream AutoGaze model도 입력 tensor와 같은 dtype으로 올린다.
+
+`--generate-only` / `--autogaze-generate-only`는 AutoGaze의 autoregressive decoder가 선택 patch index를 만드는 단계만 측정하고 싶을 때 쓰는 옵션이다. 원본 AutoGaze forward는 기본적으로 `generate_only=False`라서 `gazing_pos`, `if_padded_gazing`, `num_gazing_each_frame`, `gazing_mask`를 만든 뒤 `gazing_model(video, gazing_info)`를 한 번 더 호출해 `logits`와 `task_loss`도 계산한다. inference에서 후속 SigLIP/NVILA에 필요한 것은 gaze 위치 정보이므로, 이 추가 forward를 빼고 비교하려면 이 옵션을 켠다. 단, 논문/Quick Start 기본값과 직접 비교할 때는 옵션 상태를 반드시 같이 기록해야 한다.
 
 ## 속도 벤치마크 읽는 순서
 
@@ -135,6 +139,7 @@ Quick Start 기본 설정 그대로 비교하려면 multiscale 옵션을 넣지 
   --max-batch-size-autogaze 16 \
   --quickstart-batch-size 1 \
   --quickstart-native \
+  --autogaze-generate-only \
   --gazing-ratio-sweep 0.06,0.1,0.2,0.5,0.75,1.0 \
   --task-loss-sweep 0.7 \
   --skip-stream-profile \
@@ -144,7 +149,7 @@ Quick Start 기본 설정 그대로 비교하려면 multiscale 옵션을 넣지 
   --output-dir outputs/autogaze_repro/h100_quickstart_default_vs_nvila_single_gazing_sweep
 ```
 
-이 config의 목적은 “README Quick Start 코드 그대로의 AutoGaze forward”, “현재 wrapper의 direct AutoGaze forward”, “NVILA processor hook 내부 AutoGaze forward”를 같은 gaze policy로 놓고 보는 것이다. native lane도 video decode/preprocess는 따로 기록하지만, 핵심 비교값인 `quickstart_native_autogaze_ms`에는 포함하지 않는다. sweep summary에서는 아래 필드를 우선 비교한다.
+이 config의 목적은 “README Quick Start 코드 그대로의 AutoGaze forward”, “현재 wrapper의 direct AutoGaze forward”, “NVILA processor hook 내부 AutoGaze forward”를 같은 gaze policy로 놓고 보는 것이다. `--autogaze-generate-only`를 넣으면 direct/native lane에는 `--generate-only`, NVILA lane에는 `--autogaze-generate-only`가 전달된다. native lane도 video decode/preprocess는 따로 기록하지만, 핵심 비교값인 `quickstart_native_autogaze_ms`에는 포함하지 않는다. sweep summary에서는 아래 필드를 우선 비교한다.
 
 | Field | 의미 |
 | --- | --- |

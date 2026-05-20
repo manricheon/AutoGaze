@@ -3,6 +3,7 @@ from pathlib import Path
 
 from repro.autogaze_bench import (
     add_external_autogaze,
+    autogaze_forward_kwargs,
     autogaze_transform_kwargs,
     flatten_video_batch_for_siglip_baseline,
     move_model_to_device_dtype,
@@ -75,6 +76,24 @@ def test_autogaze_transform_kwargs_force_square_largest_target_scale():
         "crop_size": {"height": 392, "width": 392},
     }
     assert autogaze_transform_kwargs(None) == {}
+
+
+def test_autogaze_forward_kwargs_can_enable_generate_only():
+    kwargs = autogaze_forward_kwargs(
+        gazing_ratio=0.75,
+        task_loss_requirement=0.7,
+        target_scales=[56, 112, 196, 392],
+        target_patch_size=14,
+        generate_only=True,
+    )
+
+    assert kwargs == {
+        "gazing_ratio": 0.75,
+        "task_loss_requirement": 0.7,
+        "target_scales": [56, 112, 196, 392],
+        "target_patch_size": 14,
+        "generate_only": True,
+    }
 
 
 def test_move_model_to_device_dtype_passes_dtype_to_torch_module_to():

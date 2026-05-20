@@ -69,6 +69,13 @@ def test_config_from_args_can_enable_quickstart_native_lane():
     assert config.run_quickstart_native is True
 
 
+def test_config_from_args_can_enable_autogaze_generate_only():
+    args = parse_args(["--autogaze-generate-only"])
+    config = config_from_args(args)
+
+    assert config.autogaze_generate_only is True
+
+
 def test_missing_subprocess_python_reports_cli_fix():
     config = CompareConfig(python=Path("/definitely/missing/python"), require_mps=False)
 
@@ -93,6 +100,7 @@ def test_build_commands_use_requested_mps_venv_and_local_weights(tmp_path):
         repeat=3,
         autogaze_target_scales="56+112+196+392",
         autogaze_target_patch_size=14,
+        autogaze_generate_only=True,
     )
 
     quickstart = build_quickstart_command(config)
@@ -117,6 +125,7 @@ def test_build_commands_use_requested_mps_venv_and_local_weights(tmp_path):
     assert "--skip-siglip" in quickstart
     assert quickstart[quickstart.index("--target-scales") + 1] == "56+112+196+392"
     assert quickstart[quickstart.index("--target-patch-size") + 1] == "14"
+    assert "--generate-only" in quickstart
     assert quickstart_native[:3] == [
         "/Users/mrc/myresearch/AutoGaze/.venv/bin/python",
         "-m",
@@ -125,6 +134,7 @@ def test_build_commands_use_requested_mps_venv_and_local_weights(tmp_path):
     assert quickstart_native[quickstart_native.index("--autogaze-model") + 1] == "/Users/mrc/myresearch/AutoGaze/weights/AutoGaze"
     assert quickstart_native[quickstart_native.index("--target-scales") + 1] == "56+112+196+392"
     assert quickstart_native[quickstart_native.index("--target-patch-size") + 1] == "14"
+    assert "--generate-only" in quickstart_native
     assert stream_profile[stream_profile.index("--autogaze-model") + 1] == "/Users/mrc/myresearch/AutoGaze/weights/AutoGaze"
     assert stream_profile[stream_profile.index("--device") + 1] == "mps"
     assert stream_profile[stream_profile.index("--stream-chunk-frames") + 1] == "16"
@@ -132,6 +142,7 @@ def test_build_commands_use_requested_mps_venv_and_local_weights(tmp_path):
     assert stream_profile[stream_profile.index("--stream-gazing-ratio") + 1] == "0.75"
     assert stream_profile[stream_profile.index("--task-loss-requirement-tile") + 1] == "0.7"
     assert stream_profile[stream_profile.index("--autogaze-target-scales") + 1] == "56+112+196+392"
+    assert "--autogaze-generate-only" in stream_profile
     assert single[:3] == [
         "/Users/mrc/myresearch/AutoGaze/.venv/bin/python",
         "-m",
@@ -144,6 +155,7 @@ def test_build_commands_use_requested_mps_venv_and_local_weights(tmp_path):
     assert single[single.index("--num-video-frames-thumbnail") + 1] == "1"
     assert single[single.index("--max-tiles-video") + 1] == "1"
     assert "--measure-ttft" in single
+    assert "--autogaze-generate-only" in single
 
 
 def test_run_comparison_dry_run_can_compare_quickstart_to_single_without_stream(tmp_path):

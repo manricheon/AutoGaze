@@ -809,6 +809,8 @@ def build_runner_command(
         command.extend(["--limit", str(args.limit)])
     if getattr(args, "measure_ttft", False):
         command.append("--measure-ttft")
+    if getattr(args, "autogaze_generate_only", False):
+        command.append("--autogaze-generate-only")
     if getattr(args, "continue_on_error", False):
         command.append("--continue-on-error")
     if gazing_mode == "autogaze" and getattr(args, "gazing_ratio_tile", None) is not None:
@@ -1526,6 +1528,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--warmup-runs", type=int, default=0)
     parser.add_argument("--gazing-ratio-tile")
     parser.add_argument("--task-loss-requirement-tile", type=float, default=0.7)
+    parser.add_argument("--autogaze-generate-only", action="store_true")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--split", default="test")
     parser.add_argument("--config", default="default")

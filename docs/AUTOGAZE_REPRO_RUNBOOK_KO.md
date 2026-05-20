@@ -974,6 +974,8 @@ matching keep-all baseline은 모든 설정을 동일하게 유지하고 gaze mo
 
 AutoGaze policy를 명시하려면 batch wrapper에도 `--gazing-ratio-tile`과 `--task-loss-requirement-tile`을 같이 줍니다. `--gazing-ratio-tile`을 생략하면 하위 `nvila_runner`의 NVILA 기본 정책 `[0.2] + [0.06] * 15`가 유지됩니다. Quick Start와 같은 0.75 정책으로 비교하려면 `--gazing-ratio-tile 0.75 --task-loss-requirement-tile 0.7`을 붙이세요.
 
+AutoGaze selector의 inference-only 시간을 보고 싶으면 `--autogaze-generate-only`를 추가합니다. 이 옵션은 하위 `repro.nvila_runner`에 그대로 전달되며, AutoGaze가 patch index를 생성한 뒤 logits/task-loss 계산용 추가 forward를 생략합니다. 논문/Quick Start 기본 forward와 비교할 때는 켰는지 껐는지를 report의 `autogaze_runtime_config.generate_only`에서 반드시 확인하세요.
+
 지원하는 폴더 형태:
 
 ```text
@@ -1028,6 +1030,7 @@ paper comparison wrapper 예시:
   --paper-comparison-report \
   --gazing-ratio-tile 0.75 \
   --task-loss-requirement-tile 0.7 \
+  --autogaze-generate-only \
   --measure-ttft \
   --warmup-runs 1 \
   --continue-on-error

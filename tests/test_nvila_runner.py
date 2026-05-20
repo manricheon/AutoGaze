@@ -9,6 +9,7 @@ from PIL import Image
 from repro.nvila_runner import (
     DEFAULT_BASELINE_MODEL,
     StageProfiler,
+    apply_processor_autogaze_generate_only,
     apply_resize_to_dimensions,
     autogaze_processor_size_kwargs,
     build_autogaze_effect_metrics,
@@ -225,6 +226,34 @@ def test_processor_kwargs_can_override_gazing_ratio_tile_for_timing_audit():
 
     assert kwargs["gazing_ratio_tile"] == 0.75
     assert kwargs["task_loss_requirement_tile"] == 0.7
+
+
+def test_parse_args_accepts_autogaze_generate_only():
+    args = parse_args(["--autogaze-generate-only"])
+
+    assert args.autogaze_generate_only is True
+
+
+def test_apply_processor_autogaze_generate_only_injects_forward_kwarg():
+    class FakeAutoGaze(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.seen_kwargs = None
+
+        def forward(self, *args, **kwargs):
+            self.seen_kwargs = kwargs
+            return {"ok": True}
+
+    processor = argparse.Namespace(_autogaze_model=FakeAutoGaze())
+
+    applied = apply_processor_autogaze_generate_only(processor, enabled=True)
+    result = processor._autogaze_model({"video": torch.zeros(1)}, gazing_ratio=0.5)
+
+    assert applied is True
+    assert result == {"ok": True}
+    assert processor.autogaze_generate_only is True
+    assert processor._autogaze_model.seen_kwargs["generate_only"] is True
+    assert processor._autogaze_model.seen_kwargs["gazing_ratio"] == 0.5
 
 
 def test_processor_kwargs_accepts_sequence_gazing_ratio_tile():

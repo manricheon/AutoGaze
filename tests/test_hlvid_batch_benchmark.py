@@ -156,6 +156,7 @@ def test_build_runner_command_includes_local_manifest_and_measurement_flags(tmp_
         visualization_selected_max_long_side=720,
         gazing_ratio_tile="0.75",
         task_loss_requirement_tile=0.7,
+        autogaze_generate_only=True,
         continue_on_error=True,
         limit=3,
         split="test",
@@ -180,6 +181,7 @@ def test_build_runner_command_includes_local_manifest_and_measurement_flags(tmp_
     assert "--gazing-mode" in command
     assert "autogaze" in command
     assert command[command.index("--gazing-ratio-tile") + 1] == "0.75"
+    assert "--autogaze-generate-only" in command
     assert "--measure-ttft" in command
     assert "--continue-on-error" in command
     assert "--warmup-runs" in command
@@ -240,6 +242,7 @@ def test_build_runner_command_forwards_model_family_and_paper_preset(tmp_path: P
         visualization_selected_max_long_side=None,
         gazing_ratio_tile=None,
         task_loss_requirement_tile=0.7,
+        autogaze_generate_only=False,
         continue_on_error=True,
         limit=3,
         split="test",
@@ -273,9 +276,12 @@ def test_build_runner_command_forwards_model_family_and_paper_preset(tmp_path: P
 
 
 def test_batch_parser_accepts_gazing_ratio_tile_override():
-    args = build_parser().parse_args(["--dataset-dir", ".", "--gazing-ratio-tile", "0.75"])
+    args = build_parser().parse_args(
+        ["--dataset-dir", ".", "--gazing-ratio-tile", "0.75", "--autogaze-generate-only"]
+    )
 
     assert args.gazing_ratio_tile == "0.75"
+    assert args.autogaze_generate_only is True
 
 
 def test_paper_mode_args_sets_preset_defaults_without_mutating_base_args():

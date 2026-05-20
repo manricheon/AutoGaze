@@ -38,6 +38,7 @@ class CompareConfig:
     max_batch_size_autogaze: int = 16
     gazing_ratio: float = 0.75
     task_loss_requirement: float = 0.7
+    autogaze_generate_only: bool = False
     warmup: int = 1
     repeat: int = 3
     stream_decode_strategy: str = "scan"
@@ -143,6 +144,8 @@ def build_quickstart_command(config: CompareConfig) -> list[str]:
         command.extend(["--target-scales", config.autogaze_target_scales])
     if config.autogaze_target_patch_size is not None:
         command.extend(["--target-patch-size", str(config.autogaze_target_patch_size)])
+    if config.autogaze_generate_only:
+        command.append("--generate-only")
     if not config.quickstart_run_siglip:
         command.append("--skip-siglip")
     return command
@@ -180,6 +183,8 @@ def build_quickstart_native_command(config: CompareConfig) -> list[str]:
         command.extend(["--target-scales", config.autogaze_target_scales])
     if config.autogaze_target_patch_size is not None:
         command.extend(["--target-patch-size", str(config.autogaze_target_patch_size)])
+    if config.autogaze_generate_only:
+        command.append("--generate-only")
     return command
 
 
@@ -227,6 +232,8 @@ def build_stream_profile_command(config: CompareConfig) -> list[str]:
         command.extend(["--autogaze-target-scales", config.autogaze_target_scales])
     if config.autogaze_target_patch_size is not None:
         command.extend(["--autogaze-target-patch-size", str(config.autogaze_target_patch_size)])
+    if config.autogaze_generate_only:
+        command.append("--autogaze-generate-only")
     if config.stream_run_siglip:
         command.extend(
             [
@@ -292,6 +299,8 @@ def build_single_command(config: CompareConfig) -> list[str]:
         command.extend(["--autogaze-target-scales", config.autogaze_target_scales])
     if config.autogaze_target_patch_size is not None:
         command.extend(["--autogaze-target-patch-size", str(config.autogaze_target_patch_size)])
+    if config.autogaze_generate_only:
+        command.append("--autogaze-generate-only")
     return command
 
 
@@ -394,6 +403,11 @@ def build_autogaze_latency_options_summary(
             or _metric(quickstart_payload, "input", "target_patch_size"),
             "frames": quick_options.get("frames") or _metric(quickstart_payload, "input", "frames"),
             "dtype": quick_options.get("dtype") or _metric(quickstart_payload, "input", "dtype"),
+            "generate_only": (
+                quick_options.get("generate_only")
+                if quick_options.get("generate_only") is not None
+                else _metric(quickstart_payload, "input", "generate_only")
+            ),
             "siglip_enabled": quick_options.get("siglip_enabled"),
         },
         "quickstart_native": (
@@ -409,6 +423,11 @@ def build_autogaze_latency_options_summary(
                 or _metric(quickstart_native_payload, "input", "target_patch_size"),
                 "frames": native_options.get("frames") or _metric(quickstart_native_payload, "input", "frames"),
                 "dtype": native_options.get("dtype") or _metric(quickstart_native_payload, "input", "dtype"),
+                "generate_only": (
+                    native_options.get("generate_only")
+                    if native_options.get("generate_only") is not None
+                    else _metric(quickstart_native_payload, "input", "generate_only")
+                ),
                 "decode_preprocess_excluded_from_forward": native_options.get(
                     "decode_preprocess_excluded_from_forward"
                 ),
@@ -428,6 +447,7 @@ def build_autogaze_latency_options_summary(
                 "stream_chunk_frames": stream_sampling.get("stream_chunk_frames"),
                 "max_tiles_video": _metric(stream_payload, "stream_plan", "tiling", "spatial_tiles"),
                 "decode_strategy": stream_sampling.get("decode_strategy"),
+                "generate_only": stream_config.get("generate_only"),
             }
             if stream_payload
             else None
@@ -441,6 +461,7 @@ def build_autogaze_latency_options_summary(
             "frames": _metric(single_result, "token_metrics", "video_sampled_frames"),
             "thumbnail_frames": _metric(single_result, "token_metrics", "thumbnail_sampled_frames"),
             "max_tiles_video": _metric(single_result, "video_input_summary", "spatial_tiles_per_video"),
+            "generate_only": single_config.get("generate_only"),
         },
         "latency_note": (
             "Quick Start batch_size defaults to 1. It affects direct AutoGaze latency and throughput. "
@@ -1251,6 +1272,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-batch-size-autogaze", type=int, default=16)
     parser.add_argument("--gazing-ratio", type=float, default=0.75)
     parser.add_argument("--task-loss-requirement", type=float, default=0.7)
+    parser.add_argument("--autogaze-generate-only", action="store_true")
     parser.add_argument("--gazing-ratio-sweep")
     parser.add_argument("--task-loss-sweep")
     parser.add_argument("--warmup", type=int, default=1)
@@ -1288,6 +1310,7 @@ def config_from_args(args: argparse.Namespace) -> CompareConfig:
         max_batch_size_autogaze=args.max_batch_size_autogaze,
         gazing_ratio=args.gazing_ratio,
         task_loss_requirement=args.task_loss_requirement,
+        autogaze_generate_only=args.autogaze_generate_only,
         warmup=args.warmup,
         repeat=args.repeat,
         stream_decode_strategy=args.stream_decode_strategy,

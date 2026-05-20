@@ -382,6 +382,11 @@ def autogaze_runtime_config(args: argparse.Namespace) -> dict[str, Any]:
         "target_scales": parse_int_sequence(getattr(args, "autogaze_target_scales", None)),
         "target_patch_size": getattr(args, "autogaze_target_patch_size", None),
         "max_batch_size_autogaze": getattr(args, "max_batch_size_autogaze", None),
+        "generate_only": (
+            bool(getattr(args, "autogaze_generate_only", False))
+            if getattr(args, "gazing_mode", None) == "autogaze"
+            else None
+        ),
         "note": (
             "NVILA processor default is [0.2] + [0.06] * 15, while the original AutoGaze Quick Start uses 0.75. "
             "Compare AutoGaze latency only when this config and the raw patch budget match."
@@ -2608,8 +2613,34 @@ def requested_torch_dtype(args: argparse.Namespace) -> torch.dtype | None:
     raise ValueError(f"Unsupported dtype: {value}")
 
 
+def apply_processor_autogaze_generate_only(processor: Any, *, enabled: bool) -> bool:
+    setattr(processor, "autogaze_generate_only", bool(enabled))
+    if not enabled:
+        return False
+    autogaze_model = getattr(processor, "_autogaze_model", None)
+    if autogaze_model is None:
+        return False
+    if getattr(autogaze_model, "_nvila_generate_only_patch_applied", False):
+        return True
+
+    original_forward = autogaze_model.forward
+
+    def forward_with_generate_only(*args: Any, **kwargs: Any) -> Any:
+        kwargs.setdefault("generate_only", True)
+        return original_forward(*args, **kwargs)
+
+    autogaze_model.forward = forward_with_generate_only
+    autogaze_model._nvila_generate_only_patch_applied = True
+    autogaze_model._nvila_original_forward_before_generate_only_patch = original_forward
+    return True
+
+
 def load_model_and_processor(args: argparse.Namespace):
     processor = AutoProcessor.from_pretrained(args.model_path, **processor_kwargs(args))
+    apply_processor_autogaze_generate_only(
+        processor,
+        enabled=bool(getattr(args, "autogaze_generate_only", False)),
+    )
     model = AutoModel.from_pretrained(args.model_path, **model_load_kwargs(args))
     model.eval()
     return model, processor
@@ -3799,6 +3830,7 @@ def run_autogaze_on_stream_tile_sequences(
     target_patch_size: int,
     patches_per_frame_value: int,
     profiler: StageProfiler,
+    generate_only: bool = False,
     siglip_model: Any | None = None,
     siglip_mode: str = "gazed",
 ) -> tuple[dict[str, Any], int]:
@@ -3845,6 +3877,7 @@ def run_autogaze_on_stream_tile_sequences(
                     task_loss_requirement=task_loss_requirement,
                     target_scales=target_scales,
                     target_patch_size=target_patch_size,
+                    generate_only=generate_only,
                 )
 
             outputs, elapsed_ms = _measure_elapsed(device, forward)
@@ -3904,6 +3937,7 @@ def run_autogaze_on_stream_tile_sequences(
             "siglip_keep_all_last_hidden_shape": siglip_keep_all_last_hidden_shape,
             "siglip_gazed_sequence_slots_sum": siglip_gazed_sequence_slots_sum,
             "siglip_gazed_sequence_slots_squared_sum": siglip_gazed_sequence_slots_squared_sum,
+            "generate_only": generate_only,
         },
         tensor_bytes_peak,
     )
@@ -4160,6 +4194,7 @@ def run_stream_profile(args: argparse.Namespace) -> None:
                 target_patch_size=target_patch_size,
                 patches_per_frame_value=patches_per_frame_value,
                 profiler=profiler,
+                generate_only=bool(getattr(args, "autogaze_generate_only", False)),
                 siglip_model=siglip_model,
                 siglip_mode=args.stream_siglip_mode,
             )
@@ -4369,6 +4404,7 @@ def run_stream_profile(args: argparse.Namespace) -> None:
         "autogaze_runtime_config": autogaze_runtime_config(args),
         "autogaze_model": args.autogaze_model,
         "gazing_mode": args.gazing_mode,
+        "autogaze_generate_only": bool(getattr(args, "autogaze_generate_only", False)),
         "video": args.video,
         "video_resolved": resolved_video,
         "source_metadata": metadata,
@@ -4569,6 +4605,7 @@ def generate_one(
         "video_input_info": video_input_info,
         "video_input_summary": video_input_summary,
         "gazing_mode": args.gazing_mode,
+        "autogaze_generate_only": bool(getattr(args, "autogaze_generate_only", False)),
         "autogaze_target_scales": parse_int_sequence(getattr(args, "autogaze_target_scales", None)),
         "autogaze_target_patch_size": getattr(args, "autogaze_target_patch_size", None),
         "input_token_count": input_token_count,
@@ -4870,6 +4907,7 @@ def run_hlvid(args: argparse.Namespace) -> None:
                 "num_video_frames_thumbnail": args.num_video_frames_thumbnail,
                 "max_tiles_video": args.max_tiles_video,
                 "gazing_mode": args.gazing_mode,
+                "autogaze_generate_only": bool(getattr(args, "autogaze_generate_only", False)),
                 "video_resize": video_resize_config(args),
                 "autogaze_target_scales": parse_int_sequence(getattr(args, "autogaze_target_scales", None)),
                 "autogaze_target_patch_size": getattr(args, "autogaze_target_patch_size", None),
@@ -4889,6 +4927,7 @@ def run_hlvid(args: argparse.Namespace) -> None:
             "num_video_frames_thumbnail": args.num_video_frames_thumbnail,
             "max_tiles_video": args.max_tiles_video,
             "gazing_mode": args.gazing_mode,
+            "autogaze_generate_only": bool(getattr(args, "autogaze_generate_only", False)),
             "video_resize": video_resize_config(args),
             "autogaze_target_scales": parse_int_sequence(getattr(args, "autogaze_target_scales", None)),
             "autogaze_target_patch_size": getattr(args, "autogaze_target_patch_size", None),
@@ -4964,6 +5003,7 @@ def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentPar
     parser.add_argument("--gazing-ratio-tile")
     parser.add_argument("--task-loss-requirement-tile", type=float, default=0.6)
     parser.add_argument("--max-batch-size-autogaze", type=int, default=16)
+    parser.add_argument("--autogaze-generate-only", action="store_true")
     parser.add_argument("--max-batch-size-siglip", type=int, default=32)
     parser.add_argument("--max-new-tokens", type=int, default=8)
     parser.add_argument("--measure-ttft", action="store_true")
