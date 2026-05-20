@@ -14,7 +14,7 @@
 - CUDA에서는 기존 기본값인 AutoGaze batch 16, SigLIP batch 32부터 시작하는 것이 맞습니다. 단, full NVILA가 느리면 batch보다 먼저 tile/frame 수를 줄여야 합니다.
 - thumbnail은 현재 keep-all이라 total patch reduction을 희석합니다. 그래서 리더 설명 시 tile-only reduction과 total reduction을 같이 보여줘야 합니다.
 - `--stream-run-siglip`을 켜면 AutoGaze가 만든 gazing_info를 custom SigLIP vision tower에 바로 넣어 `siglip_gazed_forward`와 선택적 `siglip_keep_all_forward`를 chunk 단위로 측정합니다. projector/LLM은 여전히 full NVILA `single`/`hlvid`에서 확인해야 합니다.
-- `google/siglip2-base-patch16-224`로 MPS smoke를 돌릴 때는 `--autogaze-target-scales 32+64+112+224 --autogaze-target-patch-size 16`을 같이 써야 patch 위치가 맞습니다. 기본 NVILA scale은 patch14 기준입니다.
+- `google/siglip2-base-patch16-224`로 MPS smoke를 돌릴 때는 `--autogaze-target-scales 32+64+112+224 --autogaze-target-patch-size 16`을 같이 써야 patch 위치가 맞습니다. NVILA-HD에서는 AutoGaze target coordinate의 patch16과 SigLIP vision tower의 patch14가 공존하므로, 두 값을 리포트에서 분리해서 봐야 합니다.
 - 4K HLVid 5분 예시는 `--stream-decode-strategy seek`를 써야 합니다. 기존 scan 방식은 16프레임만 샘플링해도 끝 프레임까지 8992프레임을 디코드해서 CPU decode가 약 54-68초였습니다. seek 방식은 packet-level keyframe index를 먼저 읽고 필요한 target frame 근처 keyframe부터만 디코드해서 16프레임 기준 decode 관련 시간이 약 0.94초, 128프레임 기준 약 5.73초였습니다.
 
 ## 동작 파이프라인 그림
@@ -24,15 +24,20 @@
 full NVILA-HD-Video + AutoGaze 기준으로 먼저 생각하면 됩니다.
 
 ```text
-NVILA/AutoGaze default target
-  tile image size             = 392 x 392
+NVILA/AutoGaze target coordinate aligned to SigLIP
+  AutoGaze target patch size  = 14
   target scales               = 56 + 112 + 196 + 392
-  vision patch size           = 14
-  patches per frame/sequence  = (56/14)^2 + (112/14)^2 + (196/14)^2 + (392/14)^2
+  positions per frame         = (56//14)^2 + (112//14)^2 + (196//14)^2 + (392//14)^2
                               = 4^2 + 8^2 + 14^2 + 28^2
                               = 16 + 64 + 196 + 784
-                              = 1060 patches
-  TokenShuffle estimate       = ceil(patches / 9) visual tokens
+                              = 1060 positions
+
+NVILA/SigLIP vision tower embedding coordinate
+  tile image size             = 392 x 392
+  vision scales               = 56 + 112 + 196 + 392
+  vision patch size           = 14
+  embeddings per frame        = 1060 embeddings
+  TokenShuffle estimate       = ceil(selected embeddings / 9) visual tokens
 ```
 
 MPS에서 `google/siglip2-base-patch16-224`로 custom SigLIP smoke를 돌릴 때는 patch 위치가 달라서 별도 probe 설정을 씁니다.

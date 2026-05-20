@@ -68,21 +68,39 @@ num_gaze_tokens_each_frame
 
 즉 `gazing_ratio=0.06`은 "확률이 0.06보다 큰 patch만 선택"이 아니다. "각 frame에서 최대 약 6% patch slot까지만 autoregressive decoder가 patch id를 생성할 수 있다"에 가깝다.
 
-예를 들어 NVILA HD multiscale 기본값을 쓰면 frame당 patch budget은 아래와 같다.
+예를 들어 NVILA HD에서 혼동하기 쉬운 patch budget은 두 가지가 있다.
+
+첫째, NVILA-HD sparse SigLIP alignment 기준:
 
 ```text
-scales = 56 + 112 + 196 + 392
-patch_size = 14
+target_scales = 56 + 112 + 196 + 392
+target_patch_size = vision_config.patch_size = 14
 
-56/14  = 4   ->  16 patches
-112/14 = 8   ->  64 patches
-196/14 = 14  -> 196 patches
-392/14 = 28  -> 784 patches
+56//14  = 4   ->  16 positions
+112//14 = 8   ->  64 positions
+196//14 = 14  -> 196 positions
+392//14 = 28  -> 784 positions
 
-total per frame = 16 + 64 + 196 + 784 = 1060 patches
+total per frame = 16 + 64 + 196 + 784 = 1060 positions
 ```
 
-이때 scalar ratio를 쓰면:
+둘째, NVILA-HD weight metadata에 들어 있는 release processor 기준:
+
+```text
+preprocessor_config.target_scales = 56 + 112 + 196 + 392
+preprocessor_config.target_patch_size = 16
+
+56//16  = 3   ->   9 positions
+112//16 = 7   ->  49 positions
+196//16 = 12  -> 144 positions
+392//16 = 24  -> 576 positions
+
+total per frame = 9 + 49 + 144 + 576 = 778 positions
+```
+
+AutoGaze standalone/patch16 SigLIP 설명의 patch size 16은 두 번째 계열에 가깝다. 하지만 NVILA-HD의 실제 vision tower는 `vision_config.patch_size=14`이고, SigLIP sparse path는 `gazing_pos`로 patch sequence를 직접 gather한다. 따라서 runner 기본값은 위치 정렬을 우선해 patch14 aligned 경로로 둔다. patch16 release metadata 경로는 `--autogaze-target-patch-size 16`을 명시한 호환성/ablation 비교로만 해석한다.
+
+이때 scalar ratio를 AutoGaze target coordinate 기준으로 쓰면:
 
 ```text
 gazing_ratio=0.06 -> floor(1060 * 0.06) = 63 slots/frame
@@ -360,8 +378,9 @@ LLM context 감소:
 가장 흔한 이유는 네 가지다.
 
 1. scale/patch size가 다름
-   - Quick Start 기본은 224 단일 scale에 가까워 frame당 196 patches가 될 수 있다.
-   - NVILA HD는 `56+112+196+392`, patch size 14라서 frame당 1060 patches다.
+    - Quick Start 기본은 224 단일 scale에 가까워 frame당 196 patches가 될 수 있다.
+    - NVILA-HD weight metadata에는 `target_patch_size=16`이 있지만, 실제 vision tower config에는 conv patch size 14가 기록되어 있다.
+   - runner 기본값은 실제 sparse SigLIP gather 정렬을 우선해 `56+112+196+392`, patch size 14이며, frame당 선택 좌표는 `16+64+196+784=1060`개다.
 
 2. tile 수가 다름
    - `max_tiles_video > 1`이면 같은 frame 수라도 AutoGaze 입력 tile-frame instance가 늘어난다.

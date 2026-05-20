@@ -19,6 +19,9 @@ tiling:
 
 autogaze:
   model: nvidia/AutoGaze
+  target_scales: 56+112+196+392
+  target_patch_size: 14
+  patch_space: siglip_aligned_default
   gazing_ratio_tile: [0.2, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06]
   gazing_ratio_thumbnail: 1
   task_loss_requirement_tile: 0.6
@@ -42,6 +45,8 @@ nvila_runner:
     num_video_frames: 1024
     num_video_frames_thumbnail: 64
     max_tiles_video: 48
+    autogaze_target_scales: 56+112+196+392
+    autogaze_target_patch_size: 14
     task_loss_requirement_tile: 0.6
     max_batch_size_autogaze: 16
     max_batch_size_siglip: 32

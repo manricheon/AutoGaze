@@ -52,8 +52,12 @@ DEFAULT_PROMPT = (
     "Please answer directly with the letter of the correct answer."
 )
 NVILA_IMAGE_SIZE = 392
-NVILA_TARGET_SCALES = [56, 112, 196, 392]
-NVILA_TARGET_PATCH_SIZE = 14
+NVILA_VISION_SCALES = [56, 112, 196, 392]
+NVILA_VISION_PATCH_SIZE = 14
+NVILA_AUTOGAZE_TARGET_SCALES = [56, 112, 196, 392]
+NVILA_AUTOGAZE_TARGET_PATCH_SIZE = NVILA_VISION_PATCH_SIZE
+NVILA_TARGET_SCALES = NVILA_VISION_SCALES
+NVILA_TARGET_PATCH_SIZE = NVILA_VISION_PATCH_SIZE
 NVILA_TOKEN_SHUFFLE = 9
 NVILA_CONTEXT_LIMIT = 40960
 AUTOGAZE_CHUNK_FRAMES = 16
@@ -324,9 +328,13 @@ def spatial_tile_grid(width: int, height: int, max_tiles_video: int, image_size:
     return {"cols": cols, "rows": rows, "tiles": cols * rows}
 
 
+def patch_positions_by_scale(scales: list[int], patch_size: int) -> dict[str, int]:
+    return {str(scale): (scale // patch_size) ** 2 for scale in scales}
+
+
 def patches_per_frame(scales: list[int] | None = None, patch_size: int = NVILA_TARGET_PATCH_SIZE) -> int:
     active_scales = scales or NVILA_TARGET_SCALES
-    return sum((scale // patch_size) ** 2 for scale in active_scales)
+    return sum(patch_positions_by_scale(active_scales, patch_size).values())
 
 
 def parse_int_sequence(value: str | list[int] | tuple[int, ...] | None) -> list[int] | None:
@@ -379,8 +387,8 @@ def autogaze_runtime_config(args: argparse.Namespace) -> dict[str, Any]:
         "gazing_ratio_tile": ratio,
         "stream_gazing_ratio": effective_stream_gazing_ratio(args),
         "task_loss_requirement_tile": task_loss,
-        "target_scales": parse_int_sequence(getattr(args, "autogaze_target_scales", None)),
-        "target_patch_size": getattr(args, "autogaze_target_patch_size", None),
+        "target_scales": effective_autogaze_target_scales(args),
+        "target_patch_size": effective_autogaze_target_patch_size(args),
         "max_batch_size_autogaze": getattr(args, "max_batch_size_autogaze", None),
         "generate_only": (
             bool(getattr(args, "autogaze_generate_only", False))
@@ -461,6 +469,24 @@ def effective_model_family(args: argparse.Namespace) -> str:
     if "NVILA-8B-Video" in model_path:
         return MODEL_FAMILY_VIDEO_BASELINE
     return MODEL_FAMILY_HD_AUTOGAZE
+
+
+def effective_autogaze_target_scales(args: argparse.Namespace) -> list[int] | None:
+    explicit = parse_int_sequence(getattr(args, "autogaze_target_scales", None))
+    if explicit is not None:
+        return explicit
+    if effective_model_family(args) == MODEL_FAMILY_HD_AUTOGAZE:
+        return list(NVILA_AUTOGAZE_TARGET_SCALES)
+    return None
+
+
+def effective_autogaze_target_patch_size(args: argparse.Namespace) -> int | None:
+    explicit = getattr(args, "autogaze_target_patch_size", None)
+    if explicit is not None:
+        return int(explicit)
+    if effective_model_family(args) == MODEL_FAMILY_HD_AUTOGAZE:
+        return NVILA_AUTOGAZE_TARGET_PATCH_SIZE
+    return None
 
 
 def effective_token_selector_adapter(args: argparse.Namespace) -> str:
@@ -977,6 +1003,26 @@ def build_autogaze_token_summary(token_metrics: dict[str, Any]) -> dict[str, Any
             "temporal_chunks_per_video": token_metrics.get("temporal_chunks_per_video"),
             "encoder_patches_per_frame_multiscale": token_metrics.get("encoder_patches_per_frame_multiscale"),
         },
+        "patch_space_basis": {
+            "autogaze_target_scales": token_metrics.get("autogaze_target_scales"),
+            "autogaze_target_patch_size": token_metrics.get("autogaze_target_patch_size"),
+            "autogaze_coordinate_patches_per_frame_multiscale": token_metrics.get(
+                "autogaze_coordinate_patches_per_frame_multiscale"
+            ),
+            "autogaze_coordinate_patches_per_frame_by_scale": token_metrics.get(
+                "autogaze_coordinate_patches_per_frame_by_scale"
+            ),
+            "vision_encoder_scales": token_metrics.get("vision_encoder_scales"),
+            "vision_encoder_patch_size": token_metrics.get("vision_encoder_patch_size"),
+            "vision_encoder_patches_per_frame_multiscale": token_metrics.get(
+                "vision_encoder_patches_per_frame_multiscale"
+            ),
+            "vision_encoder_patches_per_frame_by_scale": token_metrics.get(
+                "vision_encoder_patches_per_frame_by_scale"
+            ),
+            "patch_space_mismatch": token_metrics.get("patch_space_mismatch"),
+            "note": token_metrics.get("patch_space_note"),
+        },
         "autogaze_input_breakdown": build_autogaze_input_breakdown(token_metrics),
         "autogaze_selection_patch_tokens": {
             "input_patch_tokens": autogaze_input,
@@ -1075,7 +1121,7 @@ def build_autogaze_input_breakdown(token_metrics: dict[str, Any]) -> dict[str, A
         ),
         "why_it_can_be_large": (
             "A resized video can still be split into multiple spatial tiles. "
-            "For example, 128 frames * 8 tiles/frame * 1060 multiscale patches = 1085440."
+            "For example, 128 frames * 8 tiles/frame * multiscale patch positions can exceed one million positions."
         ),
     }
 
@@ -2578,10 +2624,10 @@ def processor_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "max_batch_size_autogaze": args.max_batch_size_autogaze,
         "trust_remote_code": True,
     }
-    target_scales = parse_int_sequence(getattr(args, "autogaze_target_scales", None))
+    target_scales = effective_autogaze_target_scales(args)
     if target_scales is not None:
         kwargs["target_scales"] = target_scales
-    target_patch_size = getattr(args, "autogaze_target_patch_size", None)
+    target_patch_size = effective_autogaze_target_patch_size(args)
     if target_patch_size is not None:
         kwargs["target_patch_size"] = int(target_patch_size)
     return kwargs
@@ -3280,7 +3326,69 @@ def model_patches_per_frame_by_scale(model) -> dict[str, int]:
         parsed_scales = NVILA_TARGET_SCALES
     else:
         parsed_scales = [int(scale) for scale in scales]
-    return {str(scale): (scale // int(patch_size)) ** 2 for scale in parsed_scales}
+    return patch_positions_by_scale(parsed_scales, int(patch_size))
+
+
+def processor_autogaze_target_scales(processor) -> list[int] | None:
+    scales = getattr(processor, "target_scales", None)
+    if scales is None:
+        if hasattr(processor, "target_patch_size"):
+            return list(NVILA_AUTOGAZE_TARGET_SCALES)
+        return None
+    return [int(scale) for scale in scales]
+
+
+def processor_autogaze_target_patch_size(processor) -> int | None:
+    patch_size = getattr(processor, "target_patch_size", None)
+    if patch_size is None:
+        if hasattr(processor, "target_scales"):
+            return NVILA_AUTOGAZE_TARGET_PATCH_SIZE
+        return None
+    return int(patch_size)
+
+
+def processor_autogaze_patches_per_frame_by_scale(processor) -> dict[str, int] | None:
+    scales = processor_autogaze_target_scales(processor)
+    patch_size = processor_autogaze_target_patch_size(processor)
+    if scales is None or patch_size is None:
+        return None
+    return patch_positions_by_scale(scales, patch_size)
+
+
+def build_patch_space_metadata(model, processor) -> dict[str, Any]:
+    vision_config = getattr(getattr(model, "vision_tower", None), "config", None)
+    vision_scales = [int(scale) for scale in model_patches_per_frame_by_scale(model).keys()]
+    vision_patch_size = int(getattr(vision_config, "patch_size", NVILA_VISION_PATCH_SIZE))
+    vision_by_scale = model_patches_per_frame_by_scale(model)
+
+    autogaze_scales = processor_autogaze_target_scales(processor)
+    autogaze_patch_size = processor_autogaze_target_patch_size(processor)
+    autogaze_by_scale = processor_autogaze_patches_per_frame_by_scale(processor)
+
+    metadata: dict[str, Any] = {
+        "vision_encoder_scales": vision_scales,
+        "vision_encoder_patch_size": vision_patch_size,
+        "vision_encoder_patches_per_frame_by_scale": vision_by_scale,
+        "vision_encoder_patches_per_frame_multiscale": sum(vision_by_scale.values()),
+    }
+    if autogaze_scales is not None and autogaze_patch_size is not None and autogaze_by_scale is not None:
+        metadata.update(
+            {
+                "autogaze_target_scales": autogaze_scales,
+                "autogaze_target_patch_size": autogaze_patch_size,
+                "autogaze_coordinate_patches_per_frame_by_scale": autogaze_by_scale,
+                "autogaze_coordinate_patches_per_frame_multiscale": sum(autogaze_by_scale.values()),
+                "patch_space_mismatch": (
+                    autogaze_patch_size != vision_patch_size
+                    or autogaze_scales != vision_scales
+                ),
+                "patch_space_note": (
+                    "AutoGaze target coordinates and NVILA SigLIP embedding coordinates can differ; "
+                    "use AutoGaze fields for gaze slot budgets and vision_encoder fields for SigLIP full-token estimates."
+                ),
+            }
+        )
+    return metadata
 
 
 def move_tensors(payload: dict[str, Any], device: torch.device) -> dict[str, Any]:
@@ -4511,6 +4619,7 @@ def generate_one(
             patches_per_frame_by_scale=model_patches_per_frame_by_scale(model),
             token_shuffle=NVILA_TOKEN_SHUFFLE,
         )
+        token_metrics.update(build_patch_space_metadata(model, processor))
         input_token_count = int(inputs["input_ids"].shape[1])
         compute_metrics = build_autogaze_effect_metrics(
             inputs,

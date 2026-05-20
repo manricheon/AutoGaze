@@ -255,7 +255,7 @@ encoder patch 기준:
 
 여기서 `autogaze_input_patch_tokens`와 `autogaze_selected_patch_tokens`가 AutoGaze 자체의 입력 대비 선택 결과를 가장 직접적으로 보여줍니다. `encoder_autogaze_selected_*`는 LLM token이 아니라 **SigLIP에 들어가기 전 AutoGaze가 유지하기로 선택한 non-padded encoder patch 위치 수**입니다. 현재 runner에서는 thumbnail은 keep-all이라 tile 쪽 선택량이 AutoGaze 효과를 가장 직접적으로 보여줍니다.
 
-예를 들어 720p로 resize된 128프레임 비디오라도 `max_tiles_video=8`이면 단일 720p frame 하나가 아니라 최대 8개 spatial tile로 나뉩니다. 기본 scale `56+112+196+392`, patch size 14에서는 한 tile-frame당 patch 위치가 `16+64+196+784=1060`개입니다. 따라서 AutoGaze 입력 patch 수는 `128 frames × 8 tiles/frame × 1060 patches = 1,085,440`처럼 백만 단위가 될 수 있습니다. 이 값은 LLM visual token 수가 아니라 SigLIP/TokenShuffle 이전의 encoder patch-position budget입니다. 실제 LLM 쪽 비교는 `llm_keep_all_visual_tokens_estimated`와 `llm_actual_visual_tokens`를 봐야 합니다.
+예를 들어 720p로 resize된 128프레임 비디오라도 `max_tiles_video=8`이면 단일 720p frame 하나가 아니라 최대 8개 spatial tile로 나뉩니다. 여기서 주의할 점은 NVILA-HD weight의 `preprocessor_config.json`에는 `target_patch_size=16`이 있고, 모델 `config.json`의 `vision_config.patch_size`는 14라는 점입니다. AutoGaze Quick Start 기준으로는 실제로 붙일 vision encoder의 patch size에 `target_patch_size`를 맞춰야 하므로, runner 기본값은 sparse SigLIP gather가 정렬되도록 `56+112+196+392`, patch size 14를 명시 주입합니다. 이때 한 tile-frame당 AutoGaze/SigLIP embedding 위치는 `16+64+196+784=1060`개입니다. patch16 release metadata 경로는 호환성/ablation으로만 따로 비교해야 합니다. 실제 LLM 쪽 비교는 `llm_keep_all_visual_tokens_estimated`와 `llm_actual_visual_tokens`를 봐야 합니다.
 
 LLM visual-token 기준:
 

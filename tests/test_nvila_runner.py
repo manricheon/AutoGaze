@@ -20,6 +20,7 @@ from repro.nvila_runner import (
     build_keep_all_gazing_info,
     build_parser,
     build_autogaze_token_summary,
+    build_patch_space_metadata,
     build_video_input_summary,
     build_stream_profile_compute_metrics,
     build_stream_profile_token_metrics,
@@ -163,6 +164,14 @@ class DummyVisionTower:
 class DummyModel:
     def __init__(self, scales, patch_size=14):
         self.vision_tower = DummyVisionTower(scales, patch_size)
+
+
+class DummyProcessor:
+    def __init__(self, target_scales=None, target_patch_size=None):
+        if target_scales is not None:
+            self.target_scales = target_scales
+        if target_patch_size is not None:
+            self.target_patch_size = target_patch_size
 
 
 class DummyTransformerConfig:
@@ -607,6 +616,26 @@ def test_processor_kwargs_forwards_autogaze_resize_scales_to_nvila_processor():
     assert kwargs["target_patch_size"] == 14
 
 
+def test_processor_kwargs_uses_nvila_hd_siglip_aligned_autogaze_grid_by_default():
+    kwargs = processor_kwargs(make_args())
+
+    assert kwargs["target_scales"] == [56, 112, 196, 392]
+    assert kwargs["target_patch_size"] == 14
+
+
+def test_patch_space_metadata_separates_autogaze_target_from_vision_tower():
+    metadata = build_patch_space_metadata(
+        DummyModel("56+112+196+392", patch_size=14),
+        DummyProcessor(target_scales=[56, 112, 196, 392], target_patch_size=14),
+    )
+
+    assert metadata["autogaze_target_patch_size"] == 14
+    assert metadata["autogaze_coordinate_patches_per_frame_multiscale"] == 1060
+    assert metadata["vision_encoder_patch_size"] == 14
+    assert metadata["vision_encoder_patches_per_frame_multiscale"] == 1060
+    assert metadata["patch_space_mismatch"] is False
+
+
 def test_parse_float_sequence_accepts_fractional_reduction_ratios():
     assert parse_float_sequence("1,2.5,4") == [1.0, 2.5, 4.0]
 
@@ -868,6 +897,18 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
             "temporal_chunks_per_video": [4],
             "encoder_patches_per_frame_multiscale": 4,
         },
+        "patch_space_basis": {
+            "autogaze_target_scales": None,
+            "autogaze_target_patch_size": None,
+            "autogaze_coordinate_patches_per_frame_multiscale": None,
+            "autogaze_coordinate_patches_per_frame_by_scale": None,
+            "vision_encoder_scales": None,
+            "vision_encoder_patch_size": None,
+            "vision_encoder_patches_per_frame_multiscale": None,
+            "vision_encoder_patches_per_frame_by_scale": None,
+            "patch_space_mismatch": None,
+            "note": None,
+        },
         "autogaze_input_breakdown": {
             "formula": "tile_frame_instances * multiscale_patch_positions_per_tile_frame",
             "expanded_formula": "16 tile-frame instances * 4 multiscale patch positions = 64",
@@ -883,7 +924,7 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
             ),
             "why_it_can_be_large": (
                 "A resized video can still be split into multiple spatial tiles. "
-                "For example, 128 frames * 8 tiles/frame * 1060 multiscale patches = 1085440."
+                "For example, 128 frames * 8 tiles/frame * multiscale patch positions can exceed one million positions."
             ),
         },
         "autogaze_selection_patch_tokens": {
@@ -1057,7 +1098,7 @@ def test_build_autogaze_token_summary_separates_encoder_patches_and_llm_tokens()
         ),
         "why_it_can_be_large": (
             "A resized video can still be split into multiple spatial tiles. "
-            "For example, 128 frames * 8 tiles/frame * 1060 multiscale patches = 1085440."
+            "For example, 128 frames * 8 tiles/frame * multiscale patch positions can exceed one million positions."
         ),
     }
     assert summary["encoder_patch_tokens_before_siglip"]["raw_total_patch_tokens"] == 288320

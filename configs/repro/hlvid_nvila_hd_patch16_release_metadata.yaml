@@ -1,0 +1,45 @@
+name: hlvid_nvila_hd_patch16_release_metadata
+description: >
+  NVILA-HD HLVid benchmark preset for patch-size comparison. This follows the
+  released preprocessor metadata target_patch_size=16, while keeping the same
+  model, sampled frames, tiles, and gaze policy as the patch14 aligned preset.
+
+patch_space:
+  purpose: release_metadata_compatibility_ablation
+  note: >
+    Use this to check what happens when following the released preprocessor
+    target_patch_size=16. NVILA-HD SigLIP still has patch_size=14, so compare
+    patch_space_basis.patch_space_mismatch and downstream metrics carefully.
+  tile_size: 392
+  target_scales: 56+112+196+392
+  autogaze_target_patch_size: 16
+  siglip_patch_size: 14
+  positions_per_tile_frame: 778
+
+nvila_runner:
+  args:
+    mode: hlvid
+    model_path: nvidia/NVILA-8B-HD-Video
+    model_family: nvila-hd-video-autogaze
+    autogaze_model: nvidia/AutoGaze
+    gazing_mode: autogaze
+    device: cuda
+    device_map: auto
+    config: default
+    split: test
+    num_video_frames: 128
+    num_video_frames_thumbnail: 64
+    max_tiles_video: 8
+    autogaze_target_scales: 56+112+196+392
+    autogaze_target_patch_size: 16
+    task_loss_requirement_tile: 0.6
+    max_batch_size_autogaze: 16
+    max_batch_size_siglip: 32
+    measure_ttft: true
+    warmup_runs: 1
+    repeat_runs: 1
+    resume: true
+    continue_on_error: true
+    predictions: outputs/autogaze_repro/patchsize_compare/hlvid_patch16_release_metadata_predictions.jsonl
+    summary: outputs/autogaze_repro/patchsize_compare/hlvid_patch16_release_metadata_summary.json
+    scored_predictions: outputs/autogaze_repro/patchsize_compare/hlvid_patch16_release_metadata_scored.jsonl
