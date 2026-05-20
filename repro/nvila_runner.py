@@ -40,6 +40,8 @@ from repro.hlvid import (
 from repro.gaze_visualization import safe_label, write_gaze_visualization_artifacts
 
 DEFAULT_MODEL = "nvidia/NVILA-8B-HD-Video"
+DEFAULT_HD_MODEL = DEFAULT_MODEL
+DEFAULT_BASELINE_MODEL = "Efficient-Large-Model/NVILA-8B-Video"
 DEFAULT_EXAMPLE_VIDEO = "https://huggingface.co/datasets/bfshi/HLVid/resolve/main/example/clip_av_video_5_001.mp4"
 DEFAULT_PROMPT = (
     "Question: What does the white text on the green road sign say?\n"
@@ -55,6 +57,88 @@ NVILA_TARGET_PATCH_SIZE = 14
 NVILA_TOKEN_SHUFFLE = 9
 NVILA_CONTEXT_LIMIT = 40960
 AUTOGAZE_CHUNK_FRAMES = 16
+MODEL_FAMILY_AUTO = "auto"
+MODEL_FAMILY_HD_AUTOGAZE = "nvila-hd-video-autogaze"
+MODEL_FAMILY_VIDEO_BASELINE = "nvila-video-baseline"
+MODEL_FAMILY_CHOICES = (
+    MODEL_FAMILY_AUTO,
+    MODEL_FAMILY_HD_AUTOGAZE,
+    MODEL_FAMILY_VIDEO_BASELINE,
+)
+TOKEN_SELECTOR_ADAPTER_CHOICES = ("auto", "none", "keep-all", "autogaze")
+VISION_ENCODER_ADAPTER_CHOICES = ("auto", "nvila-hd-siglip", "nvila-video-vision")
+MLLM_ADAPTER_CHOICES = ("auto", "nvila-hd", "nvila-video")
+PAPER_PRESET_BASELINE = "autogaze-hlvid-baseline"
+PAPER_PRESET_HD = "autogaze-hlvid-hd"
+PAPER_PRESET_CHOICES = (PAPER_PRESET_BASELINE, PAPER_PRESET_HD)
+PAPER_PRESET_CONFIGS: dict[str, dict[str, Any]] = {
+    PAPER_PRESET_BASELINE: {
+        "model_path": DEFAULT_BASELINE_MODEL,
+        "model_family": MODEL_FAMILY_VIDEO_BASELINE,
+        "num_video_frames": 256,
+        "num_video_frames_thumbnail": 0,
+        "max_tiles_video": 1,
+        "video_resize_longest_edge": 448,
+        "gazing_mode": "keep-all",
+        "paper_reference_score": 42.5,
+        "paper_reference_frames": 256,
+        "paper_reference_max_resolution": 448,
+        "autogaze_applicability": "not_applicable",
+    },
+    PAPER_PRESET_HD: {
+        "model_path": DEFAULT_HD_MODEL,
+        "model_family": MODEL_FAMILY_HD_AUTOGAZE,
+        "num_video_frames": 1024,
+        "num_video_frames_thumbnail": 128,
+        "max_tiles_video": 48,
+        "video_resize_longest_edge": 3584,
+        "gazing_mode": "autogaze",
+        "task_loss_requirement_tile": 0.7,
+        "paper_reference_score": 52.6,
+        "paper_reference_frames": 1024,
+        "paper_reference_max_resolution": 3584,
+        "autogaze_applicability": "enabled",
+    },
+}
+PAPER_PRESET_FIELD_OPTIONS: dict[str, tuple[str, ...]] = {
+    "model_path": ("--model-path", "--nvila-model", "--mllm-path"),
+    "model_family": ("--model-family",),
+    "num_video_frames": ("--num-video-frames",),
+    "num_video_frames_thumbnail": ("--num-video-frames-thumbnail",),
+    "max_tiles_video": ("--max-tiles-video",),
+    "video_resize_longest_edge": (
+        "--video-resize-longest-edge",
+        "--video-resize-shortest-edge",
+        "--video-resize-width",
+        "--video-resize-height",
+    ),
+    "gazing_mode": ("--gazing-mode",),
+    "task_loss_requirement_tile": ("--task-loss-requirement-tile",),
+    "token_selector_adapter": ("--token-selector-adapter",),
+    "token_selector_name": ("--token-selector-name",),
+    "token_selector_path": ("--token-selector-path",),
+    "vision_encoder_adapter": ("--vision-encoder-adapter",),
+    "vision_encoder_name": ("--vision-encoder-name",),
+    "vision_encoder_path": ("--vision-encoder-path",),
+    "mllm_adapter": ("--mllm-adapter",),
+    "mllm_name": ("--mllm-name",),
+}
+AUTOGAZE_PROCESSOR_KWARGS = {
+    "autogaze_model_id",
+    "gazing_ratio_tile",
+    "gazing_ratio_thumbnail",
+    "task_loss_requirement_tile",
+    "task_loss_requirement_thumbnail",
+    "max_batch_size_autogaze",
+    "target_scales",
+    "target_patch_size",
+}
+H100_DEFAULT_BUDGET_GIB = 70.0
+H100_GREEN_GIB = 55.0
+H100_SWEEP_FRAMES = (1024, 512, 256, 128, 64, 32)
+H100_SWEEP_THUMBNAIL_FRAMES = (512, 256, 128, 64, 32, 16)
+H100_SWEEP_MAX_TILES = (48, 32, 16, 8, 4, 1)
+H100_SWEEP_RESIZE_SHORTEST_EDGE = (None, 1080, 720, 512, 448, 384)
 REPEAT_SUMMARY_FIELDS = (
     "total_ms",
     "generate_ms",
@@ -254,6 +338,57 @@ def parse_int_sequence(value: str | list[int] | tuple[int, ...] | None) -> list[
     return parsed or None
 
 
+def parse_float_sequence(value: str | list[float] | tuple[float, ...] | None) -> list[float] | None:
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        return [float(item) for item in value]
+    parsed = [float(part) for part in re.findall(r"\d+(?:\.\d+)?", value)]
+    return parsed or None
+
+
+def effective_stream_gazing_ratio(args: argparse.Namespace) -> float | list[float]:
+    parsed = parse_float_sequence(getattr(args, "stream_gazing_ratio", None))
+    if parsed is None:
+        parsed = parse_float_sequence(getattr(args, "gazing_ratio_tile", None))
+    if parsed is None:
+        return [0.2] + [0.06] * 15
+    if len(parsed) == 1:
+        return parsed[0]
+    return parsed
+
+
+def effective_gazing_ratio_tile(args: argparse.Namespace) -> float | list[float]:
+    parsed = parse_float_sequence(getattr(args, "gazing_ratio_tile", None))
+    if parsed is None:
+        return [0.2] + [0.06] * 15
+    if len(parsed) == 1:
+        return parsed[0]
+    return parsed
+
+
+def autogaze_runtime_config(args: argparse.Namespace) -> dict[str, Any]:
+    if getattr(args, "gazing_mode", None) == "keep-all":
+        ratio: float | list[float] | str = 1
+        task_loss = None
+    else:
+        ratio = effective_gazing_ratio_tile(args)
+        task_loss = getattr(args, "task_loss_requirement_tile", None)
+    return {
+        "gazing_mode": getattr(args, "gazing_mode", None),
+        "gazing_ratio_tile": ratio,
+        "stream_gazing_ratio": effective_stream_gazing_ratio(args),
+        "task_loss_requirement_tile": task_loss,
+        "target_scales": parse_int_sequence(getattr(args, "autogaze_target_scales", None)),
+        "target_patch_size": getattr(args, "autogaze_target_patch_size", None),
+        "max_batch_size_autogaze": getattr(args, "max_batch_size_autogaze", None),
+        "note": (
+            "NVILA processor default is [0.2] + [0.06] * 15, while the original AutoGaze Quick Start uses 0.75. "
+            "Compare AutoGaze latency only when this config and the raw patch budget match."
+        ),
+    }
+
+
 def positive_int(value: str) -> int:
     parsed = int(value)
     if parsed < 1:
@@ -266,6 +401,304 @@ def non_negative_int(value: str) -> int:
     if parsed < 0:
         raise argparse.ArgumentTypeError("value must be >= 0")
     return parsed
+
+
+def provided_cli_options(argv: list[str] | None) -> set[str]:
+    tokens = sys.argv[1:] if argv is None else list(argv)
+    options: set[str] = set()
+    for token in tokens:
+        if not token.startswith("--"):
+            continue
+        options.add(token.split("=", 1)[0])
+    return options
+
+
+def _field_was_provided(field: str, provided_options: set[str]) -> bool:
+    return any(option in provided_options for option in PAPER_PRESET_FIELD_OPTIONS.get(field, ()))
+
+
+def apply_paper_preset_defaults(args: argparse.Namespace, provided_options: set[str] | None = None) -> argparse.Namespace:
+    preset = getattr(args, "paper_preset", None)
+    if not preset:
+        return args
+    if preset not in PAPER_PRESET_CONFIGS:
+        raise ValueError(f"Unsupported paper preset: {preset}")
+    provided_options = provided_options or set()
+    for field, value in PAPER_PRESET_CONFIGS[preset].items():
+        if field.startswith("paper_reference_") or field == "autogaze_applicability":
+            continue
+        if _field_was_provided(field, provided_options):
+            continue
+        setattr(args, field, value)
+    return args
+
+
+def apply_pipeline_preset_alias(args: argparse.Namespace) -> argparse.Namespace:
+    pipeline_preset = getattr(args, "pipeline_preset", None)
+    paper_preset = getattr(args, "paper_preset", None)
+    if pipeline_preset and not paper_preset:
+        args.paper_preset = pipeline_preset
+    elif paper_preset and not pipeline_preset:
+        args.pipeline_preset = paper_preset
+    return args
+
+
+def effective_model_family(args: argparse.Namespace) -> str:
+    explicit = getattr(args, "model_family", MODEL_FAMILY_AUTO)
+    if explicit and explicit != MODEL_FAMILY_AUTO:
+        return str(explicit)
+    preset = getattr(args, "paper_preset", None)
+    if preset in PAPER_PRESET_CONFIGS:
+        return str(PAPER_PRESET_CONFIGS[preset]["model_family"])
+    model_path = str(getattr(args, "model_path", DEFAULT_MODEL))
+    if "NVILA-8B-HD-Video" in model_path:
+        return MODEL_FAMILY_HD_AUTOGAZE
+    if "NVILA-8B-Video" in model_path:
+        return MODEL_FAMILY_VIDEO_BASELINE
+    return MODEL_FAMILY_HD_AUTOGAZE
+
+
+def effective_token_selector_adapter(args: argparse.Namespace) -> str:
+    explicit = getattr(args, "token_selector_adapter", "auto")
+    if explicit and explicit != "auto":
+        return str(explicit)
+    family = effective_model_family(args)
+    if family == MODEL_FAMILY_VIDEO_BASELINE:
+        return "none"
+    if getattr(args, "gazing_mode", None) == "keep-all":
+        return "keep-all"
+    return "autogaze"
+
+
+def effective_vision_encoder_adapter(args: argparse.Namespace) -> str:
+    explicit = getattr(args, "vision_encoder_adapter", "auto")
+    if explicit and explicit != "auto":
+        return str(explicit)
+    if effective_model_family(args) == MODEL_FAMILY_VIDEO_BASELINE:
+        return "nvila-video-vision"
+    return "nvila-hd-siglip"
+
+
+def effective_mllm_adapter(args: argparse.Namespace) -> str:
+    explicit = getattr(args, "mllm_adapter", "auto")
+    if explicit and explicit != "auto":
+        return str(explicit)
+    if effective_model_family(args) == MODEL_FAMILY_VIDEO_BASELINE:
+        return "nvila-video"
+    return "nvila-hd"
+
+
+def effective_mllm_path(args: argparse.Namespace) -> str:
+    return str(getattr(args, "mllm_path", None) or getattr(args, "model_path", DEFAULT_MODEL))
+
+
+def effective_token_selector_path(args: argparse.Namespace) -> str | None:
+    adapter = effective_token_selector_adapter(args)
+    explicit = getattr(args, "token_selector_path", None)
+    if explicit is not None:
+        return str(explicit)
+    if adapter == "autogaze":
+        return str(getattr(args, "autogaze_model", "nvidia/AutoGaze"))
+    return None
+
+
+def effective_component_names(args: argparse.Namespace) -> dict[str, str]:
+    token_adapter = effective_token_selector_adapter(args)
+    vision_adapter = effective_vision_encoder_adapter(args)
+    mllm_adapter = effective_mllm_adapter(args)
+    token_name = getattr(args, "token_selector_name", None)
+    vision_name = getattr(args, "vision_encoder_name", None)
+    mllm_name = getattr(args, "mllm_name", None)
+    if token_name is None:
+        if token_adapter == "none":
+            token_name = "not_applicable"
+        elif token_adapter == "keep-all":
+            token_name = "keep_all"
+        else:
+            token_name = str(getattr(args, "autogaze_model", "nvidia/AutoGaze"))
+    if vision_name is None:
+        vision_name = "nvila-8b-video-vision" if vision_adapter == "nvila-video-vision" else "nvila-hd-siglip"
+    if mllm_name is None:
+        mllm_name = effective_mllm_path(args)
+    return {
+        "token_selector": str(token_name),
+        "vision_encoder": str(vision_name),
+        "mllm": str(mllm_name),
+    }
+
+
+def build_component_identity(args: argparse.Namespace) -> dict[str, dict[str, Any]]:
+    names = effective_component_names(args)
+    return {
+        "token_selector": {
+            "adapter": effective_token_selector_adapter(args),
+            "name": names["token_selector"],
+            "path": effective_token_selector_path(args),
+            "applicability": autogaze_applicability(args),
+        },
+        "vision_encoder": {
+            "adapter": effective_vision_encoder_adapter(args),
+            "name": names["vision_encoder"],
+            "path": str(getattr(args, "vision_encoder_path", None) or "auto"),
+        },
+        "mllm": {
+            "adapter": effective_mllm_adapter(args),
+            "name": names["mllm"],
+            "path": effective_mllm_path(args),
+        },
+    }
+
+
+def apply_component_defaults(args: argparse.Namespace) -> argparse.Namespace:
+    mllm_path = getattr(args, "mllm_path", None)
+    if mllm_path is not None:
+        args.model_path = str(mllm_path)
+    args.mllm_path = str(getattr(args, "model_path", DEFAULT_MODEL))
+
+    args.token_selector_adapter = effective_token_selector_adapter(args)
+    args.vision_encoder_adapter = effective_vision_encoder_adapter(args)
+    args.mllm_adapter = effective_mllm_adapter(args)
+    if args.token_selector_adapter == "autogaze":
+        args.gazing_mode = "autogaze"
+    elif args.token_selector_adapter in {"keep-all", "none"} and effective_model_family(args) == MODEL_FAMILY_HD_AUTOGAZE:
+        args.gazing_mode = "keep-all"
+    token_path = effective_token_selector_path(args)
+    args.token_selector_path = token_path
+    if token_path is not None and args.token_selector_adapter == "autogaze":
+        args.autogaze_model = token_path
+    if getattr(args, "vision_encoder_path", None) is None:
+        args.vision_encoder_path = "auto"
+    names = effective_component_names(args)
+    if getattr(args, "token_selector_name", None) is None:
+        args.token_selector_name = names["token_selector"]
+    if getattr(args, "vision_encoder_name", None) is None:
+        args.vision_encoder_name = names["vision_encoder"]
+    if getattr(args, "mllm_name", None) is None:
+        args.mllm_name = names["mllm"]
+    return args
+
+
+def paper_reference_for_args(args: argparse.Namespace) -> dict[str, Any]:
+    preset = getattr(args, "paper_preset", None)
+    if preset in PAPER_PRESET_CONFIGS:
+        reference_applies = True
+        if preset == PAPER_PRESET_BASELINE:
+            reference_applies = effective_model_family(args) == MODEL_FAMILY_VIDEO_BASELINE
+        elif preset == PAPER_PRESET_HD:
+            reference_applies = (
+                effective_model_family(args) == MODEL_FAMILY_HD_AUTOGAZE
+                and effective_token_selector_adapter(args) == "autogaze"
+            )
+        if not reference_applies:
+            return {
+                "paper_reference_score": None,
+                "paper_reference_frames": None,
+                "paper_reference_max_resolution": None,
+            }
+        config = PAPER_PRESET_CONFIGS[preset]
+        return {
+            "paper_reference_score": config.get("paper_reference_score"),
+            "paper_reference_frames": config.get("paper_reference_frames"),
+            "paper_reference_max_resolution": config.get("paper_reference_max_resolution"),
+        }
+    family = effective_model_family(args)
+    if family == MODEL_FAMILY_VIDEO_BASELINE:
+        config = PAPER_PRESET_CONFIGS[PAPER_PRESET_BASELINE]
+    elif family == MODEL_FAMILY_HD_AUTOGAZE and getattr(args, "gazing_mode", None) == "autogaze":
+        config = PAPER_PRESET_CONFIGS[PAPER_PRESET_HD]
+    else:
+        return {
+            "paper_reference_score": None,
+            "paper_reference_frames": None,
+            "paper_reference_max_resolution": None,
+        }
+    return {
+        "paper_reference_score": config.get("paper_reference_score"),
+        "paper_reference_frames": config.get("paper_reference_frames"),
+        "paper_reference_max_resolution": config.get("paper_reference_max_resolution"),
+    }
+
+
+def autogaze_applicability(args: argparse.Namespace) -> str:
+    family = effective_model_family(args)
+    token_selector_adapter = effective_token_selector_adapter(args)
+    if family == MODEL_FAMILY_VIDEO_BASELINE:
+        return "not_applicable"
+    if family == MODEL_FAMILY_HD_AUTOGAZE and token_selector_adapter == "autogaze":
+        return "enabled"
+    if family == MODEL_FAMILY_HD_AUTOGAZE and token_selector_adapter in {"keep-all", "none"}:
+        return "hd_keep_all_ablation"
+    return "unknown"
+
+
+def build_adapter_identity(args: argparse.Namespace) -> dict[str, Any]:
+    family = effective_model_family(args)
+    applicability = autogaze_applicability(args)
+    if applicability == "not_applicable":
+        token_selector = {
+            "name": "not_applicable",
+            "description": "NVILA-8B-Video paper baseline path; no AutoGaze processor kwargs are injected.",
+        }
+    elif applicability == "enabled":
+        token_selector = {
+            "name": "autogaze",
+            "description": "AutoGaze token selector active before SigLIP/MLLM.",
+        }
+    else:
+        token_selector = {
+            "name": "keep_all",
+            "description": "HD ablation path keeps all patches while preserving NVILA-HD processor family.",
+        }
+
+    if family == MODEL_FAMILY_VIDEO_BASELINE:
+        vision_encoder = {
+            "name": "nvila_video_baseline_vision_metadata",
+            "model_family": family,
+            "metric_status": "best_effort_from_model_inputs",
+        }
+        mllm = {"name": "nvila_video_baseline", "model_family": family}
+    else:
+        vision_encoder = {
+            "name": "nvila_hd_siglip",
+            "model_family": family,
+            "metric_status": "measured_when_remote_code_hooks_are_present",
+        }
+        mllm = {"name": "nvila_hd", "model_family": family}
+
+    return {
+        "token_selector": token_selector,
+        "vision_encoder": vision_encoder,
+        "mllm": mllm,
+        "extension_note": (
+            "This is a lightweight model-family adapter layer. LongVILA/Qwen2-VL can be added later "
+            "behind the same token_selector / vision_encoder / mllm identity fields."
+        ),
+    }
+
+
+def build_run_identity(args: argparse.Namespace) -> dict[str, Any]:
+    family = effective_model_family(args)
+    reference = paper_reference_for_args(args)
+    preset = getattr(args, "paper_preset", None)
+    return {
+        "model_family": family,
+        "paper_preset": preset,
+        "model_path": effective_mllm_path(args),
+        "paper_reference_score": reference["paper_reference_score"],
+        "paper_reference_metric": "HLVid accuracy percent",
+        "paper_reference_frames": reference["paper_reference_frames"],
+        "paper_reference_max_resolution": reference["paper_reference_max_resolution"],
+        "is_paper_baseline_candidate": family == MODEL_FAMILY_VIDEO_BASELINE,
+        "autogaze_applicability": autogaze_applicability(args),
+        "adapters": build_adapter_identity(args),
+        "components": build_component_identity(args),
+        "note": (
+            "NVILA-8B-Video is the AutoGaze paper baseline candidate. "
+            "NVILA-HD keep-all is an HD ablation, not the paper baseline."
+            if family == MODEL_FAMILY_VIDEO_BASELINE or getattr(args, "gazing_mode", None) == "keep-all"
+            else "NVILA-HD AutoGaze run."
+        ),
+    }
 
 
 def metric_value(row: dict[str, Any], dotted_path: str) -> Any:
@@ -770,6 +1203,8 @@ def build_single_summary(payload: dict[str, Any]) -> dict[str, Any]:
         question = result.get("question")
     return {
         "model_path": payload.get("model_path"),
+        "run_identity": payload.get("run_identity") or result.get("run_identity"),
+        "autogaze_runtime_config": payload.get("autogaze_runtime_config") or result.get("autogaze_runtime_config"),
         "gazing_mode": payload.get("gazing_mode"),
         "video": payload.get("video"),
         "prompt": payload.get("prompt"),
@@ -1500,19 +1935,620 @@ def estimate_nvila_preflight(
     }
 
 
+def h100_risk_band(
+    estimated_vram_gib: float,
+    *,
+    context_exceeded: bool = False,
+    h100_budget_gib: float = H100_DEFAULT_BUDGET_GIB,
+) -> str:
+    if context_exceeded:
+        return "context_red"
+    if estimated_vram_gib >= h100_budget_gib:
+        return "red"
+    if estimated_vram_gib >= H100_GREEN_GIB:
+        return "yellow"
+    return "green"
+
+
+def _estimate_siglip_peak_memory(
+    *,
+    sequence_count: int,
+    max_sequence_tokens: int,
+    hidden_size: int,
+    intermediate_size: int,
+    num_attention_heads: int,
+    dtype_bytes: int,
+    max_batch_size_siglip: int,
+) -> dict[str, int]:
+    batch_sequences = min(max(sequence_count, 1), max(max_batch_size_siglip, 1))
+    hidden_state_bytes = int(batch_sequences * max_sequence_tokens * hidden_size * dtype_bytes)
+    attention_score_bytes = int(
+        batch_sequences * max_sequence_tokens * max_sequence_tokens * num_attention_heads * dtype_bytes
+    )
+    mlp_intermediate_bytes = int(batch_sequences * max_sequence_tokens * intermediate_size * dtype_bytes)
+    return {
+        "batch_sequences": batch_sequences,
+        "max_sequence_tokens_per_batch": int(max_sequence_tokens),
+        "hidden_state_peak_bytes_estimated": hidden_state_bytes,
+        "attention_score_peak_bytes_estimated": attention_score_bytes,
+        "mlp_intermediate_peak_bytes_estimated": mlp_intermediate_bytes,
+        "peak_working_bytes_estimated": hidden_state_bytes + attention_score_bytes + mlp_intermediate_bytes,
+    }
+
+
+def estimate_h100_vision_encoder_bottleneck(
+    *,
+    preflight: dict[str, Any],
+    token_reduction_ratio: float,
+    max_batch_size_siglip: int,
+    hidden_size: int = 1152,
+    intermediate_size: int = 4304,
+    num_hidden_layers: int = 27,
+    num_attention_heads: int = 16,
+    dtype_bytes: int = 2,
+    token_shuffle: int = NVILA_TOKEN_SHUFFLE,
+) -> dict[str, Any]:
+    spatial_tiles = int(preflight["tiling"]["spatial_tiles"])
+    temporal_chunks = int(preflight["chunking"]["temporal_chunks"])
+    tile_sequences = int(preflight["chunking"]["tile_sequences"])
+    chunk_frames = int(preflight["chunking"]["chunk_frames"])
+    thumbnail_frames = int(preflight["sampling"]["thumbnail_frames"])
+    patches_per_frame_value = int(preflight["tokens"]["patches_per_frame_tile"])
+    full_tile_sequence_tokens = chunk_frames * patches_per_frame_value
+    ratio = max(float(token_reduction_ratio or 1.0), 1.0)
+    actual_tile_sequence_tokens = max(1, int(math.ceil(full_tile_sequence_tokens / ratio)))
+    thumbnail_sequence_tokens = patches_per_frame_value if thumbnail_frames > 0 else 0
+
+    keep_all_sequence_tokens = tile_sequences * full_tile_sequence_tokens + thumbnail_frames * patches_per_frame_value
+    keep_all_attention_pairs = (
+        tile_sequences * full_tile_sequence_tokens * full_tile_sequence_tokens
+        + thumbnail_frames * patches_per_frame_value * patches_per_frame_value
+    )
+    actual_sequence_tokens = tile_sequences * actual_tile_sequence_tokens + thumbnail_frames * patches_per_frame_value
+    actual_attention_pairs = (
+        tile_sequences * actual_tile_sequence_tokens * actual_tile_sequence_tokens
+        + thumbnail_frames * patches_per_frame_value * patches_per_frame_value
+    )
+    sequence_count = tile_sequences + thumbnail_frames
+
+    keep_all = estimate_siglip_encoder_compute_from_sums(
+        sequence_count=sequence_count,
+        sequence_tokens=keep_all_sequence_tokens,
+        dense_attention_pairs=keep_all_attention_pairs,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        num_hidden_layers=num_hidden_layers,
+        num_attention_heads=num_attention_heads,
+        dtype_bytes=dtype_bytes,
+    )
+    actual = estimate_siglip_encoder_compute_from_sums(
+        sequence_count=sequence_count,
+        sequence_tokens=actual_sequence_tokens,
+        dense_attention_pairs=actual_attention_pairs,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        num_hidden_layers=num_hidden_layers,
+        num_attention_heads=num_attention_heads,
+        dtype_bytes=dtype_bytes,
+    )
+
+    keep_all.update(
+        {
+            "tile_sequence_tokens": full_tile_sequence_tokens,
+            "thumbnail_sequence_tokens": thumbnail_sequence_tokens,
+            **_estimate_siglip_peak_memory(
+                sequence_count=sequence_count,
+                max_sequence_tokens=max(full_tile_sequence_tokens, thumbnail_sequence_tokens),
+                hidden_size=hidden_size,
+                intermediate_size=intermediate_size,
+                num_attention_heads=num_attention_heads,
+                dtype_bytes=dtype_bytes,
+                max_batch_size_siglip=max_batch_size_siglip,
+            ),
+        }
+    )
+    actual.update(
+        {
+            "tile_sequence_tokens": actual_tile_sequence_tokens,
+            "thumbnail_sequence_tokens": thumbnail_sequence_tokens,
+            **_estimate_siglip_peak_memory(
+                sequence_count=sequence_count,
+                max_sequence_tokens=max(actual_tile_sequence_tokens, thumbnail_sequence_tokens),
+                hidden_size=hidden_size,
+                intermediate_size=intermediate_size,
+                num_attention_heads=num_attention_heads,
+                dtype_bytes=dtype_bytes,
+                max_batch_size_siglip=max_batch_size_siglip,
+            ),
+        }
+    )
+
+    actual_visual_tokens_from_vit = int(math.ceil(actual_sequence_tokens / max(token_shuffle, 1)))
+    keep_all_visual_tokens_from_vit = int(math.ceil(keep_all_sequence_tokens / max(token_shuffle, 1)))
+    return {
+        "metric_type": "estimated_siglip_dense_attention_and_mlp_from_patch_slots",
+        "assumptions": {
+            "spatial_tiles": spatial_tiles,
+            "temporal_chunks": temporal_chunks,
+            "tile_sequences": tile_sequences,
+            "chunk_frames": chunk_frames,
+            "thumbnail_frames_keep_all": thumbnail_frames,
+            "token_reduction_ratio_applies_to": "tile_patch_slots_only",
+            "token_shuffle": token_shuffle,
+            "max_batch_size_siglip": max_batch_size_siglip,
+        },
+        "keep_all": keep_all,
+        "actual": actual,
+        "keep_all_to_actual_token_ratio": _safe_ratio(
+            keep_all["sequence_tokens"], actual["sequence_tokens"]
+        ),
+        "keep_all_to_actual_dense_attention_pair_ratio": _safe_ratio(
+            keep_all["dense_attention_pairs"], actual["dense_attention_pairs"]
+        ),
+        "keep_all_to_actual_total_macs_ratio": _safe_ratio(
+            keep_all["total_macs_estimated"], actual["total_macs_estimated"]
+        ),
+        "keep_all_llm_visual_tokens_from_vit_patch_slots": keep_all_visual_tokens_from_vit,
+        "actual_llm_visual_tokens_from_vit_patch_slots": actual_visual_tokens_from_vit,
+    }
+
+
+def estimate_llm_context_capacity(
+    *,
+    preflight: dict[str, Any],
+    text_tokens_estimated: int,
+    context_limit: int,
+    token_shuffle: int = NVILA_TOKEN_SHUFFLE,
+) -> dict[str, Any]:
+    tile_sequences = int(preflight["chunking"]["tile_sequences"])
+    chunk_frames = int(preflight["chunking"]["chunk_frames"])
+    thumbnail_frames = int(preflight["sampling"]["thumbnail_frames"])
+    patches_per_frame_value = int(preflight["tokens"]["patches_per_frame_tile"])
+    full_tile_sequence_tokens = chunk_frames * patches_per_frame_value
+    thumbnail_sequence_tokens = thumbnail_frames * patches_per_frame_value
+    available_visual_tokens = max(int(context_limit) - int(text_tokens_estimated), 0)
+    max_sequence_tokens_before_shuffle = available_visual_tokens * max(token_shuffle, 1)
+    max_tile_tokens_total = max_sequence_tokens_before_shuffle - thumbnail_sequence_tokens
+    max_tile_sequence_tokens = (
+        math.floor(max_tile_tokens_total / max(tile_sequences, 1))
+        if max_tile_tokens_total > 0 and tile_sequences > 0
+        else 0
+    )
+    min_tile_reduction_ratio = (
+        full_tile_sequence_tokens / max_tile_sequence_tokens if max_tile_sequence_tokens > 0 else None
+    )
+    return {
+        "context_limit": int(context_limit),
+        "text_tokens_estimated": int(text_tokens_estimated),
+        "available_visual_tokens": available_visual_tokens,
+        "token_shuffle": token_shuffle,
+        "max_sequence_tokens_before_shuffle": max_sequence_tokens_before_shuffle,
+        "thumbnail_sequence_tokens_keep_all": thumbnail_sequence_tokens,
+        "tile_sequences": tile_sequences,
+        "full_tile_sequence_tokens": full_tile_sequence_tokens,
+        "max_tile_sequence_tokens_for_context": max_tile_sequence_tokens,
+        "min_tile_reduction_ratio_for_context": (
+            round(float(min_tile_reduction_ratio), 2) if min_tile_reduction_ratio is not None else None
+        ),
+    }
+
+
+def estimate_h100_preflight_config(
+    *,
+    width: int,
+    height: int,
+    source_frames: int | None,
+    model_family: str,
+    num_video_frames: int,
+    num_video_frames_thumbnail: int,
+    max_tiles_video: int,
+    resize_shortest_edge: int | None,
+    token_reduction_ratio: float,
+    resize_longest_edge: int | None = None,
+    resize_width: int | None = None,
+    resize_height: int | None = None,
+    h100_budget_gib: float = H100_DEFAULT_BUDGET_GIB,
+    context_limit: int = NVILA_CONTEXT_LIMIT,
+    text_tokens_estimated: int = 256,
+    stream_chunk_frames: int | None = None,
+    max_batch_size_autogaze: int | None = None,
+    max_batch_size_siglip: int = 32,
+    autogaze_residency_policy: str = "resident",
+    autogaze_model_resident_gib: float = 0.0,
+) -> dict[str, Any]:
+    effective = apply_resize_to_dimensions(
+        width=width,
+        height=height,
+        shortest_edge=resize_shortest_edge,
+        longest_edge=resize_longest_edge,
+        exact_width=resize_width,
+        exact_height=resize_height,
+    )
+    preflight = estimate_nvila_preflight(
+        width=int(effective["width"]),
+        height=int(effective["height"]),
+        source_frames=source_frames,
+        num_video_frames=num_video_frames,
+        num_video_frames_thumbnail=num_video_frames_thumbnail,
+        max_tiles_video=max_tiles_video,
+        context_limit=context_limit,
+    )
+    keep_all_visual_tokens = int(preflight["tokens"]["keep_all_projected_tokens"])
+    ratio = max(float(token_reduction_ratio or 1.0), 1.0)
+    vision_encoder = estimate_h100_vision_encoder_bottleneck(
+        preflight=preflight,
+        token_reduction_ratio=ratio,
+        max_batch_size_siglip=max_batch_size_siglip,
+        dtype_bytes=2,
+    )
+    context_capacity = estimate_llm_context_capacity(
+        preflight=preflight,
+        text_tokens_estimated=text_tokens_estimated,
+        context_limit=context_limit,
+    )
+    actual_visual_tokens = int(vision_encoder["actual_llm_visual_tokens_from_vit_patch_slots"])
+    actual_context_tokens = int(text_tokens_estimated + actual_visual_tokens)
+    keep_all_context_tokens = int(text_tokens_estimated + keep_all_visual_tokens)
+    context_exceeded = actual_context_tokens > context_limit
+
+    dtype_bytes = 2
+    llm_prefill = estimate_llm_prefill_compute(
+        context_tokens=actual_context_tokens,
+        hidden_size=4096,
+        intermediate_size=11008,
+        num_hidden_layers=32,
+        num_attention_heads=32,
+        num_key_value_heads=8,
+        dtype_bytes=dtype_bytes,
+    )
+    model_static_gib = 20.0 if model_family == MODEL_FAMILY_VIDEO_BASELINE else 22.0
+    autogaze_resident_gib = (
+        max(float(autogaze_model_resident_gib or 0.0), 0.0)
+        if model_family == MODEL_FAMILY_HD_AUTOGAZE and autogaze_residency_policy == "resident"
+        else 0.0
+    )
+    keep_all_prefill = estimate_llm_prefill_compute(
+        context_tokens=keep_all_context_tokens,
+        hidden_size=4096,
+        intermediate_size=11008,
+        num_hidden_layers=32,
+        num_attention_heads=32,
+        num_key_value_heads=8,
+        dtype_bytes=dtype_bytes,
+    )
+    vision_encoder_peak_bytes = int(vision_encoder["actual"]["peak_working_bytes_estimated"])
+    autogaze_full_video_tensor_bytes = int(preflight["memory"]["autogaze_tile_tensor_bytes"])
+    autogaze_tensor_residency_bytes = autogaze_full_video_tensor_bytes
+    autogaze_forward_batch_tensor_bytes = autogaze_full_video_tensor_bytes
+    autogaze_working_mode = "full_video_tensor"
+    if stream_chunk_frames is not None and int(stream_chunk_frames) > 0:
+        stream_plan = estimate_stream_profile_plan(
+            width=int(effective["width"]),
+            height=int(effective["height"]),
+            source_frames=source_frames,
+            num_video_frames=num_video_frames,
+            num_video_frames_thumbnail=num_video_frames_thumbnail,
+            max_tiles_video=max_tiles_video,
+            chunk_frames=int(stream_chunk_frames),
+            max_batch_size_autogaze=max_batch_size_autogaze,
+        )
+        autogaze_tensor_residency_bytes = int(
+            stream_plan["memory"]["streaming_autogaze_tile_tensor_bytes_full_chunk"]
+        )
+        autogaze_forward_batch_tensor_bytes = int(
+            stream_plan["memory"]["streaming_autogaze_tile_tensor_bytes_per_batch"]
+        )
+        autogaze_working_mode = "stream_chunk"
+    autogaze_working_bytes = (
+        int(autogaze_tensor_residency_bytes)
+        if model_family == MODEL_FAMILY_HD_AUTOGAZE
+        else 0
+    )
+    working_bytes = (
+        int(llm_prefill["kv_cache_bytes_after_prefill_estimated"])
+        + int(llm_prefill["attention_score_bytes_estimated"])
+        + int(vision_encoder_peak_bytes)
+        + int(autogaze_working_bytes)
+    )
+    estimated_vram_gib = model_static_gib + autogaze_resident_gib + bytes_to_gib(working_bytes) * 1.15
+    band = h100_risk_band(
+        estimated_vram_gib,
+        context_exceeded=context_exceeded,
+        h100_budget_gib=h100_budget_gib,
+    )
+    mllm_prefill_memory_bytes = int(llm_prefill["kv_cache_bytes_after_prefill_estimated"]) + int(
+        llm_prefill["attention_score_bytes_estimated"]
+    )
+    stage_memory_gib = {
+        "autogaze": bytes_to_gib(autogaze_working_bytes),
+        "vision_encoder": bytes_to_gib(vision_encoder_peak_bytes),
+        "mllm_prefill": bytes_to_gib(mllm_prefill_memory_bytes),
+    }
+    stage_compute_macs = {
+        "vision_encoder": int(vision_encoder["actual"]["total_macs_estimated"]),
+        "mllm_prefill": int(llm_prefill["total_macs_estimated"]),
+    }
+    recommended_role = (
+        "paper_baseline_reproduction_config"
+        if model_family == MODEL_FAMILY_VIDEO_BASELINE
+        else "hd_autogaze_scaling_config"
+    )
+    return {
+        "model_family": model_family,
+        "recommended_role": recommended_role,
+        "config": {
+            "num_video_frames": num_video_frames,
+            "num_video_frames_thumbnail": num_video_frames_thumbnail,
+            "max_tiles_video": max_tiles_video,
+            "resize_shortest_edge": resize_shortest_edge,
+            "resize_longest_edge": resize_longest_edge,
+            "resize_width": resize_width,
+            "resize_height": resize_height,
+            "token_reduction_ratio": ratio,
+            "stream_chunk_frames": stream_chunk_frames,
+            "max_batch_size_autogaze": max_batch_size_autogaze,
+            "max_batch_size_siglip": max_batch_size_siglip,
+            "autogaze_residency_policy": autogaze_residency_policy,
+            "autogaze_model_resident_gib": autogaze_model_resident_gib,
+        },
+        "source_video": {
+            "width": width,
+            "height": height,
+            "source_frames": source_frames,
+        },
+        "effective_video": {
+            "width": int(effective["width"]),
+            "height": int(effective["height"]),
+            "resize_mode": effective["mode"],
+        },
+        "tokens": {
+            "text_tokens_estimated": text_tokens_estimated,
+            "keep_all_llm_visual_tokens_estimated": keep_all_visual_tokens,
+            "actual_llm_visual_tokens_estimated": actual_visual_tokens,
+            "keep_all_context_tokens_estimated": keep_all_context_tokens,
+            "actual_context_tokens_estimated": actual_context_tokens,
+            "context_limit": context_limit,
+            "context_exceeded": context_exceeded,
+            "context_fits": not context_exceeded,
+            "context_margin_tokens": int(context_limit - actual_context_tokens),
+            "context_utilization_percent": round((actual_context_tokens / max(context_limit, 1)) * 100.0, 2),
+            "context_capacity": context_capacity,
+        },
+        "memory": {
+            "model_static_gib_assumed": model_static_gib,
+            "working_set_bytes_estimated": working_bytes,
+            "working_set_gib_estimated": bytes_to_gib(working_bytes),
+            "estimated_vram_gib": estimated_vram_gib,
+            "h100_budget_gib": h100_budget_gib,
+            "autogaze_residency_policy": autogaze_residency_policy,
+            "autogaze_model_resident_gib_assumed": autogaze_resident_gib,
+            "llm_kv_cache_bytes_estimated": llm_prefill["kv_cache_bytes_after_prefill_estimated"],
+            "llm_attention_score_bytes_estimated": llm_prefill["attention_score_bytes_estimated"],
+            "siglip_peak_working_bytes_estimated": vision_encoder_peak_bytes,
+            "siglip_hidden_bytes_estimated": vision_encoder["actual"]["hidden_state_peak_bytes_estimated"],
+            "siglip_attention_score_bytes_capped_estimated": vision_encoder["actual"][
+                "attention_score_peak_bytes_estimated"
+            ],
+            "siglip_attention_score_peak_bytes_estimated": vision_encoder["actual"][
+                "attention_score_peak_bytes_estimated"
+            ],
+            "siglip_mlp_intermediate_peak_bytes_estimated": vision_encoder["actual"][
+                "mlp_intermediate_peak_bytes_estimated"
+            ],
+            "autogaze_working_bytes_estimated": autogaze_working_bytes,
+            "autogaze_working_mode": autogaze_working_mode,
+            "autogaze_tile_tensor_full_video_bytes_estimated": autogaze_full_video_tensor_bytes,
+            "autogaze_tensor_residency_bytes_estimated": autogaze_tensor_residency_bytes,
+            "autogaze_forward_batch_tensor_bytes_estimated": autogaze_forward_batch_tensor_bytes,
+            "note": (
+                "This is a conservative planning estimate for H100 scheduling. "
+                "It combines assumed 8B fp16 model residency, estimated LLM prefill KV/attention, "
+                "SigLIP activation pressure, and AutoGaze tensor pressure when applicable."
+            ),
+        },
+        "risk": {
+            "band": band,
+            "green_lt_gib": H100_GREEN_GIB,
+            "yellow_until_gib": h100_budget_gib,
+            "red_gte_gib": h100_budget_gib,
+            "context_red": context_exceeded,
+        },
+        "vision_encoder": vision_encoder,
+        "mllm": {
+            "metric_type": "estimated_qwen2_prefill_attention_kv_and_mlp",
+            "actual": llm_prefill,
+            "keep_all_estimated": keep_all_prefill,
+            "prefill_context_reduction_ratio": _safe_ratio(keep_all_context_tokens, actual_context_tokens),
+            "kv_cache_reduction_ratio": _safe_ratio(
+                keep_all_prefill["kv_cache_bytes_after_prefill_estimated"],
+                llm_prefill["kv_cache_bytes_after_prefill_estimated"],
+            ),
+            "attention_score_reduction_ratio": _safe_ratio(
+                keep_all_prefill["attention_score_bytes_estimated"],
+                llm_prefill["attention_score_bytes_estimated"],
+            ),
+            "total_macs_reduction_ratio": _safe_ratio(
+                keep_all_prefill["total_macs_estimated"],
+                llm_prefill["total_macs_estimated"],
+            ),
+        },
+        "bottlenecks": {
+            "stage_memory_gib_estimated": stage_memory_gib,
+            "stage_compute_macs_estimated": stage_compute_macs,
+            "dominant_memory_stage_estimated": max(stage_memory_gib, key=stage_memory_gib.get),
+            "dominant_compute_stage_estimated": (
+                "vision_encoder"
+                if stage_compute_macs["vision_encoder"] >= stage_compute_macs["mllm_prefill"]
+                else "mllm_prefill"
+            ),
+            "note": (
+                "AutoGaze can be streamed before the LLM, so the key OOM risks are the actual SigLIP "
+                "sequence batch and the collected MLLM prefill context. SigLIP estimates assume dense "
+                "attention score materialization; memory-efficient kernels can lower this peak."
+            ),
+        },
+        "nvila_preflight": preflight,
+    }
+
+
+def _resolution_label(video: dict[str, Any]) -> str:
+    return f"{int(video['width'])}x{int(video['height'])}"
+
+
+def build_h100_decision_row(row: dict[str, Any]) -> dict[str, Any]:
+    bottlenecks = row.get("bottlenecks", {})
+    stage_memory = bottlenecks.get("stage_memory_gib_estimated", {})
+    return {
+        "risk_band": row["risk"]["band"],
+        "source_resolution": _resolution_label(row["source_video"]),
+        "effective_resolution": _resolution_label(row["effective_video"]),
+        "resize_mode": row["effective_video"].get("resize_mode"),
+        "frames": row["config"]["num_video_frames"],
+        "thumbnail_frames": row["config"]["num_video_frames_thumbnail"],
+        "max_tiles_video": row["config"]["max_tiles_video"],
+        "spatial_tiles": row["nvila_preflight"]["tiling"]["spatial_tiles"],
+        "token_reduction_ratio": row["config"]["token_reduction_ratio"],
+        "llm_keep_all_visual_tokens": row["tokens"]["keep_all_llm_visual_tokens_estimated"],
+        "llm_actual_visual_tokens": row["tokens"]["actual_llm_visual_tokens_estimated"],
+        "llm_actual_context_tokens": row["tokens"]["actual_context_tokens_estimated"],
+        "context_limit": row["tokens"]["context_limit"],
+        "llm_context_fits": row["tokens"].get("context_fits"),
+        "llm_context_margin_tokens": row["tokens"].get("context_margin_tokens"),
+        "llm_context_utilization_percent": row["tokens"].get("context_utilization_percent"),
+        "min_tile_reduction_ratio_for_context": row["tokens"].get("context_capacity", {}).get(
+            "min_tile_reduction_ratio_for_context"
+        ),
+        "max_tile_sequence_tokens_for_context": row["tokens"].get("context_capacity", {}).get(
+            "max_tile_sequence_tokens_for_context"
+        ),
+        "estimated_vram_gib": round(float(row["memory"]["estimated_vram_gib"]), 2),
+        "autogaze_residency_policy": row["memory"].get("autogaze_residency_policy"),
+        "autogaze_model_resident_gib": row["memory"].get("autogaze_model_resident_gib_assumed"),
+        "autogaze_memory_gib": round(float(stage_memory.get("autogaze", 0.0)), 2),
+        "vision_encoder_memory_gib": round(float(stage_memory.get("vision_encoder", 0.0)), 2),
+        "mllm_prefill_memory_gib": round(float(stage_memory.get("mllm_prefill", 0.0)), 2),
+        "dominant_memory_stage": bottlenecks.get("dominant_memory_stage_estimated"),
+        "dominant_compute_stage": bottlenecks.get("dominant_compute_stage_estimated"),
+        "vit_tile_sequence_tokens": row.get("vision_encoder", {}).get("actual", {}).get("tile_sequence_tokens"),
+        "vit_max_sequence_tokens_per_batch": row.get("vision_encoder", {}).get("actual", {}).get(
+            "max_sequence_tokens_per_batch"
+        ),
+        "stream_chunk_frames": row["config"].get("stream_chunk_frames"),
+        "max_batch_size_autogaze": row["config"].get("max_batch_size_autogaze"),
+        "max_batch_size_siglip": row["config"].get("max_batch_size_siglip"),
+    }
+
+
+def build_h100_decision_summary(
+    *,
+    requested_rows: list[dict[str, Any]],
+    sweep: dict[str, Any],
+    limit: int = 20,
+) -> dict[str, Any]:
+    return {
+        "how_to_read": (
+            "Check effective_resolution, frames, spatial_tiles, llm_actual_visual_tokens, "
+            "llm_actual_context_tokens, estimated_vram_gib, and dominant_memory_stage first. "
+            "Full detailed rows are stored in the JSON file."
+        ),
+        "risk_band_counts": sweep.get("risk_band_counts", {}),
+        "requested_config_table": [build_h100_decision_row(row) for row in requested_rows],
+        "sweep_decision_table": [
+            build_h100_decision_row(row)
+            for row in sweep.get("recommended_configs", [])[:limit]
+        ],
+    }
+
+
+def estimate_h100_preflight_sweep(
+    *,
+    width: int,
+    height: int,
+    source_frames: int | None,
+    model_family: str,
+    token_reduction_ratios: list[float] | tuple[float, ...],
+    h100_budget_gib: float = H100_DEFAULT_BUDGET_GIB,
+    stream_chunk_frames: int | None = None,
+    max_batch_size_autogaze: int | None = None,
+    max_batch_size_siglip: int = 32,
+    autogaze_residency_policy: str = "resident",
+    autogaze_model_resident_gib: float = 0.0,
+) -> dict[str, Any]:
+    rows = []
+    for num_frames in H100_SWEEP_FRAMES:
+        for thumbnail_frames in H100_SWEEP_THUMBNAIL_FRAMES:
+            if thumbnail_frames > num_frames:
+                continue
+            for max_tiles in H100_SWEEP_MAX_TILES:
+                for resize_shortest_edge in H100_SWEEP_RESIZE_SHORTEST_EDGE:
+                    for reduction_ratio in token_reduction_ratios:
+                        rows.append(
+                            estimate_h100_preflight_config(
+                                width=width,
+                                height=height,
+                                source_frames=source_frames,
+                                model_family=model_family,
+                                num_video_frames=num_frames,
+                                num_video_frames_thumbnail=thumbnail_frames,
+                                max_tiles_video=max_tiles,
+                                resize_shortest_edge=resize_shortest_edge,
+                                resize_longest_edge=None,
+                                token_reduction_ratio=reduction_ratio,
+                                h100_budget_gib=h100_budget_gib,
+                                stream_chunk_frames=stream_chunk_frames,
+                                max_batch_size_autogaze=max_batch_size_autogaze,
+                                max_batch_size_siglip=max_batch_size_siglip,
+                                autogaze_residency_policy=autogaze_residency_policy,
+                                autogaze_model_resident_gib=autogaze_model_resident_gib,
+                            )
+                        )
+    by_band = Counter(row["risk"]["band"] for row in rows)
+    safe_rows = [row for row in rows if row["risk"]["band"] in {"green", "yellow"}]
+    safe_rows.sort(
+        key=lambda row: (
+            row["risk"]["band"] != "green",
+            -int(row["config"]["num_video_frames"]),
+            -int(row["config"]["max_tiles_video"]),
+            float(row["memory"]["estimated_vram_gib"]),
+        )
+    )
+    return {
+        "model_family": model_family,
+        "h100_budget_gib": h100_budget_gib,
+        "rows": rows,
+        "risk_band_counts": dict(by_band),
+        "recommended_configs": safe_rows[:20],
+        "decision_table": [build_h100_decision_row(row) for row in safe_rows[:20]],
+        "recommendation_note": (
+            "Paper baseline recommendations prioritize NVILA-8B-Video 256f/448-style configs; "
+            "HD recommendations prioritize the widest green/yellow AutoGaze config before full CUDA runs."
+        ),
+    }
+
+
 def processor_kwargs(args: argparse.Namespace) -> dict[str, Any]:
+    if effective_model_family(args) == MODEL_FAMILY_VIDEO_BASELINE:
+        kwargs = {
+            "num_video_frames": args.num_video_frames,
+            "trust_remote_code": True,
+        }
+        thumbnail_frames = int(getattr(args, "num_video_frames_thumbnail", 0) or 0)
+        if thumbnail_frames > 0:
+            kwargs["num_video_frames_thumbnail"] = thumbnail_frames
+        return kwargs
+
     if args.gazing_mode == "keep-all":
         gazing_ratio_tile: float | list[float] = 1
         task_loss_requirement_tile = None
     else:
-        gazing_ratio_tile = [0.2] + [0.06] * 15
+        gazing_ratio_tile = effective_gazing_ratio_tile(args)
         task_loss_requirement_tile = args.task_loss_requirement_tile
 
     kwargs = {
         "num_video_frames": args.num_video_frames,
         "num_video_frames_thumbnail": args.num_video_frames_thumbnail,
         "max_tiles_video": args.max_tiles_video,
-        "autogaze_model_id": args.autogaze_model,
+        "autogaze_model_id": effective_token_selector_path(args) or args.autogaze_model,
         "gazing_ratio_tile": gazing_ratio_tile,
         "gazing_ratio_thumbnail": 1,
         "task_loss_requirement_tile": task_loss_requirement_tile,
@@ -1529,14 +2565,19 @@ def processor_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     return kwargs
 
 
+def model_load_kwargs(args: argparse.Namespace) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "trust_remote_code": True,
+        "device_map": args.device_map,
+    }
+    if effective_model_family(args) == MODEL_FAMILY_HD_AUTOGAZE:
+        kwargs["max_batch_size_siglip"] = args.max_batch_size_siglip
+    return kwargs
+
+
 def load_model_and_processor(args: argparse.Namespace):
     processor = AutoProcessor.from_pretrained(args.model_path, **processor_kwargs(args))
-    model = AutoModel.from_pretrained(
-        args.model_path,
-        trust_remote_code=True,
-        device_map=args.device_map,
-        max_batch_size_siglip=args.max_batch_size_siglip,
-    )
+    model = AutoModel.from_pretrained(args.model_path, **model_load_kwargs(args))
     model.eval()
     return model, processor
 
@@ -3078,7 +4119,7 @@ def run_stream_profile(args: argparse.Namespace) -> None:
                 device=device,
                 dtype=dtype,
                 max_batch_size=args.max_batch_size_autogaze,
-                gazing_ratio=[0.2] + [0.06] * 15,
+                gazing_ratio=effective_stream_gazing_ratio(args),
                 task_loss_requirement=args.task_loss_requirement_tile,
                 target_scales=target_scales,
                 target_patch_size=target_patch_size,
@@ -3289,6 +4330,8 @@ def run_stream_profile(args: argparse.Namespace) -> None:
         "metadata": environment_metadata(device),
         "mode": "stream-profile",
         "model_path": args.model_path,
+        "run_identity": build_run_identity(args),
+        "autogaze_runtime_config": autogaze_runtime_config(args),
         "autogaze_model": args.autogaze_model,
         "gazing_mode": args.gazing_mode,
         "video": args.video,
@@ -3484,6 +4527,8 @@ def generate_one(
     return {
         **result,
         **gaze_metrics,
+        "run_identity": build_run_identity(args),
+        "autogaze_runtime_config": autogaze_runtime_config(args),
         "video_input": video,
         "video_resolved": resolved_video,
         "video_input_info": video_input_info,
@@ -3559,6 +4604,8 @@ def run_single(args: argparse.Namespace) -> None:
     payload = {
         "metadata": environment_metadata(device),
         "model_path": args.model_path,
+        "run_identity": build_run_identity(args),
+        "autogaze_runtime_config": autogaze_runtime_config(args),
         "autogaze_model": args.autogaze_model,
         "gazing_mode": args.gazing_mode,
         "video_resize": video_resize_config(args),
@@ -3626,6 +4673,7 @@ def run_preflight(args: argparse.Namespace) -> None:
     )
     payload = {
         "model_path": args.model_path,
+        "run_identity": build_run_identity(args),
         "autogaze_model": args.autogaze_model,
         "gazing_mode": args.gazing_mode,
         "video": args.video,
@@ -3641,6 +4689,87 @@ def run_preflight(args: argparse.Namespace) -> None:
     }
     write_json(args.preflight_json, payload)
     print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def run_h100_preflight_sweep(args: argparse.Namespace) -> None:
+    resolved_video = resolve_video(args.video, args)
+    if args.preflight_width and args.preflight_height:
+        metadata = {
+            "width": args.preflight_width,
+            "height": args.preflight_height,
+            "frames": args.preflight_source_frames,
+        }
+    elif resolved_video.startswith("http://") or resolved_video.startswith("https://"):
+        raise ValueError(
+            "H100 preflight sweep needs a local video path or explicit --preflight-width and --preflight-height."
+        )
+    else:
+        metadata = read_video_metadata(resolved_video)
+
+    ratios = parse_float_sequence(args.h100_reduction_ratios)
+    if ratios is None:
+        ratios = [1.0, 2.0, 3.0, 4.0]
+    model_family = effective_model_family(args)
+    requested_ratios = [1.0] if model_family == MODEL_FAMILY_VIDEO_BASELINE else ratios
+    stream_chunk_frames = (
+        int(args.stream_chunk_frames)
+        if getattr(args, "stream_chunk_frames", None) is not None and int(args.stream_chunk_frames) > 0
+        else None
+    )
+    max_batch_size_siglip = int(getattr(args, "max_batch_size_siglip", 32) or 32)
+    autogaze_residency_policy = getattr(args, "autogaze_residency_policy", "resident")
+    autogaze_model_resident_gib = float(getattr(args, "autogaze_model_resident_gib", 0.0) or 0.0)
+    requested_config_estimates = [
+        estimate_h100_preflight_config(
+            width=int(metadata["width"]),
+            height=int(metadata["height"]),
+            source_frames=metadata.get("frames"),
+            model_family=model_family,
+            num_video_frames=args.num_video_frames,
+            num_video_frames_thumbnail=args.num_video_frames_thumbnail,
+            max_tiles_video=args.max_tiles_video,
+            resize_shortest_edge=getattr(args, "video_resize_shortest_edge", None),
+            resize_longest_edge=getattr(args, "video_resize_longest_edge", None),
+            resize_width=getattr(args, "video_resize_width", None),
+            resize_height=getattr(args, "video_resize_height", None),
+            token_reduction_ratio=ratio,
+            h100_budget_gib=float(args.h100_budget_gib),
+            stream_chunk_frames=stream_chunk_frames,
+            max_batch_size_autogaze=getattr(args, "max_batch_size_autogaze", None),
+            max_batch_size_siglip=max_batch_size_siglip,
+            autogaze_residency_policy=autogaze_residency_policy,
+            autogaze_model_resident_gib=autogaze_model_resident_gib,
+        )
+        for ratio in requested_ratios
+    ]
+    sweep = estimate_h100_preflight_sweep(
+        width=int(metadata["width"]),
+        height=int(metadata["height"]),
+        source_frames=metadata.get("frames"),
+        model_family=model_family,
+        token_reduction_ratios=([1.0] if model_family == MODEL_FAMILY_VIDEO_BASELINE else ratios),
+        h100_budget_gib=float(args.h100_budget_gib),
+        stream_chunk_frames=stream_chunk_frames,
+        max_batch_size_autogaze=getattr(args, "max_batch_size_autogaze", None),
+        max_batch_size_siglip=max_batch_size_siglip,
+        autogaze_residency_policy=autogaze_residency_policy,
+        autogaze_model_resident_gib=autogaze_model_resident_gib,
+    )
+    payload = {
+        "model_path": args.model_path,
+        "run_identity": build_run_identity(args),
+        "video": args.video,
+        "video_resolved": resolved_video,
+        "source_metadata": metadata,
+        "requested_config_estimates": requested_config_estimates,
+        "sweep": sweep,
+    }
+    payload["summary"] = build_h100_decision_summary(
+        requested_rows=requested_config_estimates,
+        sweep=sweep,
+    )
+    write_json(args.h100_sweep_json, payload)
+    print(json.dumps(payload["summary"], indent=2, sort_keys=True))
 
 
 def completed_question_ids(path: Path) -> set[Any]:
@@ -3700,6 +4829,7 @@ def run_hlvid(args: argparse.Namespace) -> None:
                 "status": "failed",
                 "error": repr(exc),
                 "model_path": args.model_path,
+                "run_identity": build_run_identity(args),
                 "autogaze_model": args.autogaze_model,
                 "num_video_frames": args.num_video_frames,
                 "num_video_frames_thumbnail": args.num_video_frames_thumbnail,
@@ -3708,6 +4838,7 @@ def run_hlvid(args: argparse.Namespace) -> None:
                 "video_resize": video_resize_config(args),
                 "autogaze_target_scales": parse_int_sequence(getattr(args, "autogaze_target_scales", None)),
                 "autogaze_target_patch_size": getattr(args, "autogaze_target_patch_size", None),
+                "autogaze_runtime_config": autogaze_runtime_config(args),
                 "task_loss_requirement_tile": args.task_loss_requirement_tile,
             }
             append_jsonl(output_path, [prediction])
@@ -3717,6 +4848,7 @@ def run_hlvid(args: argparse.Namespace) -> None:
             **result,
             "status": "ok",
             "model_path": args.model_path,
+            "run_identity": build_run_identity(args),
             "autogaze_model": args.autogaze_model,
             "num_video_frames": args.num_video_frames,
             "num_video_frames_thumbnail": args.num_video_frames_thumbnail,
@@ -3725,6 +4857,7 @@ def run_hlvid(args: argparse.Namespace) -> None:
             "video_resize": video_resize_config(args),
             "autogaze_target_scales": parse_int_sequence(getattr(args, "autogaze_target_scales", None)),
             "autogaze_target_patch_size": getattr(args, "autogaze_target_patch_size", None),
+            "autogaze_runtime_config": autogaze_runtime_config(args),
             "task_loss_requirement_tile": args.task_loss_requirement_tile,
         }
         append_jsonl(output_path, [prediction])
@@ -3757,8 +4890,24 @@ def load_preset_defaults(path: str | None) -> dict[str, Any]:
 def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run NVILA-HD-Video quickstart and HLVid benchmark")
     parser.add_argument("--preset-config")
-    parser.add_argument("--mode", choices=["single", "hlvid", "preflight", "stream-profile"], default="single")
+    parser.add_argument(
+        "--mode",
+        choices=["single", "hlvid", "preflight", "stream-profile", "h100-preflight-sweep"],
+        default="single",
+    )
     parser.add_argument("--model-path", "--nvila-model", dest="model_path", default=DEFAULT_MODEL)
+    parser.add_argument("--model-family", choices=MODEL_FAMILY_CHOICES, default=MODEL_FAMILY_AUTO)
+    parser.add_argument("--paper-preset", choices=PAPER_PRESET_CHOICES)
+    parser.add_argument("--pipeline-preset", choices=PAPER_PRESET_CHOICES)
+    parser.add_argument("--token-selector-adapter", choices=TOKEN_SELECTOR_ADAPTER_CHOICES, default="auto")
+    parser.add_argument("--token-selector-name")
+    parser.add_argument("--token-selector-path")
+    parser.add_argument("--vision-encoder-adapter", choices=VISION_ENCODER_ADAPTER_CHOICES, default="auto")
+    parser.add_argument("--vision-encoder-name")
+    parser.add_argument("--vision-encoder-path")
+    parser.add_argument("--mllm-adapter", choices=MLLM_ADAPTER_CHOICES, default="auto")
+    parser.add_argument("--mllm-name")
+    parser.add_argument("--mllm-path")
     parser.add_argument("--autogaze-repo", default=".")
     parser.add_argument("--autogaze-model", default="nvidia/AutoGaze")
     parser.add_argument("--device", default="cuda", choices=["cpu", "mps", "cuda"])
@@ -3776,6 +4925,7 @@ def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentPar
     parser.add_argument("--gazing-mode", choices=["autogaze", "keep-all"], default="autogaze")
     parser.add_argument("--autogaze-target-scales", "--autogaze-resize-scales", dest="autogaze_target_scales")
     parser.add_argument("--autogaze-target-patch-size", type=int)
+    parser.add_argument("--gazing-ratio-tile")
     parser.add_argument("--task-loss-requirement-tile", type=float, default=0.6)
     parser.add_argument("--max-batch-size-autogaze", type=int, default=16)
     parser.add_argument("--max-batch-size-siglip", type=int, default=32)
@@ -3790,6 +4940,7 @@ def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentPar
     parser.add_argument("--stream-chunk-frames", type=int, default=AUTOGAZE_CHUNK_FRAMES)
     parser.add_argument("--stream-dtype", choices=["float32", "float16"], default="float32")
     parser.add_argument("--stream-decode-strategy", choices=["scan", "seek"], default="scan")
+    parser.add_argument("--stream-gazing-ratio")
     parser.add_argument("--stream-run-siglip", action="store_true")
     parser.add_argument("--stream-siglip-mode", choices=["gazed", "keep-all", "both"], default="gazed")
     parser.add_argument("--stream-siglip-model")
@@ -3807,6 +4958,15 @@ def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentPar
     parser.add_argument("--preflight-height", type=int)
     parser.add_argument("--preflight-source-frames", type=int)
     parser.add_argument("--preflight-json", default="outputs/autogaze_repro/nvila_preflight.json")
+    parser.add_argument("--h100-budget-gib", type=float, default=H100_DEFAULT_BUDGET_GIB)
+    parser.add_argument("--h100-reduction-ratios", default="1,2,3,4")
+    parser.add_argument(
+        "--autogaze-residency-policy",
+        choices=["resident", "unload-before-generate"],
+        default="resident",
+    )
+    parser.add_argument("--autogaze-model-resident-gib", type=float, default=0.0)
+    parser.add_argument("--h100-sweep-json", default="outputs/autogaze_repro/h100_preflight_sweep.json")
     parser.add_argument("--stream-profile-json", default="outputs/autogaze_repro/nvila_stream_profile.json")
     parser.add_argument("--output-json", default="outputs/autogaze_repro/nvila_single.json")
     parser.add_argument("--summary-json")
@@ -3824,7 +4984,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     bootstrap.add_argument("--preset-config")
     known, _ = bootstrap.parse_known_args(argv)
     defaults = load_preset_defaults(known.preset_config)
-    return build_parser(defaults).parse_args(argv)
+    args = build_parser(defaults).parse_args(argv)
+    apply_pipeline_preset_alias(args)
+    apply_paper_preset_defaults(args, provided_cli_options(argv))
+    apply_component_defaults(args)
+    return args
 
 
 def main() -> None:
@@ -3833,6 +4997,8 @@ def main() -> None:
         run_preflight(args)
     elif args.mode == "stream-profile":
         run_stream_profile(args)
+    elif args.mode == "h100-preflight-sweep":
+        run_h100_preflight_sweep(args)
     elif args.mode == "single":
         run_single(args)
     else:

@@ -6,11 +6,14 @@ import torch
 from PIL import Image
 
 from repro.nvila_runner import (
+    DEFAULT_BASELINE_MODEL,
     StageProfiler,
     apply_resize_to_dimensions,
     autogaze_processor_size_kwargs,
     build_autogaze_effect_metrics,
+    build_h100_decision_row,
     build_latency_accounting,
+    build_run_identity,
     build_seek_decode_groups,
     build_keep_all_gazing_info,
     build_parser,
@@ -20,10 +23,20 @@ from repro.nvila_runner import (
     build_stream_profile_token_metrics,
     compute_visual_token_metrics,
     estimate_siglip_encoder_compute,
+    effective_gazing_ratio_tile,
+    effective_stream_gazing_ratio,
+    estimate_h100_preflight_config,
+    h100_risk_band,
     estimate_nvila_preflight,
     estimate_stream_profile_plan,
+    model_load_kwargs,
     extract_gaze_metrics,
+    MODEL_FAMILY_HD_AUTOGAZE,
+    MODEL_FAMILY_VIDEO_BASELINE,
+    PAPER_PRESET_BASELINE,
+    PAPER_PRESET_HD,
     model_patches_per_frame,
+    parse_float_sequence,
     parse_int_sequence,
     parse_args,
     processor_kwargs,
@@ -47,8 +60,13 @@ def make_args(**overrides):
         "num_video_frames": 128,
         "num_video_frames_thumbnail": 64,
         "max_tiles_video": 48,
+        "model_path": "nvidia/NVILA-8B-HD-Video",
+        "model_family": "auto",
+        "paper_preset": None,
+        "video_resize_longest_edge": None,
         "autogaze_model": "nvidia/AutoGaze",
         "gazing_mode": "autogaze",
+        "gazing_ratio_tile": None,
         "autogaze_target_scales": None,
         "autogaze_target_patch_size": None,
         "task_loss_requirement_tile": 0.6,
@@ -198,6 +216,278 @@ def test_processor_kwargs_match_nvila_quickstart_defaults():
     assert kwargs["trust_remote_code"] is True
 
 
+def test_processor_kwargs_can_override_gazing_ratio_tile_for_timing_audit():
+    kwargs = processor_kwargs(make_args(gazing_ratio_tile="0.75", task_loss_requirement_tile=0.7))
+
+    assert kwargs["gazing_ratio_tile"] == 0.75
+    assert kwargs["task_loss_requirement_tile"] == 0.7
+
+
+def test_processor_kwargs_accepts_sequence_gazing_ratio_tile():
+    kwargs = processor_kwargs(make_args(gazing_ratio_tile="0.2,0.06,0.06"))
+
+    assert kwargs["gazing_ratio_tile"] == [0.2, 0.06, 0.06]
+
+
+def test_effective_gazing_ratio_tile_defaults_to_nvila_processor_policy():
+    args = make_args()
+
+    assert effective_gazing_ratio_tile(args) == [0.2] + [0.06] * 15
+
+
+def test_parse_args_applies_paper_baseline_preset_defaults():
+    args = parse_args(["--paper-preset", PAPER_PRESET_BASELINE])
+
+    assert args.paper_preset == PAPER_PRESET_BASELINE
+    assert args.model_family == MODEL_FAMILY_VIDEO_BASELINE
+    assert args.model_path == DEFAULT_BASELINE_MODEL
+    assert args.num_video_frames == 256
+    assert args.num_video_frames_thumbnail == 0
+    assert args.max_tiles_video == 1
+    assert args.video_resize_longest_edge == 448
+    assert args.gazing_mode == "keep-all"
+
+
+def test_parse_args_applies_paper_hd_preset_defaults():
+    args = parse_args(["--paper-preset", PAPER_PRESET_HD])
+
+    assert args.paper_preset == PAPER_PRESET_HD
+    assert args.model_family == MODEL_FAMILY_HD_AUTOGAZE
+    assert args.model_path == "nvidia/NVILA-8B-HD-Video"
+    assert args.num_video_frames == 1024
+    assert args.num_video_frames_thumbnail == 128
+    assert args.max_tiles_video == 48
+    assert args.video_resize_longest_edge == 3584
+    assert args.gazing_mode == "autogaze"
+
+
+def test_cli_values_override_paper_preset_defaults():
+    args = parse_args(
+        [
+            "--paper-preset",
+            PAPER_PRESET_BASELINE,
+            "--num-video-frames",
+            "128",
+            "--model-path",
+            "/models/local-nvila-video",
+        ]
+    )
+
+    assert args.num_video_frames == 128
+    assert args.model_path == "/models/local-nvila-video"
+    assert args.model_family == MODEL_FAMILY_VIDEO_BASELINE
+
+
+def test_baseline_processor_kwargs_omit_autogaze_specific_fields():
+    args = make_args(
+        model_family=MODEL_FAMILY_VIDEO_BASELINE,
+        model_path=DEFAULT_BASELINE_MODEL,
+        num_video_frames=256,
+        num_video_frames_thumbnail=0,
+        gazing_mode="keep-all",
+    )
+
+    kwargs = processor_kwargs(args)
+
+    assert kwargs == {
+        "num_video_frames": 256,
+        "trust_remote_code": True,
+    }
+    assert "autogaze_model_id" not in kwargs
+    assert "gazing_ratio_tile" not in kwargs
+    assert "max_batch_size_autogaze" not in kwargs
+
+
+def test_baseline_model_load_kwargs_omit_hd_siglip_batch_kwarg():
+    args = make_args(model_family=MODEL_FAMILY_VIDEO_BASELINE, device_map="auto")
+
+    kwargs = model_load_kwargs(args)
+
+    assert kwargs == {"trust_remote_code": True, "device_map": "auto"}
+    assert "max_batch_size_siglip" not in kwargs
+
+
+def test_run_identity_marks_paper_baseline_as_not_applicable():
+    args = parse_args(["--paper-preset", PAPER_PRESET_BASELINE])
+
+    identity = build_run_identity(args)
+
+    assert identity["model_family"] == MODEL_FAMILY_VIDEO_BASELINE
+    assert identity["paper_preset"] == PAPER_PRESET_BASELINE
+    assert identity["paper_reference_score"] == 42.5
+    assert identity["is_paper_baseline_candidate"] is True
+    assert identity["autogaze_applicability"] == "not_applicable"
+    assert identity["adapters"]["token_selector"]["name"] == "not_applicable"
+    assert identity["adapters"]["vision_encoder"]["name"] == "nvila_video_baseline_vision_metadata"
+    assert identity["adapters"]["mllm"]["name"] == "nvila_video_baseline"
+    assert identity["components"]["token_selector"] == {
+        "adapter": "none",
+        "name": "not_applicable",
+        "path": None,
+        "applicability": "not_applicable",
+    }
+    assert identity["components"]["vision_encoder"] == {
+        "adapter": "nvila-video-vision",
+        "name": "nvila-8b-video-vision",
+        "path": "auto",
+    }
+    assert identity["components"]["mllm"] == {
+        "adapter": "nvila-video",
+        "name": DEFAULT_BASELINE_MODEL,
+        "path": DEFAULT_BASELINE_MODEL,
+    }
+
+
+def test_run_identity_separates_hd_keep_all_ablation_from_paper_baseline():
+    args = parse_args(
+        [
+            "--model-family",
+            MODEL_FAMILY_HD_AUTOGAZE,
+            "--gazing-mode",
+            "keep-all",
+        ]
+    )
+
+    identity = build_run_identity(args)
+
+    assert identity["model_family"] == MODEL_FAMILY_HD_AUTOGAZE
+    assert identity["paper_reference_score"] is None
+    assert identity["is_paper_baseline_candidate"] is False
+    assert identity["autogaze_applicability"] == "hd_keep_all_ablation"
+    assert identity["adapters"]["token_selector"]["name"] == "keep_all"
+    assert identity["adapters"]["vision_encoder"]["name"] == "nvila_hd_siglip"
+    assert identity["adapters"]["mllm"]["name"] == "nvila_hd"
+    assert identity["components"]["token_selector"]["adapter"] == "keep-all"
+    assert identity["components"]["vision_encoder"]["adapter"] == "nvila-hd-siglip"
+    assert identity["components"]["mllm"]["adapter"] == "nvila-hd"
+
+
+def test_hd_paper_preset_with_keep_all_does_not_claim_hd_autogaze_reference():
+    args = parse_args(
+        [
+            "--paper-preset",
+            PAPER_PRESET_HD,
+            "--token-selector-adapter",
+            "keep-all",
+        ]
+    )
+
+    identity = build_run_identity(args)
+
+    assert identity["paper_preset"] == PAPER_PRESET_HD
+    assert identity["paper_reference_score"] is None
+    assert identity["autogaze_applicability"] == "hd_keep_all_ablation"
+
+
+def test_pipeline_preset_alias_and_component_cli_overrides_model_paths():
+    args = parse_args(
+        [
+            "--pipeline-preset",
+            PAPER_PRESET_BASELINE,
+            "--mllm-path",
+            "weight/NVILA-8B-Video",
+            "--mllm-name",
+            "local NVILA-8B-Video",
+            "--token-selector-adapter",
+            "none",
+            "--token-selector-name",
+            "not_applicable",
+            "--vision-encoder-adapter",
+            "nvila-video-vision",
+            "--vision-encoder-name",
+            "NVILA-8B-Video vision",
+        ]
+    )
+
+    assert args.paper_preset == PAPER_PRESET_BASELINE
+    assert args.pipeline_preset == PAPER_PRESET_BASELINE
+    assert args.model_path == "weight/NVILA-8B-Video"
+    assert args.mllm_path == "weight/NVILA-8B-Video"
+    assert args.mllm_name == "local NVILA-8B-Video"
+    assert args.token_selector_adapter == "none"
+    assert args.token_selector_name == "not_applicable"
+    assert args.vision_encoder_adapter == "nvila-video-vision"
+    assert args.vision_encoder_name == "NVILA-8B-Video vision"
+
+
+def test_run_identity_records_component_level_names_and_paths():
+    args = parse_args(
+        [
+            "--model-family",
+            MODEL_FAMILY_VIDEO_BASELINE,
+            "--mllm-path",
+            "weight/NVILA-8B-Video",
+            "--mllm-adapter",
+            "nvila-video",
+            "--mllm-name",
+            "local NVILA baseline",
+            "--token-selector-adapter",
+            "none",
+            "--token-selector-name",
+            "paper baseline none",
+            "--vision-encoder-adapter",
+            "nvila-video-vision",
+            "--vision-encoder-name",
+            "baseline vision metadata",
+            "--vision-encoder-path",
+            "auto",
+        ]
+    )
+
+    identity = build_run_identity(args)
+
+    assert identity["components"] == {
+        "token_selector": {
+            "adapter": "none",
+            "name": "paper baseline none",
+            "path": None,
+            "applicability": "not_applicable",
+        },
+        "vision_encoder": {
+            "adapter": "nvila-video-vision",
+            "name": "baseline vision metadata",
+            "path": "auto",
+        },
+        "mllm": {
+            "adapter": "nvila-video",
+            "name": "local NVILA baseline",
+            "path": "weight/NVILA-8B-Video",
+        },
+    }
+
+
+def test_component_keep_all_adapter_disables_autogaze_selection():
+    args = parse_args(["--token-selector-adapter", "keep-all"])
+
+    kwargs = processor_kwargs(args)
+    identity = build_run_identity(args)
+
+    assert args.gazing_mode == "keep-all"
+    assert kwargs["gazing_ratio_tile"] == 1
+    assert kwargs["task_loss_requirement_tile"] is None
+    assert identity["autogaze_applicability"] == "hd_keep_all_ablation"
+    assert identity["components"]["token_selector"]["adapter"] == "keep-all"
+
+
+def test_component_autogaze_adapter_forwards_selector_checkpoint_path():
+    args = parse_args(
+        [
+            "--token-selector-adapter",
+            "autogaze",
+            "--token-selector-path",
+            "/models/local-autogaze",
+        ]
+    )
+
+    kwargs = processor_kwargs(args)
+    identity = build_run_identity(args)
+
+    assert args.gazing_mode == "autogaze"
+    assert args.autogaze_model == "/models/local-autogaze"
+    assert kwargs["autogaze_model_id"] == "/models/local-autogaze"
+    assert identity["components"]["token_selector"]["path"] == "/models/local-autogaze"
+
+
 def test_processor_kwargs_accept_local_autogaze_checkpoint_path():
     kwargs = processor_kwargs(make_args(autogaze_model="/models/autogaze-local"))
 
@@ -225,10 +515,34 @@ def test_processor_kwargs_forwards_autogaze_resize_scales_to_nvila_processor():
     assert kwargs["target_patch_size"] == 14
 
 
+def test_parse_float_sequence_accepts_fractional_reduction_ratios():
+    assert parse_float_sequence("1,2.5,4") == [1.0, 2.5, 4.0]
+
+
 def test_parse_args_accepts_gazing_mode_switch():
     args = parse_args(["--gazing-mode", "keep-all"])
 
     assert args.gazing_mode == "keep-all"
+
+
+def test_stream_profile_can_override_gazing_ratio_for_quickstart_comparison():
+    args = parse_args(["--mode", "stream-profile", "--stream-gazing-ratio", "0.75"])
+
+    assert args.stream_gazing_ratio == "0.75"
+    assert effective_stream_gazing_ratio(args) == 0.75
+
+
+def test_parse_args_accepts_single_mode_gazing_ratio_tile_override():
+    args = parse_args(["--gazing-ratio-tile", "0.75"])
+
+    assert args.gazing_ratio_tile == "0.75"
+    assert effective_gazing_ratio_tile(args) == 0.75
+
+
+def test_stream_profile_uses_nvila_gazing_ratio_when_not_overridden():
+    args = parse_args(["--mode", "stream-profile"])
+
+    assert effective_stream_gazing_ratio(args) == [0.2] + [0.06] * 15
 
 
 def test_parse_args_accepts_gaze_visualization_options():
@@ -892,6 +1206,205 @@ def test_preflight_estimator_flags_4k_1024_frame_keep_all_context_risk():
     assert estimate["tokens"]["keep_all_projected_tokens"] > estimate["tokens"]["llm_context_limit"]
     assert "context" in estimate["risk_flags"]
     assert "cpu_memory" in estimate["risk_flags"]
+
+
+def test_h100_risk_band_uses_default_70gib_budget_and_context_limit():
+    assert h100_risk_band(54.9) == "green"
+    assert h100_risk_band(55.0) == "yellow"
+    assert h100_risk_band(70.0) == "red"
+    assert h100_risk_band(1.0, context_exceeded=True) == "context_red"
+
+
+def test_estimate_h100_preflight_config_reports_memory_and_context_risk_for_hd():
+    estimate = estimate_h100_preflight_config(
+        width=3840,
+        height=2160,
+        source_frames=9000,
+        model_family=MODEL_FAMILY_HD_AUTOGAZE,
+        num_video_frames=1024,
+        num_video_frames_thumbnail=512,
+        max_tiles_video=48,
+        resize_shortest_edge=None,
+        token_reduction_ratio=1.0,
+        h100_budget_gib=70.0,
+    )
+
+    assert estimate["model_family"] == MODEL_FAMILY_HD_AUTOGAZE
+    assert estimate["config"]["num_video_frames"] == 1024
+    assert estimate["tokens"]["keep_all_llm_visual_tokens_estimated"] >= estimate["tokens"]["actual_llm_visual_tokens_estimated"]
+    assert estimate["memory"]["h100_budget_gib"] == 70.0
+    assert estimate["risk"]["band"] in {"green", "yellow", "red", "context_red"}
+    assert "recommended_role" in estimate
+
+
+def test_h100_preflight_distinguishes_full_video_and_streamed_autogaze_working_set():
+    full_video = estimate_h100_preflight_config(
+        width=3584,
+        height=2016,
+        source_frames=9000,
+        model_family=MODEL_FAMILY_HD_AUTOGAZE,
+        num_video_frames=1024,
+        num_video_frames_thumbnail=128,
+        max_tiles_video=48,
+        resize_shortest_edge=None,
+        token_reduction_ratio=400.0,
+        h100_budget_gib=80.0,
+    )
+    streamed = estimate_h100_preflight_config(
+        width=3584,
+        height=2016,
+        source_frames=9000,
+        model_family=MODEL_FAMILY_HD_AUTOGAZE,
+        num_video_frames=1024,
+        num_video_frames_thumbnail=128,
+        max_tiles_video=48,
+        resize_shortest_edge=None,
+        token_reduction_ratio=400.0,
+        h100_budget_gib=80.0,
+        stream_chunk_frames=16,
+        max_batch_size_autogaze=16,
+    )
+
+    assert full_video["memory"]["autogaze_working_mode"] == "full_video_tensor"
+    assert streamed["memory"]["autogaze_working_mode"] == "stream_chunk"
+    assert streamed["config"]["stream_chunk_frames"] == 16
+    assert streamed["config"]["max_batch_size_autogaze"] == 16
+    assert (
+        streamed["memory"]["autogaze_working_bytes_estimated"]
+        < full_video["memory"]["autogaze_working_bytes_estimated"]
+    )
+    assert streamed["memory"]["autogaze_tile_tensor_full_video_bytes_estimated"] == full_video["memory"][
+        "autogaze_working_bytes_estimated"
+    ]
+    assert (
+        streamed["memory"]["autogaze_forward_batch_tensor_bytes_estimated"]
+        < streamed["memory"]["autogaze_tensor_residency_bytes_estimated"]
+    )
+
+
+def test_h100_preflight_estimates_vit_and_llm_bottlenecks_after_streamed_autogaze():
+    estimate = estimate_h100_preflight_config(
+        width=3584,
+        height=2016,
+        source_frames=9000,
+        model_family=MODEL_FAMILY_HD_AUTOGAZE,
+        num_video_frames=1024,
+        num_video_frames_thumbnail=128,
+        max_tiles_video=48,
+        resize_shortest_edge=None,
+        token_reduction_ratio=400.0,
+        h100_budget_gib=80.0,
+        stream_chunk_frames=16,
+        max_batch_size_autogaze=16,
+        max_batch_size_siglip=32,
+    )
+
+    assert estimate["vision_encoder"]["actual"]["max_sequence_tokens_per_batch"] == 1060
+    assert estimate["vision_encoder"]["actual"]["tile_sequence_tokens"] == 43
+    assert estimate["tokens"]["actual_llm_visual_tokens_estimated"] == 28836
+    assert estimate["tokens"]["actual_context_tokens_estimated"] == 29092
+    assert estimate["mllm"]["actual"]["context_tokens"] == 29092
+    assert estimate["bottlenecks"]["dominant_memory_stage_estimated"] == "mllm_prefill"
+    assert estimate["bottlenecks"]["stage_memory_gib_estimated"]["mllm_prefill"] > estimate["bottlenecks"][
+        "stage_memory_gib_estimated"
+    ]["vision_encoder"]
+
+
+def test_h100_decision_row_highlights_resolution_frames_tokens_and_bottleneck():
+    estimate = estimate_h100_preflight_config(
+        width=3840,
+        height=2160,
+        source_frames=9000,
+        model_family=MODEL_FAMILY_HD_AUTOGAZE,
+        num_video_frames=1024,
+        num_video_frames_thumbnail=128,
+        max_tiles_video=48,
+        resize_shortest_edge=None,
+        resize_longest_edge=3584,
+        token_reduction_ratio=400.0,
+        h100_budget_gib=80.0,
+        stream_chunk_frames=16,
+        max_batch_size_autogaze=16,
+        max_batch_size_siglip=32,
+    )
+
+    row = build_h100_decision_row(estimate)
+
+    assert row["source_resolution"] == "3840x2160"
+    assert row["effective_resolution"] == "3584x2016"
+    assert row["frames"] == 1024
+    assert row["thumbnail_frames"] == 128
+    assert row["spatial_tiles"] == 45
+    assert row["llm_actual_visual_tokens"] == 28836
+    assert row["llm_actual_context_tokens"] == 29092
+    assert row["dominant_memory_stage"] == "mllm_prefill"
+    assert row["risk_band"] == "yellow"
+
+
+def test_h100_decision_row_exposes_llm_context_capacity_requirements():
+    estimate = estimate_h100_preflight_config(
+        width=3584,
+        height=2016,
+        source_frames=9000,
+        model_family=MODEL_FAMILY_HD_AUTOGAZE,
+        num_video_frames=1024,
+        num_video_frames_thumbnail=128,
+        max_tiles_video=48,
+        resize_shortest_edge=None,
+        token_reduction_ratio=200.0,
+        h100_budget_gib=80.0,
+        stream_chunk_frames=16,
+        max_batch_size_autogaze=16,
+        max_batch_size_siglip=32,
+    )
+
+    row = build_h100_decision_row(estimate)
+
+    assert row["llm_actual_context_tokens"] == 42532
+    assert row["llm_context_margin_tokens"] == -1572
+    assert row["llm_context_fits"] is False
+    assert row["llm_context_utilization_percent"] == 103.84
+    assert row["min_tile_reduction_ratio_for_context"] == 212.0
+    assert row["max_tile_sequence_tokens_for_context"] == 80
+
+
+def test_h100_preflight_can_add_resident_autogaze_model_memory():
+    base = estimate_h100_preflight_config(
+        width=3584,
+        height=2016,
+        source_frames=9000,
+        model_family=MODEL_FAMILY_HD_AUTOGAZE,
+        num_video_frames=1024,
+        num_video_frames_thumbnail=128,
+        max_tiles_video=48,
+        resize_shortest_edge=None,
+        token_reduction_ratio=400.0,
+        h100_budget_gib=80.0,
+        stream_chunk_frames=16,
+        max_batch_size_autogaze=16,
+        max_batch_size_siglip=32,
+    )
+    resident = estimate_h100_preflight_config(
+        width=3584,
+        height=2016,
+        source_frames=9000,
+        model_family=MODEL_FAMILY_HD_AUTOGAZE,
+        num_video_frames=1024,
+        num_video_frames_thumbnail=128,
+        max_tiles_video=48,
+        resize_shortest_edge=None,
+        token_reduction_ratio=400.0,
+        h100_budget_gib=80.0,
+        stream_chunk_frames=16,
+        max_batch_size_autogaze=16,
+        max_batch_size_siglip=32,
+        autogaze_model_resident_gib=5.0,
+    )
+
+    assert resident["memory"]["autogaze_residency_policy"] == "resident"
+    assert resident["memory"]["autogaze_model_resident_gib_assumed"] == 5.0
+    assert resident["memory"]["estimated_vram_gib"] == base["memory"]["estimated_vram_gib"] + 5.0
+    assert build_h100_decision_row(resident)["autogaze_model_resident_gib"] == 5.0
 
 
 def test_parse_args_accepts_preflight_mode_and_output_path():

@@ -423,6 +423,85 @@ NVILA-HD-Video와 AutoGaze를 모두 로컬 checkpoint 디렉터리에서 실행
   --output-json outputs/autogaze_repro/cuda_nvila_single_local_models.json
 ```
 
+앞으로 token selector / vision encoder / MLLM을 서로 바꿔 꽂는 구조를 염두에 두고, runner는 컴포넌트 단위 식별자도 받습니다. preset은 검증된 조합을 빠르게 고르는 용도이고, 컴포넌트 CLI는 각 부분의 adapter/name/path를 명시해서 report에 남기는 용도입니다.
+
+- token selector: `--token-selector-adapter auto|none|keep-all|autogaze`, `--token-selector-name`, `--token-selector-path`
+- vision encoder: `--vision-encoder-adapter auto|nvila-hd-siglip|nvila-video-vision`, `--vision-encoder-name`, `--vision-encoder-path`
+- MLLM: `--mllm-adapter auto|nvila-hd|nvila-video`, `--mllm-name`, `--mllm-path`
+
+`--model-path`/`--nvila-model`은 기존 호환용으로 유지됩니다. `--mllm-path`를 주면 실제 model load path로 승격되고, 결과 JSON에는 `run_identity.components.token_selector`, `run_identity.components.vision_encoder`, `run_identity.components.mllm`로 기록됩니다. `--pipeline-preset`은 현재 `--paper-preset`의 alias라서 같은 preset 기본값을 적용합니다.
+
+예를 들어 로컬 `NVILA-8B-Video` baseline을 컴포넌트 형태로 명시하면:
+
+```bash
+.venv/bin/python -m repro.nvila_runner \
+  --mode hlvid \
+  --device cuda \
+  --pipeline-preset autogaze-hlvid-baseline \
+  --mllm-path weight/NVILA-8B-Video \
+  --mllm-adapter nvila-video \
+  --mllm-name local-nvila-8b-video \
+  --token-selector-adapter none \
+  --token-selector-name not_applicable \
+  --vision-encoder-adapter nvila-video-vision \
+  --vision-encoder-name nvila-8b-video-vision \
+  --manifest /path/to/HLVid/data/test-00000-of-00001.parquet \
+  --hlvid-video-root /path/to/HLVid/videos \
+  --measure-ttft \
+  --continue-on-error
+```
+
+HD AutoGaze 쪽을 같은 형태로 명시하면:
+
+```bash
+.venv/bin/python -m repro.nvila_runner \
+  --mode single \
+  --device cuda \
+  --mllm-path /path/to/local/nvila-hd-video \
+  --mllm-adapter nvila-hd \
+  --mllm-name local-nvila-hd-video \
+  --token-selector-adapter autogaze \
+  --token-selector-path /path/to/local/autogaze-checkpoint \
+  --token-selector-name local-autogaze \
+  --vision-encoder-adapter nvila-hd-siglip \
+  --vision-encoder-name nvila-hd-siglip \
+  --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
+  --num-video-frames 128 \
+  --num-video-frames-thumbnail 64 \
+  --max-tiles-video 48 \
+  --measure-ttft \
+  --output-json outputs/autogaze_repro/cuda_nvila_single_component_style.json
+```
+
+paper baseline용 `NVILA-8B-Video`를 로컬 weight에서 직접 지정하려면 preset 없이 아래처럼 씁니다. 이 경우 `--model-family nvila-video-baseline`을 함께 주면 runner가 baseline path로 인식해서 AutoGaze processor kwargs를 넣지 않습니다.
+
+```bash
+.venv/bin/python -m repro.nvila_runner \
+  --mode hlvid \
+  --device cuda \
+  --model-path weight/NVILA-8B-Video \
+  --model-family nvila-video-baseline \
+  --manifest /path/to/HLVid/data/test-00000-of-00001.parquet \
+  --hlvid-video-root /path/to/HLVid/videos \
+  --num-video-frames 256 \
+  --num-video-frames-thumbnail 0 \
+  --max-tiles-video 1 \
+  --video-resize-longest-edge 448 \
+  --gazing-mode keep-all \
+  --measure-ttft \
+  --warmup-runs 1 \
+  --predictions outputs/autogaze_repro/hlvid_local_nvila_8b_video_predictions.jsonl \
+  --summary outputs/autogaze_repro/hlvid_local_nvila_8b_video_summary.json \
+  --scored-predictions outputs/autogaze_repro/hlvid_local_nvila_8b_video_scored.jsonl \
+  --continue-on-error
+```
+
+다운로드는 다음 형태로 받으면 됩니다. 현재 로컬에는 `weight/NVILA-8B-Video` 경로로 받아두었습니다.
+
+```bash
+.venv/bin/python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='Efficient-Large-Model/NVILA-8B-Video', repo_type='model', local_dir='weight/NVILA-8B-Video')"
+```
+
 ## HF Space 예시 비디오
 
 `https://huggingface.co/spaces/bfshi/AutoGaze`의 AutoGaze Space는 세 개의 예시 비디오 `doorbell.mp4`, `tomjerry.mp4`, `security.mp4`를 사용합니다. 아래 명령으로 로컬에 다운로드합니다.
@@ -491,6 +570,60 @@ Space 예시 비디오에서 HLVid-like stress check를 하려면 전체 샘플�
 ```
 
 4K/1024프레임 estimate에서는 현재 public processor path 기준으로 약 `45`개 spatial tile, `2880`개 tile sequence, 약 `5.44M` keep-all visual token, Python/PIL overhead를 제외한 CPU preprocessing memory lower bound 약 `202 GiB`가 보고됩니다. 이 결과가 나오면 full generation을 시도하기 전에 `--num-video-frames`나 `--max-tiles-video`를 줄이거나, chunked preprocessing 및 vision encoding을 구현해야 한다는 신호로 보세요.
+
+### H100 preflight sweep
+
+H100 80GB에서 바로 full run을 던지기 전에 `h100-preflight-sweep`으로 config risk를 먼저 볼 수 있습니다. 기본 budget은 실제 가용 여유를 남기기 위해 `70 GiB`이고, risk band는 `green <55GiB`, `yellow 55-70GiB`, `red >=70GiB`, context 초과는 `context_red`입니다.
+
+paper baseline 후보:
+
+```bash
+.venv/bin/python -m repro.nvila_runner \
+  --mode h100-preflight-sweep \
+  --paper-preset autogaze-hlvid-baseline \
+  --video /path/to/HLVid/videos/clip_av_video_5_001.mp4 \
+  --h100-budget-gib 70 \
+  --h100-sweep-json outputs/autogaze_repro/h100_paper_baseline_sweep.json
+```
+
+HD AutoGaze 확장 후보:
+
+```bash
+.venv/bin/python -m repro.nvila_runner \
+  --mode h100-preflight-sweep \
+  --paper-preset autogaze-hlvid-hd \
+  --video /path/to/HLVid/videos/clip_av_video_5_001.mp4 \
+  --h100-budget-gib 80 \
+  --h100-reduction-ratios 128,200,256,300,400 \
+  --stream-chunk-frames 16 \
+  --max-batch-size-autogaze 16 \
+  --max-batch-size-siglip 32 \
+  --autogaze-residency-policy resident \
+  --autogaze-model-resident-gib 0 \
+  --h100-sweep-json outputs/autogaze_repro/h100_hd_autogaze_sweep.json
+```
+
+sweep grid는 frames `[1024,512,256,128,64,32]`, thumbnail frames `[512,256,128,64,32,16]`, max tiles `[48,32,16,8,4,1]`, resize shortest edge `[None,1080,720,512,448,384]`, token reduction ratio는 CLI의 `--h100-reduction-ratios`입니다. 콘솔에는 전체 JSON 대신 `summary`만 출력됩니다. 먼저 `requested_config_table`을 보세요. 이 표가 현재 CLI/preset 설정에 대한 해상도, 프레임 수, tile 수, LLM visual/context token, VRAM, 병목 stage를 보여줍니다. `llm_context_fits`, `llm_context_margin_tokens`, `llm_context_utilization_percent`, `min_tile_reduction_ratio_for_context`, `max_tile_sequence_tokens_for_context`는 고정된 LLM context limit 안에 들어가는지 판단하는 1차 gate입니다. 그 다음 `sweep_decision_table`에서 가능한 대안 조합을 봅니다. 전체 상세 row는 `--h100-sweep-json` 파일의 `sweep.rows`에 저장됩니다. 이 estimator는 scheduling용 보수 추정치이고, 실제 CUDA run에서는 `processor_peak_memory_bytes`, `ttft_peak_memory_bytes`, `llm_peak_memory_bytes`, `peak_memory_bytes`를 최종 근거로 삼아야 합니다.
+
+OOM preflight는 AutoGaze tensor residency를 두 방식으로 구분합니다. `--stream-chunk-frames 0` 또는 미지정 API 호출은 sampled tile tensor를 전체 비디오 단위로 잡는 현재 public processor 위험을 보여주고, `--stream-chunk-frames 16 --max-batch-size-autogaze 16`은 decode/tile/AutoGaze가 temporal chunk 단위로 흘러간다는 가정의 working set을 보여줍니다. 리포트에서는 `memory.autogaze_working_mode`, `autogaze_tile_tensor_full_video_bytes_estimated`, `autogaze_tensor_residency_bytes_estimated`, `autogaze_forward_batch_tensor_bytes_estimated`를 비교하세요. 단, LLM prefill은 여전히 누적된 visual token sequence를 한 번에 받는 것으로 추정하므로 `tokens.actual_context_tokens_estimated`와 `risk.context_red`를 같이 봐야 합니다.
+
+AutoGaze 모델 weight가 GPU에 계속 남는 경우는 `--autogaze-residency-policy resident --autogaze-model-resident-gib <GiB>`로 별도 반영합니다. 이 값은 H100에서 실제 AutoGaze 처리 직후 `torch.cuda.max_memory_allocated`나 `nvidia-smi`로 보정하세요. AutoGaze를 명시적으로 내리고 generate를 돌리는 실험을 할 때만 `--autogaze-residency-policy unload-before-generate`로 비교합니다.
+
+AutoGaze가 streaming된다는 가정에서는 `bottlenecks` 섹션을 먼저 보세요. `bottlenecks.stage_memory_gib_estimated.autogaze`는 AutoGaze chunk tensor residency, `vision_encoder`는 SigLIP dense attention/MLP batch peak 추정, `mllm_prefill`은 LLM prefill attention score와 KV cache 추정입니다. `vision_encoder.actual.tile_sequence_tokens`, `vision_encoder.actual.max_sequence_tokens_per_batch`, `mllm.actual.context_tokens`, `mllm.actual.kv_cache_bytes_after_prefill_estimated`를 같이 보면 병목이 ViT인지 LLM인지 분리해서 볼 수 있습니다. synthetic `--h100-reduction-ratios`는 tile patch slot 감소율로 해석하고, thumbnail patch는 keep-all로 둔 뒤 token shuffle 이후 LLM visual token을 다시 계산합니다.
+
+HLVid 폴더 전체의 mp4 metadata를 기준으로 가장 보수적인 sweep을 만들려면 batch wrapper의 preflight 모드를 씁니다. 이 모드는 mp4를 전부 디코드하지 않고 stream metadata만 읽어서 가장 큰 해상도와 가장 긴 frame count를 기준으로 paper baseline / HD AutoGaze 추천 config를 나눠 냅니다.
+
+```bash
+.venv/bin/python scripts/run_hlvid_folder_benchmark.py \
+  --dataset-dir /path/to/HLVid \
+  --video-root /path/to/extracted/videos \
+  --h100-preflight \
+  --h100-budget-gib 70 \
+  --h100-reduction-ratios 1,2,3,4 \
+  --h100-preflight-output outputs/autogaze_repro/hlvid_h100_preflight_report.json
+```
+
+report에서는 `dataset_video_summary`, `recommendations.paper_baseline_reproduction_configs`, `recommendations.hd_autogaze_scaling_configs`, `sweeps.*.risk_band_counts`를 먼저 봅니다. 로컬에 일부 mp4만 있는 상태에서 의도적으로 가능한 파일만 보고 싶으면 `--allow-missing-videos`를 붙이세요.
 
 ## NVILA 청크 스트리밍 pre-LLM profile
 
@@ -740,7 +873,49 @@ manifest 명령은 `datasets.load_dataset` 대신 Hugging Face Dataset Viewer AP
 
 ## HLVid 논문 대응 실행
 
-fixed total-frame sampling setup용 preset은 `configs/repro/hlvid_like_nvila_1024.yaml`입니다.
+논문 table의 baseline은 `NVILA-8B-HD-Video --gazing-mode keep-all`이 아니라 별도 checkpoint family인 `NVILA-8B-Video`로 봅니다. 따라서 report에서는 세 가지를 분리합니다.
+
+- `paper_baseline_nvila_8b_video`: `Efficient-Large-Model/NVILA-8B-Video`, 256 frames, max resolution target 448, AutoGaze not applicable, HLVid reference `42.5`
+- `hd_autogaze`: `nvidia/NVILA-8B-HD-Video`, 1024 frames, max resolution target 3584, AutoGaze enabled, HLVid reference `52.6`
+- `hd_keep_all_optional`: NVILA-HD에서 AutoGaze selection만 끈 ablation입니다. OOM/비교용으로 유용하지만 paper baseline이라고 부르지 않습니다.
+
+runner 단일 모드/HLVid 모드에서는 `--paper-preset`을 사용할 수 있습니다. preset은 기본값을 채우지만 CLI에서 직접 지정한 값은 유지합니다.
+
+```bash
+.venv/bin/python -m repro.nvila_runner \
+  --mode hlvid \
+  --paper-preset autogaze-hlvid-baseline \
+  --manifest /path/to/HLVid/data/test-00000-of-00001.parquet \
+  --hlvid-video-root /path/to/HLVid/videos \
+  --device cuda \
+  --measure-ttft \
+  --warmup-runs 1 \
+  --predictions outputs/autogaze_repro/hlvid_paper_baseline_predictions.jsonl \
+  --summary outputs/autogaze_repro/hlvid_paper_baseline_summary.json \
+  --scored-predictions outputs/autogaze_repro/hlvid_paper_baseline_scored.jsonl \
+  --continue-on-error
+```
+
+HD AutoGaze paper target은 다음처럼 실행합니다.
+
+```bash
+.venv/bin/python -m repro.nvila_runner \
+  --mode hlvid \
+  --paper-preset autogaze-hlvid-hd \
+  --manifest /path/to/HLVid/data/test-00000-of-00001.parquet \
+  --hlvid-video-root /path/to/HLVid/videos \
+  --device cuda \
+  --measure-ttft \
+  --warmup-runs 1 \
+  --predictions outputs/autogaze_repro/hlvid_paper_hd_autogaze_predictions.jsonl \
+  --summary outputs/autogaze_repro/hlvid_paper_hd_autogaze_summary.json \
+  --scored-predictions outputs/autogaze_repro/hlvid_paper_hd_autogaze_scored.jsonl \
+  --continue-on-error
+```
+
+각 row와 summary에는 `run_identity.model_family`, `run_identity.paper_preset`, `run_identity.paper_reference_score`, `run_identity.is_paper_baseline_candidate`, `run_identity.autogaze_applicability`가 남습니다. 추가로 `run_identity.components` 아래에 token selector / vision encoder / MLLM의 adapter, name, path가 각각 남습니다. baseline preset에서는 token selector가 `adapter=none`, `applicability=not_applicable`로 기록되고, NVILA processor에 AutoGaze-specific kwargs를 넣지 않습니다. AutoGaze 관련 reduction metric은 `not_applicable`로 해석하세요.
+
+기존 fixed total-frame sampling setup용 preset은 `configs/repro/hlvid_like_nvila_1024.yaml`입니다. 이것은 HD AutoGaze 재현/ablation용이며, 위의 `NVILA-8B-Video` paper baseline과는 다릅니다.
 
 ```bash
 .venv/bin/python -m repro.nvila_runner \
@@ -793,7 +968,7 @@ matching keep-all baseline은 모든 설정을 동일하게 유지하고 gaze mo
 
 ### HLVid 폴더 기반 일괄 benchmark
 
-데이터셋을 로컬 폴더로 받은 경우에는 `scripts/run_hlvid_folder_benchmark.py`를 쓰면 됩니다. 이 스크립트는 폴더에서 manifest를 찾고, `keep-all`과 `autogaze`를 같은 설정으로 각각 실행한 뒤, accuracy/속도/메모리/token/compute gain report를 만듭니다. `--video-resize-*`를 켠 benchmark에서는 기본적으로 `--video-decode-strategy auto`가 하위 `repro.nvila_runner`에 전달되어 keyframe seek sampling을 먼저 사용합니다.
+데이터셋을 로컬 폴더로 받은 경우에는 `scripts/run_hlvid_folder_benchmark.py`를 쓰면 됩니다. 이 스크립트는 폴더에서 manifest를 찾고, 기본 모드에서는 `keep-all`과 `autogaze`를 같은 설정으로 각각 실행한 뒤 accuracy/속도/메모리/token/compute gain report를 만듭니다. `--paper-baseline --paper-hd-autogaze --paper-comparison-report`를 쓰면 논문 baseline 비교 모드가 켜지고, `paper_baseline_nvila_8b_video`와 `hd_autogaze`를 별도 column으로 비교합니다. `--paper-hd-keep-all-optional`은 OOM/ablation 확인용입니다. `--video-resize-*`를 켠 benchmark에서는 기본적으로 `--video-decode-strategy auto`가 하위 `repro.nvila_runner`에 전달되어 keyframe seek sampling을 먼저 사용합니다.
 
 지원하는 폴더 형태:
 
@@ -834,6 +1009,25 @@ report에서 `ready_for_full_benchmark=true`, `missing_videos=0`이면 full run 
 
 manifest는 `question_id`, `category`, `video_path`, `question`, `answer` 컬럼을 가져야 합니다. 파일명이 다르면 `--manifest`로 직접 지정하세요. `video_path`는 manifest 기준 문자열이고, runner는 자동 발견된 video root 또는 `--video-root`로 전달된 폴더 아래에서 찾습니다.
 full benchmark 실행 전에도 같은 video-file preflight를 돌립니다. 누락된 mp4가 있으면 기본적으로 실행을 멈추므로, 일부 샘플만 의도적으로 실패 처리하려는 경우에만 `--allow-missing-videos --continue-on-error`를 같이 쓰세요.
+
+후속 VideoQA 계열 benchmark는 같은 schema로 맞추면 됩니다. 공통 required field는 `video_path`, `question`, `answer`이고, optional field는 `question_id`, `choices`, `category`, `duration`, `source`입니다. helper는 [videoqa_task_schema.py](../repro/videoqa_task_schema.py)에 있으며, multiple-choice scoring은 우선 `A/B/C/D` 답변 안정화에 맞춰두었습니다.
+
+paper comparison wrapper 예시:
+
+```bash
+.venv/bin/python scripts/run_hlvid_folder_benchmark.py \
+  --dataset-dir /path/to/HLVid \
+  --video-root /path/to/extracted/videos \
+  --output-dir outputs/autogaze_repro/hlvid_paper_comparison \
+  --paper-baseline \
+  --paper-hd-autogaze \
+  --paper-comparison-report \
+  --measure-ttft \
+  --warmup-runs 1 \
+  --continue-on-error
+```
+
+출력 핵심 파일은 `hlvid_paper_comparison_report.json`과 `hlvid_paper_comparison_report.csv`입니다. report의 `modes.paper_baseline_nvila_8b_video.paper_reference_accuracy=42.5`, `modes.hd_autogaze.paper_reference_accuracy=52.6`, `measured_accuracy`, `delta_from_reference`, `failed`, `oom`, `parse_failed`, `skipped`를 먼저 보세요. `measured_accuracy`는 reference와 같은 percent 단위이고, 원래 fraction은 `measured_accuracy_fraction`에 같이 남습니다.
 
 ### HLVid를 일반 inference 입력으로 쓰기
 

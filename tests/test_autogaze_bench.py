@@ -4,6 +4,7 @@ from pathlib import Path
 from repro.autogaze_bench import (
     add_external_autogaze,
     flatten_video_batch_for_siglip_baseline,
+    repeat_video_batch,
     select_siglip_vision_model_class,
     summarize_gaze,
 )
@@ -38,12 +39,32 @@ def test_summarize_gaze_counts_selected_and_padded_positions_from_lists():
     assert summary["num_gazing_each_frame"] == [2, 2]
 
 
+def test_summarize_gaze_flattens_batched_num_gazing_each_frame():
+    gaze_outputs = {
+        "if_padded_gazing": [[False, True], [False, False]],
+        "num_gazing_each_frame": [[2, 3], [4, 5]],
+    }
+
+    summary = summarize_gaze(gaze_outputs, raw_patch_budget=32)
+
+    assert summary["selected_non_padded_patches"] == 3
+    assert summary["num_gazing_each_frame"] == [2, 3, 4, 5]
+
+
 def test_flatten_video_batch_for_siglip_baseline_turns_frames_into_batch():
     video = torch.zeros(2, 3, 4, 5, 6)
 
     flattened = flatten_video_batch_for_siglip_baseline(video)
 
     assert list(flattened.shape) == [6, 4, 5, 6]
+
+
+def test_repeat_video_batch_repeats_single_quickstart_clip():
+    video = torch.zeros(1, 2, 3, 4, 5)
+
+    repeated = repeat_video_batch(video, batch_size=3)
+
+    assert list(repeated.shape) == [3, 2, 3, 4, 5]
 
 
 def test_select_siglip_vision_model_class_uses_config_model_type():

@@ -3,12 +3,18 @@ import json
 from pathlib import Path
 
 from repro.hlvid_batch_benchmark import (
+    PAPER_COMPARISON_COLUMNS,
     build_prepare_report,
     build_gain_report,
+    build_h100_dataset_preflight_report_from_metadata,
+    build_paper_comparison_report,
     build_runner_command,
     discover_dataset_layout,
     flatten_metric_row,
+    flatten_paper_comparison_row,
+    paper_mode_args,
 )
+from repro.nvila_runner import MODEL_FAMILY_VIDEO_BASELINE, PAPER_PRESET_BASELINE, PAPER_PRESET_HD
 
 
 def test_discover_dataset_layout_finds_manifest_and_video_root(tmp_path: Path):
@@ -94,9 +100,37 @@ def test_prepare_report_detects_missing_videos_and_archives(tmp_path: Path):
     assert report["missing_video_samples"] == ["clip_av_video_3_000.mp4"]
 
 
+def test_h100_dataset_preflight_report_uses_largest_hlvid_video_metadata():
+    report = build_h100_dataset_preflight_report_from_metadata(
+        [
+            {"path": "short.mp4", "width": 1920, "height": 1080, "frames": 1800},
+            {"path": "long4k.mp4", "width": 3840, "height": 2160, "frames": 9000},
+        ],
+        h100_budget_gib=70.0,
+        token_reduction_ratios=[1.0, 2.0],
+    )
+
+    assert report["dataset_video_summary"]["video_count"] == 2
+    assert report["dataset_video_summary"]["max_width"] == 3840
+    assert report["dataset_video_summary"]["max_height"] == 2160
+    assert report["dataset_video_summary"]["max_frames"] == 9000
+    assert "paper_baseline_reproduction_configs" in report["recommendations"]
+    assert "hd_autogaze_scaling_configs" in report["recommendations"]
+    assert report["sweeps"]["paper_baseline_nvila_8b_video"]["model_family"] == MODEL_FAMILY_VIDEO_BASELINE
+
+
 def test_build_runner_command_includes_local_manifest_and_measurement_flags(tmp_path: Path):
     args = argparse.Namespace(
         model_path="local-nvila",
+        model_family="auto",
+        paper_preset=None,
+        token_selector_adapter="autogaze",
+        token_selector_name="local-autogaze-selector",
+        vision_encoder_adapter="nvila-hd-siglip",
+        vision_encoder_name="local-siglip",
+        vision_encoder_path="auto",
+        mllm_adapter="nvila-hd",
+        mllm_name="local-nvila-hd",
         autogaze_model="local-autogaze",
         device="cuda",
         device_map="auto",
@@ -153,6 +187,124 @@ def test_build_runner_command_includes_local_manifest_and_measurement_flags(tmp_
     assert str(tmp_path / "viz") in command
     assert "--visualization-selected-max-long-side" in command
     assert "720" in command
+    assert "--token-selector-adapter" in command
+    assert "autogaze" in command
+    assert "--token-selector-name" in command
+    assert "local-autogaze-selector" in command
+    assert "--vision-encoder-adapter" in command
+    assert "nvila-hd-siglip" in command
+    assert "--vision-encoder-name" in command
+    assert "local-siglip" in command
+    assert "--mllm-adapter" in command
+    assert "nvila-hd" in command
+    assert "--mllm-name" in command
+    assert "local-nvila-hd" in command
+
+
+def test_build_runner_command_forwards_model_family_and_paper_preset(tmp_path: Path):
+    args = argparse.Namespace(
+        model_path="Efficient-Large-Model/NVILA-8B-Video",
+        model_family=MODEL_FAMILY_VIDEO_BASELINE,
+        paper_preset=PAPER_PRESET_BASELINE,
+        token_selector_adapter="none",
+        token_selector_name="not_applicable",
+        vision_encoder_adapter="nvila-video-vision",
+        vision_encoder_name="nvila-8b-video-vision",
+        vision_encoder_path="auto",
+        mllm_adapter="nvila-video",
+        mllm_name="Efficient-Large-Model/NVILA-8B-Video",
+        autogaze_model="nvidia/AutoGaze",
+        device="cuda",
+        device_map="auto",
+        num_video_frames=256,
+        num_video_frames_thumbnail=0,
+        max_tiles_video=1,
+        max_batch_size_autogaze=16,
+        max_batch_size_siglip=32,
+        max_new_tokens=4,
+        warmup_runs=0,
+        measure_ttft=True,
+        video_resize_shortest_edge=None,
+        video_resize_longest_edge=448,
+        video_resize_width=None,
+        video_resize_height=None,
+        video_decode_strategy="auto",
+        autogaze_target_scales=None,
+        autogaze_target_patch_size=None,
+        visualization_output_dir=None,
+        visualization_fps=None,
+        visualization_alpha=None,
+        visualization_selected_max_long_side=None,
+        task_loss_requirement_tile=0.7,
+        continue_on_error=True,
+        limit=3,
+        split="test",
+        config="default",
+        extra_runner_args=[],
+    )
+
+    command = build_runner_command(
+        args,
+        gazing_mode="keep-all",
+        manifest=tmp_path / "manifest.jsonl",
+        video_root=tmp_path / "videos",
+        predictions=tmp_path / "pred.jsonl",
+        summary=tmp_path / "summary.json",
+        scored_predictions=tmp_path / "scored.jsonl",
+    )
+
+    assert "--model-family" in command
+    assert MODEL_FAMILY_VIDEO_BASELINE in command
+    assert "--paper-preset" in command
+    assert PAPER_PRESET_BASELINE in command
+    assert "--token-selector-adapter" in command
+    assert "none" in command
+    assert "--vision-encoder-adapter" in command
+    assert "nvila-video-vision" in command
+    assert "--mllm-adapter" in command
+    assert "nvila-video" in command
+    assert "--video-resize-longest-edge" in command
+    assert "448" in command
+
+
+def test_paper_mode_args_sets_preset_defaults_without_mutating_base_args():
+    base = argparse.Namespace(
+        model_path="nvidia/NVILA-8B-HD-Video",
+        model_family="auto",
+        paper_preset=None,
+        num_video_frames=1024,
+        num_video_frames_thumbnail=128,
+        max_tiles_video=48,
+        video_resize_shortest_edge=None,
+        video_resize_longest_edge=None,
+        video_resize_width=None,
+        video_resize_height=None,
+        gazing_mode="autogaze",
+    )
+
+    baseline = paper_mode_args(base, "paper_baseline_nvila_8b_video")
+    hd = paper_mode_args(base, "hd_autogaze")
+
+    assert baseline.model_path == "Efficient-Large-Model/NVILA-8B-Video"
+    assert baseline.model_family == MODEL_FAMILY_VIDEO_BASELINE
+    assert baseline.paper_preset == PAPER_PRESET_BASELINE
+    assert baseline.num_video_frames == 256
+    assert baseline.num_video_frames_thumbnail == 0
+    assert baseline.max_tiles_video == 1
+    assert baseline.video_resize_longest_edge == 448
+    assert baseline.gazing_mode == "keep-all"
+    assert baseline.token_selector_adapter == "none"
+    assert baseline.token_selector_name == "not_applicable"
+    assert baseline.vision_encoder_adapter == "nvila-video-vision"
+    assert baseline.mllm_adapter == "nvila-video"
+    assert baseline.mllm_name == "Efficient-Large-Model/NVILA-8B-Video"
+    assert hd.paper_preset == PAPER_PRESET_HD
+    assert hd.num_video_frames == 1024
+    assert hd.video_resize_longest_edge == 3584
+    assert hd.token_selector_adapter == "autogaze"
+    assert hd.vision_encoder_adapter == "nvila-hd-siglip"
+    assert hd.mllm_adapter == "nvila-hd"
+    assert base.paper_preset is None
 
 
 def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
@@ -396,6 +548,100 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
     assert report["gains"]["autogaze_token_reduction_median"]["autogaze_input_patch_tokens"] == 800.0
     assert report["gains"]["autogaze_token_reduction_median"]["autogaze_selected_patch_tokens"] == 200.0
     assert report["gains"]["compute_reduction_median"]["siglip_total_macs"] == 4.0
+
+
+def test_build_paper_comparison_report_separates_reference_scores_and_modes():
+    baseline_rows = [
+        {
+            "question_id": 1,
+            "video_path": "clip.mp4",
+            "question": "Q? A. a B. b C. c D. d",
+            "answer": "A",
+            "raw_output": "A",
+            "status": "ok",
+            "total_ms": 100.0,
+            "token_metrics": {"llm_actual_visual_tokens": 200},
+            "run_identity": {
+                "model_family": MODEL_FAMILY_VIDEO_BASELINE,
+                "paper_preset": PAPER_PRESET_BASELINE,
+                "paper_reference_score": 42.5,
+                "autogaze_applicability": "not_applicable",
+                "is_paper_baseline_candidate": True,
+            },
+        }
+    ]
+    hd_rows = [
+        {
+            "question_id": 1,
+            "video_path": "clip.mp4",
+            "question": "Q? A. a B. b C. c D. d",
+            "answer": "A",
+            "raw_output": "B",
+            "status": "ok",
+            "total_ms": 70.0,
+            "token_metrics": {"llm_actual_visual_tokens": 80},
+            "run_identity": {
+                "model_family": "nvila-hd-video-autogaze",
+                "paper_preset": PAPER_PRESET_HD,
+                "paper_reference_score": 52.6,
+                "autogaze_applicability": "enabled",
+                "is_paper_baseline_candidate": False,
+            },
+        }
+    ]
+
+    report = build_paper_comparison_report(
+        paper_baseline_rows=baseline_rows,
+        hd_autogaze_rows=hd_rows,
+        hd_keep_all_rows=[],
+    )
+
+    assert report["paper_reference"]["source"] == "AutoGaze project page benchmark table"
+    assert report["modes"]["paper_baseline_nvila_8b_video"]["paper_reference_accuracy"] == 42.5
+    assert report["modes"]["paper_baseline_nvila_8b_video"]["measured_accuracy"] == 100.0
+    assert report["modes"]["paper_baseline_nvila_8b_video"]["measured_accuracy_fraction"] == 1.0
+    assert report["modes"]["paper_baseline_nvila_8b_video"]["delta_from_reference"] == 57.5
+    assert report["modes"]["paper_baseline_nvila_8b_video"]["autogaze_applicability"] == "not_applicable"
+    assert report["modes"]["hd_autogaze"]["paper_reference_accuracy"] == 52.6
+    assert report["modes"]["hd_autogaze"]["measured_accuracy"] == 0.0
+    assert report["modes"]["hd_autogaze"]["delta_from_reference"] == -52.6
+    assert report["modes"]["hd_keep_all_optional"]["metric_status"] == "missing_or_skipped"
+    assert report["comparison_columns"] == PAPER_COMPARISON_COLUMNS
+    assert report["benchmark_samples"]["paper_baseline_nvila_8b_video"][0]["model_answer"] == "A"
+
+
+def test_flatten_paper_comparison_row_creates_columns_for_each_mode():
+    report = {
+        "modes": {
+            "paper_baseline_nvila_8b_video": {
+                "paper_reference_accuracy": 42.5,
+                "measured_accuracy": 40.0,
+                "delta_from_reference": -2.5,
+                "failed": 1,
+                "oom": 1,
+                "parse_failed": 2,
+                "skipped": 0,
+            },
+            "hd_autogaze": {
+                "paper_reference_accuracy": 52.6,
+                "measured_accuracy": 0.5,
+                "delta_from_reference": -52.1,
+                "failed": 0,
+                "oom": 0,
+                "parse_failed": 1,
+                "skipped": 0,
+            },
+            "hd_keep_all_optional": {"metric_status": "missing_or_skipped"},
+        }
+    }
+
+    row = flatten_paper_comparison_row(report)
+
+    assert row["paper_baseline_nvila_8b_video_paper_reference_accuracy"] == 42.5
+    assert row["paper_baseline_nvila_8b_video_measured_accuracy"] == 40.0
+    assert row["paper_baseline_nvila_8b_video_failed"] == 1
+    assert row["hd_autogaze_measured_accuracy"] == 0.5
+    assert row["hd_keep_all_optional_metric_status"] == "missing_or_skipped"
 
 
 def test_build_gain_report_marks_keep_all_as_missing_when_skipped():

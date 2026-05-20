@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -9,6 +10,20 @@ from typing import Any
 
 from repro.common import compute_stats, write_csv, write_json
 from repro.hlvid import latency_accounting_summary, read_jsonl, read_manifest_file, score_predictions
+from repro.nvila_runner import (
+    DEFAULT_BASELINE_MODEL,
+    DEFAULT_HD_MODEL,
+    MODEL_FAMILY_HD_AUTOGAZE,
+    MODEL_FAMILY_VIDEO_BASELINE,
+    MLLM_ADAPTER_CHOICES,
+    PAPER_PRESET_BASELINE,
+    PAPER_PRESET_CONFIGS,
+    PAPER_PRESET_HD,
+    TOKEN_SELECTOR_ADAPTER_CHOICES,
+    VISION_ENCODER_ADAPTER_CHOICES,
+    estimate_h100_preflight_sweep,
+    read_video_metadata,
+)
 
 
 MANIFEST_PATTERNS = (
@@ -36,6 +51,22 @@ VIDEO_ROOT_CANDIDATES = (
 )
 VIDEO_ARCHIVE_PATTERN = "videos_part_*.tar"
 CORRECTNESS_COMPARISON_SAMPLE_LIMIT = 20
+PAPER_MODE_KEYS = (
+    "paper_baseline_nvila_8b_video",
+    "hd_autogaze",
+    "hd_keep_all_optional",
+)
+PAPER_COMPARISON_COLUMNS = (
+    "paper_reference_accuracy",
+    "measured_accuracy",
+    "measured_accuracy_fraction",
+    "delta_from_reference",
+    "failed",
+    "oom",
+    "parse_failed",
+    "skipped",
+    "metric_status",
+)
 
 LATENCY_FIELDS = (
     "total_ms",
@@ -536,6 +567,171 @@ def build_prepare_report(
     }
 
 
+def _parse_float_sequence(value: str | list[float] | tuple[float, ...] | None) -> list[float]:
+    if value is None:
+        return [1.0, 2.0, 3.0, 4.0]
+    if isinstance(value, (list, tuple)):
+        return [float(item) for item in value]
+    parsed = [float(item) for item in re.findall(r"\d+(?:\.\d+)?", value)]
+    return parsed or [1.0, 2.0, 3.0, 4.0]
+
+
+def _numeric_metadata_value(row: dict[str, Any], key: str) -> int | None:
+    value = row.get(key)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def dataset_video_metadata_summary(metadata_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    widths = [_numeric_metadata_value(row, "width") for row in metadata_rows]
+    heights = [_numeric_metadata_value(row, "height") for row in metadata_rows]
+    frames = [_numeric_metadata_value(row, "frames") for row in metadata_rows]
+    widths = [value for value in widths if value is not None]
+    heights = [value for value in heights if value is not None]
+    frames = [value for value in frames if value is not None]
+    max_frame_row = max(
+        metadata_rows,
+        key=lambda row: _numeric_metadata_value(row, "frames") or 0,
+        default={},
+    )
+    max_resolution_row = max(
+        metadata_rows,
+        key=lambda row: (_numeric_metadata_value(row, "width") or 0) * (_numeric_metadata_value(row, "height") or 0),
+        default={},
+    )
+    return {
+        "video_count": len(metadata_rows),
+        "max_width": max(widths) if widths else None,
+        "max_height": max(heights) if heights else None,
+        "max_frames": max(frames) if frames else None,
+        "max_frame_video": max_frame_row.get("path"),
+        "max_resolution_video": max_resolution_row.get("path"),
+    }
+
+
+def build_h100_dataset_preflight_report_from_metadata(
+    metadata_rows: list[dict[str, Any]],
+    *,
+    h100_budget_gib: float,
+    token_reduction_ratios: list[float] | tuple[float, ...],
+    stream_chunk_frames: int | None = None,
+    max_batch_size_autogaze: int | None = None,
+    max_batch_size_siglip: int = 32,
+    autogaze_residency_policy: str = "resident",
+    autogaze_model_resident_gib: float = 0.0,
+) -> dict[str, Any]:
+    summary = dataset_video_metadata_summary(metadata_rows)
+    if not metadata_rows or summary["max_width"] is None or summary["max_height"] is None:
+        raise ValueError("No readable video metadata rows were provided for H100 preflight.")
+    max_width = int(summary["max_width"])
+    max_height = int(summary["max_height"])
+    max_frames = int(summary["max_frames"] or 0) or None
+    baseline = estimate_h100_preflight_sweep(
+        width=max_width,
+        height=max_height,
+        source_frames=max_frames,
+        model_family=MODEL_FAMILY_VIDEO_BASELINE,
+        token_reduction_ratios=[1.0],
+        h100_budget_gib=h100_budget_gib,
+        stream_chunk_frames=stream_chunk_frames,
+        max_batch_size_autogaze=max_batch_size_autogaze,
+        max_batch_size_siglip=max_batch_size_siglip,
+        autogaze_residency_policy=autogaze_residency_policy,
+        autogaze_model_resident_gib=autogaze_model_resident_gib,
+    )
+    hd = estimate_h100_preflight_sweep(
+        width=max_width,
+        height=max_height,
+        source_frames=max_frames,
+        model_family=MODEL_FAMILY_HD_AUTOGAZE,
+        token_reduction_ratios=token_reduction_ratios,
+        h100_budget_gib=h100_budget_gib,
+        stream_chunk_frames=stream_chunk_frames,
+        max_batch_size_autogaze=max_batch_size_autogaze,
+        max_batch_size_siglip=max_batch_size_siglip,
+        autogaze_residency_policy=autogaze_residency_policy,
+        autogaze_model_resident_gib=autogaze_model_resident_gib,
+    )
+    return {
+        "dataset_video_summary": summary,
+        "metadata_samples": metadata_rows[:10],
+        "h100_budget_gib": h100_budget_gib,
+        "streaming_memory_assumption": {
+            "stream_chunk_frames": stream_chunk_frames,
+            "max_batch_size_autogaze": max_batch_size_autogaze,
+            "max_batch_size_siglip": max_batch_size_siglip,
+            "autogaze_residency_policy": autogaze_residency_policy,
+            "autogaze_model_resident_gib": autogaze_model_resident_gib,
+            "note": (
+                "When stream_chunk_frames is set, AutoGaze tensor residency is estimated per temporal chunk "
+                "instead of for all sampled tile images at once. LLM prefill still consumes the collected "
+                "visual token sequence."
+            ),
+        },
+        "sweeps": {
+            "paper_baseline_nvila_8b_video": baseline,
+            "hd_autogaze": hd,
+        },
+        "recommendations": {
+            "paper_baseline_reproduction_configs": baseline["recommended_configs"][:10],
+            "hd_autogaze_scaling_configs": hd["recommended_configs"][:10],
+        },
+        "risk_note": (
+            "Sweep estimates use the largest width/height and max frame count found in the HLVid mp4 folder. "
+            "Use this as a conservative scheduler preflight, then confirm with CUDA memory metrics."
+        ),
+    }
+
+
+def _collect_video_metadata_from_layout(
+    layout: dict[str, Any],
+    *,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    rows = read_manifest_file(layout["manifest"])
+    unique_videos = sorted({str(row["video_path"]) for row in rows})
+    if limit is not None:
+        unique_videos = unique_videos[:limit]
+    metadata_rows: list[dict[str, Any]] = []
+    for video in unique_videos:
+        path = find_video_file(layout["video_root"], video, recursive=True)
+        if path is None:
+            continue
+        try:
+            metadata = read_video_metadata(str(path))
+        except Exception as exc:
+            metadata_rows.append({"path": str(path), "status": "metadata_failed", "error": repr(exc)})
+            continue
+        metadata_rows.append({"path": str(path), "status": "ok", **metadata})
+    return metadata_rows
+
+
+def build_h100_dataset_preflight_report(args: argparse.Namespace, layout: dict[str, Any]) -> dict[str, Any]:
+    metadata_rows = _collect_video_metadata_from_layout(layout, limit=args.limit)
+    readable_rows = [row for row in metadata_rows if row.get("status") == "ok"]
+    report = build_h100_dataset_preflight_report_from_metadata(
+        readable_rows,
+        h100_budget_gib=float(args.h100_budget_gib),
+        token_reduction_ratios=_parse_float_sequence(args.h100_reduction_ratios),
+        stream_chunk_frames=(
+            int(args.stream_chunk_frames)
+            if getattr(args, "stream_chunk_frames", None) is not None and int(args.stream_chunk_frames) > 0
+            else None
+        ),
+        max_batch_size_autogaze=getattr(args, "max_batch_size_autogaze", None),
+        max_batch_size_siglip=int(getattr(args, "max_batch_size_siglip", 32) or 32),
+        autogaze_residency_policy=getattr(args, "autogaze_residency_policy", "resident"),
+        autogaze_model_resident_gib=float(getattr(args, "autogaze_model_resident_gib", 0.0) or 0.0),
+    )
+    report["metadata_failures"] = [row for row in metadata_rows if row.get("status") != "ok"][:20]
+    report["metadata_failure_count"] = len([row for row in metadata_rows if row.get("status") != "ok"])
+    return report
+
+
 def build_runner_command(
     args: argparse.Namespace,
     *,
@@ -558,6 +754,8 @@ def build_runner_command(
         str(video_root),
         "--model-path",
         str(args.model_path),
+        "--model-family",
+        str(getattr(args, "model_family", "auto")),
         "--autogaze-model",
         str(args.autogaze_model),
         "--device",
@@ -589,6 +787,24 @@ def build_runner_command(
         "--scored-predictions",
         str(scored_predictions),
     ]
+    if getattr(args, "mllm_path", None) is not None:
+        command.extend(["--mllm-path", str(args.mllm_path)])
+    component_options = (
+        ("--token-selector-adapter", "token_selector_adapter"),
+        ("--token-selector-name", "token_selector_name"),
+        ("--token-selector-path", "token_selector_path"),
+        ("--vision-encoder-adapter", "vision_encoder_adapter"),
+        ("--vision-encoder-name", "vision_encoder_name"),
+        ("--vision-encoder-path", "vision_encoder_path"),
+        ("--mllm-adapter", "mllm_adapter"),
+        ("--mllm-name", "mllm_name"),
+    )
+    for option, attr in component_options:
+        value = getattr(args, attr, None)
+        if value is not None:
+            command.extend([option, str(value)])
+    if getattr(args, "paper_preset", None):
+        command.extend(["--paper-preset", str(args.paper_preset)])
     if getattr(args, "limit", None) is not None:
         command.extend(["--limit", str(args.limit)])
     if getattr(args, "measure_ttft", False):
@@ -626,6 +842,91 @@ def build_runner_command(
     return command
 
 
+def _copy_args_with(args: argparse.Namespace, **overrides: Any) -> argparse.Namespace:
+    values = vars(args).copy()
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+def paper_mode_args(args: argparse.Namespace, mode_key: str) -> argparse.Namespace:
+    if mode_key == "paper_baseline_nvila_8b_video":
+        config = PAPER_PRESET_CONFIGS[PAPER_PRESET_BASELINE]
+        return _copy_args_with(
+            args,
+            model_path=DEFAULT_BASELINE_MODEL,
+            model_family=MODEL_FAMILY_VIDEO_BASELINE,
+            paper_preset=PAPER_PRESET_BASELINE,
+            mllm_path=getattr(args, "mllm_path", None),
+            token_selector_adapter="none",
+            token_selector_name="not_applicable",
+            token_selector_path=None,
+            vision_encoder_adapter="nvila-video-vision",
+            vision_encoder_name="nvila-8b-video-vision",
+            vision_encoder_path="auto",
+            mllm_adapter="nvila-video",
+            mllm_name=DEFAULT_BASELINE_MODEL,
+            num_video_frames=int(config["num_video_frames"]),
+            num_video_frames_thumbnail=int(config["num_video_frames_thumbnail"]),
+            max_tiles_video=int(config["max_tiles_video"]),
+            video_resize_shortest_edge=None,
+            video_resize_longest_edge=int(config["video_resize_longest_edge"]),
+            video_resize_width=None,
+            video_resize_height=None,
+            gazing_mode="keep-all",
+        )
+    if mode_key == "hd_autogaze":
+        config = PAPER_PRESET_CONFIGS[PAPER_PRESET_HD]
+        return _copy_args_with(
+            args,
+            model_path=DEFAULT_HD_MODEL,
+            model_family=MODEL_FAMILY_HD_AUTOGAZE,
+            paper_preset=PAPER_PRESET_HD,
+            mllm_path=getattr(args, "mllm_path", None),
+            token_selector_adapter="autogaze",
+            token_selector_name=getattr(args, "autogaze_model", "nvidia/AutoGaze"),
+            token_selector_path=getattr(args, "autogaze_model", "nvidia/AutoGaze"),
+            vision_encoder_adapter="nvila-hd-siglip",
+            vision_encoder_name="nvila-hd-siglip",
+            vision_encoder_path="auto",
+            mllm_adapter="nvila-hd",
+            mllm_name=DEFAULT_HD_MODEL,
+            num_video_frames=int(config["num_video_frames"]),
+            num_video_frames_thumbnail=int(config["num_video_frames_thumbnail"]),
+            max_tiles_video=int(config["max_tiles_video"]),
+            video_resize_shortest_edge=None,
+            video_resize_longest_edge=int(config["video_resize_longest_edge"]),
+            video_resize_width=None,
+            video_resize_height=None,
+            gazing_mode="autogaze",
+        )
+    if mode_key == "hd_keep_all_optional":
+        config = PAPER_PRESET_CONFIGS[PAPER_PRESET_HD]
+        return _copy_args_with(
+            args,
+            model_path=DEFAULT_HD_MODEL,
+            model_family=MODEL_FAMILY_HD_AUTOGAZE,
+            paper_preset=PAPER_PRESET_HD,
+            mllm_path=getattr(args, "mllm_path", None),
+            token_selector_adapter="keep-all",
+            token_selector_name="keep_all",
+            token_selector_path=None,
+            vision_encoder_adapter="nvila-hd-siglip",
+            vision_encoder_name="nvila-hd-siglip",
+            vision_encoder_path="auto",
+            mllm_adapter="nvila-hd",
+            mllm_name=DEFAULT_HD_MODEL,
+            num_video_frames=int(config["num_video_frames"]),
+            num_video_frames_thumbnail=int(config["num_video_frames_thumbnail"]),
+            max_tiles_video=int(config["max_tiles_video"]),
+            video_resize_shortest_edge=None,
+            video_resize_longest_edge=int(config["video_resize_longest_edge"]),
+            video_resize_width=None,
+            video_resize_height=None,
+            gazing_mode="keep-all",
+        )
+    raise ValueError(f"Unsupported paper comparison mode: {mode_key}")
+
+
 def summarize_run(rows: list[dict[str, Any]]) -> dict[str, Any]:
     accuracy, _ = score_predictions(rows)
     return {
@@ -635,6 +936,131 @@ def summarize_run(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "memory_bytes": _stats_by_field(rows, MEMORY_FIELDS),
         "tokens": _stats_by_field(rows, AUTOGAZE_TOKEN_FIELDS),
         "compute": _stats_by_field(rows, COMPUTE_FIELDS),
+    }
+
+
+def _first_run_identity(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    for row in rows:
+        identity = row.get("run_identity")
+        if isinstance(identity, dict):
+            return identity
+    return {}
+
+
+def _oom_count(rows: list[dict[str, Any]]) -> int:
+    total = 0
+    for row in rows:
+        text = f"{row.get('error', '')} {row.get('status', '')}".lower()
+        if "oom" in text or "out of memory" in text:
+            total += 1
+    return total
+
+
+def _paper_mode_summary(
+    *,
+    rows: list[dict[str, Any]],
+    fallback_mode_key: str,
+    fallback_reference: float | None,
+) -> dict[str, Any]:
+    if not rows:
+        return {
+            "metric_status": "missing_or_skipped",
+            "paper_reference_accuracy": fallback_reference,
+            "measured_accuracy": None,
+            "measured_accuracy_fraction": None,
+            "delta_from_reference": None,
+            "failed": 0,
+            "oom": 0,
+            "parse_failed": 0,
+            "skipped": 0,
+        }
+    summary = summarize_run(rows)
+    accuracy = summary["accuracy"]
+    identity = _first_run_identity(rows)
+    reference = identity.get("paper_reference_score", fallback_reference)
+    measured_fraction = accuracy.get("accuracy_scored")
+    measured_percent = float(measured_fraction) * 100.0 if measured_fraction is not None else None
+    return {
+        "metric_status": "available",
+        "mode_key": fallback_mode_key,
+        "model_family": identity.get("model_family"),
+        "paper_preset": identity.get("paper_preset"),
+        "autogaze_applicability": identity.get("autogaze_applicability"),
+        "is_paper_baseline_candidate": identity.get("is_paper_baseline_candidate"),
+        "paper_reference_accuracy": reference,
+        "measured_accuracy": measured_percent,
+        "measured_accuracy_fraction": measured_fraction,
+        "delta_from_reference": (
+            measured_percent - float(reference)
+            if measured_percent is not None and reference is not None
+            else None
+        ),
+        "failed": accuracy.get("failed", 0),
+        "oom": _oom_count(rows),
+        "parse_failed": accuracy.get("parse_failed", 0),
+        "skipped": accuracy.get("skipped", 0),
+        "total": accuracy.get("total", 0),
+        "scored": accuracy.get("scored", 0),
+        "correct": accuracy.get("correct", 0),
+        "accuracy": accuracy,
+        "latency_ms": summary["latency_ms"],
+        "stage_timings_ms": summary["stage_timings_ms"],
+        "memory_bytes": summary["memory_bytes"],
+        "tokens": summary["tokens"],
+        "compute": summary["compute"],
+        "metric_status_note": (
+            "AutoGaze token reduction is not applicable for the NVILA-8B-Video paper baseline; "
+            "available token/context fields are reported from model inputs when present."
+            if identity.get("autogaze_applicability") == "not_applicable"
+            else "AutoGaze-capable HD mode."
+        ),
+    }
+
+
+def build_paper_comparison_report(
+    *,
+    paper_baseline_rows: list[dict[str, Any]],
+    hd_autogaze_rows: list[dict[str, Any]],
+    hd_keep_all_rows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    hd_keep_all_rows = hd_keep_all_rows or []
+    modes = {
+        "paper_baseline_nvila_8b_video": _paper_mode_summary(
+            rows=paper_baseline_rows,
+            fallback_mode_key="paper_baseline_nvila_8b_video",
+            fallback_reference=42.5,
+        ),
+        "hd_autogaze": _paper_mode_summary(
+            rows=hd_autogaze_rows,
+            fallback_mode_key="hd_autogaze",
+            fallback_reference=52.6,
+        ),
+        "hd_keep_all_optional": _paper_mode_summary(
+            rows=hd_keep_all_rows,
+            fallback_mode_key="hd_keep_all_optional",
+            fallback_reference=None,
+        ),
+    }
+    return {
+        "paper_reference": {
+            "source": "AutoGaze project page benchmark table",
+            "metric": "HLVid accuracy percent",
+            "nvila_8b_video_reference": 42.5,
+            "nvila_8b_hd_video_reference": 52.6,
+            "note": (
+                "Paper baseline is NVILA-8B-Video, not NVILA-HD keep-all. "
+                "Measured accuracy is reported in percent so delta_from_reference uses the same unit."
+            ),
+        },
+        "comparison_columns": PAPER_COMPARISON_COLUMNS,
+        "modes": modes,
+        "benchmark_samples": {
+            mode_key: mode.get("accuracy", {}).get("benchmark_samples", [])
+            for mode_key, mode in modes.items()
+        },
+        "metric_status": {
+            mode_key: mode.get("metric_status") for mode_key, mode in modes.items()
+        },
     }
 
 
@@ -868,6 +1294,17 @@ def flatten_metric_row(report: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
+def flatten_paper_comparison_row(report: dict[str, Any]) -> dict[str, Any]:
+    row: dict[str, Any] = {}
+    for mode_key, mode in report.get("modes", {}).items():
+        for column in PAPER_COMPARISON_COLUMNS:
+            row[f"{mode_key}_{column}"] = mode.get(column)
+        row[f"{mode_key}_model_family"] = mode.get("model_family")
+        row[f"{mode_key}_paper_preset"] = mode.get("paper_preset")
+        row[f"{mode_key}_autogaze_applicability"] = mode.get("autogaze_applicability")
+    return row
+
+
 def output_paths(output_dir: str | Path) -> dict[str, Path]:
     root = Path(output_dir)
     return {
@@ -879,11 +1316,58 @@ def output_paths(output_dir: str | Path) -> dict[str, Path]:
         "autogaze_scored": root / "hlvid_autogaze_scored.jsonl",
         "report_json": root / "hlvid_autogaze_gain_report.json",
         "report_csv": root / "hlvid_autogaze_gain_report.csv",
+        "paper_baseline_predictions": root / "hlvid_paper_baseline_nvila_8b_video_predictions.jsonl",
+        "paper_baseline_summary": root / "hlvid_paper_baseline_nvila_8b_video_summary.json",
+        "paper_baseline_scored": root / "hlvid_paper_baseline_nvila_8b_video_scored.jsonl",
+        "paper_hd_autogaze_predictions": root / "hlvid_paper_hd_autogaze_predictions.jsonl",
+        "paper_hd_autogaze_summary": root / "hlvid_paper_hd_autogaze_summary.json",
+        "paper_hd_autogaze_scored": root / "hlvid_paper_hd_autogaze_scored.jsonl",
+        "paper_hd_keep_all_predictions": root / "hlvid_paper_hd_keep_all_optional_predictions.jsonl",
+        "paper_hd_keep_all_summary": root / "hlvid_paper_hd_keep_all_optional_summary.json",
+        "paper_hd_keep_all_scored": root / "hlvid_paper_hd_keep_all_optional_scored.jsonl",
+        "paper_report_json": root / "hlvid_paper_comparison_report.json",
+        "paper_report_csv": root / "hlvid_paper_comparison_report.csv",
     }
 
 
 def run_command(command: list[str]) -> None:
     subprocess.run(command, check=True)
+
+
+def _run_paper_mode(
+    args: argparse.Namespace,
+    *,
+    mode_key: str,
+    manifest: str | Path,
+    video_root: str | Path,
+    predictions: str | Path,
+    summary: str | Path,
+    scored_predictions: str | Path,
+) -> None:
+    mode_args = paper_mode_args(args, mode_key)
+    run_command(
+        build_runner_command(
+            mode_args,
+            gazing_mode=mode_args.gazing_mode,
+            manifest=manifest,
+            video_root=video_root,
+            predictions=predictions,
+            summary=summary,
+            scored_predictions=scored_predictions,
+        )
+    )
+
+
+def _paper_report_requested(args: argparse.Namespace) -> bool:
+    return any(
+        bool(getattr(args, name, False))
+        for name in (
+            "paper_baseline",
+            "paper_hd_autogaze",
+            "paper_comparison_report",
+            "paper_hd_keep_all_optional",
+        )
+    )
 
 
 def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
@@ -915,6 +1399,57 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 f"under {prepare_report['video_root']}. Run with --prepare-only to inspect the layout, "
                 "extract videos_part_*.tar, pass --video-root, or use --allow-missing-videos intentionally."
             )
+
+    if getattr(args, "h100_preflight", False):
+        report = build_h100_dataset_preflight_report(args, layout)
+        output = Path(args.h100_preflight_output or (Path(args.output_dir) / "hlvid_h100_preflight_report.json"))
+        write_json(output, report)
+        return report
+
+    if _paper_report_requested(args):
+        if not args.report_only and args.paper_baseline:
+            _run_paper_mode(
+                args,
+                mode_key="paper_baseline_nvila_8b_video",
+                manifest=layout["manifest"],
+                video_root=layout["video_root"],
+                predictions=paths["paper_baseline_predictions"],
+                summary=paths["paper_baseline_summary"],
+                scored_predictions=paths["paper_baseline_scored"],
+            )
+        if not args.report_only and args.paper_hd_autogaze:
+            _run_paper_mode(
+                args,
+                mode_key="hd_autogaze",
+                manifest=layout["manifest"],
+                video_root=layout["video_root"],
+                predictions=paths["paper_hd_autogaze_predictions"],
+                summary=paths["paper_hd_autogaze_summary"],
+                scored_predictions=paths["paper_hd_autogaze_scored"],
+            )
+        if not args.report_only and args.paper_hd_keep_all_optional:
+            _run_paper_mode(
+                args,
+                mode_key="hd_keep_all_optional",
+                manifest=layout["manifest"],
+                video_root=layout["video_root"],
+                predictions=paths["paper_hd_keep_all_predictions"],
+                summary=paths["paper_hd_keep_all_summary"],
+                scored_predictions=paths["paper_hd_keep_all_scored"],
+            )
+        report = build_paper_comparison_report(
+            paper_baseline_rows=read_prediction_rows(paths["paper_baseline_predictions"]),
+            hd_autogaze_rows=read_prediction_rows(paths["paper_hd_autogaze_predictions"]),
+            hd_keep_all_rows=read_prediction_rows(paths["paper_hd_keep_all_predictions"]),
+        )
+        report["dataset"] = {
+            key: [str(item) for item in value] if isinstance(value, list) else str(value)
+            for key, value in layout.items()
+        }
+        report["outputs"] = {key: str(value) for key, value in paths.items()}
+        write_json(paths["paper_report_json"], report)
+        write_csv(paths["paper_report_csv"], [flatten_paper_comparison_row(report)])
+        return report
 
     if not args.report_only and not args.skip_keep_all:
         run_command(
@@ -962,6 +1497,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--video-root")
     parser.add_argument("--output-dir", default="outputs/autogaze_repro/hlvid_batch")
     parser.add_argument("--model-path", default="nvidia/NVILA-8B-HD-Video")
+    parser.add_argument(
+        "--model-family",
+        choices=["auto", MODEL_FAMILY_HD_AUTOGAZE, MODEL_FAMILY_VIDEO_BASELINE],
+        default="auto",
+    )
+    parser.add_argument("--paper-preset", choices=[PAPER_PRESET_BASELINE, PAPER_PRESET_HD])
+    parser.add_argument("--token-selector-adapter", choices=TOKEN_SELECTOR_ADAPTER_CHOICES, default="auto")
+    parser.add_argument("--token-selector-name")
+    parser.add_argument("--token-selector-path")
+    parser.add_argument("--vision-encoder-adapter", choices=VISION_ENCODER_ADAPTER_CHOICES, default="auto")
+    parser.add_argument("--vision-encoder-name")
+    parser.add_argument("--vision-encoder-path")
+    parser.add_argument("--mllm-adapter", choices=MLLM_ADAPTER_CHOICES, default="auto")
+    parser.add_argument("--mllm-name")
+    parser.add_argument("--mllm-path")
     parser.add_argument("--autogaze-model", default="nvidia/AutoGaze")
     parser.add_argument("--device", default="cuda", choices=["cpu", "mps", "cuda"])
     parser.add_argument("--device-map", default="auto")
@@ -982,8 +1532,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--layout-report")
     parser.add_argument("--allow-missing-videos", action="store_true")
+    parser.add_argument("--h100-preflight", action="store_true")
+    parser.add_argument("--h100-preflight-output")
+    parser.add_argument("--h100-budget-gib", type=float, default=70.0)
+    parser.add_argument("--h100-reduction-ratios", default="1,2,3,4")
+    parser.add_argument("--stream-chunk-frames", type=int, default=16)
+    parser.add_argument(
+        "--autogaze-residency-policy",
+        choices=["resident", "unload-before-generate"],
+        default="resident",
+    )
+    parser.add_argument("--autogaze-model-resident-gib", type=float, default=0.0)
     parser.add_argument("--skip-keep-all", action="store_true")
     parser.add_argument("--skip-autogaze", action="store_true")
+    parser.add_argument("--paper-baseline", action="store_true")
+    parser.add_argument("--paper-hd-autogaze", action="store_true")
+    parser.add_argument("--paper-comparison-report", action="store_true")
+    parser.add_argument("--paper-hd-keep-all-optional", action="store_true")
     parser.add_argument("--video-resize-shortest-edge", type=int)
     parser.add_argument("--video-resize-longest-edge", type=int)
     parser.add_argument("--video-resize-width", type=int)

@@ -6,9 +6,10 @@ __pycache__/
 .ruff_cache/
 
 external/
+weight/
 inputs/
+outputs/
 data/hlvid/videos/
 data/hlvid/cache/
-outputs/autogaze_repro/
 
 .DS_Store
