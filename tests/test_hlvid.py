@@ -191,6 +191,12 @@ def test_score_predictions_includes_latency_memory_token_and_compute_summaries()
                 "siglip_encoder": {"keep_all_to_actual_total_macs_ratio": 4.0},
                 "mllm": {"kv_cache_reduction_ratio": 2.5},
             },
+            "stage_timings_ms": {
+                "processor": {
+                    "autogaze_forward_batched": {"total_ms": 11.0, "count": 3, "mean_ms": 11.0 / 3.0},
+                    "autogaze_total": {"total_ms": 14.0, "count": 1, "mean_ms": 14.0},
+                }
+            },
         },
         {
             "answer": "B",
@@ -228,6 +234,12 @@ def test_score_predictions_includes_latency_memory_token_and_compute_summaries()
             "compute_metrics": {
                 "siglip_encoder": {"keep_all_to_actual_total_macs_ratio": 3.0},
                 "mllm": {"kv_cache_reduction_ratio": 3.0},
+            },
+            "stage_timings_ms": {
+                "processor": {
+                    "autogaze_forward_batched": {"total_ms": 8.0, "count": 2, "mean_ms": 4.0},
+                    "autogaze_total": {"total_ms": 10.0, "count": 1, "mean_ms": 10.0},
+                }
             },
         },
     ]
@@ -298,6 +310,15 @@ def test_score_predictions_includes_latency_memory_token_and_compute_summaries()
     assert "video_decode_ms" in summary["readable_performance_summary"]["latency_accounting"]["do_not_sum_with_total_ms"]
     assert summary["readable_performance_summary"]["latency_ms_detail_median"]["generate_ms"] == 70.0
     assert summary["readable_performance_summary"]["latency_ms_detail_median"]["video_decode_ms"] == 8.0
+    assert summary["stage_timings_ms"]["processor.autogaze_forward_batched.total_ms"]["median"] == 9.5
+    assert summary["stage_timings_ms"]["processor.autogaze_forward_batched.count"]["median"] == 2.5
+    assert summary["readable_performance_summary"]["stage_timings_ms_median"] == {
+        "processor_autogaze_forward_batched_total_ms": 9.5,
+        "processor_autogaze_forward_batched_count": 2.5,
+        "processor_autogaze_forward_batched_mean_ms": ((11.0 / 3.0) + 4.0) / 2.0,
+        "processor_autogaze_total_total_ms": 12.0,
+        "processor_autogaze_total_count": 1.0,
+    }
     assert summary["readable_performance_summary"]["tokens_median"]["llm_visual_tokens_after_actual"] == 35.0
 
 

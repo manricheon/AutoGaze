@@ -56,6 +56,50 @@ LATENCY_FIELDS = (
     "ttft_ms",
     "generation_decode_after_ttft_estimated_ms",
 )
+STAGE_TIMING_FIELDS = (
+    (
+        "processor.autogaze_forward_batched.total_ms",
+        "stage_timings_ms.processor.autogaze_forward_batched.total_ms",
+    ),
+    (
+        "processor.autogaze_forward_batched.count",
+        "stage_timings_ms.processor.autogaze_forward_batched.count",
+    ),
+    (
+        "processor.autogaze_forward_batched.mean_ms",
+        "stage_timings_ms.processor.autogaze_forward_batched.mean_ms",
+    ),
+    (
+        "processor.autogaze_total.total_ms",
+        "stage_timings_ms.processor.autogaze_total.total_ms",
+    ),
+    (
+        "processor.autogaze_total.count",
+        "stage_timings_ms.processor.autogaze_total.count",
+    ),
+)
+READABLE_STAGE_TIMING_FIELDS = (
+    (
+        "processor_autogaze_forward_batched_total_ms",
+        "stage_timings_ms.processor.autogaze_forward_batched.total_ms",
+    ),
+    (
+        "processor_autogaze_forward_batched_count",
+        "stage_timings_ms.processor.autogaze_forward_batched.count",
+    ),
+    (
+        "processor_autogaze_forward_batched_mean_ms",
+        "stage_timings_ms.processor.autogaze_forward_batched.mean_ms",
+    ),
+    (
+        "processor_autogaze_total_total_ms",
+        "stage_timings_ms.processor.autogaze_total.total_ms",
+    ),
+    (
+        "processor_autogaze_total_count",
+        "stage_timings_ms.processor.autogaze_total.count",
+    ),
+)
 MODULE_LATENCY_FIELDS = (
     ("total_ms", "total_ms"),
     ("preprocess_without_autogaze_ms", "video_preprocess_without_autogaze_ms"),
@@ -135,6 +179,13 @@ def _numeric_values(rows: list[dict[str, Any]], field: str) -> list[float]:
 
 def _stats_by_field(rows: list[dict[str, Any]], fields: tuple[str, ...]) -> dict[str, dict[str, float | int]]:
     return {field: compute_stats(_numeric_values(rows, field)) for field in fields}
+
+
+def _stats_by_labeled_field(
+    rows: list[dict[str, Any]],
+    fields: tuple[tuple[str, str], ...],
+) -> dict[str, dict[str, float | int]]:
+    return {label: compute_stats(_numeric_values(rows, field)) for label, field in fields}
 
 
 def _median_ratio(
@@ -220,6 +271,15 @@ def build_readable_summary(
         )
         for field in LATENCY_FIELDS
     }
+    stage_timing_detail = {
+        label: _comparison_summary(
+            keep_all_rows,
+            autogaze_rows,
+            field,
+            ratio_key="speedup_ratio_keep_all_over_autogaze",
+        )
+        for label, field in READABLE_STAGE_TIMING_FIELDS
+    }
     latency = {
         label: _comparison_summary(
             keep_all_rows,
@@ -291,11 +351,18 @@ def build_readable_summary(
         },
         "latency_ms_median": latency,
         "latency_ms_detail_median": latency_detail,
+        "stage_timings_ms_median": stage_timing_detail,
         "key_metrics_median": {
             "latency_ms": latency,
             "tokens": tokens,
             "memory_bytes": key_memory,
         },
+        "stage_timings_note": (
+            "Nested stage timings are aggregated from per-row HLVid prediction JSONL. "
+            "processor_autogaze_forward_batched_total_ms is the summed _run_autogaze_batched time "
+            "within each row; processor_autogaze_forward_batched_count is the number of wrapped calls "
+            "observed for that row."
+        ),
         "latency_accounting": latency_accounting_summary(),
         "latency_field_note": (
             "Summary-level latency is intentionally coarse: "
@@ -564,6 +631,7 @@ def summarize_run(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "accuracy": accuracy,
         "latency_ms": _stats_by_field(rows, LATENCY_FIELDS),
+        "stage_timings_ms": _stats_by_labeled_field(rows, STAGE_TIMING_FIELDS),
         "memory_bytes": _stats_by_field(rows, MEMORY_FIELDS),
         "tokens": _stats_by_field(rows, AUTOGAZE_TOKEN_FIELDS),
         "compute": _stats_by_field(rows, COMPUTE_FIELDS),

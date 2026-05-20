@@ -35,6 +35,50 @@ LATENCY_FIELDS = (
     "ttft_ms",
     "generation_decode_after_ttft_estimated_ms",
 )
+STAGE_TIMING_FIELDS = (
+    (
+        "processor.autogaze_forward_batched.total_ms",
+        "stage_timings_ms.processor.autogaze_forward_batched.total_ms",
+    ),
+    (
+        "processor.autogaze_forward_batched.count",
+        "stage_timings_ms.processor.autogaze_forward_batched.count",
+    ),
+    (
+        "processor.autogaze_forward_batched.mean_ms",
+        "stage_timings_ms.processor.autogaze_forward_batched.mean_ms",
+    ),
+    (
+        "processor.autogaze_total.total_ms",
+        "stage_timings_ms.processor.autogaze_total.total_ms",
+    ),
+    (
+        "processor.autogaze_total.count",
+        "stage_timings_ms.processor.autogaze_total.count",
+    ),
+)
+READABLE_STAGE_TIMING_FIELDS = (
+    (
+        "processor_autogaze_forward_batched_total_ms",
+        "stage_timings_ms.processor.autogaze_forward_batched.total_ms",
+    ),
+    (
+        "processor_autogaze_forward_batched_count",
+        "stage_timings_ms.processor.autogaze_forward_batched.count",
+    ),
+    (
+        "processor_autogaze_forward_batched_mean_ms",
+        "stage_timings_ms.processor.autogaze_forward_batched.mean_ms",
+    ),
+    (
+        "processor_autogaze_total_total_ms",
+        "stage_timings_ms.processor.autogaze_total.total_ms",
+    ),
+    (
+        "processor_autogaze_total_count",
+        "stage_timings_ms.processor.autogaze_total.count",
+    ),
+)
 MODULE_LATENCY_FIELDS = (
     ("total_ms", "total_ms"),
     ("preprocess_without_autogaze_ms", "video_preprocess_without_autogaze_ms"),
@@ -243,6 +287,13 @@ def numeric_values(rows: list[dict[str, Any]], field: str) -> list[float]:
 
 def stats_by_field(rows: list[dict[str, Any]], fields: tuple[str, ...]) -> dict[str, dict[str, float | int]]:
     return {field: compute_stats(numeric_values(rows, field)) for field in fields}
+
+
+def stats_by_labeled_field(
+    rows: list[dict[str, Any]],
+    fields: tuple[tuple[str, str], ...],
+) -> dict[str, dict[str, float | int]]:
+    return {label: compute_stats(numeric_values(rows, field)) for label, field in fields}
 
 
 def median_from_stats(stats: dict[str, dict[str, float | int]], field: str) -> float | int | None:
@@ -454,6 +505,8 @@ def latency_accounting_summary() -> dict[str, Any]:
 
 def summarize_prediction_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     latency = stats_by_field(rows, LATENCY_FIELDS)
+    stage_timings = stats_by_labeled_field(rows, STAGE_TIMING_FIELDS)
+    readable_stage_timings = stats_by_labeled_field(rows, READABLE_STAGE_TIMING_FIELDS)
     memory = stats_by_field(rows, MEMORY_FIELDS)
     tokens = stats_by_field(rows, TOKEN_FIELDS)
     compute = stats_by_field(rows, COMPUTE_FIELDS)
@@ -462,6 +515,7 @@ def summarize_prediction_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     memory_summary = key_medians(memory, KEY_MEMORY_FIELDS)
     return {
         "latency_ms": latency,
+        "stage_timings_ms": stage_timings,
         "memory_bytes": memory,
         "tokens": tokens,
         "compute": compute,
@@ -473,6 +527,15 @@ def summarize_prediction_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
             },
             "latency_ms_median": latency_summary,
             "latency_ms_detail_median": {field: latency[field]["median"] for field in LATENCY_FIELDS},
+            "stage_timings_ms_median": {
+                field: readable_stage_timings[field]["median"] for field, _ in READABLE_STAGE_TIMING_FIELDS
+            },
+            "stage_timings_note": (
+                "Nested stage_timings_ms are aggregated from per-row prediction JSONL. "
+                "processor_autogaze_forward_batched_total_ms is the summed _run_autogaze_batched time "
+                "within each row; processor_autogaze_forward_batched_count is the number of wrapped calls "
+                "observed for that row."
+            ),
             "latency_accounting": latency_accounting_summary(),
             "latency_field_note": (
                 "Summary-level latency is intentionally coarse: "

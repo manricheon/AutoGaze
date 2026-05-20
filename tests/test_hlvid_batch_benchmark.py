@@ -227,6 +227,12 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
                 "siglip_encoder": {"keep_all_to_actual_total_macs_ratio": 4.0},
                 "mllm": {"kv_cache_reduction_ratio": 2.5},
             },
+            "stage_timings_ms": {
+                "processor": {
+                    "autogaze_forward_batched": {"total_ms": 10.0, "count": 2, "mean_ms": 5.0},
+                    "autogaze_total": {"total_ms": 12.0, "count": 1, "mean_ms": 12.0},
+                }
+            },
         }
     ]
 
@@ -309,6 +315,20 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
         "speedup_ratio_keep_all_over_autogaze": 40.0 / 15.0,
         "reduction_percent_of_keep_all": 62.5,
     }
+    assert report["autogaze"]["stage_timings_ms"]["processor.autogaze_forward_batched.total_ms"][
+        "median"
+    ] == 10.0
+    assert report["readable_summary"]["stage_timings_ms_median"][
+        "processor_autogaze_forward_batched_total_ms"
+    ] == {
+        "keep_all": 0.0,
+        "autogaze": 10.0,
+        "speedup_ratio_keep_all_over_autogaze": None,
+        "reduction_percent_of_keep_all": None,
+    }
+    assert report["readable_summary"]["stage_timings_ms_median"][
+        "processor_autogaze_forward_batched_count"
+    ]["autogaze"] == 2.0
     assert report["readable_summary"]["key_metrics_median"]["latency_ms"]["total_ms"] == {
         "keep_all": 100.0,
         "autogaze": 60.0,
