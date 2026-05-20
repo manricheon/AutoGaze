@@ -970,6 +970,8 @@ matching keep-all baseline은 모든 설정을 동일하게 유지하고 gaze mo
 
 데이터셋을 로컬 폴더로 받은 경우에는 `scripts/run_hlvid_folder_benchmark.py`를 쓰면 됩니다. 이 스크립트는 폴더에서 manifest를 찾고, 기본 모드에서는 `keep-all`과 `autogaze`를 같은 설정으로 각각 실행한 뒤 accuracy/속도/메모리/token/compute gain report를 만듭니다. `--paper-baseline --paper-hd-autogaze --paper-comparison-report`를 쓰면 논문 baseline 비교 모드가 켜지고, `paper_baseline_nvila_8b_video`와 `hd_autogaze`를 별도 column으로 비교합니다. `--paper-hd-keep-all-optional`은 OOM/ablation 확인용입니다. `--video-resize-*`를 켠 benchmark에서는 기본적으로 `--video-decode-strategy auto`가 하위 `repro.nvila_runner`에 전달되어 keyframe seek sampling을 먼저 사용합니다.
 
+AutoGaze policy를 명시하려면 batch wrapper에도 `--gazing-ratio-tile`과 `--task-loss-requirement-tile`을 같이 줍니다. `--gazing-ratio-tile`을 생략하면 하위 `nvila_runner`의 NVILA 기본 정책 `[0.2] + [0.06] * 15`가 유지됩니다. Quick Start와 같은 0.75 정책으로 비교하려면 `--gazing-ratio-tile 0.75 --task-loss-requirement-tile 0.7`을 붙이세요.
+
 지원하는 폴더 형태:
 
 ```text
@@ -1022,6 +1024,8 @@ paper comparison wrapper 예시:
   --paper-baseline \
   --paper-hd-autogaze \
   --paper-comparison-report \
+  --gazing-ratio-tile 0.75 \
+  --task-loss-requirement-tile 0.7 \
   --measure-ttft \
   --warmup-runs 1 \
   --continue-on-error

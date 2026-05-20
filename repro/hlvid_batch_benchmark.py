@@ -811,6 +811,8 @@ def build_runner_command(
         command.append("--measure-ttft")
     if getattr(args, "continue_on_error", False):
         command.append("--continue-on-error")
+    if gazing_mode == "autogaze" and getattr(args, "gazing_ratio_tile", None) is not None:
+        command.extend(["--gazing-ratio-tile", str(args.gazing_ratio_tile)])
     if getattr(args, "video_resize_shortest_edge", None) is not None:
         command.extend(["--video-resize-shortest-edge", str(args.video_resize_shortest_edge)])
     if getattr(args, "video_resize_longest_edge", None) is not None:
@@ -1522,6 +1524,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-batch-size-siglip", type=int, default=32)
     parser.add_argument("--max-new-tokens", type=int, default=4)
     parser.add_argument("--warmup-runs", type=int, default=0)
+    parser.add_argument("--gazing-ratio-tile")
     parser.add_argument("--task-loss-requirement-tile", type=float, default=0.7)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--split", default="test")

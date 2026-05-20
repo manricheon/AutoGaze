@@ -8,6 +8,7 @@ from repro.hlvid_batch_benchmark import (
     build_gain_report,
     build_h100_dataset_preflight_report_from_metadata,
     build_paper_comparison_report,
+    build_parser,
     build_runner_command,
     discover_dataset_layout,
     flatten_metric_row,
@@ -153,6 +154,7 @@ def test_build_runner_command_includes_local_manifest_and_measurement_flags(tmp_
         visualization_fps=5,
         visualization_alpha=0.25,
         visualization_selected_max_long_side=720,
+        gazing_ratio_tile="0.75",
         task_loss_requirement_tile=0.7,
         continue_on_error=True,
         limit=3,
@@ -177,6 +179,7 @@ def test_build_runner_command_includes_local_manifest_and_measurement_flags(tmp_
     assert "--hlvid-video-root" in command
     assert "--gazing-mode" in command
     assert "autogaze" in command
+    assert command[command.index("--gazing-ratio-tile") + 1] == "0.75"
     assert "--measure-ttft" in command
     assert "--continue-on-error" in command
     assert "--warmup-runs" in command
@@ -235,6 +238,7 @@ def test_build_runner_command_forwards_model_family_and_paper_preset(tmp_path: P
         visualization_fps=None,
         visualization_alpha=None,
         visualization_selected_max_long_side=None,
+        gazing_ratio_tile=None,
         task_loss_requirement_tile=0.7,
         continue_on_error=True,
         limit=3,
@@ -253,6 +257,7 @@ def test_build_runner_command_forwards_model_family_and_paper_preset(tmp_path: P
         scored_predictions=tmp_path / "scored.jsonl",
     )
 
+    assert "--gazing-ratio-tile" not in command
     assert "--model-family" in command
     assert MODEL_FAMILY_VIDEO_BASELINE in command
     assert "--paper-preset" in command
@@ -265,6 +270,12 @@ def test_build_runner_command_forwards_model_family_and_paper_preset(tmp_path: P
     assert "nvila-video" in command
     assert "--video-resize-longest-edge" in command
     assert "448" in command
+
+
+def test_batch_parser_accepts_gazing_ratio_tile_override():
+    args = build_parser().parse_args(["--dataset-dir", ".", "--gazing-ratio-tile", "0.75"])
+
+    assert args.gazing_ratio_tile == "0.75"
 
 
 def test_paper_mode_args_sets_preset_defaults_without_mutating_base_args():
