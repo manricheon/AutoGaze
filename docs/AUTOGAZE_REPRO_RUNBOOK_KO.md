@@ -423,13 +423,16 @@ NVILA-HD-Video와 AutoGaze를 모두 로컬 checkpoint 디렉터리에서 실행
   --output-json outputs/autogaze_repro/cuda_nvila_single_local_models.json
 ```
 
-앞으로 token selector / vision encoder / MLLM을 서로 바꿔 꽂는 구조를 염두에 두고, runner는 컴포넌트 단위 식별자도 받습니다. preset은 검증된 조합을 빠르게 고르는 용도이고, 컴포넌트 CLI는 각 부분의 adapter/name/path를 명시해서 report에 남기는 용도입니다.
+`nvila_runner`는 NVILA-HD와 논문 baseline 재현을 안정적으로 유지하는 러너입니다. 이 러너도 컴포넌트 단위 식별자를 받지만, 범위는 NVILA-HD / NVILA-8B-Video paper baseline에 한정합니다. preset은 검증된 조합을 빠르게 고르는 용도이고, 컴포넌트 CLI는 각 부분의 adapter/name/path를 명시해서 report에 남기는 용도입니다.
 
 - token selector: `--token-selector-adapter auto|none|keep-all|autogaze`, `--token-selector-name`, `--token-selector-path`
 - vision encoder: `--vision-encoder-adapter auto|nvila-hd-siglip|nvila-video-vision`, `--vision-encoder-name`, `--vision-encoder-path`
 - MLLM: `--mllm-adapter auto|nvila-hd|nvila-video`, `--mllm-name`, `--mllm-path`
+- model family: `--model-family auto|nvila-hd-video-autogaze|nvila-video-baseline`
 
 `--model-path`/`--nvila-model`은 기존 호환용으로 유지됩니다. `--mllm-path`를 주면 실제 model load path로 승격되고, 결과 JSON에는 `run_identity.components.token_selector`, `run_identity.components.vision_encoder`, `run_identity.components.mllm`로 기록됩니다. `--pipeline-preset`은 현재 `--paper-preset`의 alias라서 같은 preset 기본값을 적용합니다.
+
+중요한 구분은 아래와 같습니다. `nvila-video-baseline`은 AutoGaze 논문 table의 `NVILA-8B-Video` baseline 재현 후보입니다. AutoGaze는 `not_applicable`이고, processor kwargs에도 AutoGaze 관련 필드를 넣지 않습니다. 반대로 튜닝되지 않은 NVILA-Video, LongVILA, Qwen2-VL류에 AutoGaze on/off를 붙이는 실험은 `nvila_runner`에 넣지 않고 새 확장 러너인 `repro.flexible_runner`에서 다룹니다.
 
 예를 들어 로컬 `NVILA-8B-Video` baseline을 컴포넌트 형태로 명시하면:
 
@@ -495,6 +498,168 @@ paper baseline용 `NVILA-8B-Video`를 로컬 weight에서 직접 지정하려면
   --scored-predictions outputs/autogaze_repro/hlvid_local_nvila_8b_video_scored.jsonl \
   --continue-on-error
 ```
+
+같은 `NVILA-8B-Video` weight를 paper baseline이 아니라 AutoGaze on/off 실험 대상으로 쓰려면 `repro.flexible_runner`를 사용합니다. `NVILA-8B-Video` root config의 `model_type=llava_llama`는 일반 Transformers `AutoModel`만으로는 현재 로드되지 않으므로, native/off 실행은 공식 VILA 코드의 `vila-infer` CLI를 감싸서 수행합니다. 공식 VILA README도 video inference 예시를 `vila-infer --model-path ... --conv-mode auto --text ... --media ...` 형태로 안내합니다.
+
+첫 단계는 모델을 로드하지 않는 `inspect` 모드로 어떤 plugin 조합을 실행할지 JSON으로 고정하는 것입니다. 그 다음 `--mode single`을 쓰면 `nvila-video` native/off는 `vila-infer`를 통해 실제 실행을 시도하고, 아직 실제 generate를 하지 않는 planned 계열 adapter는 `probe_required` JSON을 만듭니다. 이 probe는 모델별 processor 입력, vision feature shape, MLLM visual token packing boundary를 CUDA 머신에서 어디서 찍어야 하는지 명확히 남기는 용도입니다.
+
+```bash
+.venv/bin/python -m repro.flexible_runner \
+  --mode inspect \
+  --model-path weight/NVILA-8B-Video \
+  --model-family nvila-video-plugin \
+  --token-selector-adapter keep-all \
+  --vision-encoder-adapter nvila-video-vision \
+  --mllm-adapter nvila-video \
+  --autogaze-integration-level none \
+  --num-video-frames 128 \
+  --output-json outputs/autogaze_repro/flexible_nvila_video_plugin_off_inspect.json
+```
+
+CUDA 머신에 VILA 환경이 있고 `vila-infer`가 PATH에 잡혀 있으면 native/off single 실행은 아래처럼 갑니다. PATH가 다르면 `--external-mllm-command /path/to/vila-infer`로 지정합니다.
+
+```bash
+.venv/bin/python -m repro.flexible_runner \
+  --mode single \
+  --model-path weight/NVILA-8B-Video \
+  --model-family nvila-video-plugin \
+  --token-selector-adapter keep-all \
+  --vision-encoder-adapter nvila-video-vision \
+  --mllm-adapter nvila-video \
+  --autogaze-integration-level none \
+  --external-mllm-command vila-infer \
+  --video /path/to/video.mp4 \
+  --num-video-frames 256 \
+  --max-tiles-video 8 \
+  --output-json outputs/autogaze_repro/flexible_nvila_video_plugin_off_single.json
+```
+
+이 adapter는 공식 CLI가 지원하는 `--num_video_frames`, `--video_max_tiles`를 넘기고, CLI stdout의 마지막 non-empty line을 `generation.text`로 기록합니다. `max_new_tokens`는 현재 공식 `vila-infer` 인자에 직접 노출되지 않으므로 `external_cli.max_new_tokens_supported=false`로 기록합니다.
+
+AutoGaze on 실험은 아래처럼 token selector checkpoint를 별도로 지정합니다. `planned_plugin`이나 `post_encoder_token_prune`으로 기록하며, 실제 pre-encoder sparse gather 또는 post-encoder token prune을 해당 모델 내부 feature packing에 삽입하는 구현은 다음 단계입니다.
+
+```bash
+.venv/bin/python -m repro.flexible_runner \
+  --mode inspect \
+  --model-path weight/NVILA-8B-Video \
+  --model-family nvila-video-plugin \
+  --token-selector-adapter autogaze \
+  --token-selector-path weight/AutoGaze \
+  --vision-encoder-adapter nvila-video-vision \
+  --mllm-adapter nvila-video \
+  --autogaze-integration-level planned_plugin \
+  --num-video-frames 128 \
+  --output-json outputs/autogaze_repro/flexible_nvila_video_plugin_autogaze_requested_inspect.json
+```
+
+planned adapter의 `single` probe 결과를 만들려면 아래처럼 실행합니다. 이 명령은 모델 weight를 올려서 generate하지 않고, `mllm_runtime.feature_packing_probe`와 `generation.metrics.feature_packing_probe`에 다음 구현에서 확인해야 할 지점을 남깁니다.
+
+```bash
+.venv/bin/python -m repro.flexible_runner \
+  --mode single \
+  --model-path weight/NVILA-8B-Video \
+  --model-family nvila-video-plugin \
+  --token-selector-adapter autogaze \
+  --token-selector-path weight/AutoGaze \
+  --vision-encoder-adapter nvila-video-vision \
+  --mllm-adapter nvila-video \
+  --autogaze-integration-level post_encoder_token_prune \
+  --video /path/to/video.mp4 \
+  --num-video-frames 128 \
+  --output-json outputs/autogaze_repro/flexible_nvila_video_plugin_probe.json
+```
+
+결과 JSON에서 우선 볼 부분은 아래입니다.
+
+```text
+implementation_status: probe_required
+mllm_runtime.feature_packing_probe.required_inputs
+mllm_runtime.feature_packing_probe.post_encoder_hook
+generation.metrics.feature_packing_probe.token_accounting_targets
+```
+
+LongVILA, Qwen2-VL, Qwen3-VL도 같은 확장 러너 identity 축을 사용합니다. Qwen3-VL은 공식 Transformers 경로에서 `pixel_values_videos`, `video_grid_thw`, `mm_token_type_ids`를 사용하고 `get_video_features` entrypoint가 있으므로, 우선은 vision encoder를 그대로 둔 `post_encoder_token_prune` 방식으로 MLLM context 감소를 확인하는 순서가 맞습니다.
+
+LongVILA native/off도 VILA 계열이므로 `vila-infer` CLI adapter로 먼저 실행합니다. AutoGaze on을 요청하면 아직 실제 generate를 하지 않고 `probe_required`로 남깁니다.
+
+```bash
+.venv/bin/python -m repro.flexible_runner \
+  --mode single \
+  --model-path weight/LongVILA \
+  --model-family longvila \
+  --token-selector-adapter keep-all \
+  --vision-encoder-adapter longvila-siglip \
+  --mllm-adapter longvila \
+  --autogaze-integration-level none \
+  --external-mllm-command vila-infer \
+  --video /path/to/video.mp4 \
+  --num-video-frames 256 \
+  --max-tiles-video 8 \
+  --output-json outputs/autogaze_repro/flexible_longvila_plugin_off_single.json
+```
+
+```bash
+.venv/bin/python -m repro.flexible_runner \
+  --mode inspect \
+  --model-path weight/longvila \
+  --model-family longvila \
+  --token-selector-adapter autogaze \
+  --token-selector-path weight/AutoGaze \
+  --vision-encoder-adapter longvila-siglip \
+  --mllm-adapter longvila \
+  --autogaze-integration-level planned_plugin \
+  --num-video-frames 128 \
+  --output-json outputs/autogaze_repro/flexible_longvila_autogaze_requested_inspect.json
+```
+
+Qwen3-VL post-prune 후보는 아래처럼 inspect합니다.
+
+```bash
+.venv/bin/python -m repro.flexible_runner \
+  --mode inspect \
+  --model-path weight/Qwen3-VL-8B-Instruct \
+  --model-family qwen3-vl \
+  --token-selector-adapter autogaze \
+  --token-selector-path weight/AutoGaze \
+  --vision-encoder-adapter qwen3-vl-vision \
+  --mllm-adapter qwen3-vl \
+  --autogaze-integration-level post_encoder_token_prune \
+  --num-video-frames 128 \
+  --output-json outputs/autogaze_repro/flexible_qwen3_vl_autogaze_post_prune_inspect.json
+```
+
+PixelPrune처럼 Qwen3-VL model load 전에 pre-ViT pruning hook을 적용하는 후보도 열어두었습니다. 실제 실행 전에는 우선 `--dry-run`으로 환경 변수와 hook 계획을 확인하세요.
+
+```bash
+.venv/bin/python -m repro.flexible_runner \
+  --mode single \
+  --dry-run \
+  --model-path weight/Qwen3-VL-8B-Instruct \
+  --model-family qwen3-vl \
+  --token-selector-adapter keep-all \
+  --vision-encoder-adapter qwen3-vl-vision \
+  --mllm-adapter qwen3-vl \
+  --autogaze-integration-level pre_encoder_sparse \
+  --pre-encoder-prune-adapter pixelprune \
+  --pixelprune-threshold 0.0 \
+  --video /path/to/video.mp4 \
+  --output-json outputs/autogaze_repro/flexible_qwen3_vl_pixelprune_pre_vit_dry_run.json
+```
+
+실제 실행 시에는 `--dry-run`을 제거합니다. 이때 `pixelprune` 패키지가 설치되어 있으면 runner가 모델 로드 전에 `PIXELPRUNE_ENABLED`, `PIXELPRUNE_THRESHOLD`, `PIXELPRUNE_VERBOSE` 환경 변수를 설정하고 PixelPrune hook을 적용합니다.
+
+다른 MLLM 후보 현황은 아래처럼 잡았습니다.
+
+| family | 1차 목표 | pre 쪽 가능성 | 현재 runner 상태 |
+|---|---|---|---|
+| `qwen2-vl` | post-encoder token prune | grid probe 필요 | single dry-run + inspect config |
+| `qwen2.5-vl` | post-encoder token prune | grid probe 필요 | single dry-run + inspect config |
+| `qwen3-vl` | post-encoder token prune + PixelPrune pre-ViT reference | PixelPrune reference 있음 | single dry-run |
+| `qwen3-vl-moe` | post-encoder token prune + PixelPrune pre-ViT reference | PixelPrune reference 있음 | inspect |
+| `llava-onevision` | post-pool token prune | hard, 196 tokens/frame pooling 이후가 현실적 | single dry-run + inspect config |
+| `nvila-video-plugin` | post-encoder token prune | patch/position alignment probe 필요 | single probe + inspect config |
+| `internvl3` | post-encoder token prune | dynamic tiling probe 필요 | single probe + inspect config |
+| `longvila` | post-encoder token prune | VILA feature packing probe 필요 | native/off single + AutoGaze-on probe |
 
 다운로드는 다음 형태로 받으면 됩니다. 현재 로컬에는 `weight/NVILA-8B-Video` 경로로 받아두었습니다.
 
@@ -1159,10 +1324,120 @@ ratio와 percent는 의도가 다릅니다. `*_ratio_*`는 `before_or_keep_all /
 
 이미 prediction JSONL이 있는 상태에서 report만 다시 만들려면 같은 `--output-dir`에 대해 `--report-only`를 붙입니다.
 
+## Plugin Runner 8단계 완료 기준
+
+확장성 검증용 8단계는 stable NVILA-HD runner가 아니라 `repro.flexible_runner`와 `repro.plugin_hlvid_benchmark` 기준으로 진행합니다.
+
+현재 repo에서 닫은 범위:
+
+| 단계 | 상태 | 실행/산출물 |
+|---|---|---|
+| 1. NVILA-Video off smoke | 준비 완료 | `nvila-video` adapter가 공식 `vila-infer` CLI를 호출 |
+| 2. LongVILA off smoke | 준비 완료 | `longvila` adapter도 같은 VILA CLI 경로 사용 |
+| 3. stdout parsing | 완료 | `Assistant: ...`, JSON `{"answer": ...}`, 마지막 non-empty line 순서로 추출 |
+| 4. feature packing probe | 완료 | `feature_packing_probe`에 required input, hook, token accounting target 기록 |
+| 5. post-encoder prune 준비 | 완료 | AutoGaze on은 실제 generate 대신 `probe_required`로 막고 post-encoder hook 위치 기록 |
+| 6. InternVL3 off adapter | 준비 완료 | `repro.internvl3_off_infer` helper를 external command로 호출 |
+| 7. Qwen probe | 완료 | Qwen2/2.5/3-VL AutoGaze on은 `get_video_features` 이후 probe로 기록 |
+| 8. HLVid limit3 report | 준비 완료 | `repro.plugin_hlvid_benchmark`가 predictions/summary/Markdown 생성 |
+
+CUDA 머신에서 NVILA-Video와 LongVILA off smoke는 아래처럼 실행합니다.
+
+```bash
+.venv/bin/python -m repro.flexible_runner \
+  --mode single \
+  --model-path weight/NVILA-8B-Video \
+  --model-family nvila-video-plugin \
+  --token-selector-adapter keep-all \
+  --vision-encoder-adapter nvila-video-vision \
+  --mllm-adapter nvila-video \
+  --autogaze-integration-level none \
+  --external-mllm-command vila-infer \
+  --video /path/to/video.mp4 \
+  --num-video-frames 256 \
+  --max-tiles-video 8 \
+  --output-json outputs/autogaze_repro/flexible_nvila_video_plugin_off_single.json
+```
+
+```bash
+.venv/bin/python -m repro.flexible_runner \
+  --mode single \
+  --model-path weight/LongVILA \
+  --model-family longvila \
+  --token-selector-adapter keep-all \
+  --vision-encoder-adapter longvila-siglip \
+  --mllm-adapter longvila \
+  --autogaze-integration-level none \
+  --external-mllm-command vila-infer \
+  --video /path/to/video.mp4 \
+  --num-video-frames 256 \
+  --max-tiles-video 8 \
+  --output-json outputs/autogaze_repro/flexible_longvila_plugin_off_single.json
+```
+
+InternVL3 off smoke는 helper를 사용합니다. 공식 InternVL3 모델 카드의 Transformers 경로는 `AutoModel`, `AutoTokenizer`, `pixel_values`, `num_patches_list`, `model.chat(...)` 흐름이며, repo helper는 이 흐름을 CLI로 감싼 것입니다.
+
+```bash
+.venv/bin/python -m repro.flexible_runner \
+  --mode single \
+  --model-path weight/InternVL3 \
+  --model-family internvl3 \
+  --token-selector-adapter keep-all \
+  --vision-encoder-adapter internvl-dynamic-vision \
+  --mllm-adapter internvl3 \
+  --autogaze-integration-level none \
+  --external-mllm-command ".venv/bin/python -m repro.internvl3_off_infer" \
+  --video /path/to/video.mp4 \
+  --num-video-frames 8 \
+  --max-tiles-video 1 \
+  --output-json outputs/autogaze_repro/flexible_internvl3_off_single.json
+```
+
+Qwen3-VL AutoGaze post-encoder probe는 아래처럼 실행합니다. 이 명령은 모델을 로드하지 않고 `probe_required`를 기록합니다.
+
+```bash
+.venv/bin/python -m repro.flexible_runner \
+  --mode single \
+  --model-path weight/Qwen3-VL-8B-Instruct \
+  --model-family qwen3-vl \
+  --token-selector-adapter autogaze \
+  --token-selector-path weight/AutoGaze \
+  --vision-encoder-adapter qwen3-vl-vision \
+  --mllm-adapter qwen3-vl \
+  --autogaze-integration-level post_encoder_token_prune \
+  --video /path/to/video.mp4 \
+  --output-json outputs/autogaze_repro/flexible_qwen3_vl_autogaze_probe.json
+```
+
+HLVid limit3 plugin 비교는 `configs/repro/plugin_hlvid_limit3.yaml`에 대응합니다. CUDA 머신의 HLVid 폴더가 mp4 flat 구조여도 `video_root / basename(video_path)` fallback으로 찾습니다.
+
+```bash
+.venv/bin/python -m repro.plugin_hlvid_benchmark \
+  --manifest /path/to/HLVid/data/test-00000-of-00001.parquet \
+  --video-root /path/to/HLVid/videos \
+  --output-dir outputs/autogaze_repro/plugin_hlvid_limit3 \
+  --limit 3 \
+  --modes nvila-video-off,longvila-off,internvl3-off,qwen3-vl-autogaze-probe \
+  --external-mllm-command vila-infer \
+  --model nvila-video=weight/NVILA-8B-Video \
+  --model longvila=weight/LongVILA \
+  --model internvl3=weight/InternVL3 \
+  --model qwen3-vl=weight/Qwen3-VL-8B-Instruct \
+  --num-video-frames 256 \
+  --max-tiles-video 8
+```
+
+결과 파일:
+
+- `plugin_hlvid_predictions.jsonl`: mode별 per-row output, question, answer, status, metric_status
+- `plugin_hlvid_summary.json`: mode별 score와 failed/parse_failed 분리
+- `plugin_hlvid_report.md`: 리더 리뷰용 간단 표
+
 ## 검증
 
 ```bash
 .venv/bin/python -m pytest tests -q
+.venv/bin/python -m repro.plugin_hlvid_benchmark --help
 .venv/bin/python -m repro.autogaze_bench --help
 .venv/bin/python -m repro.hlvid --help
 .venv/bin/python scripts/run_hlvid_folder_benchmark.py --help
