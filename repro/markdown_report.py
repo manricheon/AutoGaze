@@ -766,6 +766,7 @@ def render_processing_budget_summary(payload: dict[str, Any]) -> str:
     model_unit = as_mapping(summary.get("model_processing_unit"))
     tiling = as_mapping(summary.get("tiling"))
     thumbnail = as_mapping(summary.get("thumbnail"))
+    single_scale = as_mapping(summary.get("single_scale_dense_vision_budget"))
     multiscale = as_mapping(summary.get("multiscale_patch_space"))
     patch_budget = as_mapping(summary.get("patch_budget_before_siglip") or summary.get("patch_budget_before_vit"))
     llm_budget = as_mapping(summary.get("llm_visual_budget"))
@@ -782,6 +783,21 @@ def render_processing_budget_summary(payload: dict[str, Any]) -> str:
         ["thumbnail_enabled", thumbnail.get("enabled")],
         ["thumbnail_actual_frames", thumbnail.get("actual_frames") or thumbnail.get("effective_frames")],
         ["thumbnail_policy", thumbnail.get("policy") or thumbnail.get("pruning_policy")],
+        ["single_scale_dense_scope", single_scale.get("comparison_scope")],
+        [
+            "single_scale_dense_patch_positions_per_tile_frame",
+            single_scale.get("patch_positions_per_tile_frame")
+            or single_scale.get("patch_positions_per_reference_tile_frame"),
+        ],
+        [
+            "single_scale_dense_total_patch_tokens",
+            single_scale.get("total_patch_tokens") or single_scale.get("estimated_total_patch_tokens"),
+        ],
+        [
+            "single_scale_dense_llm_visual_tokens_estimated",
+            single_scale.get("llm_visual_tokens_estimated")
+            or single_scale.get("estimated_llm_visual_tokens_after_token_shuffle"),
+        ],
         ["multiscale_patch_positions_per_tile_frame", multiscale.get("patch_positions_per_tile_frame")],
         ["patch_positions_by_scale", multiscale.get("patch_positions_by_scale")],
         ["keep_all_total_patch_tokens", patch_budget.get("keep_all_total_patch_tokens") or patch_budget.get("estimated_visual_tokens_before_prune")],
@@ -843,6 +859,12 @@ def render_readable_budget_token_flow(readable_budget: dict[str, Any]) -> str:
         "patch_budget_before_siglip.autogaze_selected_total_patch_tokens",
     )
     add_row(
+        "Single-scale dense SigLIP reference",
+        "single_scale_dense_vision_budget.total_patch_tokens",
+        "single_scale_dense_vision_budget.total_patch_tokens",
+        "patch_budget_before_siglip.autogaze_selected_total_patch_tokens",
+    )
+    add_row(
         "Tile patch budget before SigLIP",
         "patch_budget_before_siglip.keep_all_tile_patch_tokens",
         "patch_budget_before_siglip.keep_all_tile_patch_tokens",
@@ -894,6 +916,15 @@ def render_readable_budget_token_flow(readable_budget: dict[str, Any]) -> str:
 
 def render_single_budget_token_flow(summary: dict[str, Any], metrics: dict[str, Any]) -> str:
     tokens = as_mapping(metrics.get("tokens"))
+    single_scale = as_mapping(summary.get("single_scale_dense_vision_budget"))
+    single_scale_patch_tokens = first_present(
+        single_scale.get("total_patch_tokens"),
+        single_scale.get("estimated_total_patch_tokens"),
+    )
+    single_scale_llm_tokens = first_present(
+        single_scale.get("llm_visual_tokens_estimated"),
+        single_scale.get("estimated_llm_visual_tokens_after_token_shuffle"),
+    )
     patch_budget = as_mapping(summary.get("patch_budget_before_siglip"))
     if patch_budget:
         full_patch = first_present(
@@ -922,6 +953,16 @@ def render_single_budget_token_flow(summary: dict[str, Any], metrics: dict[str, 
                 "full_multiscale_patch_budget_before_autogaze",
                 full_patch,
                 "All multiscale tile plus thumbnail patch positions that keep-all/off would send toward SigLIP.",
+            ],
+            [
+                "single_scale_dense_siglip_reference_patch_tokens",
+                single_scale_patch_tokens,
+                "Reference dense SigLIP budget using only 392px scale with patch size 14, so 784 positions per tile-frame.",
+            ],
+            [
+                "single_scale_dense_siglip_reference_llm_visual_tokens_estimated",
+                single_scale_llm_tokens,
+                "Reference visual-token estimate after TokenShuffle for the single-scale dense SigLIP budget.",
             ],
             [
                 "autogaze_selected_patch_tokens",
@@ -959,6 +1000,11 @@ def render_single_budget_token_flow(summary: dict[str, Any], metrics: dict[str, 
                 "Full patch budget divided by AutoGaze-selected patch budget.",
             ],
             [
+                "single_scale_dense_reference_reduction_ratio_before_over_after",
+                ratio_before_over_after(single_scale_patch_tokens, selected_patch),
+                "Single-scale dense SigLIP reference patch budget divided by AutoGaze-selected patch budget.",
+            ],
+            [
                 "llm_visual_token_reduction_ratio_before_over_after",
                 ratio_before_over_after(llm_before, llm_after),
                 "Estimated keep-all LLM visual tokens divided by actual AutoGaze LLM visual tokens.",
@@ -976,6 +1022,11 @@ def render_single_budget_token_flow(summary: dict[str, Any], metrics: dict[str, 
             tokens.get("visual_tokens_after_prune"),
         )
         rows = [
+            [
+                "single_scale_dense_siglip_reference_patch_tokens",
+                single_scale_patch_tokens,
+                "Reference-only dense SigLIP budget; exact for 392px SigLIP tile pipelines, approximate for other adapters.",
+            ],
             [
                 "full_patch_budget_before_selector",
                 full_patch,
@@ -1000,6 +1051,11 @@ def render_single_budget_token_flow(summary: dict[str, Any], metrics: dict[str, 
                 "patch_reduction_ratio_before_over_after",
                 ratio_before_over_after(full_patch, selected_patch),
                 "Raw visual patch budget divided by selected visual patch budget.",
+            ],
+            [
+                "single_scale_dense_reference_reduction_ratio_before_over_after",
+                ratio_before_over_after(single_scale_patch_tokens, selected_patch),
+                "Reference dense SigLIP patch budget divided by selected visual patch budget.",
             ],
         ]
 

@@ -345,6 +345,10 @@ def test_build_mllm_processing_budget_summary_reports_qwen_resize_thumbnail_and_
     assert summary["patch_budget_before_vit"]["estimated_total_frames_in_processor"] == 40
     assert summary["patch_budget_before_vit"]["estimated_visual_tokens_before_prune"] is not None
     assert summary["patch_budget_before_vit"]["multiscale_policy"] == "not_applicable_qwen_native_grid"
+    assert summary["single_scale_dense_vision_budget"]["comparison_scope"] == "reference_only_not_model_exact"
+    assert summary["single_scale_dense_vision_budget"]["patch_positions_per_reference_tile_frame"] == 784
+    assert summary["single_scale_dense_vision_budget"]["estimated_total_patch_tokens"] == 106624
+    assert summary["single_scale_dense_vision_budget"]["reference_tile_count_source"] == "runner_max_tiles_video"
 
 
 def test_runtime_description_includes_metric_schema():

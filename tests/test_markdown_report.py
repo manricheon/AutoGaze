@@ -28,6 +28,13 @@ def test_render_single_markdown_report_includes_pipeline_and_key_metrics(tmp_pat
             "model_processing_unit": {"name": "nvila_392px_spatial_tile_sequence", "tile_size_px": 392},
             "tiling": {"spatial_tiles_per_frame": 8, "tile_frame_instances": 1024},
             "thumbnail": {"enabled": True, "actual_frames": 64, "policy": "keep_all"},
+            "single_scale_dense_vision_budget": {
+                "comparison_scope": "siglip_392px_single_scale_reference",
+                "patch_positions_per_tile_frame": 784,
+                "total_patch_tokens": 852992,
+                "llm_visual_tokens_estimated": 94848,
+                "ratio_over_autogaze_selected_total_patch_tokens": 4.836,
+            },
             "multiscale_patch_space": {
                 "patch_positions_per_tile_frame": 1060,
                 "patch_positions_by_scale": {"56": 16, "112": 64, "196": 196, "392": 784},
@@ -137,6 +144,8 @@ def test_render_single_markdown_report_includes_pipeline_and_key_metrics(tmp_pat
     assert "keep_all_total_patch_tokens" in markdown
     assert "## AutoGaze Token And Patch Flow" in markdown
     assert "full_multiscale_patch_budget_before_autogaze" in markdown
+    assert "single_scale_dense_siglip_reference_patch_tokens" in markdown
+    assert "852,992" in markdown
     assert "encoder_input_patch_tokens_after_autogaze" in markdown
     assert "llm_input_visual_tokens_after_token_shuffle_projector" in markdown
     assert "## Latency Accounting" in markdown
@@ -223,24 +232,28 @@ def test_render_benchmark_markdown_report_includes_scores_and_comparison_tables(
                 "additive_fields": ["video_preprocess_ms", "generate_ms"],
                 "do_not_sum_with_total_ms": ["video_decode_ms", "autogaze_ms", "ttft_ms"],
             },
-            "processing_budget_summary": {
-                "keep_all_median": {
-                    "video.source_resolution": "3840x2160",
-                    "video.processor_input_resolution": "1280x720",
-                    "tiling.spatial_tiles_per_frame": 8,
-                    "thumbnail.actual_frames": 64,
-                    "multiscale_patch_space.patch_positions_per_tile_frame": 1060,
+                "processing_budget_summary": {
+                    "keep_all_median": {
+                        "video.source_resolution": "3840x2160",
+                        "video.processor_input_resolution": "1280x720",
+                        "single_scale_dense_vision_budget.total_patch_tokens": 800,
+                        "single_scale_dense_vision_budget.llm_visual_tokens_estimated": 90,
+                        "tiling.spatial_tiles_per_frame": 8,
+                        "thumbnail.actual_frames": 64,
+                        "multiscale_patch_space.patch_positions_per_tile_frame": 1060,
                     "patch_budget_before_siglip.keep_all_total_patch_tokens": 900,
                     "patch_budget_before_siglip.autogaze_selected_total_patch_tokens": 900,
                     "llm_visual_budget.keep_all_visual_tokens_estimated": 100,
                     "llm_visual_budget.actual_visual_tokens": 100,
                 },
-                "autogaze_median": {
-                    "video.source_resolution": "3840x2160",
-                    "video.processor_input_resolution": "1280x720",
-                    "tiling.spatial_tiles_per_frame": 8,
-                    "thumbnail.actual_frames": 64,
-                    "multiscale_patch_space.patch_positions_per_tile_frame": 1060,
+                    "autogaze_median": {
+                        "video.source_resolution": "3840x2160",
+                        "video.processor_input_resolution": "1280x720",
+                        "single_scale_dense_vision_budget.total_patch_tokens": 800,
+                        "single_scale_dense_vision_budget.llm_visual_tokens_estimated": 90,
+                        "tiling.spatial_tiles_per_frame": 8,
+                        "thumbnail.actual_frames": 64,
+                        "multiscale_patch_space.patch_positions_per_tile_frame": 1060,
                     "patch_budget_before_siglip.keep_all_total_patch_tokens": 900,
                     "patch_budget_before_siglip.autogaze_selected_total_patch_tokens": 300,
                     "llm_visual_budget.keep_all_visual_tokens_estimated": 100,
@@ -326,6 +339,7 @@ def test_render_benchmark_markdown_report_includes_scores_and_comparison_tables(
     assert "patch_budget_before_siglip.autogaze_selected_total_patch_tokens" in markdown
     assert "## AutoGaze Token And Patch Flow" in markdown
     assert "| Full multiscale patch budget before AutoGaze | 900 | 900 | 300 | 3 | 66.666667 |" in markdown
+    assert "| Single-scale dense SigLIP reference | 800 | 800 | 300 | 2.666667 | 62.5 |" in markdown
     assert "| LLM visual tokens after TokenShuffle/projector | 100 | 100 | 40 | 2.5 | 60 |" in markdown
 
 
@@ -470,6 +484,11 @@ def test_render_flexible_single_markdown_reads_generation_metrics_processing_bud
                 "memory_bytes": {"peak_cuda_allocated": 10_000},
                 "processing_budget_summary": {
                     "runner": "flexible_runner",
+                    "single_scale_dense_vision_budget": {
+                        "comparison_scope": "reference_only_not_model_exact",
+                        "estimated_total_patch_tokens": 106624,
+                        "ratio_over_estimated_visual_tokens_after_prune": 1066.24,
+                    },
                     "video": {
                         "source_resolution": "3840x2160",
                         "processor_input_resolution": "1280x720",
@@ -491,6 +510,7 @@ def test_render_flexible_single_markdown_reads_generation_metrics_processing_bud
     assert "## Processing Budget Summary" in markdown
     assert "3840x2160" in markdown
     assert "## AutoGaze Token And Patch Flow" in markdown
+    assert "single_scale_dense_siglip_reference_patch_tokens" in markdown
     assert "full_patch_budget_before_selector" in markdown
     assert "encoder_input_patch_tokens_after_autogaze" in markdown
     assert "llm_input_context_tokens" in markdown

@@ -450,6 +450,10 @@ def build_markdown_report(summary: dict[str, Any]) -> str:
                 mode_median.get("video.processor_input_resolution"),
                 mode_median.get("video.requested_video_frames"),
                 first_present(
+                    mode_median.get("single_scale_dense_vision_budget.total_patch_tokens"),
+                    mode_median.get("single_scale_dense_vision_budget.estimated_total_patch_tokens"),
+                ),
+                first_present(
                     mode_median.get("patch_budget_before_siglip.keep_all_total_patch_tokens"),
                     mode_median.get("patch_budget_before_vit.actual_raw_patch_tokens_before_vit"),
                     mode_median.get("patch_budget_before_vit.estimated_visual_tokens_before_prune"),
@@ -471,8 +475,8 @@ def build_markdown_report(summary: dict[str, Any]) -> str:
                 "",
                 "## Processing Budget By Mode",
                 "",
-                "| mode | source_resolution | processor_input_resolution | frames | full/off patch tokens | selected/actual patch tokens | reduction_ratio | llm_visual_tokens |",
-                "|---|---|---|---:|---:|---:|---:|---:|",
+                "| mode | source_resolution | processor_input_resolution | frames | single-scale SigLIP patch ref | full/off patch tokens | selected/actual patch tokens | reduction_ratio | llm_visual_tokens |",
+                "|---|---|---|---:|---:|---:|---:|---:|---:|",
             ]
         )
         for row in budget_rows:

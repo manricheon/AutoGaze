@@ -19,6 +19,10 @@ from repro.plugins.gaze_plan import (
 )
 from repro.vila_feature_probe import run_vila_feature_probe
 
+SIGLIP_DENSE_REFERENCE_TILE_SIZE = 392
+SIGLIP_DENSE_REFERENCE_PATCH_SIZE = 14
+SIGLIP_DENSE_REFERENCE_TOKEN_SHUFFLE = 9
+
 
 @dataclass(frozen=True)
 class MllmRunRequest:
@@ -2329,6 +2333,51 @@ def _estimate_selected_tokens(raw_visual_tokens: int, gazing_ratio: float | None
     return max(1, int(round(raw_visual_tokens * ratio)))
 
 
+def build_single_scale_dense_reference_budget(
+    *,
+    main_frames: int,
+    thumbnail_frames: int,
+    reference_tile_count: int,
+    selected_visual_tokens: int | None,
+) -> dict[str, Any]:
+    tile_count = max(int(reference_tile_count), 1)
+    patches_per_reference_tile = (
+        SIGLIP_DENSE_REFERENCE_TILE_SIZE // SIGLIP_DENSE_REFERENCE_PATCH_SIZE
+    ) ** 2
+    main_tile_frames = main_frames * tile_count
+    thumbnail_tile_frames = thumbnail_frames
+    estimated_total_patch_tokens = (main_tile_frames + thumbnail_tile_frames) * patches_per_reference_tile
+    estimated_llm_visual_tokens = (
+        main_frames
+        * math.ceil(
+            tile_count * patches_per_reference_tile / SIGLIP_DENSE_REFERENCE_TOKEN_SHUFFLE
+        )
+        + thumbnail_frames
+        * math.ceil(patches_per_reference_tile / SIGLIP_DENSE_REFERENCE_TOKEN_SHUFFLE)
+    )
+    return {
+        "comparison_scope": "reference_only_not_model_exact",
+        "reference_tile_size_px": SIGLIP_DENSE_REFERENCE_TILE_SIZE,
+        "reference_patch_size": SIGLIP_DENSE_REFERENCE_PATCH_SIZE,
+        "patch_positions_per_reference_tile_frame": patches_per_reference_tile,
+        "reference_tile_count_per_frame": tile_count,
+        "reference_tile_count_source": "runner_max_tiles_video",
+        "estimated_main_tile_frames": main_tile_frames,
+        "estimated_thumbnail_tile_frames": thumbnail_tile_frames,
+        "estimated_total_patch_tokens": estimated_total_patch_tokens,
+        "estimated_llm_visual_tokens_after_token_shuffle": estimated_llm_visual_tokens,
+        "reference_token_shuffle": SIGLIP_DENSE_REFERENCE_TOKEN_SHUFFLE,
+        "ratio_over_estimated_visual_tokens_after_prune": (
+            estimated_total_patch_tokens / selected_visual_tokens if selected_visual_tokens else None
+        ),
+        "note": (
+            "Reference-only dense SigLIP-style baseline using 392px tiles and patch size 14. "
+            "It is exact only for NVILA/SigLIP tile-like pipelines; for Qwen/LongVILA/other adapters "
+            "it is included to make cross-run reports comparable, not to describe the native processor."
+        ),
+    }
+
+
 def build_mllm_processing_budget_summary(request: MllmRunRequest) -> dict[str, Any]:
     main_frames = qwen_main_video_frame_count(request)
     thumbnail = qwen_thumbnail_summary(request)
@@ -2338,6 +2387,12 @@ def build_mllm_processing_budget_summary(request: MllmRunRequest) -> dict[str, A
     selected_visual = _estimate_selected_tokens(estimated_visual, request.gazing_ratio) if estimated_visual is not None else None
     source_metadata = _safe_qwen_video_metadata(request.video)
     resize_effective = _safe_qwen_resize_effective(request, source_metadata)
+    single_scale_dense = build_single_scale_dense_reference_budget(
+        main_frames=main_frames,
+        thumbnail_frames=thumbnail_frames,
+        reference_tile_count=int(request.max_tiles_video or 1),
+        selected_visual_tokens=selected_visual,
+    )
     return {
         "runner": "flexible_runner",
         "video": {
@@ -2379,6 +2434,7 @@ def build_mllm_processing_budget_summary(request: MllmRunRequest) -> dict[str, A
             "enabled": thumbnail_frames > 0,
             **thumbnail,
         },
+        "single_scale_dense_vision_budget": single_scale_dense,
         "patch_budget_before_vit": {
             "estimated_main_frames_in_processor": main_frames,
             "estimated_thumbnail_frames_in_processor": thumbnail_frames,

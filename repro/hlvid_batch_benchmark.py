@@ -372,6 +372,10 @@ def build_readable_summary(
         ),
     }
     processing_budget_comparison_fields = (
+        "single_scale_dense_vision_budget.total_patch_tokens",
+        "single_scale_dense_vision_budget.estimated_total_patch_tokens",
+        "single_scale_dense_vision_budget.llm_visual_tokens_estimated",
+        "single_scale_dense_vision_budget.estimated_llm_visual_tokens_after_token_shuffle",
         "patch_budget_before_siglip.keep_all_tile_patch_tokens",
         "patch_budget_before_siglip.autogaze_selected_tile_patch_tokens",
         "patch_budget_before_siglip.keep_all_thumbnail_patch_tokens",

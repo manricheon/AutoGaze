@@ -1315,6 +1315,13 @@ def test_build_processing_budget_summary_explains_resize_tiling_thumbnail_and_pa
     assert summary["patch_budget_before_siglip"]["autogaze_selected_total_patch_tokens"] == 176384
     assert summary["patch_budget_before_siglip"]["autogaze_selected_tile_patch_tokens"] == 108544
     assert summary["patch_budget_before_siglip"]["thumbnail_policy"] == "keep_all"
+    assert summary["single_scale_dense_vision_budget"]["comparison_scope"] == "siglip_392px_single_scale_reference"
+    assert summary["single_scale_dense_vision_budget"]["patch_positions_per_tile_frame"] == 784
+    assert summary["single_scale_dense_vision_budget"]["tile_patch_tokens"] == 802816
+    assert summary["single_scale_dense_vision_budget"]["thumbnail_patch_tokens"] == 50176
+    assert summary["single_scale_dense_vision_budget"]["total_patch_tokens"] == 852992
+    assert summary["single_scale_dense_vision_budget"]["llm_visual_tokens_estimated"] == 94848
+    assert summary["single_scale_dense_vision_budget"]["ratio_over_autogaze_selected_total_patch_tokens"] == 852992 / 176384
     assert summary["llm_visual_budget"]["keep_all_visual_tokens_estimated"] == 128512
     assert summary["llm_visual_budget"]["actual_visual_tokens"] == 19632
 

@@ -1077,6 +1077,80 @@ def _single_or_list(value: Any) -> Any:
     return value
 
 
+def _first_int(value: Any) -> int | None:
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return None
+        value = value[0]
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def build_single_scale_dense_vision_budget(
+    *,
+    video_frames: Any,
+    thumbnail_frames: Any,
+    spatial_tiles: Any,
+    tile_frame_instances: Any,
+    selected_total_patch_tokens: Any,
+    multiscale_total_patch_tokens: Any,
+    token_shuffle: int = NVILA_TOKEN_SHUFFLE,
+) -> dict[str, Any]:
+    patches_per_tile = (NVILA_IMAGE_SIZE // NVILA_VISION_PATCH_SIZE) ** 2
+    frame_count = _first_int(video_frames)
+    thumbnail_count = _first_int(thumbnail_frames) or 0
+    tile_count = _first_int(spatial_tiles)
+    tile_frame_count = _first_int(tile_frame_instances)
+    if tile_frame_count is None and frame_count is not None and tile_count is not None:
+        tile_frame_count = frame_count * tile_count
+
+    tile_patch_tokens = tile_frame_count * patches_per_tile if tile_frame_count is not None else None
+    thumbnail_patch_tokens = thumbnail_count * patches_per_tile
+    total_patch_tokens = (
+        tile_patch_tokens + thumbnail_patch_tokens if tile_patch_tokens is not None else None
+    )
+
+    tile_visual_tokens = None
+    if frame_count is not None and tile_count is not None:
+        tile_visual_tokens = frame_count * math.ceil(tile_count * patches_per_tile / max(token_shuffle, 1))
+    elif tile_patch_tokens is not None:
+        tile_visual_tokens = math.ceil(tile_patch_tokens / max(token_shuffle, 1))
+    thumbnail_visual_tokens = thumbnail_count * math.ceil(patches_per_tile / max(token_shuffle, 1))
+    llm_visual_tokens = (
+        tile_visual_tokens + thumbnail_visual_tokens if tile_visual_tokens is not None else None
+    )
+
+    return {
+        "comparison_scope": "siglip_392px_single_scale_reference",
+        "reference_scale_px": NVILA_IMAGE_SIZE,
+        "reference_patch_size": NVILA_VISION_PATCH_SIZE,
+        "patch_positions_per_tile_frame": patches_per_tile,
+        "spatial_tiles_per_frame": tile_count,
+        "tile_frame_instances": tile_frame_count,
+        "thumbnail_frames": thumbnail_count,
+        "tile_patch_tokens": tile_patch_tokens,
+        "thumbnail_patch_tokens": thumbnail_patch_tokens,
+        "total_patch_tokens": total_patch_tokens,
+        "llm_visual_tokens_estimated": llm_visual_tokens,
+        "token_shuffle": token_shuffle,
+        "ratio_over_autogaze_selected_total_patch_tokens": _safe_ratio(
+            total_patch_tokens,
+            selected_total_patch_tokens,
+        ),
+        "ratio_over_hd_multiscale_keep_all_total_patch_tokens": _safe_ratio(
+            total_patch_tokens,
+            multiscale_total_patch_tokens,
+        ),
+        "note": (
+            "Reference-only dense SigLIP baseline using only the 392px scale: "
+            "392/14 = 28, so 28*28 = 784 patch positions per 392x392 tile-frame. "
+            "NVILA-HD AutoGaze keep-all uses the multiscale 56+112+196+392 space instead."
+        ),
+    }
+
+
 def build_processing_budget_summary(
     *,
     video_input_summary: dict[str, Any],
@@ -1094,6 +1168,15 @@ def build_processing_budget_summary(
     selected_thumbnail = token_metrics.get("encoder_autogaze_selected_thumbnail_patch_tokens")
     keep_all_visual = token_metrics.get("llm_keep_all_visual_tokens_estimated")
     actual_visual = token_metrics.get("llm_actual_visual_tokens")
+    single_scale_dense = build_single_scale_dense_vision_budget(
+        video_frames=token_metrics.get("video_sampled_frames") or video_input_summary.get("actual_video_frames"),
+        thumbnail_frames=thumbnail_frames or video_input_summary.get("actual_thumbnail_frames"),
+        spatial_tiles=spatial_tiles,
+        tile_frame_instances=token_metrics.get("autogaze_input_tile_frame_instances"),
+        selected_total_patch_tokens=selected_total,
+        multiscale_total_patch_tokens=raw_total,
+        token_shuffle=int(token_metrics.get("token_shuffle") or NVILA_TOKEN_SHUFFLE),
+    )
     return {
         "runner": runner,
         "video": {
@@ -1130,6 +1213,7 @@ def build_processing_budget_summary(
             "selected_patch_tokens": selected_thumbnail,
             "policy": "keep_all" if thumbnail_frames else "not_applicable",
         },
+        "single_scale_dense_vision_budget": single_scale_dense,
         "multiscale_patch_space": {
             "patch_positions_per_tile_frame": token_metrics.get("encoder_patches_per_frame_multiscale"),
             "patch_positions_by_scale": token_metrics.get("encoder_patches_per_frame_by_scale"),
