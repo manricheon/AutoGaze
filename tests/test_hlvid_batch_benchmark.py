@@ -356,6 +356,28 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
                     "autogaze_input_patch_tokens": 800,
                     "autogaze_selected_patch_tokens": 800,
                 },
+            "processing_budget_summary": {
+                "video": {
+                    "source_resolution": "3840x2160",
+                    "processor_input_resolution": "1280x720",
+                    "requested_video_frames": 128,
+                    "actual_video_frames": 128,
+                },
+                "tiling": {"spatial_tiles_per_frame": 8, "tile_frame_instances": 80},
+                "thumbnail": {"enabled": True, "actual_frames": 64, "policy": "keep_all"},
+                "multiscale_patch_space": {
+                    "patch_positions_per_tile_frame": 1060,
+                    "patch_positions_by_scale": {"56": 16, "112": 64, "196": 196, "392": 784},
+                },
+                "patch_budget_before_siglip": {
+                    "keep_all_total_patch_tokens": 900,
+                    "autogaze_selected_total_patch_tokens": 900,
+                },
+                "llm_visual_budget": {
+                    "keep_all_visual_tokens_estimated": 100,
+                    "actual_visual_tokens": 100,
+                },
+            },
             }
     ]
     autogaze_rows = [
@@ -401,6 +423,30 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
                     "autogaze_forward_batched": {"total_ms": 10.0, "count": 2, "mean_ms": 5.0},
                     "autogaze_total": {"total_ms": 12.0, "count": 1, "mean_ms": 12.0},
                 }
+            },
+            "processing_budget_summary": {
+                "video": {
+                    "source_resolution": "3840x2160",
+                    "processor_input_resolution": "1280x720",
+                    "requested_video_frames": 128,
+                    "actual_video_frames": 128,
+                },
+                "tiling": {"spatial_tiles_per_frame": 8, "tile_frame_instances": 80},
+                "thumbnail": {"enabled": True, "actual_frames": 64, "policy": "keep_all"},
+                "multiscale_patch_space": {
+                    "patch_positions_per_tile_frame": 1060,
+                    "patch_positions_by_scale": {"56": 16, "112": 64, "196": 196, "392": 784},
+                },
+                "patch_budget_before_siglip": {
+                    "keep_all_total_patch_tokens": 900,
+                    "autogaze_selected_total_patch_tokens": 300,
+                    "total_patch_reduction_ratio": 3.0,
+                },
+                "llm_visual_budget": {
+                    "keep_all_visual_tokens_estimated": 100,
+                    "actual_visual_tokens": 40,
+                    "visual_token_reduction_ratio": 2.5,
+                },
             },
         }
     ]
@@ -546,6 +592,20 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
         "after_autogaze_actual": 40.0,
         "reduction_ratio_before_over_after": 2.5,
         "reduction_percent_of_before": 60.0,
+    }
+    assert report["readable_summary"]["processing_budget_summary"]["keep_all_median"][
+        "patch_budget_before_siglip.keep_all_total_patch_tokens"
+    ] == 900.0
+    assert report["readable_summary"]["processing_budget_summary"]["autogaze_median"][
+        "patch_budget_before_siglip.autogaze_selected_total_patch_tokens"
+    ] == 300.0
+    assert report["readable_summary"]["processing_budget_summary"]["comparison"][
+        "patch_budget_before_siglip.keep_all_total_patch_tokens"
+    ] == {
+        "keep_all": 900.0,
+        "autogaze": 900.0,
+        "ratio_keep_all_over_autogaze": 1.0,
+        "reduction_percent_of_keep_all": 0.0,
     }
     assert report["gains"]["reduction_percent_median"]["latency_ms"]["total_ms"] == 40.0
     assert report["gains"]["reduction_percent_median"]["memory_bytes"]["llm_peak_memory_bytes"] == 50.0

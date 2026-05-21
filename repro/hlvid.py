@@ -133,6 +133,25 @@ TOKEN_FIELDS = (
     "token_metrics.llm_actual_visual_tokens",
     "token_metrics.llm_visual_token_reduction_ratio",
 )
+PROCESSING_BUDGET_SUMMARY_FIELDS = (
+    "video.source_resolution",
+    "video.processor_input_resolution",
+    "video.requested_video_frames",
+    "video.actual_video_frames",
+    "tiling.spatial_tiles_per_frame",
+    "tiling.tile_frame_instances",
+    "thumbnail.enabled",
+    "thumbnail.actual_frames",
+    "thumbnail.policy",
+    "multiscale_patch_space.patch_positions_per_tile_frame",
+    "multiscale_patch_space.patch_positions_by_scale",
+    "patch_budget_before_siglip.keep_all_total_patch_tokens",
+    "patch_budget_before_siglip.autogaze_selected_total_patch_tokens",
+    "patch_budget_before_siglip.total_patch_reduction_ratio",
+    "llm_visual_budget.keep_all_visual_tokens_estimated",
+    "llm_visual_budget.actual_visual_tokens",
+    "llm_visual_budget.visual_token_reduction_ratio",
+)
 COMPUTE_FIELDS = (
     "compute_metrics.siglip_encoder.keep_all_to_actual_attention_macs_ratio",
     "compute_metrics.siglip_encoder.keep_all_to_actual_mlp_macs_ratio",
@@ -283,6 +302,29 @@ def numeric_values(rows: list[dict[str, Any]], field: str) -> list[float]:
         except (TypeError, ValueError):
             continue
     return values
+
+
+def summarize_processing_budget_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    for field in PROCESSING_BUDGET_SUMMARY_FIELDS:
+        values = [
+            metric_value(row, f"processing_budget_summary.{field}")
+            for row in rows
+        ]
+        values = [value for value in values if value is not None]
+        if not values:
+            summary[field] = None
+            continue
+        numeric: list[float] = []
+        for value in values:
+            if isinstance(value, bool):
+                continue
+            try:
+                numeric.append(float(value))
+            except (TypeError, ValueError):
+                continue
+        summary[field] = compute_stats(numeric)["median"] if numeric and len(numeric) == len(values) else values[0]
+    return summary
 
 
 def stats_by_field(rows: list[dict[str, Any]], fields: tuple[str, ...]) -> dict[str, dict[str, float | int]]:
@@ -510,6 +552,7 @@ def summarize_prediction_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     memory = stats_by_field(rows, MEMORY_FIELDS)
     tokens = stats_by_field(rows, TOKEN_FIELDS)
     compute = stats_by_field(rows, COMPUTE_FIELDS)
+    processing_budget = summarize_processing_budget_rows(rows)
     latency_summary = key_medians(latency, MODULE_LATENCY_FIELDS)
     token_summary = key_medians(tokens, KEY_TOKEN_FIELDS)
     memory_summary = key_medians(memory, KEY_MEMORY_FIELDS)
@@ -519,6 +562,7 @@ def summarize_prediction_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "memory_bytes": memory,
         "tokens": tokens,
         "compute": compute,
+        "processing_budget_summary": processing_budget,
         "readable_performance_summary": {
             "key_metrics_median": {
                 "latency_ms": latency_summary,
@@ -548,6 +592,13 @@ def summarize_prediction_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
             ),
             "memory_bytes_median": {field: memory[field]["median"] for field in MEMORY_FIELDS},
             "tokens_median": token_summary,
+            "processing_budget_summary": {
+                "mode_median": processing_budget,
+                "note": (
+                    "Median/representative input processing budget from per-row processing_budget_summary. "
+                    "String and dict values use the first observed non-null value; numeric values use median."
+                ),
+            },
             "compute_median": {
                 field: compute[field]["median"] for field in COMPUTE_FIELDS
             },

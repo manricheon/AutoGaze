@@ -219,6 +219,30 @@ def test_render_benchmark_markdown_report_includes_scores_and_comparison_tables(
                 "additive_fields": ["video_preprocess_ms", "generate_ms"],
                 "do_not_sum_with_total_ms": ["video_decode_ms", "autogaze_ms", "ttft_ms"],
             },
+            "processing_budget_summary": {
+                "keep_all_median": {
+                    "video.source_resolution": "3840x2160",
+                    "video.processor_input_resolution": "1280x720",
+                    "tiling.spatial_tiles_per_frame": 8,
+                    "thumbnail.actual_frames": 64,
+                    "multiscale_patch_space.patch_positions_per_tile_frame": 1060,
+                    "patch_budget_before_siglip.keep_all_total_patch_tokens": 900,
+                    "patch_budget_before_siglip.autogaze_selected_total_patch_tokens": 900,
+                    "llm_visual_budget.keep_all_visual_tokens_estimated": 100,
+                    "llm_visual_budget.actual_visual_tokens": 100,
+                },
+                "autogaze_median": {
+                    "video.source_resolution": "3840x2160",
+                    "video.processor_input_resolution": "1280x720",
+                    "tiling.spatial_tiles_per_frame": 8,
+                    "thumbnail.actual_frames": 64,
+                    "multiscale_patch_space.patch_positions_per_tile_frame": 1060,
+                    "patch_budget_before_siglip.keep_all_total_patch_tokens": 900,
+                    "patch_budget_before_siglip.autogaze_selected_total_patch_tokens": 300,
+                    "llm_visual_budget.keep_all_visual_tokens_estimated": 100,
+                    "llm_visual_budget.actual_visual_tokens": 40,
+                },
+            },
         },
         "correctness_comparison": {
             "counts": {
@@ -294,6 +318,8 @@ def test_render_benchmark_markdown_report_includes_scores_and_comparison_tables(
     assert "| keep_all_only_correct | 1 | 0.25 |" in markdown
     assert "| autogaze_only_correct | 1 | 0.25 |" in markdown
     assert "| clip2.mp4 | What happened? | B | B | true | A | false | keep_all_only_correct |" in markdown
+    assert "## Processing Budget Summary" in markdown
+    assert "patch_budget_before_siglip.autogaze_selected_total_patch_tokens" in markdown
 
 
 def test_render_benchmark_markdown_keeps_detail_latency_when_autogaze_is_skipped():

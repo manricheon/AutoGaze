@@ -9,7 +9,14 @@ from pathlib import Path
 from typing import Any
 
 from repro.common import compute_stats, write_csv, write_json
-from repro.hlvid import latency_accounting_summary, read_jsonl, read_manifest_file, score_predictions
+from repro.hlvid import (
+    PROCESSING_BUDGET_SUMMARY_FIELDS,
+    latency_accounting_summary,
+    read_jsonl,
+    read_manifest_file,
+    score_predictions,
+    summarize_processing_budget_rows,
+)
 from repro.nvila_runner import (
     DEFAULT_BASELINE_MODEL,
     DEFAULT_HD_MODEL,
@@ -364,6 +371,30 @@ def build_readable_summary(
             after_key="after_autogaze_actual",
         ),
     }
+    processing_budget_comparison_fields = (
+        "patch_budget_before_siglip.keep_all_total_patch_tokens",
+        "patch_budget_before_siglip.autogaze_selected_total_patch_tokens",
+        "llm_visual_budget.keep_all_visual_tokens_estimated",
+        "llm_visual_budget.actual_visual_tokens",
+    )
+    processing_budget_summary = {
+        "keep_all_median": summarize_processing_budget_rows(keep_all_rows),
+        "autogaze_median": summarize_processing_budget_rows(autogaze_rows),
+        "comparison": {
+            field: _comparison_summary(
+                keep_all_rows,
+                autogaze_rows,
+                f"processing_budget_summary.{field}",
+                ratio_key="ratio_keep_all_over_autogaze",
+            )
+            for field in processing_budget_comparison_fields
+        },
+        "fields": list(PROCESSING_BUDGET_SUMMARY_FIELDS),
+        "note": (
+            "Representative processing budget for summary/Markdown review. Numeric values are medians; "
+            "string/dict values use the first non-null row. Full per-sample details remain in predictions JSONL."
+        ),
+    }
     return {
         "mode_status": {
             "keep_all": "available" if keep_all_rows else "skipped_or_missing",
@@ -388,6 +419,7 @@ def build_readable_summary(
             "tokens": tokens,
             "memory_bytes": key_memory,
         },
+        "processing_budget_summary": processing_budget_summary,
         "stage_timings_note": (
             "Nested stage timings are aggregated from per-row HLVid prediction JSONL. "
             "processor_autogaze_forward_batched_total_ms is the summed _run_autogaze_batched time "

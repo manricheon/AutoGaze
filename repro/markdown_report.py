@@ -707,6 +707,21 @@ def render_input_tokenization(payload: dict[str, Any], metrics: dict[str, Any]) 
 def render_processing_budget_summary(payload: dict[str, Any]) -> str:
     result = result_payload(payload)
     summary = as_mapping(result.get("processing_budget_summary") or payload.get("processing_budget_summary"))
+    readable_budget = as_mapping(
+        get_path(payload, "readable_summary.processing_budget_summary")
+        or get_path(payload, "readable_performance_summary.processing_budget_summary")
+    )
+    if readable_budget:
+        keep_all = as_mapping(readable_budget.get("keep_all_median") or readable_budget.get("mode_median"))
+        autogaze = as_mapping(readable_budget.get("autogaze_median"))
+        rows = []
+        fields = readable_budget.get("fields") or sorted(set(keep_all) | set(autogaze))
+        for field in fields:
+            rows.append([field, keep_all.get(field), autogaze.get(field)])
+        return "## Processing Budget Summary\n\n" + markdown_table(
+            ["Field", "Keep-all / Mode", "AutoGaze"],
+            [row for row in rows if row[1] is not None or row[2] is not None],
+        )
     if not summary:
         return ""
     model_unit = as_mapping(summary.get("model_processing_unit"))
