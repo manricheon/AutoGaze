@@ -6,6 +6,7 @@ from typing import Any
 
 from repro.common import write_json
 from repro.plugin_api import ExperimentSpec, MetricStatus
+from repro.plugins.autogaze_sparse_selector import runtime_config_from_args, run_direct_autogaze_selector
 from repro.plugins.mllm_adapters import MllmRunRequest, resolve_mllm_adapter
 from repro.plugins.pixelprune_adapter import PixelPruneConfig, apply_pixelprune_if_available, pixelprune_model_key
 
@@ -75,6 +76,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pixelprune-verbose", action="store_true")
     parser.add_argument("--enable-qwen-prune-generate", action="store_true")
     parser.add_argument("--sparse-selection-plan-json")
+    parser.add_argument("--run-autogaze-selector", action="store_true")
+    parser.add_argument("--autogaze-selector-output-json")
+    parser.add_argument("--autogaze-repo", default=".")
+    parser.add_argument("--autogaze-model")
+    parser.add_argument("--autogaze-device", default="auto", choices=["auto", "cpu", "mps", "cuda"])
+    parser.add_argument("--autogaze-dtype", default="auto", choices=["auto", "float32", "float16", "bfloat16"])
+    parser.add_argument("--autogaze-target-scales", default="32+64+112+224")
+    parser.add_argument("--autogaze-target-patch-size", type=int, default=16)
+    parser.add_argument("--autogaze-encoder-patch-size", type=int)
+    parser.add_argument("--autogaze-tile-size", type=int)
+    parser.add_argument("--autogaze-chunk-frames", type=int, default=16)
+    parser.add_argument("--max-batch-size-autogaze", type=int, default=16)
+    parser.add_argument("--task-loss-requirement", type=float)
+    parser.add_argument("--autogaze-generate-only", action="store_true")
+    parser.add_argument("--qwen-video-nframes", type=int)
+    parser.add_argument("--qwen-video-fps", type=float)
+    parser.add_argument("--qwen-video-max-pixels", type=int)
+    parser.add_argument("--qwen-video-min-pixels", type=int)
     parser.add_argument("--video")
     parser.add_argument("--image")
     parser.add_argument("--prompt", default="Describe the video.")
@@ -98,6 +117,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = build_parser().parse_args(argv)
     if getattr(args, "mllm_path", None) is None:
         args.mllm_path = args.model_path
+    if (
+        getattr(args, "qwen_video_nframes", None) is None
+        and getattr(args, "video", None)
+        and str(getattr(args, "model_family", "")).startswith("qwen")
+    ):
+        args.qwen_video_nframes = int(getattr(args, "num_video_frames", 0) or 0)
     return args
 
 
@@ -326,13 +351,39 @@ def run_single(args: argparse.Namespace) -> dict[str, Any]:
         write_json(args.output_json, payload)
         return payload
 
+    direct_selector_status = maybe_run_direct_autogaze_selector(args)
+    if direct_selector_status.get("status") == "failed":
+        payload["implementation_status"] = "failed_autogaze_selector"
+        payload["pre_encoder_prune_runtime"] = pixelprune_status
+        payload["direct_autogaze_selector"] = direct_selector_status
+        write_json(args.output_json, payload)
+        return payload
+
+    request = build_mllm_run_request(args)
+    payload["mllm_runtime"] = adapter.describe_runtime(request)
     output = adapter.run(request).to_dict()
     payload["implementation_status"] = output.get("status", "executed")
     payload["pre_encoder_prune_runtime"] = pixelprune_status
+    payload["direct_autogaze_selector"] = direct_selector_status
     payload["generation"] = output
     payload["measurement_plan"] = output.get("metrics", payload["measurement_plan"])
     write_json(args.output_json, payload)
     return payload
+
+
+def maybe_run_direct_autogaze_selector(args: argparse.Namespace) -> dict[str, Any]:
+    if not getattr(args, "run_autogaze_selector", False):
+        return {"status": "not_requested"}
+    if not getattr(args, "video", None):
+        return {"status": "failed", "reason": "--run-autogaze-selector requires --video"}
+    if getattr(args, "qwen_video_nframes", None) is None:
+        args.qwen_video_nframes = int(getattr(args, "num_video_frames", 0) or 0)
+    try:
+        status = run_direct_autogaze_selector(runtime_config_from_args(args))
+    except Exception as exc:
+        return {"status": "failed", "reason": str(exc), "exception_type": type(exc).__name__}
+    args.sparse_selection_plan_json = status.get("sparse_selection_plan_json")
+    return status
 
 
 def maybe_apply_pre_encoder_prune(args: argparse.Namespace, model_family: str) -> dict[str, Any]:
@@ -388,6 +439,10 @@ def build_mllm_run_request(args: argparse.Namespace) -> MllmRunRequest:
         external_mllm_command=args.external_mllm_command,
         enable_qwen_prune_generate=args.enable_qwen_prune_generate,
         sparse_selection_plan_path=args.sparse_selection_plan_json,
+        qwen_video_nframes=args.qwen_video_nframes,
+        qwen_video_fps=args.qwen_video_fps,
+        qwen_video_max_pixels=args.qwen_video_max_pixels,
+        qwen_video_min_pixels=args.qwen_video_min_pixels,
     )
 
 

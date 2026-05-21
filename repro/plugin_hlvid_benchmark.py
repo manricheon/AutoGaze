@@ -138,14 +138,21 @@ def build_mode_runner_args(
             max_tiles_video=max_tiles_video,
             max_new_tokens=max_new_tokens,
         )
-    if mode in {"qwen3-vl-autogaze-probe", "qwen3-vl-autogaze-poc", "qwen3-vl-autogaze-prune-generate"}:
+    if mode in {
+        "qwen3-vl-autogaze-probe",
+        "qwen3-vl-autogaze-poc",
+        "qwen3-vl-autogaze-prune-generate",
+        "qwen3-vl-autogaze-direct-prune-generate",
+        "qwen3-vl-autogaze-direct-pre-vit-sparse",
+    }:
+        integration_level = "pre_encoder_sparse" if mode == "qwen3-vl-autogaze-direct-pre-vit-sparse" else "post_encoder_token_prune"
         args = _base_args(
             model_family="qwen3-vl",
             model_path=models.get("qwen3-vl", DEFAULT_MODELS["qwen3-vl"]),
             token_selector="autogaze",
             vision_adapter="qwen3-vl-vision",
             mllm_adapter="qwen3-vl",
-            integration_level="post_encoder_token_prune",
+            integration_level=integration_level,
             row=row,
             video_path=video_path,
             output_json=output_json,
@@ -154,8 +161,12 @@ def build_mode_runner_args(
             max_tiles_video=max_tiles_video,
             max_new_tokens=max_new_tokens,
         )
-        if mode == "qwen3-vl-autogaze-prune-generate":
+        if mode in {"qwen3-vl-autogaze-prune-generate", "qwen3-vl-autogaze-direct-prune-generate"}:
             args.append("--enable-qwen-prune-generate")
+        if mode in {"qwen3-vl-autogaze-direct-prune-generate", "qwen3-vl-autogaze-direct-pre-vit-sparse"}:
+            args.extend(["--run-autogaze-selector", "--autogaze-generate-only"])
+        if mode == "qwen3-vl-autogaze-direct-pre-vit-sparse":
+            args.extend(["--enable-qwen-prune-generate", "--pre-encoder-prune-adapter", "autogaze-sparse"])
         return args
     if mode == "qwen3-vl-pixelprune-pre-vit":
         args = _base_args(
@@ -283,6 +294,8 @@ def build_markdown_report(summary: dict[str, Any]) -> str:
             "- `qwen3-vl-pixelprune-pre-vit` applies PixelPrune before Qwen model load and then runs the native Qwen path.",
             "- `qwen3-vl-autogaze-poc` records a Qwen AutoGaze post-encoder attachment PoC until visual token packing is wired.",
             "- `qwen3-vl-autogaze-prune-generate` explicitly enables the experimental Qwen post-encoder prune + generate path.",
+            "- `qwen3-vl-autogaze-direct-prune-generate` runs AutoGaze first, writes a sparse plan, then uses that plan for Qwen prune + generate.",
+            "- `qwen3-vl-autogaze-direct-pre-vit-sparse` additionally installs the experimental Qwen sparse vision hook before MLLM packing.",
             "- `accuracy_total` uses all rows in the denominator; failed and parse-failed rows are separated in the table.",
         ]
     )

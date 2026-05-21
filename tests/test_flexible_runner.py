@@ -490,6 +490,107 @@ def test_flexible_runner_passes_sparse_selection_plan_json_to_qwen_prune_generat
     assert payload["generation"]["text"] == "qwen plan"
 
 
+def test_flexible_runner_runs_direct_autogaze_selector_before_qwen_prune_generate(monkeypatch, tmp_path):
+    output_json = tmp_path / "qwen3_direct_autogaze.json"
+    generated_plan_json = tmp_path / "generated_sparse_plan.json"
+    args = parse_args(
+        [
+            "--mode",
+            "single",
+            "--model-family",
+            "qwen3-vl",
+            "--model-path",
+            "weight/Qwen3-VL-8B-Instruct",
+            "--token-selector-adapter",
+            "autogaze",
+            "--token-selector-path",
+            "weight/AutoGaze",
+            "--vision-encoder-adapter",
+            "qwen3-vl-vision",
+            "--mllm-adapter",
+            "qwen3-vl",
+            "--autogaze-integration-level",
+            "post_encoder_token_prune",
+            "--enable-qwen-prune-generate",
+            "--run-autogaze-selector",
+            "--autogaze-selector-output-json",
+            str(generated_plan_json),
+            "--gazing-ratio",
+            "0.1",
+            "--video",
+            "inputs/example.mp4",
+            "--output-json",
+            str(output_json),
+        ]
+    )
+
+    def fake_selector(selector_args):
+        assert selector_args.video == "inputs/example.mp4"
+        generated_plan_json.write_text('{"selector_name": "autogaze-direct", "selected_patches": []}')
+        return {
+            "status": "executed",
+            "sparse_selection_plan_json": str(generated_plan_json),
+            "tokens": {
+                "raw_patch_tokens": 100,
+                "selected_patch_tokens": 9,
+                "reduction_ratio": 100 / 9,
+            },
+        }
+
+    def fake_run(self, request):
+        assert request.sparse_selection_plan_path == str(generated_plan_json)
+        return MllmRunResult(
+            text="qwen direct autogaze",
+            prompt=request.prompt,
+            video=request.video,
+            image=request.image,
+            adapter=self.name,
+            status="executed",
+            metrics={
+                "latency_ms": {"total": 1.0},
+                "tokens": {"visual_tokens_before_prune": 100, "visual_tokens_after_prune": 9},
+                "memory_bytes": {},
+            },
+        )
+
+    monkeypatch.setattr("repro.flexible_runner.run_direct_autogaze_selector", fake_selector)
+    monkeypatch.setattr(QwenGridMllmAdapter, "_run_qwen_autogaze_prune_generate", fake_run)
+
+    payload = run_single(args)
+
+    assert payload["implementation_status"] == "executed"
+    assert payload["direct_autogaze_selector"]["status"] == "executed"
+    assert payload["direct_autogaze_selector"]["sparse_selection_plan_json"] == str(generated_plan_json)
+    assert payload["generation"]["text"] == "qwen direct autogaze"
+
+
+def test_flexible_runner_defaults_qwen_video_nframes_to_num_video_frames():
+    args = parse_args(
+        [
+            "--mode",
+            "single",
+            "--model-family",
+            "qwen2.5-vl",
+            "--model-path",
+            "weight/Qwen2.5-VL-7B-Instruct",
+            "--token-selector-adapter",
+            "keep-all",
+            "--vision-encoder-adapter",
+            "qwen2.5-vl-vision",
+            "--mllm-adapter",
+            "qwen2.5-vl",
+            "--autogaze-integration-level",
+            "none",
+            "--num-video-frames",
+            "32",
+            "--video",
+            "inputs/large.mp4",
+        ]
+    )
+
+    assert args.qwen_video_nframes == 32
+
+
 def test_flexible_runner_supports_llava_onevision_and_internvl_status():
     llava_args = parse_args(
         [

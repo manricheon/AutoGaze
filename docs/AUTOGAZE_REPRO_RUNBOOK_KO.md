@@ -1512,6 +1512,108 @@ Qwen3-VL에서 실제 prune-generate 경로를 실험하려면 아래처럼 명�
   --output-json outputs/autogaze_repro/flexible_qwen3_vl_autogaze_prune_generate.json
 ```
 
+Qwen에서 AutoGaze 모델을 실제로 먼저 돌린 뒤 바로 Qwen ViT/MLLM prune-generate에 붙이려면 `--run-autogaze-selector`를 추가합니다. 이 모드는 다음 순서로 실행됩니다.
+
+```text
+video
+  -> direct AutoGaze selector
+       - sampled frames: --num-video-frames
+       - chunk: --autogaze-chunk-frames
+       - scales/patch: --autogaze-target-scales, --autogaze-target-patch-size
+       - output: SparseSelectionPlan JSON
+  -> Qwen processor / Qwen ViT get_video_features
+       - qwen_vl_utils nframes는 기본적으로 --num-video-frames와 맞춤
+  -> selected_patches를 Qwen video_grid_thw visual indices로 매핑
+  -> Qwen visual placeholder를 줄인 inputs_embeds
+  -> Qwen MLLM generate
+```
+
+```bash
+.venv/bin/python -m repro.flexible_runner \
+  --mode single \
+  --model-path weight/Qwen3-VL-8B-Instruct \
+  --model-family qwen3-vl \
+  --token-selector-adapter autogaze \
+  --token-selector-path /path/to/weights/AutoGaze \
+  --vision-encoder-adapter qwen3-vl-vision \
+  --mllm-adapter qwen3-vl \
+  --autogaze-integration-level post_encoder_token_prune \
+  --enable-qwen-prune-generate \
+  --run-autogaze-selector \
+  --autogaze-generate-only \
+  --autogaze-repo external/AutoGaze \
+  --autogaze-target-scales 32+64+112+224 \
+  --autogaze-target-patch-size 16 \
+  --autogaze-encoder-patch-size 16 \
+  --autogaze-chunk-frames 16 \
+  --max-batch-size-autogaze 1 \
+  --num-video-frames 16 \
+  --gazing-ratio 0.75 \
+  --task-loss-requirement 0.7 \
+  --video external/AutoGaze/assets/example_input.mp4 \
+  --output-json outputs/autogaze_repro/flexible_qwen3_vl_direct_autogaze_prune_generate.json
+```
+
+출력에서 먼저 확인할 위치:
+
+- `direct_autogaze_selector.sparse_selection_plan_json`: 실제 AutoGaze가 만든 sparse plan 파일
+- `direct_autogaze_selector.tokens.raw_patch_tokens`: AutoGaze 입력 후보 패치 수
+- `direct_autogaze_selector.tokens.selected_patch_tokens`: AutoGaze가 선택한 non-padded 패치 수
+- `generation.metrics.qwen_prune_generate.selection_source`: `sparse_selection_plan`이면 실제 AutoGaze plan이 Qwen prune에 사용된 것
+- `generation.metrics.tokens.visual_tokens_before_prune / visual_tokens_after_prune`: Qwen MLLM에 들어가는 visual placeholder 감소량
+
+주의: 현재 Qwen 연결은 **post-encoder prune**입니다. 즉 Qwen ViT는 아직 full video feature를 계산하고, AutoGaze 이득은 우선 MLLM context/prefill/KV cache 쪽에서 확인합니다. ViT 연산량까지 줄이려면 다음 단계의 pre-ViT sparse input adapter가 필요합니다.
+
+Qwen ViT 연산량까지 줄이는 실험 경로는 `pre_encoder_sparse + autogaze-sparse`로 켭니다. 이 경로는 AutoGaze plan을 Qwen `video_grid_thw`의 merged visual token index로 매핑한 뒤, Qwen visual transformer에 들어가는 merged-token group만 통과시키고, 같은 index의 visual placeholder만 MLLM 입력에 남깁니다. 아직 모델별 실험 hook이므로 CUDA smoke에서 `qwen_pre_vit_sparse.status`와 `metric_status`를 먼저 확인해야 합니다.
+
+```bash
+.venv/bin/python -m repro.flexible_runner \
+  --mode single \
+  --model-path weight/Qwen3-VL-8B-Instruct \
+  --model-family qwen3-vl \
+  --token-selector-adapter autogaze \
+  --token-selector-path /path/to/weights/AutoGaze \
+  --vision-encoder-adapter qwen3-vl-vision \
+  --mllm-adapter qwen3-vl \
+  --autogaze-integration-level pre_encoder_sparse \
+  --pre-encoder-prune-adapter autogaze-sparse \
+  --enable-qwen-prune-generate \
+  --run-autogaze-selector \
+  --autogaze-generate-only \
+  --autogaze-repo external/AutoGaze \
+  --autogaze-target-scales 32+64+112+224 \
+  --autogaze-target-patch-size 16 \
+  --autogaze-encoder-patch-size 16 \
+  --autogaze-chunk-frames 16 \
+  --max-batch-size-autogaze 1 \
+  --num-video-frames 16 \
+  --qwen-video-max-pixels 200704 \
+  --gazing-ratio 0.75 \
+  --task-loss-requirement 0.7 \
+  --video external/AutoGaze/assets/example_input.mp4 \
+  --output-json outputs/autogaze_repro/flexible_qwen3_vl_direct_autogaze_pre_vit_sparse.json
+```
+
+Qwen off 또는 AutoGaze off로 큰 비디오를 넣을 때는 NVILA runner와 다르게 Qwen의 `qwen_vl_utils`가 비디오 디코드/샘플링/resize를 담당합니다. runner는 Qwen 계열 비디오 실행에서 `--qwen-video-nframes`를 기본적으로 `--num-video-frames`와 맞추지만, 4K/긴 영상은 아래처럼 해상도 cap도 같이 주는 편이 안전합니다.
+
+```bash
+.venv/bin/python -m repro.flexible_runner \
+  --mode single \
+  --model-path weight/Qwen3-VL-8B-Instruct \
+  --model-family qwen3-vl \
+  --token-selector-adapter keep-all \
+  --vision-encoder-adapter qwen3-vl-vision \
+  --mllm-adapter qwen3-vl \
+  --autogaze-integration-level none \
+  --num-video-frames 32 \
+  --qwen-video-nframes 32 \
+  --qwen-video-max-pixels 200704 \
+  --video /path/to/large_4k_video.mp4 \
+  --output-json outputs/autogaze_repro/flexible_qwen3_vl_off_large_video.json
+```
+
+`qwen_vl_utils` 단계에서 죽으면 JSON의 `generation.metrics.metric_status.reason` 또는 터미널 에러에 `video`, `nframes`, `fps`, `max_pixels`가 같이 표시됩니다. 여러 비디오 종류를 테스트하는 것은 좋지만, 우선은 같은 비디오에 대해 `nframes`와 `max_pixels`를 고정한 뒤 비교해야 NVILA runner와 같은 조건이 됩니다.
+
 HLVid limit3 plugin 비교는 `configs/repro/plugin_hlvid_limit3.yaml`에 대응합니다. CUDA 머신의 HLVid 폴더가 mp4 flat 구조여도 `video_root / basename(video_path)` fallback으로 찾습니다.
 
 ```bash
@@ -1520,7 +1622,7 @@ HLVid limit3 plugin 비교는 `configs/repro/plugin_hlvid_limit3.yaml`에 대응
   --video-root /path/to/HLVid/videos \
   --output-dir outputs/autogaze_repro/plugin_hlvid_limit3 \
   --limit 3 \
-  --modes nvila-video-off,longvila-off,internvl3-off,qwen3-vl-autogaze-probe,qwen3-vl-autogaze-prune-generate \
+  --modes nvila-video-off,longvila-off,internvl3-off,qwen3-vl-autogaze-probe,qwen3-vl-autogaze-prune-generate,qwen3-vl-autogaze-direct-prune-generate,qwen3-vl-autogaze-direct-pre-vit-sparse \
   --external-mllm-command vila-infer \
   --model nvila-video=weight/NVILA-8B-Video \
   --model longvila=weight/LongVILA \

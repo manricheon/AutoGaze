@@ -221,7 +221,7 @@ def qwen_visual_indices_from_sparse_plan(
     indices: list[int] = []
     statuses: set[str] = set()
     for patch in sorted(plan.selected_patches, key=lambda item: item.autoregressive_order):
-        frame_order = min(max(int(patch.frame_order), 0), max(t - 1, 0))
+        frame_order = _map_frame_order_to_qwen_temporal_index(plan, int(patch.frame_order), t)
         row_col_status = _qwen_row_col_for_patch(plan, patch, h=h, w=w)
         if row_col_status is None:
             continue
@@ -251,6 +251,15 @@ def qwen_visual_indices_from_sparse_plan(
         status = "approximate_grid"
         reason = f"mapped {len(plan.selected_patches)} AutoGaze patches to {len(indices)} merged Qwen visual feature indices"
     return MllmMapping(status=status, visual_feature_indices=indices, reason=reason)
+
+
+def _map_frame_order_to_qwen_temporal_index(plan: SparseSelectionPlan, frame_order: int, qwen_t: int) -> int:
+    if qwen_t <= 1:
+        return 0
+    sampled_count = len(plan.source_video.sampled_frame_indices)
+    if sampled_count > 1 and sampled_count != qwen_t:
+        return min(max(int(round(frame_order * (qwen_t - 1) / (sampled_count - 1))), 0), qwen_t - 1)
+    return min(max(int(frame_order), 0), qwen_t - 1)
 
 
 def _qwen_row_col_for_patch(

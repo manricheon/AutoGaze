@@ -3,7 +3,9 @@ import os
 from repro.plugins.mllm_adapters import (
     _build_qwen_grid_inputs,
     build_qwen_pruned_visual_inputs,
+    build_qwen_pre_vit_sparse_visual_inputs,
     InternVL3CliMllmAdapter,
+    install_qwen_pre_vit_sparse_hook,
     MllmRunRequest,
     MllmRunResult,
     PlannedMllmAdapter,
@@ -38,6 +40,10 @@ def make_request(**overrides):
         "external_mllm_command": "vila-infer",
         "enable_qwen_prune_generate": False,
         "sparse_selection_plan_path": None,
+        "qwen_video_nframes": None,
+        "qwen_video_fps": None,
+        "qwen_video_max_pixels": None,
+        "qwen_video_min_pixels": None,
     }
     values.update(overrides)
     return MllmRunRequest(**values)
@@ -253,6 +259,131 @@ def test_qwen_grid_adapter_runs_prune_generate_path_when_explicitly_enabled(monk
     assert result.status == "executed"
     assert result.text == "pruned answer"
     assert result.metrics["qwen_prune_generate"]["enabled"] is True
+
+
+def test_qwen_grid_adapter_runs_pre_vit_sparse_path_when_explicitly_enabled(monkeypatch):
+    adapter = resolve_mllm_adapter("qwen3-vl")
+
+    def fake_run(self, request):
+        return MllmRunResult(
+            text="pre vit sparse answer",
+            prompt=request.prompt,
+            video=request.video,
+            image=request.image,
+            adapter=self.name,
+            status="executed",
+            metrics={
+                "latency_ms": {"total": 33.0},
+                "tokens": {
+                    "visual_tokens_before_prune": 100,
+                    "visual_tokens_after_prune": 7,
+                },
+                "memory_bytes": {},
+                "qwen_pre_vit_sparse": {"enabled": True},
+            },
+        )
+
+    monkeypatch.setattr(QwenGridMllmAdapter, "_run_qwen_autogaze_pre_vit_sparse_generate", fake_run)
+
+    result = adapter.run(
+        make_request(
+            model_family="qwen3-vl",
+            mllm_adapter="qwen3-vl",
+            token_selector_kind="autogaze",
+            integration_level="pre_encoder_sparse",
+            pre_encoder_prune_adapter="autogaze-sparse",
+            enable_qwen_prune_generate=True,
+            sparse_selection_plan_path="outputs/plan.json",
+        )
+    )
+
+    assert result.status == "executed"
+    assert result.text == "pre vit sparse answer"
+    assert result.metrics["qwen_pre_vit_sparse"]["enabled"] is True
+
+
+def test_qwen_pre_vit_sparse_visual_inputs_use_pruned_features_and_original_placeholders():
+    torch = __import__("torch")
+
+    class FakeQwenModel:
+        def __init__(self):
+            self.config = type("Config", (), {"video_token_id": 999})()
+            self.embedding = torch.nn.Embedding(1200, 4)
+
+        def get_input_embeddings(self):
+            return self.embedding
+
+        def get_video_features(self, pixel_values_videos=None, video_grid_thw=None):
+            return torch.tensor(
+                [
+                    [10.0, 0.0, 0.0, 0.0],
+                    [30.0, 0.0, 0.0, 0.0],
+                ]
+            )
+
+    inputs = {
+        "input_ids": torch.tensor([[1, 999, 999, 999, 999, 2]]),
+        "attention_mask": torch.ones((1, 6), dtype=torch.long),
+        "pixel_values_videos": torch.zeros((1, 3, 2, 2)),
+        "video_grid_thw": torch.tensor([[1, 2, 2]]),
+    }
+
+    pruned = build_qwen_pre_vit_sparse_visual_inputs(FakeQwenModel(), inputs, original_keep_indices=[0, 2])
+
+    assert pruned["input_ids"].tolist() == [[1, 999, 999, 2]]
+    assert list(pruned["inputs_embeds"].shape) == [1, 4, 4]
+    assert pruned["inputs_embeds"][0, 1].tolist() == [10.0, 0.0, 0.0, 0.0]
+    assert pruned["inputs_embeds"][0, 2].tolist() == [30.0, 0.0, 0.0, 0.0]
+    assert "pixel_values_videos" not in pruned
+    assert "video_grid_thw" not in pruned
+    assert pruned["qwen_pre_vit_sparse_metadata"]["visual_tokens_before_prune"] == 4
+    assert pruned["qwen_pre_vit_sparse_metadata"]["visual_tokens_after_prune"] == 2
+    assert pruned["qwen_pre_vit_sparse_metadata"]["kept_original_visual_indices"] == [0, 2]
+
+
+def test_install_qwen_pre_vit_sparse_hook_runs_sparse_visual_forward():
+    torch = __import__("torch")
+
+    class FakeMerger(torch.nn.Module):
+        def forward(self, hidden_states):
+            return hidden_states.reshape(-1, 4, 3).sum(dim=1)
+
+    class FakeVisual(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.dtype = torch.float32
+            self.spatial_merge_unit = 4
+            self.patch_embed = torch.nn.Identity()
+            self.blocks = torch.nn.ModuleList([])
+            self.merger = FakeMerger()
+
+        def rot_pos_emb(self, grid_thw):
+            return torch.zeros((8, 2), dtype=torch.float32)
+
+    class FakeInner:
+        def __init__(self):
+            self.visual = FakeVisual()
+
+        def get_video_features(self, pixel_values_videos=None, video_grid_thw=None):
+            raise AssertionError("should be patched")
+
+    class FakeModel:
+        def __init__(self):
+            self.model = FakeInner()
+
+        def get_video_features(self, pixel_values_videos=None, video_grid_thw=None):
+            raise AssertionError("should be patched")
+
+    model = FakeModel()
+
+    status = install_qwen_pre_vit_sparse_hook(model, keep_indices=[1])
+    features = model.get_video_features(
+        pixel_values_videos=torch.arange(24, dtype=torch.float32).reshape(8, 3),
+        video_grid_thw=torch.tensor([[1, 2, 4]]),
+    )
+
+    assert status["selected_merged_tokens"] == 1
+    assert features.tolist() == [[66.0, 70.0, 74.0]]
 
 
 def test_resolve_qwen_visual_keep_indices_prefers_sparse_plan_json(tmp_path):

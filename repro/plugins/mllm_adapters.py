@@ -8,6 +8,7 @@ import shlex
 import shutil
 import subprocess
 import time
+from types import MethodType
 from typing import Any
 
 from repro.plugins.gaze_plan import (
@@ -40,6 +41,10 @@ class MllmRunRequest:
     external_mllm_command: str = "vila-infer"
     enable_qwen_prune_generate: bool = False
     sparse_selection_plan_path: str | None = None
+    qwen_video_nframes: int | None = None
+    qwen_video_fps: float | None = None
+    qwen_video_max_pixels: int | None = None
+    qwen_video_min_pixels: int | None = None
 
 
 @dataclass(frozen=True)
@@ -397,7 +402,16 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
     def build_messages(self, request: MllmRunRequest) -> list[dict[str, Any]]:
         content: list[dict[str, Any]] = []
         if request.video:
-            content.append({"type": "video", "video": request.video})
+            video_item: dict[str, Any] = {"type": "video", "video": request.video}
+            if request.qwen_video_nframes is not None:
+                video_item["nframes"] = int(request.qwen_video_nframes)
+            if request.qwen_video_fps is not None:
+                video_item["fps"] = float(request.qwen_video_fps)
+            if request.qwen_video_max_pixels is not None:
+                video_item["max_pixels"] = int(request.qwen_video_max_pixels)
+            if request.qwen_video_min_pixels is not None:
+                video_item["min_pixels"] = int(request.qwen_video_min_pixels)
+            content.append(video_item)
         if request.image:
             content.append({"type": "image", "image": request.image})
         content.append({"type": "text", "text": request.prompt})
@@ -405,11 +419,28 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
 
     def describe_runtime(self, request: MllmRunRequest) -> dict[str, Any]:
         description = super().describe_runtime(request)
+        if request.video:
+            description["qwen_video_input"] = {
+                "video": request.video,
+                "nframes": request.qwen_video_nframes,
+                "fps": request.qwen_video_fps,
+                "max_pixels": request.qwen_video_max_pixels,
+                "min_pixels": request.qwen_video_min_pixels,
+                "note": "These constraints are passed to qwen_vl_utils through the video message item.",
+            }
         if request.token_selector_kind == "autogaze" or request.integration_level != "none":
             description["feature_packing_probe"] = build_feature_packing_probe(self.name, request)
         return description
 
     def run(self, request: MllmRunRequest) -> MllmRunResult:
+        if (
+            request.token_selector_kind == "autogaze"
+            and request.integration_level == "pre_encoder_sparse"
+            and request.pre_encoder_prune_adapter == "autogaze-sparse"
+        ):
+            if request.enable_qwen_prune_generate:
+                return self._run_qwen_autogaze_pre_vit_sparse_generate(request)
+            return self._run_autogaze_post_encoder_poc(request)
         if request.token_selector_kind == "autogaze" and request.integration_level == "post_encoder_token_prune":
             if request.enable_qwen_prune_generate:
                 return self._run_qwen_autogaze_prune_generate(request)
@@ -525,6 +556,146 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
             generated_ids = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(input_ids, generated_ids)]
         text = processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
+        _record_cuda_memory(metrics)
+        return MllmRunResult(
+            text=text,
+            prompt=request.prompt,
+            video=request.video,
+            image=request.image,
+            adapter=self.name,
+            status="executed",
+            metrics=metrics,
+        )
+
+    def _run_qwen_autogaze_pre_vit_sparse_generate(self, request: MllmRunRequest) -> MllmRunResult:
+        try:
+            from transformers import AutoModelForImageTextToText, AutoProcessor
+        except ModuleNotFoundError as exc:
+            raise RuntimeError("transformers is required for Qwen grid MLLM execution") from exc
+
+        model_kwargs: dict[str, Any] = {
+            "device_map": request.device_map,
+            "trust_remote_code": request.trust_remote_code,
+        }
+        if request.dtype != "auto":
+            model_kwargs["dtype"] = request.dtype
+        if request.attn_implementation:
+            model_kwargs["attn_implementation"] = request.attn_implementation
+
+        metrics = build_metric_skeleton(request)
+        metrics["feature_packing_probe"] = build_feature_packing_probe(self.name, request)
+        total_start = time.perf_counter()
+        start = time.perf_counter()
+        model = AutoModelForImageTextToText.from_pretrained(request.model_path, **model_kwargs)
+        metrics["latency_ms"]["model_load"] = _elapsed_ms(start)
+        start = time.perf_counter()
+        processor = AutoProcessor.from_pretrained(request.model_path, trust_remote_code=request.trust_remote_code)
+        metrics["latency_ms"]["processor_load"] = _elapsed_ms(start)
+        messages = self.build_messages(request)
+        start = time.perf_counter()
+        inputs = _build_qwen_grid_inputs(processor, messages, request)
+        metrics["latency_ms"]["input_build"] = _elapsed_ms(start)
+        _record_input_token_metrics(metrics, inputs)
+        model_device = getattr(model, "device", None)
+        if model_device is not None and hasattr(inputs, "to"):
+            inputs = inputs.to(model_device)
+
+        try:
+            if not request.sparse_selection_plan_path:
+                raise ValueError("Qwen pre-ViT AutoGaze sparse mode requires --sparse-selection-plan-json or --run-autogaze-selector")
+            raw_visual_tokens = count_qwen_visual_placeholders(model, inputs)
+            mapping = _qwen_mapping_from_sparse_plan_path(
+                request.sparse_selection_plan_path,
+                model=model,
+                inputs=inputs,
+            )
+            keep_indices = [
+                int(index)
+                for index in (mapping.visual_feature_indices or [])
+                if 0 <= int(index) < int(raw_visual_tokens)
+            ]
+            if not keep_indices:
+                raise ValueError(f"AutoGaze sparse plan did not map to Qwen visual tokens: {mapping.reason}")
+            install_qwen_pre_vit_sparse_hook(model, keep_indices)
+            start = time.perf_counter()
+            pruned_inputs = build_qwen_pre_vit_sparse_visual_inputs(model, inputs, original_keep_indices=keep_indices)
+            metrics["latency_ms"]["pre_vit_sparse_prepare"] = _elapsed_ms(start)
+        except Exception as exc:
+            metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
+            metrics["qwen_pre_vit_sparse"] = {
+                "enabled": True,
+                "status": "failed_before_generate",
+                "reason": str(exc),
+            }
+            metrics["metric_status"] = {
+                "value": "failed_qwen_pre_vit_sparse",
+                "reason": str(exc),
+            }
+            _record_cuda_memory(metrics)
+            return MllmRunResult(
+                text=None,
+                prompt=request.prompt,
+                video=request.video,
+                image=request.image,
+                adapter=self.name,
+                status="failed_qwen_pre_vit_sparse",
+                metrics=metrics,
+            )
+
+        sparse_metadata = pruned_inputs.pop("qwen_pre_vit_sparse_metadata")
+        metrics["qwen_pre_vit_sparse"] = {
+            "enabled": True,
+            "status": "inputs_embeds_prepared",
+            "selection_source": "sparse_selection_plan",
+            "sparse_selection_plan_path": request.sparse_selection_plan_path,
+            "mllm_mapping": mapping.to_dict(),
+            **sparse_metadata,
+        }
+        metrics["tokens"]["visual_tokens_before_prune"] = sparse_metadata["visual_tokens_before_prune"]
+        metrics["tokens"]["visual_tokens_after_prune"] = sparse_metadata["visual_tokens_after_prune"]
+        if sparse_metadata["visual_tokens_after_prune"]:
+            metrics["tokens"]["visual_token_reduction_ratio"] = (
+                sparse_metadata["visual_tokens_before_prune"] / sparse_metadata["visual_tokens_after_prune"]
+            )
+        input_ids = pruned_inputs.get("input_ids")
+        if input_ids is not None and hasattr(input_ids, "shape"):
+            metrics["tokens"]["llm_context_tokens"] = int(input_ids.shape[-1])
+
+        start = time.perf_counter()
+        try:
+            generated_ids = model.generate(**pruned_inputs, max_new_tokens=request.max_new_tokens)
+        except Exception as exc:
+            metrics["latency_ms"]["generate"] = _elapsed_ms(start)
+            metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
+            metrics["qwen_pre_vit_sparse"]["status"] = "failed_during_generate"
+            metrics["qwen_pre_vit_sparse"]["reason"] = str(exc)
+            metrics["metric_status"] = {
+                "value": "failed_qwen_pre_vit_sparse",
+                "reason": str(exc),
+            }
+            _record_cuda_memory(metrics)
+            return MllmRunResult(
+                text=None,
+                prompt=request.prompt,
+                video=request.video,
+                image=request.image,
+                adapter=self.name,
+                status="failed_qwen_pre_vit_sparse",
+                metrics=metrics,
+            )
+
+        metrics["latency_ms"]["generate"] = _elapsed_ms(start)
+        if input_ids is not None:
+            generated_ids = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(input_ids, generated_ids)]
+        text = processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+        metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
+        metrics["metric_status"] = {
+            "value": "executed_qwen_pre_vit_sparse",
+            "reason": (
+                "Qwen visual transformer received AutoGaze-selected sparse merged-token groups, "
+                "then the matching visual placeholders were packed into inputs_embeds."
+            ),
+        }
         _record_cuda_memory(metrics)
         return MllmRunResult(
             text=text,
@@ -749,20 +920,43 @@ def _build_qwen_grid_inputs(processor: Any, messages: list[dict[str, Any]], requ
                 "or rerun `.venv/bin/python -m pip install -r requirements-repro.txt`."
             ) from exc
         text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        images, videos, video_kwargs = process_vision_info(messages, return_video_kwargs=True)
-        return processor(
-            text=[text],
-            images=images,
-            videos=videos,
-            return_tensors="pt",
-            **video_kwargs,
-        )
+        try:
+            images, videos, video_kwargs = process_vision_info(messages, return_video_kwargs=True)
+        except Exception as exc:
+            raise RuntimeError(
+                "Qwen video decode/preprocess failed before processor tokenization. "
+                f"{_qwen_video_debug_context(request)} "
+                "For large videos, set --qwen-video-nframes to a small sampled frame count and "
+                "--qwen-video-max-pixels to cap per-frame resolution."
+            ) from exc
+        try:
+            return processor(
+                text=[text],
+                images=images,
+                videos=videos,
+                return_tensors="pt",
+                **video_kwargs,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Qwen processor failed after video decode/preprocess. "
+                f"{_qwen_video_debug_context(request)} "
+                "Check that the processor/model family matches the checkpoint and that video frame/resolution "
+                "limits are set for large inputs."
+            ) from exc
     return processor.apply_chat_template(
         messages,
         tokenize=True,
         add_generation_prompt=True,
         return_dict=True,
         return_tensors="pt",
+    )
+
+
+def _qwen_video_debug_context(request: MllmRunRequest) -> str:
+    return (
+        f"video={request.video!r}, nframes={request.qwen_video_nframes!r}, fps={request.qwen_video_fps!r}, "
+        f"max_pixels={request.qwen_video_max_pixels!r}, min_pixels={request.qwen_video_min_pixels!r}"
     )
 
 
@@ -835,6 +1029,89 @@ def build_qwen_pruned_visual_inputs(model: Any, inputs: Any, keep_indices: list[
         "visual_tokens_after_prune": len(keep),
         "dropped_visual_placeholders": visual_count - len(keep),
         "kept_visual_indices": keep,
+        "kept_visual_placeholder_positions": [int(item) for item in keep_positions.detach().cpu().tolist()],
+        "llm_context_tokens_after_prune": int(pruned["input_ids"].shape[-1]),
+    }
+    return pruned
+
+
+def build_qwen_pre_vit_sparse_visual_inputs(
+    model: Any,
+    inputs: Any,
+    *,
+    original_keep_indices: list[int],
+) -> dict[str, Any]:
+    try:
+        import torch
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("torch is required for Qwen pre-ViT sparse visual pruning") from exc
+
+    values = dict(inputs)
+    input_ids = values.get("input_ids")
+    if input_ids is None or not hasattr(input_ids, "shape"):
+        raise ValueError("Qwen pre-ViT sparse generate requires input_ids in processor outputs")
+    if len(input_ids.shape) != 2 or int(input_ids.shape[0]) != 1:
+        raise ValueError("Qwen pre-ViT sparse generate currently supports a single prompt/video batch")
+
+    video_token_id = qwen_video_token_id(model)
+    embeddings = _qwen_input_embeddings(model)(input_ids)
+    placeholder_positions = (input_ids[0] == video_token_id).nonzero(as_tuple=False).flatten()
+    raw_visual_count = int(placeholder_positions.numel())
+    keep = [index for index in dict.fromkeys(int(item) for item in original_keep_indices) if 0 <= index < raw_visual_count]
+    if not keep and raw_visual_count > 0:
+        keep = [0]
+
+    video_features = _qwen_video_features(model, values)
+    if len(video_features.shape) == 3:
+        if int(video_features.shape[0]) != 1:
+            raise ValueError("Qwen pre-ViT sparse generate currently supports one video feature batch")
+        video_features = video_features[0]
+    if len(video_features.shape) != 2:
+        raise ValueError(f"Expected 2D sparse Qwen video features, got shape={list(video_features.shape)}")
+    if int(video_features.shape[0]) != len(keep):
+        raise ValueError(
+            "Qwen pre-ViT sparse features must match selected original visual placeholders "
+            f"({int(video_features.shape[0])} != {len(keep)})"
+        )
+
+    keep_positions = placeholder_positions[torch.tensor(keep, device=placeholder_positions.device, dtype=torch.long)]
+    keep_position_set = {int(item) for item in keep_positions.detach().cpu().tolist()}
+    sequence_keep_mask = torch.ones(input_ids.shape[-1], dtype=torch.bool, device=input_ids.device)
+    for position in placeholder_positions.detach().cpu().tolist():
+        if int(position) not in keep_position_set:
+            sequence_keep_mask[int(position)] = False
+
+    pruned: dict[str, Any] = {}
+    for key, value in values.items():
+        if key in {"pixel_values_videos", "video_grid_thw", "pixel_values", "image_grid_thw"}:
+            continue
+        if (
+            hasattr(value, "shape")
+            and len(value.shape) >= 2
+            and int(value.shape[0]) == 1
+            and int(value.shape[1]) == int(input_ids.shape[-1])
+        ):
+            pruned[key] = value[:, sequence_keep_mask, ...]
+        else:
+            pruned[key] = value
+
+    pruned_embeddings = embeddings[:, sequence_keep_mask, :].clone()
+    sparse_features = video_features.to(device=pruned_embeddings.device, dtype=pruned_embeddings.dtype)
+    new_positions: list[int] = []
+    for original_position in keep_positions.detach().cpu().tolist():
+        new_positions.append(int(sequence_keep_mask[: int(original_position) + 1].sum().item()) - 1)
+    for row, new_position in enumerate(new_positions):
+        pruned_embeddings[0, new_position, :] = sparse_features[row]
+    pruned["inputs_embeds"] = pruned_embeddings
+    pruned["input_ids"] = input_ids[:, sequence_keep_mask]
+    if "attention_mask" in values:
+        pruned["attention_mask"] = values["attention_mask"][:, sequence_keep_mask]
+    pruned["qwen_pre_vit_sparse_metadata"] = {
+        "video_token_id": video_token_id,
+        "visual_tokens_before_prune": raw_visual_count,
+        "visual_tokens_after_prune": len(keep),
+        "dropped_visual_placeholders": raw_visual_count - len(keep),
+        "kept_original_visual_indices": keep,
         "kept_visual_placeholder_positions": [int(item) for item in keep_positions.detach().cpu().tolist()],
         "llm_context_tokens_after_prune": int(pruned["input_ids"].shape[-1]),
     }
@@ -975,6 +1252,83 @@ def _qwen_video_features(model: Any, values: dict[str, Any]) -> Any:
     except TypeError:
         output = getter(pixel_values_videos, video_grid_thw)
     return _first_tensor_like(output)
+
+
+def install_qwen_pre_vit_sparse_hook(model: Any, keep_indices: list[int]) -> dict[str, Any]:
+    visual = _qwen_visual_module(model)
+    keep = [int(index) for index in dict.fromkeys(keep_indices)]
+    if not keep:
+        raise ValueError("Qwen pre-ViT sparse hook requires at least one selected visual token")
+
+    def sparse_get_video_features(self: Any, pixel_values_videos: Any, video_grid_thw: Any = None):
+        return _qwen_sparse_visual_forward(visual, pixel_values_videos, video_grid_thw, keep)
+
+    patched_targets = []
+    for target in (model, getattr(model, "model", None)):
+        if target is not None and getattr(target, "get_video_features", None) is not None:
+            setattr(target, "get_video_features", MethodType(sparse_get_video_features, target))
+            patched_targets.append(type(target).__name__)
+    if not patched_targets:
+        raise ValueError("Qwen model does not expose get_video_features for sparse hook installation")
+    return {
+        "patched_targets": patched_targets,
+        "selected_merged_tokens": len(keep),
+        "spatial_merge_size": qwen_spatial_merge_size(model),
+    }
+
+
+def _qwen_visual_module(model: Any) -> Any:
+    for target in (model, getattr(model, "model", None)):
+        visual = getattr(target, "visual", None)
+        if visual is not None:
+            return visual
+    raise ValueError("Qwen model does not expose a visual module for pre-ViT sparse pruning")
+
+
+def _qwen_sparse_visual_forward(visual: Any, pixel_values_videos: Any, video_grid_thw: Any, keep_indices: list[int]) -> Any:
+    try:
+        import torch
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("torch is required for Qwen pre-ViT sparse visual pruning") from exc
+
+    required = ["patch_embed", "rot_pos_emb", "blocks", "merger", "spatial_merge_unit"]
+    missing = [name for name in required if not hasattr(visual, name)]
+    if missing:
+        raise ValueError(f"Qwen visual module does not support sparse hook; missing {missing}")
+
+    target_dtype = getattr(visual, "dtype", None)
+    if target_dtype is not None and hasattr(pixel_values_videos, "type"):
+        pixel_values_videos = pixel_values_videos.type(target_dtype)
+    hidden_states = visual.patch_embed(pixel_values_videos)
+    seq_len, _ = hidden_states.size()
+    spatial_merge_unit = int(visual.spatial_merge_unit)
+    if seq_len % spatial_merge_unit != 0:
+        raise ValueError(
+            f"Qwen sparse visual tokens must be divisible by spatial_merge_unit ({seq_len} % {spatial_merge_unit})"
+        )
+    total_merged_tokens = seq_len // spatial_merge_unit
+    keep = [index for index in dict.fromkeys(int(item) for item in keep_indices) if 0 <= index < total_merged_tokens]
+    if not keep:
+        keep = [0]
+    keep_tensor = torch.tensor(keep, device=hidden_states.device, dtype=torch.long)
+
+    rotary_pos_emb = visual.rot_pos_emb(video_grid_thw).to(hidden_states.device)
+    hidden_states = hidden_states.reshape(total_merged_tokens, spatial_merge_unit, -1)[keep_tensor]
+    hidden_states = hidden_states.reshape(len(keep) * spatial_merge_unit, -1)
+    rotary_pos_emb = rotary_pos_emb.reshape(total_merged_tokens, spatial_merge_unit, -1)[keep_tensor]
+    rotary_pos_emb = rotary_pos_emb.reshape(len(keep) * spatial_merge_unit, -1)
+    emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
+    position_embeddings = (emb.cos(), emb.sin())
+    cu_seqlens = torch.tensor([0, hidden_states.shape[0]], device=hidden_states.device, dtype=torch.int32)
+
+    for blk in visual.blocks:
+        hidden_states = blk(
+            hidden_states,
+            cu_seqlens=cu_seqlens,
+            position_embeddings=position_embeddings,
+        )
+
+    return visual.merger(hidden_states)
 
 
 def _first_tensor_like(value: Any) -> Any:

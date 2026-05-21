@@ -144,6 +144,55 @@ def test_build_mode_runner_args_for_qwen3_autogaze_prune_generate_mode():
     assert "--enable-qwen-prune-generate" in args
 
 
+def test_build_mode_runner_args_for_qwen3_direct_autogaze_prune_generate_mode():
+    row = {
+        "video_path": "clip.mp4",
+        "question": "Question? A. one B. two C. three D. four",
+        "answer": "A",
+    }
+
+    args = build_mode_runner_args(
+        mode="qwen3-vl-autogaze-direct-prune-generate",
+        row=row,
+        video_path=Path("/data/clip.mp4"),
+        output_json=Path("/tmp/run.json"),
+        models={"qwen3-vl": "weight/Qwen3-VL"},
+        external_mllm_command="vila-infer",
+        num_video_frames=128,
+        max_tiles_video=1,
+        max_new_tokens=8,
+    )
+
+    assert "--enable-qwen-prune-generate" in args
+    assert "--run-autogaze-selector" in args
+    assert "--autogaze-generate-only" in args
+
+
+def test_build_mode_runner_args_for_qwen3_direct_autogaze_pre_vit_sparse_mode():
+    row = {
+        "video_path": "clip.mp4",
+        "question": "Question? A. one B. two C. three D. four",
+        "answer": "A",
+    }
+
+    args = build_mode_runner_args(
+        mode="qwen3-vl-autogaze-direct-pre-vit-sparse",
+        row=row,
+        video_path=Path("/data/clip.mp4"),
+        output_json=Path("/tmp/run.json"),
+        models={"qwen3-vl": "weight/Qwen3-VL"},
+        external_mllm_command="vila-infer",
+        num_video_frames=128,
+        max_tiles_video=1,
+        max_new_tokens=8,
+    )
+
+    assert args[args.index("--autogaze-integration-level") + 1] == "pre_encoder_sparse"
+    assert args[args.index("--pre-encoder-prune-adapter") + 1] == "autogaze-sparse"
+    assert "--enable-qwen-prune-generate" in args
+    assert "--run-autogaze-selector" in args
+
+
 def test_run_plugin_hlvid_benchmark_writes_predictions_summary_and_markdown(tmp_path):
     manifest = tmp_path / "manifest.json"
     video_root = tmp_path / "videos"
