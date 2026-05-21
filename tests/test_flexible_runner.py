@@ -612,6 +612,8 @@ def test_flexible_runner_accepts_qwen_vit_comparison_mode():
             "qwen_chunked_vit_autogaze_sparse",
             "--qwen-vit-chunk-frames",
             "8",
+            "--qwen-vit-max-spatial-chunks",
+            "4",
             "--video",
             "inputs/example.mp4",
             "--num-video-frames",
@@ -621,6 +623,7 @@ def test_flexible_runner_accepts_qwen_vit_comparison_mode():
 
     assert args.qwen_vit_mode == "qwen_chunked_vit_autogaze_sparse"
     assert args.qwen_vit_chunk_frames == 8
+    assert args.qwen_vit_max_spatial_chunks == 4
     assert args.qwen_video_nframes == 32
 
 

@@ -101,6 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--qwen-video-min-pixels", type=int)
     parser.add_argument("--qwen-vit-mode", choices=QWEN_VIT_MODE_CHOICES, default="qwen_full_vit")
     parser.add_argument("--qwen-vit-chunk-frames", type=int, default=16)
+    parser.add_argument("--qwen-vit-max-spatial-chunks", type=int)
     parser.add_argument("--video")
     parser.add_argument("--image")
     parser.add_argument("--prompt", default="Describe the video.")
@@ -130,6 +131,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         and str(getattr(args, "model_family", "")).startswith("qwen")
     ):
         args.qwen_video_nframes = int(getattr(args, "num_video_frames", 0) or 0)
+    if (
+        getattr(args, "qwen_vit_max_spatial_chunks", None) is None
+        and str(getattr(args, "model_family", "")).startswith("qwen")
+    ):
+        args.qwen_vit_max_spatial_chunks = max(1, int(getattr(args, "max_tiles_video", 1) or 1))
     return args
 
 
@@ -452,6 +458,7 @@ def build_mllm_run_request(args: argparse.Namespace) -> MllmRunRequest:
         qwen_video_min_pixels=args.qwen_video_min_pixels,
         qwen_vit_mode=args.qwen_vit_mode,
         qwen_vit_chunk_frames=args.qwen_vit_chunk_frames,
+        qwen_vit_max_spatial_chunks=args.qwen_vit_max_spatial_chunks,
     )
 
 

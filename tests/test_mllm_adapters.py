@@ -49,6 +49,7 @@ def make_request(**overrides):
         "qwen_video_min_pixels": None,
         "qwen_vit_mode": "qwen_full_vit",
         "qwen_vit_chunk_frames": 16,
+        "qwen_vit_max_spatial_chunks": 1,
     }
     values.update(overrides)
     return MllmRunRequest(**values)
@@ -485,32 +486,41 @@ def test_qwen_grid_chunks_split_flat_video_tokens_by_temporal_grid():
         chunk_frames=2,
     )
 
-    assert chunks == [
-        {
-            "chunk_index": 0,
-            "t_start": 0,
-            "t_end": 2,
-            "t": 2,
-            "h": 2,
-            "w": 4,
-            "raw_token_start": 0,
-            "raw_token_end": 16,
-            "merged_token_start": 0,
-            "merged_token_end": 4,
-        },
-        {
-            "chunk_index": 1,
-            "t_start": 2,
-            "t_end": 4,
-            "t": 2,
-            "h": 2,
-            "w": 4,
-            "raw_token_start": 16,
-            "raw_token_end": 32,
-            "merged_token_start": 4,
-            "merged_token_end": 8,
-        },
-    ]
+    assert len(chunks) == 2
+    assert chunks[0]["t_start"] == 0
+    assert chunks[0]["t_end"] == 2
+    assert chunks[0]["spatial_tiles"] == 1
+    assert chunks[0]["raw_token_start"] == 0
+    assert chunks[0]["raw_token_end"] == 16
+    assert chunks[0]["merged_token_indices"] == [0, 1, 2, 3]
+    assert chunks[0]["raw_token_indices"] == [0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15]
+    assert chunks[1]["t_start"] == 2
+    assert chunks[1]["t_end"] == 4
+    assert chunks[1]["merged_token_indices"] == [4, 5, 6, 7]
+
+
+def test_qwen_grid_chunks_can_split_spatial_grid_like_nvila_tiles():
+    torch = __import__("torch")
+
+    chunks = qwen_grid_chunk_slices(
+        torch.tensor([[2, 4, 4]]),
+        spatial_merge_size=2,
+        chunk_frames=1,
+        max_spatial_chunks=4,
+    )
+
+    assert len(chunks) == 8
+    assert chunks[0]["tile_grid_cols"] == 2
+    assert chunks[0]["tile_grid_rows"] == 2
+    assert chunks[0]["spatial_tile_index"] == 0
+    assert chunks[0]["raw_token_indices"] == [0, 1, 4, 5]
+    assert chunks[0]["merged_token_indices"] == [0]
+    assert chunks[1]["spatial_tile_index"] == 1
+    assert chunks[1]["raw_token_indices"] == [2, 3, 6, 7]
+    assert chunks[1]["merged_token_indices"] == [1]
+    assert chunks[4]["t_start"] == 1
+    assert chunks[4]["raw_token_indices"] == [16, 17, 20, 21]
+    assert chunks[4]["merged_token_indices"] == [4]
 
 
 def test_build_qwen_inputs_from_video_features_keeps_dense_placeholders():
@@ -617,12 +627,64 @@ def test_qwen_chunked_video_features_runs_dense_and_sparse_chunks():
         keep_indices=[1, 6],
     )
 
-    assert dense_features.flatten().tolist() == [6.0, 22.0, 38.0, 54.0, 70.0, 86.0, 102.0, 118.0]
+    assert dense_features.flatten().tolist() == [10.0, 18.0, 42.0, 50.0, 74.0, 82.0, 106.0, 114.0]
     assert dense_metadata["chunk_count"] == 2
     assert dense_metadata["visual_tokens_after_prune"] == 8
-    assert sparse_features.flatten().tolist() == [22.0, 102.0]
+    assert sparse_features.flatten().tolist() == [18.0, 106.0]
     assert sparse_metadata["executed_chunk_count"] == 2
     assert sparse_metadata["visual_tokens_after_prune"] == 2
+
+
+def test_qwen_chunked_video_features_runs_spatial_tiles_after_processor():
+    torch = __import__("torch")
+
+    class FakeMerger(torch.nn.Module):
+        def forward(self, hidden_states):
+            return hidden_states.reshape(-1, 4, 1).sum(dim=1)
+
+    class FakeVisual(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.dtype = torch.float32
+            self.spatial_merge_unit = 4
+            self.patch_embed = torch.nn.Identity()
+            self.blocks = torch.nn.ModuleList([])
+            self.merger = FakeMerger()
+
+        def rot_pos_emb(self, grid_thw):
+            t, h, w = [int(item) for item in grid_thw[0].tolist()]
+            return torch.zeros((t * h * w, 1), dtype=torch.float32)
+
+    class FakeModel:
+        def __init__(self):
+            self.visual = FakeVisual()
+            self.config = type("Config", (), {"vision_config": type("VisionConfig", (), {"spatial_merge_size": 2})()})()
+
+    values = {
+        "pixel_values_videos": torch.arange(32, dtype=torch.float32).reshape(32, 1),
+        "video_grid_thw": torch.tensor([[2, 4, 4]]),
+    }
+
+    features, metadata = qwen_chunked_video_features(
+        FakeModel(),
+        values,
+        chunk_frames=1,
+        max_spatial_chunks=4,
+    )
+    sparse_features, sparse_metadata = qwen_chunked_video_features(
+        FakeModel(),
+        values,
+        chunk_frames=1,
+        max_spatial_chunks=4,
+        keep_indices=[1, 4],
+    )
+
+    assert features.flatten().tolist() == [10.0, 18.0, 42.0, 50.0, 74.0, 82.0, 106.0, 114.0]
+    assert metadata["spatial_chunking"]["tile_grid"] == {"cols": 2, "rows": 2, "tiles": 4}
+    assert metadata["spatial_chunking"]["mode"] == "qwen_processor_grid_spatial_tiles"
+    assert sparse_features.flatten().tolist() == [18.0, 74.0]
+    assert sparse_metadata["executed_chunk_count"] == 2
+    assert sparse_metadata["spatial_chunking"]["max_spatial_chunks"] == 4
 
 
 def test_qwen_grid_adapter_routes_chunked_vit_mode(monkeypatch):

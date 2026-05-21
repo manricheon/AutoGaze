@@ -1601,15 +1601,19 @@ qwen_full_vit
   video -> qwen_vl_utils/processer -> native Qwen get_video_features(full) -> MLLM
 
 qwen_chunked_vit
-  video -> qwen_vl_utils/processer -> pixel_values_videos를 temporal chunk로 분할
-        -> Qwen ViT chunk forward(keep-all) -> concat features -> MLLM
+  video -> qwen_vl_utils/processor -> pixel_values_videos 생성
+        -> Qwen processor patch grid를 temporal chunk + spatial tile로 분할
+        -> Qwen ViT chunk/tile forward(keep-all) -> concat features -> MLLM
 
 qwen_chunked_vit_autogaze_sparse
   video -> direct AutoGaze selector -> SparseSelectionPlan
-        -> qwen_vl_utils/processer -> pixel_values_videos temporal chunk
-        -> AutoGaze selected merged-token만 Qwen ViT chunk forward
+        -> qwen_vl_utils/processor -> pixel_values_videos 생성
+        -> Qwen processor patch grid를 temporal chunk + spatial tile로 분할
+        -> AutoGaze selected merged-token만 Qwen ViT chunk/tile forward
         -> selected visual placeholder만 MLLM context에 packing
 ```
+
+여기서 “spatial tile”은 NVILA처럼 원본 프레임을 먼저 crop해서 Qwen processor에 여러 비디오로 넣는 완전한 전처리 tile은 아닙니다. 현재 1차 구현은 Qwen processor가 resize/patchify한 뒤 나온 `video_grid_thw=[T,H,W]`의 `H/W` patch grid를 NVILA식 max-tile ratio로 나눕니다. 그래서 ViT block residency와 sparse token 계산량 비교에는 쓸 수 있지만, Qwen processor의 decode/resize peak 자체를 줄이려면 후속으로 processor 이전 spatial crop path가 필요합니다.
 
 단일 비디오에서 비교:
 
@@ -1641,6 +1645,7 @@ qwen_chunked_vit_autogaze_sparse
   --autogaze-integration-level none \
   --qwen-vit-mode qwen_chunked_vit \
   --qwen-vit-chunk-frames 16 \
+  --qwen-vit-max-spatial-chunks 4 \
   --num-video-frames 32 \
   --qwen-video-nframes 32 \
   --qwen-video-max-pixels 200704 \
@@ -1669,6 +1674,7 @@ qwen_chunked_vit_autogaze_sparse
   --max-batch-size-autogaze 1 \
   --qwen-vit-mode qwen_chunked_vit_autogaze_sparse \
   --qwen-vit-chunk-frames 16 \
+  --qwen-vit-max-spatial-chunks 4 \
   --num-video-frames 32 \
   --qwen-video-nframes 32 \
   --qwen-video-max-pixels 200704 \
@@ -1682,6 +1688,7 @@ qwen_chunked_vit_autogaze_sparse
 
 - `generation.metrics.qwen_vit.mode`: 세 비교 모드 중 어떤 경로인지
 - `generation.metrics.qwen_vit.processor_chunking`: 현재는 Qwen processor가 만든 `pixel_values_videos` 이후 chunking입니다. 즉 decode/resize 메모리는 아직 Qwen processor 정책의 영향을 받습니다.
+- `generation.metrics.qwen_vit.spatial_chunking.tile_grid`: Qwen patch grid를 몇 개 spatial tile로 나눴는지입니다. `--qwen-vit-max-spatial-chunks`를 지정하지 않으면 Qwen chunked 모드는 `--max-tiles-video` 값을 기본으로 씁니다.
 - `generation.metrics.qwen_vit.raw_patch_tokens_before_vit`: Qwen ViT patch embedding 입력 토큰 수
 - `generation.metrics.qwen_vit.visual_tokens_before_prune / visual_tokens_after_prune`: Qwen merged visual token 기준 AutoGaze 전후 수
 - `generation.metrics.tokens.visual_token_reduction_ratio`: 분모는 AutoGaze 전 Qwen visual placeholder 수, 분자는 AutoGaze 후 placeholder 수입니다.
@@ -1689,7 +1696,7 @@ qwen_chunked_vit_autogaze_sparse
 
 중요한 제한:
 
-- `qwen_chunked_vit`는 peak ViT residency를 줄이기 위한 chunked feature extraction 실험입니다. AutoGaze off라서 visual token 수는 줄지 않습니다.
+- `qwen_chunked_vit`는 peak ViT residency를 줄이기 위한 temporal+spatial chunked feature extraction 실험입니다. AutoGaze off라서 최종 visual token 수는 줄지 않습니다.
 - `qwen_chunked_vit_autogaze_sparse`는 AutoGaze 선택 token만 Qwen visual transformer block과 MLLM context에 통과시킵니다.
 - 아직 “진짜 decode streaming”은 아닙니다. 긴 4K 영상에서 decode/resize 자체 OOM이 나면 `--qwen-video-nframes`, `--qwen-video-max-pixels`를 먼저 줄여야 합니다.
 
@@ -1731,6 +1738,7 @@ HLVid limit3 plugin 비교는 `configs/repro/plugin_hlvid_limit3.yaml`에 대응
   --qwen-video-nframes 256 \
   --qwen-video-max-pixels 200704 \
   --qwen-vit-chunk-frames 16 \
+  --qwen-vit-max-spatial-chunks 8 \
   --max-tiles-video 8
 ```
 

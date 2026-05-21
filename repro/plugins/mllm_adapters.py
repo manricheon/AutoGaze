@@ -47,6 +47,7 @@ class MllmRunRequest:
     qwen_video_min_pixels: int | None = None
     qwen_vit_mode: str = "qwen_full_vit"
     qwen_vit_chunk_frames: int = 16
+    qwen_vit_max_spatial_chunks: int = 1
 
 
 @dataclass(frozen=True)
@@ -433,9 +434,11 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
         description["qwen_vit"] = {
             "mode": request.qwen_vit_mode,
             "chunk_frames": request.qwen_vit_chunk_frames,
+            "max_spatial_chunks": request.qwen_vit_max_spatial_chunks,
             "note": (
                 "qwen_full_vit uses the native full-video path; qwen_chunked_vit and "
-                "qwen_chunked_vit_autogaze_sparse split Qwen pixel_values_videos after processor build."
+                "qwen_chunked_vit_autogaze_sparse split Qwen pixel_values_videos after processor build "
+                "across temporal chunks and NVILA-style spatial chunks."
             ),
         }
         if request.token_selector_kind == "autogaze" or request.integration_level != "none":
@@ -619,6 +622,7 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
                 model,
                 dict(inputs),
                 chunk_frames=request.qwen_vit_chunk_frames,
+                max_spatial_chunks=request.qwen_vit_max_spatial_chunks,
             )
             packed_inputs = build_qwen_inputs_from_video_features(model, inputs, video_features)
             metrics["latency_ms"]["qwen_vit_prepare"] = _elapsed_ms(start)
@@ -762,6 +766,7 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
                 model,
                 dict(inputs),
                 chunk_frames=request.qwen_vit_chunk_frames,
+                max_spatial_chunks=request.qwen_vit_max_spatial_chunks,
                 keep_indices=keep_indices,
             )
             packed_inputs = build_qwen_inputs_from_video_features(
@@ -1597,35 +1602,151 @@ def qwen_grid_chunk_slices(
     *,
     spatial_merge_size: int,
     chunk_frames: int,
-) -> list[dict[str, int]]:
+    max_spatial_chunks: int = 1,
+) -> list[dict[str, Any]]:
     t, h, w = _single_qwen_grid(video_grid_thw)
     chunk = max(1, int(chunk_frames))
-    spatial_merge_unit = max(1, int(spatial_merge_size) ** 2)
-    raw_tokens_per_t = h * w
-    if raw_tokens_per_t % spatial_merge_unit != 0:
+    merge = max(1, int(spatial_merge_size))
+    spatial_merge_unit = merge**2
+    if h % merge != 0 or w % merge != 0:
         raise ValueError(
-            "Qwen temporal chunking requires h*w to be divisible by spatial_merge_size^2 "
-            f"({raw_tokens_per_t} % {spatial_merge_unit})"
+            "Qwen temporal/spatial chunking requires H and W to be divisible by spatial_merge_size "
+            f"(H={h}, W={w}, spatial_merge_size={merge})"
         )
-    merged_tokens_per_t = raw_tokens_per_t // spatial_merge_unit
-    chunks: list[dict[str, int]] = []
-    for chunk_index, t_start in enumerate(range(0, t, chunk)):
+    raw_tokens_per_t = h * w
+    merged_h = h // merge
+    merged_w = w // merge
+    merged_tokens_per_t = merged_h * merged_w
+    tile_grid = qwen_spatial_tile_grid(
+        merged_width=merged_w,
+        merged_height=merged_h,
+        max_spatial_chunks=max_spatial_chunks,
+    )
+    col_ranges = _split_index_ranges(merged_w, int(tile_grid["cols"]))
+    row_ranges = _split_index_ranges(merged_h, int(tile_grid["rows"]))
+    chunks: list[dict[str, Any]] = []
+    chunk_index = 0
+    for t_start in range(0, t, chunk):
         t_end = min(t_start + chunk, t)
-        chunks.append(
-            {
-                "chunk_index": chunk_index,
-                "t_start": t_start,
-                "t_end": t_end,
-                "t": t_end - t_start,
-                "h": h,
-                "w": w,
-                "raw_token_start": t_start * raw_tokens_per_t,
-                "raw_token_end": t_end * raw_tokens_per_t,
-                "merged_token_start": t_start * merged_tokens_per_t,
-                "merged_token_end": t_end * merged_tokens_per_t,
-            }
-        )
+        for tile_row, (merged_row_start, merged_row_end) in enumerate(row_ranges):
+            for tile_col, (merged_col_start, merged_col_end) in enumerate(col_ranges):
+                if merged_row_start == merged_row_end or merged_col_start == merged_col_end:
+                    continue
+                spatial_tile_index = tile_row * int(tile_grid["cols"]) + tile_col
+                merged_token_indices: list[int] = []
+                merged_token_raw_indices: list[list[int]] = []
+                raw_token_indices: list[int] = []
+                for t_index in range(t_start, t_end):
+                    for merged_row in range(merged_row_start, merged_row_end):
+                        for merged_col in range(merged_col_start, merged_col_end):
+                            merged_index = t_index * merged_tokens_per_t + merged_row * merged_w + merged_col
+                            group_raw = _qwen_raw_indices_for_merged_token(
+                                t_index=t_index,
+                                merged_row=merged_row,
+                                merged_col=merged_col,
+                                h=h,
+                                w=w,
+                                merge=merge,
+                            )
+                            merged_token_indices.append(merged_index)
+                            merged_token_raw_indices.append(group_raw)
+                            raw_token_indices.extend(group_raw)
+                chunk_payload = {
+                    "chunk_index": chunk_index,
+                    "t_start": t_start,
+                    "t_end": t_end,
+                    "t": t_end - t_start,
+                    "h": h,
+                    "w": w,
+                    "spatial_tile_index": spatial_tile_index,
+                    "tile_grid_cols": int(tile_grid["cols"]),
+                    "tile_grid_rows": int(tile_grid["rows"]),
+                    "spatial_tiles": int(tile_grid["tiles"]),
+                    "merged_row_start": merged_row_start,
+                    "merged_row_end": merged_row_end,
+                    "merged_col_start": merged_col_start,
+                    "merged_col_end": merged_col_end,
+                    "raw_token_indices": raw_token_indices,
+                    "merged_token_indices": merged_token_indices,
+                    "merged_token_raw_indices": merged_token_raw_indices,
+                }
+                if int(tile_grid["tiles"]) == 1:
+                    chunk_payload.update(
+                        {
+                            "raw_token_start": t_start * raw_tokens_per_t,
+                            "raw_token_end": t_end * raw_tokens_per_t,
+                            "merged_token_start": t_start * merged_tokens_per_t,
+                            "merged_token_end": t_end * merged_tokens_per_t,
+                        }
+                    )
+                chunks.append(chunk_payload)
+                chunk_index += 1
     return chunks
+
+
+def qwen_spatial_tile_grid(*, merged_width: int, merged_height: int, max_spatial_chunks: int) -> dict[str, int]:
+    width = max(1, int(merged_width))
+    height = max(1, int(merged_height))
+    max_tiles = max(1, min(int(max_spatial_chunks), width * height))
+    target_ratios = {
+        (cols, rows)
+        for n in range(1, max_tiles + 1)
+        for cols in range(1, n + 1)
+        for rows in range(1, n + 1)
+        if 1 <= cols * rows <= max_tiles and cols <= width and rows <= height
+    }
+    sorted_ratios = sorted(target_ratios, key=lambda item: item[0] * item[1])
+    cols, rows = _closest_spatial_ratio(width / height, sorted_ratios, width, height)
+    return {"cols": cols, "rows": rows, "tiles": cols * rows}
+
+
+def _closest_spatial_ratio(
+    aspect_ratio: float,
+    target_ratios: list[tuple[int, int]],
+    width: int,
+    height: int,
+) -> tuple[int, int]:
+    best_ratio_diff = float("inf")
+    best_ratio = (1, 1)
+    area = width * height
+    for ratio in target_ratios:
+        target_aspect_ratio = ratio[0] / ratio[1]
+        ratio_diff = abs(aspect_ratio - target_aspect_ratio)
+        if ratio_diff < best_ratio_diff:
+            best_ratio_diff = ratio_diff
+            best_ratio = ratio
+        elif ratio_diff == best_ratio_diff:
+            if area > 0.5 * ratio[0] * ratio[1]:
+                best_ratio = ratio
+    return best_ratio
+
+
+def _split_index_ranges(length: int, parts: int) -> list[tuple[int, int]]:
+    total = max(1, int(length))
+    count = max(1, min(int(parts), total))
+    return [
+        (int(index * total // count), int((index + 1) * total // count))
+        for index in range(count)
+    ]
+
+
+def _qwen_raw_indices_for_merged_token(
+    *,
+    t_index: int,
+    merged_row: int,
+    merged_col: int,
+    h: int,
+    w: int,
+    merge: int,
+) -> list[int]:
+    base = int(t_index) * int(h) * int(w)
+    row_start = int(merged_row) * int(merge)
+    col_start = int(merged_col) * int(merge)
+    return [
+        base + (row_start + row_offset) * int(w) + col_start + col_offset
+        for row_offset in range(int(merge))
+        for col_offset in range(int(merge))
+    ]
 
 
 def qwen_chunked_video_features(
@@ -1633,6 +1754,7 @@ def qwen_chunked_video_features(
     values: dict[str, Any],
     *,
     chunk_frames: int,
+    max_spatial_chunks: int = 1,
     keep_indices: list[int] | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     try:
@@ -1652,6 +1774,7 @@ def qwen_chunked_video_features(
         video_grid_thw,
         spatial_merge_size=spatial_merge_size,
         chunk_frames=chunk_frames,
+        max_spatial_chunks=max_spatial_chunks,
     )
     keep = None
     if keep_indices is not None:
@@ -1659,25 +1782,29 @@ def qwen_chunked_video_features(
     feature_parts: list[Any] = []
     chunk_records: list[dict[str, Any]] = []
     for chunk in chunks:
-        merged_start = chunk["merged_token_start"]
-        merged_end = chunk["merged_token_end"]
+        merged_token_indices = [int(index) for index in chunk["merged_token_indices"]]
+        merged_token_raw_indices = chunk["merged_token_raw_indices"]
         local_keep: list[int] | None
         if keep is None:
-            local_keep = list(range(merged_end - merged_start))
+            local_keep = list(range(len(merged_token_indices)))
         else:
             local_keep = [
-                index - merged_start
-                for index in keep
-                if merged_start <= index < merged_end
+                local_index
+                for local_index, global_index in enumerate(merged_token_indices)
+                if global_index in keep
             ]
         if not local_keep:
             chunk_records.append({**chunk, "selected_merged_tokens": 0, "status": "skipped_empty_selection"})
             continue
 
-        chunk_pixels = _slice_qwen_video_pixel_values(
+        selected_raw_token_indices = [
+            raw_index
+            for local_index in local_keep
+            for raw_index in merged_token_raw_indices[local_index]
+        ]
+        chunk_pixels = _slice_qwen_video_pixel_values_by_indices(
             pixel_values_videos,
-            chunk["raw_token_start"],
-            chunk["raw_token_end"],
+            selected_raw_token_indices,
         )
         chunk_grid = _make_qwen_grid_like(
             video_grid_thw,
@@ -1689,9 +1816,9 @@ def qwen_chunked_video_features(
             visual,
             chunk_pixels,
             chunk_grid,
-            local_keep,
+            list(range(len(local_keep))),
             full_video_grid_thw=video_grid_thw,
-            raw_token_offset=chunk["raw_token_start"],
+            raw_token_indices=selected_raw_token_indices,
         )
         feature_parts.append(features)
         chunk_records.append({**chunk, "selected_merged_tokens": len(local_keep), "status": "executed"})
@@ -1712,7 +1839,16 @@ def qwen_chunked_video_features(
         "visual_tokens_before_prune": visual_tokens_before_prune,
         "visual_tokens_after_prune": int(merged_features.shape[0]),
         "processor_chunking": "after_qwen_processor_pixel_values_videos",
-        "position_policy": "full_video_rotary_position_embedding_sliced_by_raw_token_offset",
+        "spatial_chunking": {
+            "mode": "qwen_processor_grid_spatial_tiles",
+            "max_spatial_chunks": max(1, int(max_spatial_chunks)),
+            "tile_grid": {
+                "cols": int(chunks[0]["tile_grid_cols"]) if chunks else 1,
+                "rows": int(chunks[0]["tile_grid_rows"]) if chunks else 1,
+                "tiles": int(chunks[0]["spatial_tiles"]) if chunks else 1,
+            },
+        },
+        "position_policy": "full_video_rotary_position_embedding_gathered_by_raw_token_indices",
         "chunks": chunk_records,
     }
     return merged_features, metadata
@@ -1734,17 +1870,24 @@ def _single_qwen_grid(video_grid_thw: Any) -> tuple[int, int, int]:
     return int(grid[0]), int(grid[1]), int(grid[2])
 
 
-def _slice_qwen_video_pixel_values(pixel_values_videos: Any, start: int, end: int) -> Any:
+def _slice_qwen_video_pixel_values_by_indices(pixel_values_videos: Any, indices: list[int]) -> Any:
+    if not indices:
+        raise ValueError("Qwen pixel_values_videos chunk requires at least one raw token index")
     if not hasattr(pixel_values_videos, "shape"):
-        return pixel_values_videos[start:end]
+        return [pixel_values_videos[index] for index in indices]
+    import torch
+
     shape = list(pixel_values_videos.shape)
-    if shape and int(shape[0]) >= int(end):
-        return pixel_values_videos[start:end, ...]
-    if len(shape) >= 2 and int(shape[0]) == 1 and int(shape[1]) >= int(end):
-        return pixel_values_videos[:, start:end, ...]
+    max_index = max(int(index) for index in indices)
+    if shape and int(shape[0]) > max_index:
+        index_tensor = torch.tensor(indices, device=pixel_values_videos.device, dtype=torch.long)
+        return pixel_values_videos.index_select(0, index_tensor)
+    if len(shape) >= 2 and int(shape[0]) == 1 and int(shape[1]) > max_index:
+        index_tensor = torch.tensor(indices, device=pixel_values_videos.device, dtype=torch.long)
+        return pixel_values_videos.index_select(1, index_tensor)
     raise ValueError(
-        "Qwen pixel_values_videos first token dimension is smaller than the requested chunk "
-        f"(shape={shape}, start={start}, end={end})"
+        "Qwen pixel_values_videos token dimension is smaller than the requested chunk "
+        f"(shape={shape}, max_index={max_index})"
     )
 
 
@@ -1848,6 +1991,7 @@ def _qwen_sparse_visual_forward(
     *,
     full_video_grid_thw: Any | None = None,
     raw_token_offset: int = 0,
+    raw_token_indices: list[int] | None = None,
 ) -> Any:
     try:
         import torch
@@ -1877,7 +2021,10 @@ def _qwen_sparse_visual_forward(
 
     rotary_grid = full_video_grid_thw if full_video_grid_thw is not None else video_grid_thw
     rotary_pos_emb = visual.rot_pos_emb(rotary_grid).to(hidden_states.device)
-    if full_video_grid_thw is not None or raw_token_offset:
+    if raw_token_indices is not None:
+        rotary_index = torch.tensor(raw_token_indices, device=hidden_states.device, dtype=torch.long)
+        rotary_pos_emb = rotary_pos_emb.index_select(0, rotary_index)
+    elif full_video_grid_thw is not None or raw_token_offset:
         start = int(raw_token_offset)
         rotary_pos_emb = rotary_pos_emb[start : start + seq_len]
     hidden_states = hidden_states.reshape(total_merged_tokens, spatial_merge_unit, -1)[keep_tensor]
@@ -1935,6 +2082,7 @@ def build_metric_skeleton(request: MllmRunRequest) -> dict[str, Any]:
         "qwen_vit": {
             "mode": request.qwen_vit_mode,
             "chunk_frames": request.qwen_vit_chunk_frames,
+            "max_spatial_chunks": request.qwen_vit_max_spatial_chunks,
             "status": "not_started",
         },
     }

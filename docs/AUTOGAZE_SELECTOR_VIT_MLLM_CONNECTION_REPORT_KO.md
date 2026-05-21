@@ -682,12 +682,13 @@ Acceptance:
 - [x] selected feature만 MLLM context에 insert하는 `inputs_embeds` bridge helper 추가
 - [x] before/after LLM context와 visual token count 기록
 - [x] `qwen_full_vit`, `qwen_chunked_vit`, `qwen_chunked_vit_autogaze_sparse` 비교 모드 추가
+- [x] Qwen chunked ViT에 temporal chunk뿐 아니라 Qwen processor patch grid 기준 spatial tile chunk도 추가
 - [ ] TTFT, peak memory를 Qwen prune-generate path에서 CUDA smoke로 검증
 - [x] 실패 시 `failed_qwen_prune_generate`로 원인 기록
 
 Acceptance:
 
-- `qwen_chunked_vit_autogaze_sparse`에서는 AutoGaze index mapping 결과를 Qwen merged visual token index로 바꾸고, 선택된 token만 chunked Qwen ViT와 MLLM context에 통과시킨다. 단, 현재 chunking은 Qwen processor 이후 `pixel_values_videos` 단계이므로 decode/resize 절감은 별도 후속 과제다.
+- `qwen_chunked_vit_autogaze_sparse`에서는 AutoGaze index mapping 결과를 Qwen merged visual token index로 바꾸고, 선택된 token만 temporal+spatial chunked Qwen ViT와 MLLM context에 통과시킨다. 단, 현재 spatial chunking은 Qwen processor 이후 `pixel_values_videos` / `video_grid_thw` 단계이므로 원본 video decode/resize 절감은 별도 후속 과제다.
 
 ### Phase F: InternVL3 Tile Sparse
 

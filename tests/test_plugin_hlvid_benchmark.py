@@ -212,6 +212,7 @@ def test_build_mode_runner_args_for_qwen_vit_comparison_modes():
         "max_tiles_video": 1,
         "max_new_tokens": 8,
         "qwen_vit_chunk_frames": 16,
+        "qwen_vit_max_spatial_chunks": 4,
     }
 
     full_args = build_mode_runner_args(mode="qwen_full_vit", **common)
@@ -222,6 +223,7 @@ def test_build_mode_runner_args_for_qwen_vit_comparison_modes():
     assert full_args[full_args.index("--token-selector-adapter") + 1] == "keep-all"
     assert chunked_args[chunked_args.index("--qwen-vit-mode") + 1] == "qwen_chunked_vit"
     assert chunked_args[chunked_args.index("--qwen-vit-chunk-frames") + 1] == "16"
+    assert chunked_args[chunked_args.index("--qwen-vit-max-spatial-chunks") + 1] == "4"
     assert sparse_args[sparse_args.index("--qwen-vit-mode") + 1] == "qwen_chunked_vit_autogaze_sparse"
     assert sparse_args[sparse_args.index("--pre-encoder-prune-adapter") + 1] == "autogaze-sparse"
     assert "--run-autogaze-selector" in sparse_args
@@ -244,6 +246,7 @@ def test_flatten_key_metrics_includes_qwen_vit_comparison_fields():
                 "raw_patch_tokens_before_vit": 4000,
                 "chunk_count": 4,
                 "executed_chunk_count": 3,
+                "spatial_chunking": {"tile_grid": {"tiles": 4}},
             },
         }
     )
@@ -255,6 +258,7 @@ def test_flatten_key_metrics_includes_qwen_vit_comparison_fields():
     assert flattened["visual_token_reduction_ratio"] == 10.0
     assert flattened["qwen_vit_raw_patch_tokens_before_vit"] == 4000
     assert flattened["qwen_vit_executed_chunk_count"] == 3
+    assert flattened["qwen_vit_spatial_tiles"] == 4
 
 
 def test_run_plugin_hlvid_benchmark_writes_predictions_summary_and_markdown(tmp_path):

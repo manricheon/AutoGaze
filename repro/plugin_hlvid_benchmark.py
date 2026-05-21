@@ -46,6 +46,7 @@ def build_mode_runner_args(
     qwen_video_max_pixels: int | None = None,
     qwen_video_min_pixels: int | None = None,
     qwen_vit_chunk_frames: int = 16,
+    qwen_vit_max_spatial_chunks: int | None = None,
 ) -> list[str]:
     if mode == "nvila-video-off":
         return _base_args(
@@ -189,6 +190,7 @@ def build_mode_runner_args(
             qwen_video_min_pixels=qwen_video_min_pixels,
             qwen_vit_mode=mode,
             qwen_vit_chunk_frames=qwen_vit_chunk_frames,
+            qwen_vit_max_spatial_chunks=qwen_vit_max_spatial_chunks or max_tiles_video,
         )
         if sparse:
             args.extend(
@@ -277,6 +279,7 @@ def run_plugin_hlvid_benchmark(
     qwen_video_max_pixels: int | None = None,
     qwen_video_min_pixels: int | None = None,
     qwen_vit_chunk_frames: int = 16,
+    qwen_vit_max_spatial_chunks: int | None = None,
 ) -> dict[str, Any]:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -305,6 +308,7 @@ def run_plugin_hlvid_benchmark(
                 qwen_video_max_pixels=qwen_video_max_pixels,
                 qwen_video_min_pixels=qwen_video_min_pixels,
                 qwen_vit_chunk_frames=qwen_vit_chunk_frames,
+                qwen_vit_max_spatial_chunks=qwen_vit_max_spatial_chunks,
             )
             payload = run_single(parse_flexible_args(runner_args))
             generation = payload.get("generation", {})
@@ -405,6 +409,7 @@ def _base_args(
     qwen_video_min_pixels: int | None = None,
     qwen_vit_mode: str | None = None,
     qwen_vit_chunk_frames: int | None = None,
+    qwen_vit_max_spatial_chunks: int | None = None,
 ) -> list[str]:
     args = [
         "--mode",
@@ -450,6 +455,8 @@ def _base_args(
             args.extend(["--qwen-vit-mode", str(qwen_vit_mode)])
         if qwen_vit_chunk_frames is not None:
             args.extend(["--qwen-vit-chunk-frames", str(qwen_vit_chunk_frames)])
+        if qwen_vit_max_spatial_chunks is not None:
+            args.extend(["--qwen-vit-max-spatial-chunks", str(qwen_vit_max_spatial_chunks)])
     if external_mllm_command:
         args.extend(["--external-mllm-command", external_mllm_command])
     return args
@@ -466,6 +473,8 @@ def _flatten_key_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     memory = metrics.get("memory_bytes", {})
     tokens = metrics.get("tokens", {})
     qwen_vit = metrics.get("qwen_vit", {})
+    spatial_chunking = qwen_vit.get("spatial_chunking") or {}
+    tile_grid = spatial_chunking.get("tile_grid") or {}
     return {
         "total_ms": latency.get("total"),
         "generate_ms": latency.get("generate"),
@@ -476,6 +485,7 @@ def _flatten_key_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "qwen_vit_raw_patch_tokens_before_vit": qwen_vit.get("raw_patch_tokens_before_vit"),
         "qwen_vit_chunk_count": qwen_vit.get("chunk_count"),
         "qwen_vit_executed_chunk_count": qwen_vit.get("executed_chunk_count"),
+        "qwen_vit_spatial_tiles": tile_grid.get("tiles"),
         "visual_tokens_before_prune": tokens.get("visual_tokens_before_prune"),
         "visual_tokens_after_prune": tokens.get("visual_tokens_after_prune"),
         "visual_token_reduction_ratio": tokens.get("visual_token_reduction_ratio"),
@@ -551,6 +561,7 @@ def main() -> None:
     parser.add_argument("--qwen-video-max-pixels", type=int)
     parser.add_argument("--qwen-video-min-pixels", type=int)
     parser.add_argument("--qwen-vit-chunk-frames", type=int, default=16)
+    parser.add_argument("--qwen-vit-max-spatial-chunks", type=int)
     args = parser.parse_args()
     payload = run_plugin_hlvid_benchmark(
         manifest=args.manifest,
@@ -568,6 +579,7 @@ def main() -> None:
         qwen_video_max_pixels=args.qwen_video_max_pixels,
         qwen_video_min_pixels=args.qwen_video_min_pixels,
         qwen_vit_chunk_frames=args.qwen_vit_chunk_frames,
+        qwen_vit_max_spatial_chunks=args.qwen_vit_max_spatial_chunks,
     )
     print(json.dumps(payload["summary"], indent=2, sort_keys=True))
 
