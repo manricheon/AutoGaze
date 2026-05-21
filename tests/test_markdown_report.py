@@ -137,6 +137,11 @@ def test_render_single_markdown_report_includes_pipeline_and_key_metrics(tmp_pat
     assert "1280x720" in markdown
     assert "## Key Metrics" in markdown
     assert "encoder_patch_tokens_before_keep_all_or_raw" in markdown
+    assert "| single_scale_dense_siglip_reference_patch_tokens | 852,992 |" in markdown
+    assert "| hd_multiscale_keep_all_patch_tokens | 1,153,280 |" in markdown
+    assert "| autogaze_selected_total_patch_tokens | 176,384 |" in markdown
+    assert "| encoder_input_patch_tokens_after_autogaze | 176,384 |" in markdown
+    assert "| patch_reduction_ratio_single_scale_over_autogaze | 4.836 |" in markdown
     assert "llm_peak_median" in markdown
     assert "## Step-by-step Pipeline Metrics" in markdown
     assert "## Processing Budget Summary" in markdown
@@ -323,6 +328,9 @@ def test_render_benchmark_markdown_report_includes_scores_and_comparison_tables(
     assert "autogaze" in markdown
     assert "## Key Metrics" in markdown
     assert "llm_visual_tokens" in markdown
+    assert "single_scale_dense_reference_vs_autogaze_selected_patches" in markdown
+    assert "| single_scale_dense_reference_vs_autogaze_selected_patches | 800 | 300 | 2.666667 | 62.5 |" in markdown
+    assert "| hd_multiscale_keep_all_vs_autogaze_selected_patches | 900 | 300 | 3 | 66.666667 |" in markdown
     assert "llm_peak" in markdown
     assert "## Benchmark Samples" in markdown
     assert "clip.mp4" in markdown
@@ -509,6 +517,9 @@ def test_render_flexible_single_markdown_reads_generation_metrics_processing_bud
 
     assert "## Processing Budget Summary" in markdown
     assert "3840x2160" in markdown
+    assert "| single_scale_dense_siglip_reference_patch_tokens | 106,624 |" in markdown
+    assert "| raw_vit_patch_tokens_before_selector | 1,000 |" in markdown
+    assert "| autogaze_selected_total_patch_tokens | 100 |" in markdown
     assert "## AutoGaze Token And Patch Flow" in markdown
     assert "single_scale_dense_siglip_reference_patch_tokens" in markdown
     assert "full_patch_budget_before_selector" in markdown

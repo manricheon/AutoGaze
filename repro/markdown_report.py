@@ -256,6 +256,164 @@ def key_metrics(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def processing_budget_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    result = result_payload(payload)
+    return as_mapping(
+        result.get("processing_budget_summary")
+        or payload.get("processing_budget_summary")
+        or get_path(payload, "generation.metrics.processing_budget_summary")
+    )
+
+
+def readable_processing_budget_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    return as_mapping(
+        get_path(payload, "readable_summary.processing_budget_summary")
+        or get_path(payload, "readable_performance_summary.processing_budget_summary")
+    )
+
+
+def enriched_key_metrics(payload: dict[str, Any], metrics: dict[str, Any]) -> dict[str, Any]:
+    enriched = {key: dict(value) if isinstance(value, dict) else value for key, value in metrics.items()}
+    tokens = dict(as_mapping(enriched.get("tokens")))
+
+    readable_budget = readable_processing_budget_summary(payload)
+    if readable_budget:
+        add_readable_budget_token_metrics(tokens, readable_budget)
+    else:
+        add_single_budget_token_metrics(tokens, processing_budget_summary(payload))
+
+    if tokens:
+        enriched["tokens"] = tokens
+    return enriched
+
+
+def add_if_present(target: dict[str, Any], key: str, value: Any) -> None:
+    if value is not None:
+        target[key] = value
+
+
+def add_single_budget_token_metrics(tokens: dict[str, Any], summary: dict[str, Any]) -> None:
+    if not summary:
+        return
+    single_scale = as_mapping(summary.get("single_scale_dense_vision_budget"))
+    patch_budget_siglip = as_mapping(summary.get("patch_budget_before_siglip"))
+    patch_budget_vit = as_mapping(summary.get("patch_budget_before_vit"))
+    llm_budget = as_mapping(summary.get("llm_visual_budget"))
+
+    single_scale_patches = first_present(
+        single_scale.get("total_patch_tokens"),
+        single_scale.get("estimated_total_patch_tokens"),
+    )
+    single_scale_llm = first_present(
+        single_scale.get("llm_visual_tokens_estimated"),
+        single_scale.get("estimated_llm_visual_tokens_after_token_shuffle"),
+    )
+    hd_multiscale_patches = patch_budget_siglip.get("keep_all_total_patch_tokens")
+    raw_vit_patches = first_present(
+        patch_budget_vit.get("actual_raw_patch_tokens_before_vit"),
+        patch_budget_vit.get("estimated_visual_tokens_before_prune"),
+    )
+    selected_patches = first_present(
+        patch_budget_siglip.get("autogaze_selected_total_patch_tokens"),
+        patch_budget_vit.get("estimated_visual_tokens_after_prune"),
+        tokens.get("visual_tokens_after_prune"),
+    )
+    raw_or_multiscale_patches = first_present(hd_multiscale_patches, raw_vit_patches)
+    llm_keep_all = first_present(
+        llm_budget.get("keep_all_visual_tokens_estimated"),
+        tokens.get("llm_visual_tokens_before_keep_all_estimated"),
+    )
+    llm_actual = first_present(
+        llm_budget.get("actual_visual_tokens"),
+        tokens.get("llm_visual_tokens_after_actual"),
+    )
+
+    add_if_present(tokens, "single_scale_dense_siglip_reference_patch_tokens", single_scale_patches)
+    add_if_present(tokens, "single_scale_dense_siglip_reference_llm_visual_tokens_estimated", single_scale_llm)
+    add_if_present(tokens, "hd_multiscale_keep_all_patch_tokens", hd_multiscale_patches)
+    add_if_present(tokens, "raw_vit_patch_tokens_before_selector", raw_vit_patches)
+    add_if_present(tokens, "autogaze_selected_total_patch_tokens", selected_patches)
+    add_if_present(tokens, "encoder_input_patch_tokens_after_autogaze", selected_patches)
+    add_if_present(
+        tokens,
+        "patch_reduction_ratio_single_scale_over_autogaze",
+        first_present(
+            single_scale.get("ratio_over_autogaze_selected_total_patch_tokens"),
+            single_scale.get("ratio_over_estimated_visual_tokens_after_prune"),
+            ratio_before_over_after(single_scale_patches, selected_patches),
+        ),
+    )
+    add_if_present(
+        tokens,
+        "patch_reduction_ratio_full_or_raw_over_autogaze",
+        ratio_before_over_after(raw_or_multiscale_patches, selected_patches),
+    )
+    add_if_present(tokens, "llm_visual_tokens_keep_all_estimated_from_budget", llm_keep_all)
+    add_if_present(tokens, "llm_visual_tokens_actual_from_budget", llm_actual)
+    add_if_present(
+        tokens,
+        "llm_visual_token_reduction_ratio_from_budget",
+        ratio_before_over_after(llm_keep_all, llm_actual),
+    )
+
+
+def add_readable_budget_token_metrics(tokens: dict[str, Any], readable_budget: dict[str, Any]) -> None:
+    keep_all = as_mapping(readable_budget.get("keep_all_median") or readable_budget.get("mode_median"))
+    autogaze = as_mapping(readable_budget.get("autogaze_median"))
+
+    single_keep_all = first_present(
+        get_budget_value(keep_all, "single_scale_dense_vision_budget.total_patch_tokens"),
+        get_budget_value(keep_all, "single_scale_dense_vision_budget.estimated_total_patch_tokens"),
+    )
+    single_autogaze_basis = first_present(
+        get_budget_value(autogaze, "single_scale_dense_vision_budget.total_patch_tokens"),
+        get_budget_value(autogaze, "single_scale_dense_vision_budget.estimated_total_patch_tokens"),
+        single_keep_all,
+    )
+    hd_keep_all = first_present(
+        get_budget_value(autogaze, "patch_budget_before_siglip.keep_all_total_patch_tokens"),
+        get_budget_value(keep_all, "patch_budget_before_siglip.keep_all_total_patch_tokens"),
+        get_budget_value(autogaze, "patch_budget_before_vit.actual_raw_patch_tokens_before_vit"),
+        get_budget_value(autogaze, "patch_budget_before_vit.estimated_visual_tokens_before_prune"),
+    )
+    selected = first_present(
+        get_budget_value(autogaze, "patch_budget_before_siglip.autogaze_selected_total_patch_tokens"),
+        get_budget_value(autogaze, "patch_budget_before_vit.estimated_visual_tokens_after_prune"),
+    )
+    llm_keep_all = first_present(
+        get_budget_value(autogaze, "llm_visual_budget.keep_all_visual_tokens_estimated"),
+        get_budget_value(keep_all, "llm_visual_budget.keep_all_visual_tokens_estimated"),
+    )
+    llm_actual = get_budget_value(autogaze, "llm_visual_budget.actual_visual_tokens")
+
+    if single_keep_all is not None or single_autogaze_basis is not None:
+        tokens["single_scale_dense_siglip_reference_patch_tokens"] = {
+            "keep_all": single_keep_all,
+            "autogaze": single_autogaze_basis,
+        }
+    if single_autogaze_basis is not None or selected is not None:
+        tokens["single_scale_dense_reference_vs_autogaze_selected_patches"] = before_after_metric(
+            single_autogaze_basis,
+            selected,
+        )
+    if hd_keep_all is not None or selected is not None:
+        tokens["hd_multiscale_keep_all_vs_autogaze_selected_patches"] = before_after_metric(
+            hd_keep_all,
+            selected,
+        )
+    if llm_keep_all is not None or llm_actual is not None:
+        tokens["llm_visual_budget_keep_all_vs_actual"] = before_after_metric(llm_keep_all, llm_actual)
+
+
+def before_after_metric(before: Any, after: Any) -> dict[str, Any]:
+    return {
+        "before_keep_all_estimated": before,
+        "after_autogaze_actual": after,
+        "reduction_ratio_before_over_after": ratio_before_over_after(before, after),
+        "reduction_percent_of_before": reduction_percent(before, after),
+    }
+
+
 def render_simple_metric_table(metrics: dict[str, Any], *, memory: bool = False) -> str:
     rows: list[list[Any]] = []
     for name, value in metrics.items():
@@ -739,16 +897,8 @@ def render_input_tokenization(payload: dict[str, Any], metrics: dict[str, Any]) 
 
 
 def render_processing_budget_summary(payload: dict[str, Any]) -> str:
-    result = result_payload(payload)
-    summary = as_mapping(
-        result.get("processing_budget_summary")
-        or payload.get("processing_budget_summary")
-        or get_path(payload, "generation.metrics.processing_budget_summary")
-    )
-    readable_budget = as_mapping(
-        get_path(payload, "readable_summary.processing_budget_summary")
-        or get_path(payload, "readable_performance_summary.processing_budget_summary")
-    )
+    summary = processing_budget_summary(payload)
+    readable_budget = readable_processing_budget_summary(payload)
     if readable_budget:
         keep_all = as_mapping(readable_budget.get("keep_all_median") or readable_budget.get("mode_median"))
         autogaze = as_mapping(readable_budget.get("autogaze_median"))
@@ -814,19 +964,11 @@ def render_processing_budget_summary(payload: dict[str, Any]) -> str:
 
 
 def render_autogaze_token_patch_flow(payload: dict[str, Any], metrics: dict[str, Any]) -> str:
-    readable_budget = as_mapping(
-        get_path(payload, "readable_summary.processing_budget_summary")
-        or get_path(payload, "readable_performance_summary.processing_budget_summary")
-    )
+    readable_budget = readable_processing_budget_summary(payload)
     if readable_budget:
         return render_readable_budget_token_flow(readable_budget)
 
-    result = result_payload(payload)
-    summary = as_mapping(
-        result.get("processing_budget_summary")
-        or payload.get("processing_budget_summary")
-        or get_path(payload, "generation.metrics.processing_budget_summary")
-    )
+    summary = processing_budget_summary(payload)
     if not summary:
         return ""
     return render_single_budget_token_flow(summary, metrics)
@@ -1071,7 +1213,7 @@ def render_markdown_report(
     source_path: str | None = None,
     title: str = "AutoGaze Reproduction Report",
 ) -> str:
-    metrics = key_metrics(payload)
+    metrics = enriched_key_metrics(payload, key_metrics(payload))
     sections = [
         f"# {title}",
         render_video_and_experiment_info(payload, source_path),
