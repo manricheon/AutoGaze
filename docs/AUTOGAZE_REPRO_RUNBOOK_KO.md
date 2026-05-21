@@ -1762,6 +1762,8 @@ runner는 Qwen 계열 비디오 실행에서 `--qwen-video-nframes`를 기본적
 
 HLVid limit3 plugin 비교는 `configs/repro/plugin_hlvid_limit3.yaml`에 대응합니다. CUDA 머신의 HLVid 폴더가 mp4 flat 구조여도 `video_root / basename(video_path)` fallback으로 찾습니다.
 
+Qwen ViT 경로만 비교하려면 `configs/repro/plugin_hlvid_qwen_vit_limit3.yaml`을 기준으로 쓰세요. 이 설정은 같은 HLVid 입력, 같은 `32` main frames, 같은 `8` append-thumbnail frames, 같은 `448` longest-edge resize, 같은 `Qwen/Qwen3-VL-8B-Instruct` 로컬 weight를 유지하고 `qwen_full_vit`, `qwen_chunked_vit`, `qwen_chunked_vit_autogaze_sparse`만 바꿉니다. 즉 runner 파일은 `repro.plugin_hlvid_benchmark`, 모델 override는 `--model qwen3-vl=weight/Qwen3-VL-8B-Instruct`만 맞추면 됩니다.
+
 ```bash
 .venv/bin/python -m repro.plugin_hlvid_benchmark \
   --manifest /path/to/HLVid/data/test-00000-of-00001.parquet \

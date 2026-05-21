@@ -171,6 +171,27 @@ def test_plugin_hlvid_limit3_config_defines_comparison_modes():
     assert (root / "scripts" / "download_qwen_model.py").is_file()
 
 
+def test_plugin_hlvid_qwen_vit_limit3_config_defines_matched_qwen_modes():
+    root = Path(__file__).resolve().parents[1]
+    config = OmegaConf.load(root / "configs" / "repro" / "plugin_hlvid_qwen_vit_limit3.yaml")
+
+    args = config.plugin_hlvid_benchmark.args
+    assert args.limit == 3
+    assert args.modes == [
+        "qwen_full_vit",
+        "qwen_chunked_vit",
+        "qwen_chunked_vit_autogaze_sparse",
+    ]
+    assert args.models["qwen3-vl"] == "weight/Qwen3-VL-8B-Instruct"
+    assert args.num_video_frames == 32
+    assert args.qwen_video_nframes == 32
+    assert args.num_video_frames_thumbnail == 8
+    assert args.qwen_thumbnail_mode == "append-video"
+    assert args.video_resize_longest_edge == 448
+    assert args.qwen_vit_chunk_frames == 16
+    assert args.qwen_vit_max_spatial_chunks == 4
+
+
 def test_autogaze_priority_validation_config_lists_four_tracks():
     root = Path(__file__).resolve().parents[1]
     config = OmegaConf.load(root / "configs" / "repro" / "autogaze_priority_validation.yaml")

@@ -1,0 +1,40 @@
+description: >
+  Qwen3-VL-only HLVid limit-3 comparison for the plugin runner. The three
+  modes keep the dataset, frame count, runner-side resize, thumbnail append,
+  and model path identical while changing only the Qwen ViT execution path:
+  native full ViT, chunked ViT keep-all, and chunked ViT with direct AutoGaze
+  sparse pre-ViT pruning.
+
+plugin_hlvid_benchmark:
+  module: repro.plugin_hlvid_benchmark
+  args:
+    manifest: /path/to/HLVid/data/test-00000-of-00001.parquet
+    video_root: /path/to/HLVid/videos
+    output_dir: outputs/autogaze_repro/plugin_hlvid_qwen_vit_limit3
+    limit: 3
+    modes:
+      - qwen_full_vit
+      - qwen_chunked_vit
+      - qwen_chunked_vit_autogaze_sparse
+    models:
+      qwen3-vl: weight/Qwen3-VL-8B-Instruct
+    num_video_frames: 32
+    qwen_video_nframes: 32
+    num_video_frames_thumbnail: 8
+    qwen_thumbnail_mode: append-video
+    video_resize_longest_edge: 448
+    max_tiles_video: 4
+    qwen_vit_chunk_frames: 16
+    qwen_vit_max_spatial_chunks: 4
+    max_new_tokens: 8
+
+outputs:
+  predictions: outputs/autogaze_repro/plugin_hlvid_qwen_vit_limit3/plugin_hlvid_predictions.jsonl
+  summary: outputs/autogaze_repro/plugin_hlvid_qwen_vit_limit3/plugin_hlvid_summary.json
+  markdown: outputs/autogaze_repro/plugin_hlvid_qwen_vit_limit3/plugin_hlvid_report.md
+
+notes:
+  - qwen_full_vit uses native Qwen video feature extraction.
+  - qwen_chunked_vit keeps all visual tokens but splits Qwen ViT work into temporal/spatial chunks.
+  - qwen_chunked_vit_autogaze_sparse runs the direct AutoGaze selector first and applies sparse pre-ViT pruning.
+  - qwen_thumbnail_mode append-video is an experiment-mode approximation, not a native Qwen thumbnail stream.
