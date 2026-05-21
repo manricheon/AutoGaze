@@ -1562,7 +1562,7 @@ video
 - `generation.metrics.qwen_prune_generate.selection_source`: `sparse_selection_plan`이면 실제 AutoGaze plan이 Qwen prune에 사용된 것
 - `generation.metrics.tokens.visual_tokens_before_prune / visual_tokens_after_prune`: Qwen MLLM에 들어가는 visual placeholder 감소량
 
-주의: 현재 Qwen 연결은 **post-encoder prune**입니다. 즉 Qwen ViT는 아직 full video feature를 계산하고, AutoGaze 이득은 우선 MLLM context/prefill/KV cache 쪽에서 확인합니다. ViT 연산량까지 줄이려면 다음 단계의 pre-ViT sparse input adapter가 필요합니다.
+주의: `post_encoder_token_prune` 경로는 Qwen ViT는 full video feature를 계산하고, AutoGaze 이득을 MLLM context/prefill/KV cache 쪽에서 먼저 확인하는 경로입니다. ViT 연산량 감소까지 보려면 아래의 `qwen_chunked_vit_autogaze_sparse` 또는 기존 `pre_encoder_sparse + autogaze-sparse` 경로를 사용합니다.
 
 Qwen ViT 연산량까지 줄이는 실험 경로는 `pre_encoder_sparse + autogaze-sparse`로 켭니다. 이 경로는 AutoGaze plan을 Qwen `video_grid_thw`의 merged visual token index로 매핑한 뒤, Qwen visual transformer에 들어가는 merged-token group만 통과시키고, 같은 index의 visual placeholder만 MLLM 입력에 남깁니다. 아직 모델별 실험 hook이므로 CUDA smoke에서 `qwen_pre_vit_sparse.status`와 `metric_status`를 먼저 확인해야 합니다.
 
@@ -1594,6 +1594,105 @@ Qwen ViT 연산량까지 줄이는 실험 경로는 `pre_encoder_sparse + autoga
   --output-json outputs/autogaze_repro/flexible_qwen3_vl_direct_autogaze_pre_vit_sparse.json
 ```
 
+Qwen ViT 비교는 아래 세 모드를 같은 입력으로 나란히 돌립니다.
+
+```text
+qwen_full_vit
+  video -> qwen_vl_utils/processer -> native Qwen get_video_features(full) -> MLLM
+
+qwen_chunked_vit
+  video -> qwen_vl_utils/processer -> pixel_values_videos를 temporal chunk로 분할
+        -> Qwen ViT chunk forward(keep-all) -> concat features -> MLLM
+
+qwen_chunked_vit_autogaze_sparse
+  video -> direct AutoGaze selector -> SparseSelectionPlan
+        -> qwen_vl_utils/processer -> pixel_values_videos temporal chunk
+        -> AutoGaze selected merged-token만 Qwen ViT chunk forward
+        -> selected visual placeholder만 MLLM context에 packing
+```
+
+단일 비디오에서 비교:
+
+```bash
+# 1) native full Qwen ViT
+.venv/bin/python -m repro.flexible_runner \
+  --mode single \
+  --model-path weight/Qwen3-VL-8B-Instruct \
+  --model-family qwen3-vl \
+  --token-selector-adapter keep-all \
+  --vision-encoder-adapter qwen3-vl-vision \
+  --mllm-adapter qwen3-vl \
+  --autogaze-integration-level none \
+  --qwen-vit-mode qwen_full_vit \
+  --num-video-frames 32 \
+  --qwen-video-nframes 32 \
+  --qwen-video-max-pixels 200704 \
+  --video /path/to/video.mp4 \
+  --output-json outputs/autogaze_repro/qwen_full_vit.json
+
+# 2) chunked Qwen ViT, AutoGaze off
+.venv/bin/python -m repro.flexible_runner \
+  --mode single \
+  --model-path weight/Qwen3-VL-8B-Instruct \
+  --model-family qwen3-vl \
+  --token-selector-adapter keep-all \
+  --vision-encoder-adapter qwen3-vl-vision \
+  --mllm-adapter qwen3-vl \
+  --autogaze-integration-level none \
+  --qwen-vit-mode qwen_chunked_vit \
+  --qwen-vit-chunk-frames 16 \
+  --num-video-frames 32 \
+  --qwen-video-nframes 32 \
+  --qwen-video-max-pixels 200704 \
+  --video /path/to/video.mp4 \
+  --output-json outputs/autogaze_repro/qwen_chunked_vit.json
+
+# 3) chunked Qwen ViT + direct AutoGaze sparse
+.venv/bin/python -m repro.flexible_runner \
+  --mode single \
+  --model-path weight/Qwen3-VL-8B-Instruct \
+  --model-family qwen3-vl \
+  --token-selector-adapter autogaze \
+  --token-selector-path /path/to/weights/AutoGaze \
+  --vision-encoder-adapter qwen3-vl-vision \
+  --mllm-adapter qwen3-vl \
+  --autogaze-integration-level pre_encoder_sparse \
+  --pre-encoder-prune-adapter autogaze-sparse \
+  --enable-qwen-prune-generate \
+  --run-autogaze-selector \
+  --autogaze-generate-only \
+  --autogaze-repo external/AutoGaze \
+  --autogaze-target-scales 32+64+112+224 \
+  --autogaze-target-patch-size 16 \
+  --autogaze-encoder-patch-size 16 \
+  --autogaze-chunk-frames 16 \
+  --max-batch-size-autogaze 1 \
+  --qwen-vit-mode qwen_chunked_vit_autogaze_sparse \
+  --qwen-vit-chunk-frames 16 \
+  --num-video-frames 32 \
+  --qwen-video-nframes 32 \
+  --qwen-video-max-pixels 200704 \
+  --gazing-ratio 0.75 \
+  --task-loss-requirement 0.7 \
+  --video /path/to/video.mp4 \
+  --output-json outputs/autogaze_repro/qwen_chunked_vit_autogaze_sparse.json
+```
+
+확인할 핵심 필드:
+
+- `generation.metrics.qwen_vit.mode`: 세 비교 모드 중 어떤 경로인지
+- `generation.metrics.qwen_vit.processor_chunking`: 현재는 Qwen processor가 만든 `pixel_values_videos` 이후 chunking입니다. 즉 decode/resize 메모리는 아직 Qwen processor 정책의 영향을 받습니다.
+- `generation.metrics.qwen_vit.raw_patch_tokens_before_vit`: Qwen ViT patch embedding 입력 토큰 수
+- `generation.metrics.qwen_vit.visual_tokens_before_prune / visual_tokens_after_prune`: Qwen merged visual token 기준 AutoGaze 전후 수
+- `generation.metrics.tokens.visual_token_reduction_ratio`: 분모는 AutoGaze 전 Qwen visual placeholder 수, 분자는 AutoGaze 후 placeholder 수입니다.
+- `generation.metrics.latency_ms.qwen_vit_prepare`: chunked/sparse path에서 ViT feature 생성과 MLLM input packing에 걸린 시간입니다.
+
+중요한 제한:
+
+- `qwen_chunked_vit`는 peak ViT residency를 줄이기 위한 chunked feature extraction 실험입니다. AutoGaze off라서 visual token 수는 줄지 않습니다.
+- `qwen_chunked_vit_autogaze_sparse`는 AutoGaze 선택 token만 Qwen visual transformer block과 MLLM context에 통과시킵니다.
+- 아직 “진짜 decode streaming”은 아닙니다. 긴 4K 영상에서 decode/resize 자체 OOM이 나면 `--qwen-video-nframes`, `--qwen-video-max-pixels`를 먼저 줄여야 합니다.
+
 Qwen off 또는 AutoGaze off로 큰 비디오를 넣을 때는 NVILA runner와 다르게 Qwen의 `qwen_vl_utils`가 비디오 디코드/샘플링/resize를 담당합니다. runner는 Qwen 계열 비디오 실행에서 `--qwen-video-nframes`를 기본적으로 `--num-video-frames`와 맞추지만, 4K/긴 영상은 아래처럼 해상도 cap도 같이 주는 편이 안전합니다.
 
 ```bash
@@ -1622,13 +1721,16 @@ HLVid limit3 plugin 비교는 `configs/repro/plugin_hlvid_limit3.yaml`에 대응
   --video-root /path/to/HLVid/videos \
   --output-dir outputs/autogaze_repro/plugin_hlvid_limit3 \
   --limit 3 \
-  --modes nvila-video-off,longvila-off,internvl3-off,qwen3-vl-autogaze-probe,qwen3-vl-autogaze-prune-generate,qwen3-vl-autogaze-direct-prune-generate,qwen3-vl-autogaze-direct-pre-vit-sparse \
+  --modes nvila-video-off,longvila-off,internvl3-off,qwen_full_vit,qwen_chunked_vit,qwen_chunked_vit_autogaze_sparse \
   --external-mllm-command vila-infer \
   --model nvila-video=weight/NVILA-8B-Video \
   --model longvila=weight/LongVILA \
   --model internvl3=weight/InternVL3 \
   --model qwen3-vl=weight/Qwen3-VL-8B-Instruct \
   --num-video-frames 256 \
+  --qwen-video-nframes 256 \
+  --qwen-video-max-pixels 200704 \
+  --qwen-vit-chunk-frames 16 \
   --max-tiles-video 8
 ```
 

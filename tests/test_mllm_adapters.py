@@ -2,6 +2,7 @@ import os
 
 from repro.plugins.mllm_adapters import (
     _build_qwen_grid_inputs,
+    build_qwen_inputs_from_video_features,
     build_qwen_pruned_visual_inputs,
     build_qwen_pre_vit_sparse_visual_inputs,
     InternVL3CliMllmAdapter,
@@ -13,6 +14,8 @@ from repro.plugins.mllm_adapters import (
     VilaCliMllmAdapter,
     build_metric_skeleton,
     extract_assistant_text,
+    qwen_grid_chunk_slices,
+    qwen_chunked_video_features,
     resolve_mllm_adapter,
     resolve_qwen_visual_keep_indices,
 )
@@ -44,6 +47,8 @@ def make_request(**overrides):
         "qwen_video_fps": None,
         "qwen_video_max_pixels": None,
         "qwen_video_min_pixels": None,
+        "qwen_vit_mode": "qwen_full_vit",
+        "qwen_vit_chunk_frames": 16,
     }
     values.update(overrides)
     return MllmRunRequest(**values)
@@ -117,6 +122,7 @@ def test_metric_skeleton_contains_latency_token_memory_slots():
         "model_load": None,
         "processor_load": None,
         "input_build": None,
+        "qwen_vit_prepare": None,
         "generate": None,
         "total": None,
     }
@@ -125,6 +131,7 @@ def test_metric_skeleton_contains_latency_token_memory_slots():
     assert skeleton["tokens"]["visual_tokens_before_prune"] is None
     assert skeleton["tokens"]["visual_tokens_after_prune"] is None
     assert skeleton["memory_bytes"]["peak_cuda_allocated"] is None
+    assert skeleton["qwen_vit"]["mode"] == "qwen_full_vit"
 
 
 def test_runtime_description_includes_metric_schema():
@@ -467,6 +474,208 @@ def test_qwen_grid_adapter_runs_pixelprune_pre_vit_path(monkeypatch):
     assert result.text == "pixelprune answer"
     assert result.metrics["pre_encoder_prune"]["adapter"] == "pixelprune"
     assert result.metrics["pre_encoder_prune"]["integration_level"] == "pre_encoder_sparse"
+
+
+def test_qwen_grid_chunks_split_flat_video_tokens_by_temporal_grid():
+    torch = __import__("torch")
+
+    chunks = qwen_grid_chunk_slices(
+        torch.tensor([[4, 2, 4]]),
+        spatial_merge_size=2,
+        chunk_frames=2,
+    )
+
+    assert chunks == [
+        {
+            "chunk_index": 0,
+            "t_start": 0,
+            "t_end": 2,
+            "t": 2,
+            "h": 2,
+            "w": 4,
+            "raw_token_start": 0,
+            "raw_token_end": 16,
+            "merged_token_start": 0,
+            "merged_token_end": 4,
+        },
+        {
+            "chunk_index": 1,
+            "t_start": 2,
+            "t_end": 4,
+            "t": 2,
+            "h": 2,
+            "w": 4,
+            "raw_token_start": 16,
+            "raw_token_end": 32,
+            "merged_token_start": 4,
+            "merged_token_end": 8,
+        },
+    ]
+
+
+def test_build_qwen_inputs_from_video_features_keeps_dense_placeholders():
+    torch = __import__("torch")
+
+    class FakeQwenModel:
+        def __init__(self):
+            self.config = type("Config", (), {"video_token_id": 999})()
+            self.embedding = torch.nn.Embedding(1200, 4)
+
+        def get_input_embeddings(self):
+            return self.embedding
+
+    inputs = {
+        "input_ids": torch.tensor([[1, 999, 999, 2]]),
+        "attention_mask": torch.ones((1, 4), dtype=torch.long),
+        "pixel_values_videos": torch.zeros((4, 3)),
+        "video_grid_thw": torch.tensor([[1, 1, 4]]),
+    }
+    features = torch.tensor([[10.0, 0.0, 0.0, 0.0], [20.0, 0.0, 0.0, 0.0]])
+
+    packed = build_qwen_inputs_from_video_features(FakeQwenModel(), inputs, features)
+
+    assert packed["input_ids"].tolist() == [[1, 999, 999, 2]]
+    assert packed["attention_mask"].tolist() == [[1, 1, 1, 1]]
+    assert packed["inputs_embeds"][0, 1].tolist() == [10.0, 0.0, 0.0, 0.0]
+    assert packed["inputs_embeds"][0, 2].tolist() == [20.0, 0.0, 0.0, 0.0]
+    assert "pixel_values_videos" not in packed
+    assert "video_grid_thw" not in packed
+    assert packed["qwen_video_feature_metadata"]["visual_tokens_before_prune"] == 2
+    assert packed["qwen_video_feature_metadata"]["visual_tokens_after_prune"] == 2
+
+
+def test_build_qwen_inputs_from_video_features_keeps_sparse_placeholders():
+    torch = __import__("torch")
+
+    class FakeQwenModel:
+        def __init__(self):
+            self.config = type("Config", (), {"video_token_id": 999})()
+            self.embedding = torch.nn.Embedding(1200, 4)
+
+        def get_input_embeddings(self):
+            return self.embedding
+
+    inputs = {
+        "input_ids": torch.tensor([[1, 999, 999, 999, 999, 2]]),
+        "attention_mask": torch.ones((1, 6), dtype=torch.long),
+        "pixel_values_videos": torch.zeros((16, 3)),
+        "video_grid_thw": torch.tensor([[1, 4, 4]]),
+    }
+    features = torch.tensor([[20.0, 0.0, 0.0, 0.0], [40.0, 0.0, 0.0, 0.0]])
+
+    packed = build_qwen_inputs_from_video_features(
+        FakeQwenModel(),
+        inputs,
+        features,
+        original_keep_indices=[1, 3],
+        metadata_key="qwen_chunked_vit_sparse_metadata",
+    )
+
+    assert packed["input_ids"].tolist() == [[1, 999, 999, 2]]
+    assert packed["inputs_embeds"][0, 1].tolist() == [20.0, 0.0, 0.0, 0.0]
+    assert packed["inputs_embeds"][0, 2].tolist() == [40.0, 0.0, 0.0, 0.0]
+    assert packed["qwen_chunked_vit_sparse_metadata"]["kept_original_visual_indices"] == [1, 3]
+    assert packed["qwen_chunked_vit_sparse_metadata"]["visual_tokens_before_prune"] == 4
+    assert packed["qwen_chunked_vit_sparse_metadata"]["visual_tokens_after_prune"] == 2
+
+
+def test_qwen_chunked_video_features_runs_dense_and_sparse_chunks():
+    torch = __import__("torch")
+
+    class FakeMerger(torch.nn.Module):
+        def forward(self, hidden_states):
+            return hidden_states.reshape(-1, 4, 1).sum(dim=1)
+
+    class FakeVisual(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.dtype = torch.float32
+            self.spatial_merge_unit = 4
+            self.patch_embed = torch.nn.Identity()
+            self.blocks = torch.nn.ModuleList([])
+            self.merger = FakeMerger()
+
+        def rot_pos_emb(self, grid_thw):
+            t, h, w = [int(item) for item in grid_thw[0].tolist()]
+            return torch.zeros((t * h * w, 1), dtype=torch.float32)
+
+    class FakeModel:
+        def __init__(self):
+            self.visual = FakeVisual()
+            self.config = type("Config", (), {"vision_config": type("VisionConfig", (), {"spatial_merge_size": 2})()})()
+
+    values = {
+        "pixel_values_videos": torch.arange(32, dtype=torch.float32).reshape(32, 1),
+        "video_grid_thw": torch.tensor([[4, 2, 4]]),
+    }
+
+    dense_features, dense_metadata = qwen_chunked_video_features(FakeModel(), values, chunk_frames=2)
+    sparse_features, sparse_metadata = qwen_chunked_video_features(
+        FakeModel(),
+        values,
+        chunk_frames=2,
+        keep_indices=[1, 6],
+    )
+
+    assert dense_features.flatten().tolist() == [6.0, 22.0, 38.0, 54.0, 70.0, 86.0, 102.0, 118.0]
+    assert dense_metadata["chunk_count"] == 2
+    assert dense_metadata["visual_tokens_after_prune"] == 8
+    assert sparse_features.flatten().tolist() == [22.0, 102.0]
+    assert sparse_metadata["executed_chunk_count"] == 2
+    assert sparse_metadata["visual_tokens_after_prune"] == 2
+
+
+def test_qwen_grid_adapter_routes_chunked_vit_mode(monkeypatch):
+    adapter = resolve_mllm_adapter("qwen3-vl")
+
+    def fake_run(self, request):
+        return MllmRunResult(
+            text="chunked answer",
+            prompt=request.prompt,
+            video=request.video,
+            image=request.image,
+            adapter=self.name,
+            status="executed",
+            metrics={"qwen_vit": {"mode": request.qwen_vit_mode, "chunk_frames": request.qwen_vit_chunk_frames}},
+        )
+
+    monkeypatch.setattr(QwenGridMllmAdapter, "_run_qwen_chunked_vit_generate", fake_run)
+
+    result = adapter.run(make_request(qwen_vit_mode="qwen_chunked_vit", qwen_vit_chunk_frames=8))
+
+    assert result.text == "chunked answer"
+    assert result.metrics["qwen_vit"] == {"mode": "qwen_chunked_vit", "chunk_frames": 8}
+
+
+def test_qwen_grid_adapter_routes_chunked_vit_autogaze_sparse_mode(monkeypatch):
+    adapter = resolve_mllm_adapter("qwen3-vl")
+
+    def fake_run(self, request):
+        return MllmRunResult(
+            text="sparse chunked answer",
+            prompt=request.prompt,
+            video=request.video,
+            image=request.image,
+            adapter=self.name,
+            status="executed",
+            metrics={"qwen_vit": {"mode": request.qwen_vit_mode}},
+        )
+
+    monkeypatch.setattr(QwenGridMllmAdapter, "_run_qwen_chunked_vit_autogaze_sparse_generate", fake_run)
+
+    result = adapter.run(
+        make_request(
+            qwen_vit_mode="qwen_chunked_vit_autogaze_sparse",
+            token_selector_kind="autogaze",
+            integration_level="pre_encoder_sparse",
+            pre_encoder_prune_adapter="autogaze-sparse",
+            enable_qwen_prune_generate=True,
+            sparse_selection_plan_path="outputs/plan.json",
+        )
+    )
+
+    assert result.text == "sparse chunked answer"
+    assert result.metrics["qwen_vit"]["mode"] == "qwen_chunked_vit_autogaze_sparse"
 
 
 def test_llava_onevision_adapter_uses_path_style_video_content():

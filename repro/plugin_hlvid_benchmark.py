@@ -45,6 +45,7 @@ def build_mode_runner_args(
     qwen_video_fps: float | None = None,
     qwen_video_max_pixels: int | None = None,
     qwen_video_min_pixels: int | None = None,
+    qwen_vit_chunk_frames: int = 16,
 ) -> list[str]:
     if mode == "nvila-video-off":
         return _base_args(
@@ -166,6 +167,40 @@ def build_mode_runner_args(
             qwen_video_max_pixels=qwen_video_max_pixels,
             qwen_video_min_pixels=qwen_video_min_pixels,
         )
+    if mode in {"qwen_full_vit", "qwen_chunked_vit", "qwen_chunked_vit_autogaze_sparse"}:
+        sparse = mode == "qwen_chunked_vit_autogaze_sparse"
+        args = _base_args(
+            model_family="qwen3-vl",
+            model_path=models.get("qwen3-vl", DEFAULT_MODELS["qwen3-vl"]),
+            token_selector="autogaze" if sparse else "keep-all",
+            vision_adapter="qwen3-vl-vision",
+            mllm_adapter="qwen3-vl",
+            integration_level="pre_encoder_sparse" if sparse else "none",
+            row=row,
+            video_path=video_path,
+            output_json=output_json,
+            external_mllm_command=external_mllm_command,
+            num_video_frames=num_video_frames,
+            max_tiles_video=max_tiles_video,
+            max_new_tokens=max_new_tokens,
+            qwen_video_nframes=qwen_video_nframes,
+            qwen_video_fps=qwen_video_fps,
+            qwen_video_max_pixels=qwen_video_max_pixels,
+            qwen_video_min_pixels=qwen_video_min_pixels,
+            qwen_vit_mode=mode,
+            qwen_vit_chunk_frames=qwen_vit_chunk_frames,
+        )
+        if sparse:
+            args.extend(
+                [
+                    "--run-autogaze-selector",
+                    "--autogaze-generate-only",
+                    "--enable-qwen-prune-generate",
+                    "--pre-encoder-prune-adapter",
+                    "autogaze-sparse",
+                ]
+            )
+        return args
     if mode in {
         "qwen3-vl-autogaze-probe",
         "qwen3-vl-autogaze-poc",
@@ -241,6 +276,7 @@ def run_plugin_hlvid_benchmark(
     qwen_video_fps: float | None = None,
     qwen_video_max_pixels: int | None = None,
     qwen_video_min_pixels: int | None = None,
+    qwen_vit_chunk_frames: int = 16,
 ) -> dict[str, Any]:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -268,6 +304,7 @@ def run_plugin_hlvid_benchmark(
                 qwen_video_fps=qwen_video_fps,
                 qwen_video_max_pixels=qwen_video_max_pixels,
                 qwen_video_min_pixels=qwen_video_min_pixels,
+                qwen_vit_chunk_frames=qwen_vit_chunk_frames,
             )
             payload = run_single(parse_flexible_args(runner_args))
             generation = payload.get("generation", {})
@@ -340,6 +377,7 @@ def build_markdown_report(summary: dict[str, Any]) -> str:
             "- `qwen3-vl-autogaze-prune-generate` explicitly enables the experimental Qwen post-encoder prune + generate path.",
             "- `qwen3-vl-autogaze-direct-prune-generate` runs AutoGaze first, writes a sparse plan, then uses that plan for Qwen prune + generate.",
             "- `qwen3-vl-autogaze-direct-pre-vit-sparse` additionally installs the experimental Qwen sparse vision hook before MLLM packing.",
+            "- `qwen_full_vit`, `qwen_chunked_vit`, and `qwen_chunked_vit_autogaze_sparse` compare native full Qwen ViT, temporal chunked Qwen ViT, and temporal chunked AutoGaze sparse Qwen ViT.",
             "- `accuracy_total` uses all rows in the denominator; failed and parse-failed rows are separated in the table.",
         ]
     )
@@ -365,6 +403,8 @@ def _base_args(
     qwen_video_fps: float | None = None,
     qwen_video_max_pixels: int | None = None,
     qwen_video_min_pixels: int | None = None,
+    qwen_vit_mode: str | None = None,
+    qwen_vit_chunk_frames: int | None = None,
 ) -> list[str]:
     args = [
         "--mode",
@@ -406,6 +446,10 @@ def _base_args(
             args.extend(["--qwen-video-max-pixels", str(qwen_video_max_pixels)])
         if qwen_video_min_pixels is not None:
             args.extend(["--qwen-video-min-pixels", str(qwen_video_min_pixels)])
+        if qwen_vit_mode is not None:
+            args.extend(["--qwen-vit-mode", str(qwen_vit_mode)])
+        if qwen_vit_chunk_frames is not None:
+            args.extend(["--qwen-vit-chunk-frames", str(qwen_vit_chunk_frames)])
     if external_mllm_command:
         args.extend(["--external-mllm-command", external_mllm_command])
     return args
@@ -420,11 +464,22 @@ def _prediction_status(generation_status: str | None) -> str:
 def _flatten_key_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     latency = metrics.get("latency_ms", {})
     memory = metrics.get("memory_bytes", {})
+    tokens = metrics.get("tokens", {})
+    qwen_vit = metrics.get("qwen_vit", {})
     return {
         "total_ms": latency.get("total"),
         "generate_ms": latency.get("generate"),
+        "qwen_vit_prepare_ms": latency.get("qwen_vit_prepare"),
         "llm_peak_memory_bytes": memory.get("peak_cuda_allocated"),
         "peak_memory_bytes": memory.get("peak_cuda_reserved"),
+        "qwen_vit_mode": qwen_vit.get("mode"),
+        "qwen_vit_raw_patch_tokens_before_vit": qwen_vit.get("raw_patch_tokens_before_vit"),
+        "qwen_vit_chunk_count": qwen_vit.get("chunk_count"),
+        "qwen_vit_executed_chunk_count": qwen_vit.get("executed_chunk_count"),
+        "visual_tokens_before_prune": tokens.get("visual_tokens_before_prune"),
+        "visual_tokens_after_prune": tokens.get("visual_tokens_after_prune"),
+        "visual_token_reduction_ratio": tokens.get("visual_token_reduction_ratio"),
+        "llm_context_tokens": tokens.get("llm_context_tokens"),
     }
 
 
@@ -495,6 +550,7 @@ def main() -> None:
     parser.add_argument("--qwen-video-fps", type=float)
     parser.add_argument("--qwen-video-max-pixels", type=int)
     parser.add_argument("--qwen-video-min-pixels", type=int)
+    parser.add_argument("--qwen-vit-chunk-frames", type=int, default=16)
     args = parser.parse_args()
     payload = run_plugin_hlvid_benchmark(
         manifest=args.manifest,
@@ -511,6 +567,7 @@ def main() -> None:
         qwen_video_fps=args.qwen_video_fps,
         qwen_video_max_pixels=args.qwen_video_max_pixels,
         qwen_video_min_pixels=args.qwen_video_min_pixels,
+        qwen_vit_chunk_frames=args.qwen_vit_chunk_frames,
     )
     print(json.dumps(payload["summary"], indent=2, sort_keys=True))
 

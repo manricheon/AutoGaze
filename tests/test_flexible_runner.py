@@ -591,6 +591,39 @@ def test_flexible_runner_defaults_qwen_video_nframes_to_num_video_frames():
     assert args.qwen_video_nframes == 32
 
 
+def test_flexible_runner_accepts_qwen_vit_comparison_mode():
+    args = parse_args(
+        [
+            "--model-family",
+            "qwen3-vl",
+            "--model-path",
+            "weight/Qwen3-VL-8B-Instruct",
+            "--token-selector-adapter",
+            "autogaze",
+            "--vision-encoder-adapter",
+            "qwen3-vl-vision",
+            "--mllm-adapter",
+            "qwen3-vl",
+            "--autogaze-integration-level",
+            "pre_encoder_sparse",
+            "--pre-encoder-prune-adapter",
+            "autogaze-sparse",
+            "--qwen-vit-mode",
+            "qwen_chunked_vit_autogaze_sparse",
+            "--qwen-vit-chunk-frames",
+            "8",
+            "--video",
+            "inputs/example.mp4",
+            "--num-video-frames",
+            "32",
+        ]
+    )
+
+    assert args.qwen_vit_mode == "qwen_chunked_vit_autogaze_sparse"
+    assert args.qwen_vit_chunk_frames == 8
+    assert args.qwen_video_nframes == 32
+
+
 def test_flexible_runner_supports_llava_onevision_and_internvl_status():
     llava_args = parse_args(
         [

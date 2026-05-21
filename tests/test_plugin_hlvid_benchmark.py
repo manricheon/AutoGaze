@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 from repro.plugin_hlvid_benchmark import (
+    _flatten_key_metrics,
     build_mode_runner_args,
     resolve_hlvid_video_path,
     run_plugin_hlvid_benchmark,
@@ -193,6 +194,67 @@ def test_build_mode_runner_args_for_qwen3_direct_autogaze_pre_vit_sparse_mode():
     assert "--enable-qwen-prune-generate" in args
     assert "--run-autogaze-selector" in args
     assert args[args.index("--qwen-video-max-pixels") + 1] == "200704"
+
+
+def test_build_mode_runner_args_for_qwen_vit_comparison_modes():
+    row = {
+        "video_path": "clip.mp4",
+        "question": "Question? A. one B. two C. three D. four",
+        "answer": "A",
+    }
+    common = {
+        "row": row,
+        "video_path": Path("/data/clip.mp4"),
+        "output_json": Path("/tmp/run.json"),
+        "models": {"qwen3-vl": "weight/Qwen3-VL"},
+        "external_mllm_command": "vila-infer",
+        "num_video_frames": 128,
+        "max_tiles_video": 1,
+        "max_new_tokens": 8,
+        "qwen_vit_chunk_frames": 16,
+    }
+
+    full_args = build_mode_runner_args(mode="qwen_full_vit", **common)
+    chunked_args = build_mode_runner_args(mode="qwen_chunked_vit", **common)
+    sparse_args = build_mode_runner_args(mode="qwen_chunked_vit_autogaze_sparse", **common)
+
+    assert full_args[full_args.index("--qwen-vit-mode") + 1] == "qwen_full_vit"
+    assert full_args[full_args.index("--token-selector-adapter") + 1] == "keep-all"
+    assert chunked_args[chunked_args.index("--qwen-vit-mode") + 1] == "qwen_chunked_vit"
+    assert chunked_args[chunked_args.index("--qwen-vit-chunk-frames") + 1] == "16"
+    assert sparse_args[sparse_args.index("--qwen-vit-mode") + 1] == "qwen_chunked_vit_autogaze_sparse"
+    assert sparse_args[sparse_args.index("--pre-encoder-prune-adapter") + 1] == "autogaze-sparse"
+    assert "--run-autogaze-selector" in sparse_args
+    assert "--enable-qwen-prune-generate" in sparse_args
+
+
+def test_flatten_key_metrics_includes_qwen_vit_comparison_fields():
+    flattened = _flatten_key_metrics(
+        {
+            "latency_ms": {"total": 100.0, "generate": 40.0, "qwen_vit_prepare": 30.0},
+            "memory_bytes": {"peak_cuda_allocated": 10, "peak_cuda_reserved": 20},
+            "tokens": {
+                "visual_tokens_before_prune": 1000,
+                "visual_tokens_after_prune": 100,
+                "visual_token_reduction_ratio": 10.0,
+                "llm_context_tokens": 120,
+            },
+            "qwen_vit": {
+                "mode": "qwen_chunked_vit_autogaze_sparse",
+                "raw_patch_tokens_before_vit": 4000,
+                "chunk_count": 4,
+                "executed_chunk_count": 3,
+            },
+        }
+    )
+
+    assert flattened["qwen_vit_prepare_ms"] == 30.0
+    assert flattened["qwen_vit_mode"] == "qwen_chunked_vit_autogaze_sparse"
+    assert flattened["visual_tokens_before_prune"] == 1000
+    assert flattened["visual_tokens_after_prune"] == 100
+    assert flattened["visual_token_reduction_ratio"] == 10.0
+    assert flattened["qwen_vit_raw_patch_tokens_before_vit"] == 4000
+    assert flattened["qwen_vit_executed_chunk_count"] == 3
 
 
 def test_run_plugin_hlvid_benchmark_writes_predictions_summary_and_markdown(tmp_path):

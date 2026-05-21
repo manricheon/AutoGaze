@@ -56,6 +56,11 @@ AUTOGAZE_INTEGRATION_LEVEL_CHOICES = (
     "planned_plugin",
 )
 PRE_ENCODER_PRUNE_ADAPTER_CHOICES = ("none", "autogaze-sparse", "pixelprune")
+QWEN_VIT_MODE_CHOICES = (
+    "qwen_full_vit",
+    "qwen_chunked_vit",
+    "qwen_chunked_vit_autogaze_sparse",
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -94,6 +99,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--qwen-video-fps", type=float)
     parser.add_argument("--qwen-video-max-pixels", type=int)
     parser.add_argument("--qwen-video-min-pixels", type=int)
+    parser.add_argument("--qwen-vit-mode", choices=QWEN_VIT_MODE_CHOICES, default="qwen_full_vit")
+    parser.add_argument("--qwen-vit-chunk-frames", type=int, default=16)
     parser.add_argument("--video")
     parser.add_argument("--image")
     parser.add_argument("--prompt", default="Describe the video.")
@@ -443,6 +450,8 @@ def build_mllm_run_request(args: argparse.Namespace) -> MllmRunRequest:
         qwen_video_fps=args.qwen_video_fps,
         qwen_video_max_pixels=args.qwen_video_max_pixels,
         qwen_video_min_pixels=args.qwen_video_min_pixels,
+        qwen_vit_mode=args.qwen_vit_mode,
+        qwen_vit_chunk_frames=args.qwen_vit_chunk_frames,
     )
 
 

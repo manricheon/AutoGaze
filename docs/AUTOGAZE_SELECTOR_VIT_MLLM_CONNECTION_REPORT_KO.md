@@ -677,16 +677,17 @@ Acceptance:
 - [x] Qwen3-VL AutoGaze post-encoder attachment PoC 구현: `SparseSelectionPlan`, feature packing probe, visual token estimate 기록
 - [x] Qwen 계열 post-encoder feature prune/generate 실험 경로 추가: `--enable-qwen-prune-generate`
 - [x] AutoGaze `SparseSelectionPlan.selected_patches`를 Qwen `video_grid_thw` visual feature index로 매핑하는 helper 추가
-- [ ] 실제 AutoGaze runner output에서 concrete `selected_patches`를 저장해 Qwen path에 공급
-- [ ] `get_video_features` output token index와 AutoGaze patch mapping 연결
+- [x] 실제 AutoGaze runner output에서 concrete `selected_patches`를 저장해 Qwen path에 공급
+- [x] `get_video_features` output token index와 AutoGaze patch mapping 연결
 - [x] selected feature만 MLLM context에 insert하는 `inputs_embeds` bridge helper 추가
 - [x] before/after LLM context와 visual token count 기록
+- [x] `qwen_full_vit`, `qwen_chunked_vit`, `qwen_chunked_vit_autogaze_sparse` 비교 모드 추가
 - [ ] TTFT, peak memory를 Qwen prune-generate path에서 CUDA smoke로 검증
 - [x] 실패 시 `failed_qwen_prune_generate`로 원인 기록
 
 Acceptance:
 
-- ViT latency는 그대로지만 LLM visual token, prefill context, KV cache estimate가 줄어든다. 현재 구현은 AutoGaze index mapping 전 단계라 `gazing_ratio` 기반 placeholder selection으로 표시된다.
+- `qwen_chunked_vit_autogaze_sparse`에서는 AutoGaze index mapping 결과를 Qwen merged visual token index로 바꾸고, 선택된 token만 chunked Qwen ViT와 MLLM context에 통과시킨다. 단, 현재 chunking은 Qwen processor 이후 `pixel_values_videos` 단계이므로 decode/resize 절감은 별도 후속 과제다.
 
 ### Phase F: InternVL3 Tile Sparse
 

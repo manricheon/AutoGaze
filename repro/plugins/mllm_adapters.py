@@ -45,6 +45,8 @@ class MllmRunRequest:
     qwen_video_fps: float | None = None
     qwen_video_max_pixels: int | None = None
     qwen_video_min_pixels: int | None = None
+    qwen_vit_mode: str = "qwen_full_vit"
+    qwen_vit_chunk_frames: int = 16
 
 
 @dataclass(frozen=True)
@@ -428,11 +430,23 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
                 "min_pixels": request.qwen_video_min_pixels,
                 "note": "These constraints are passed to qwen_vl_utils through the video message item.",
             }
+        description["qwen_vit"] = {
+            "mode": request.qwen_vit_mode,
+            "chunk_frames": request.qwen_vit_chunk_frames,
+            "note": (
+                "qwen_full_vit uses the native full-video path; qwen_chunked_vit and "
+                "qwen_chunked_vit_autogaze_sparse split Qwen pixel_values_videos after processor build."
+            ),
+        }
         if request.token_selector_kind == "autogaze" or request.integration_level != "none":
             description["feature_packing_probe"] = build_feature_packing_probe(self.name, request)
         return description
 
     def run(self, request: MllmRunRequest) -> MllmRunResult:
+        if request.qwen_vit_mode == "qwen_chunked_vit":
+            return self._run_qwen_chunked_vit_generate(request)
+        if request.qwen_vit_mode == "qwen_chunked_vit_autogaze_sparse":
+            return self._run_qwen_chunked_vit_autogaze_sparse_generate(request)
         if (
             request.token_selector_kind == "autogaze"
             and request.integration_level == "pre_encoder_sparse"
@@ -556,6 +570,284 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
             generated_ids = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(input_ids, generated_ids)]
         text = processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
+        _record_cuda_memory(metrics)
+        return MllmRunResult(
+            text=text,
+            prompt=request.prompt,
+            video=request.video,
+            image=request.image,
+            adapter=self.name,
+            status="executed",
+            metrics=metrics,
+        )
+
+    def _run_qwen_chunked_vit_generate(self, request: MllmRunRequest) -> MllmRunResult:
+        try:
+            from transformers import AutoModelForImageTextToText, AutoProcessor
+        except ModuleNotFoundError as exc:
+            raise RuntimeError("transformers is required for Qwen grid MLLM execution") from exc
+
+        model_kwargs: dict[str, Any] = {
+            "device_map": request.device_map,
+            "trust_remote_code": request.trust_remote_code,
+        }
+        if request.dtype != "auto":
+            model_kwargs["dtype"] = request.dtype
+        if request.attn_implementation:
+            model_kwargs["attn_implementation"] = request.attn_implementation
+
+        metrics = build_metric_skeleton(request)
+        total_start = time.perf_counter()
+        start = time.perf_counter()
+        model = AutoModelForImageTextToText.from_pretrained(request.model_path, **model_kwargs)
+        metrics["latency_ms"]["model_load"] = _elapsed_ms(start)
+        start = time.perf_counter()
+        processor = AutoProcessor.from_pretrained(request.model_path, trust_remote_code=request.trust_remote_code)
+        metrics["latency_ms"]["processor_load"] = _elapsed_ms(start)
+        messages = self.build_messages(request)
+        start = time.perf_counter()
+        inputs = _build_qwen_grid_inputs(processor, messages, request)
+        metrics["latency_ms"]["input_build"] = _elapsed_ms(start)
+        _record_input_token_metrics(metrics, inputs)
+        model_device = getattr(model, "device", None)
+        if model_device is not None and hasattr(inputs, "to"):
+            inputs = inputs.to(model_device)
+
+        try:
+            start = time.perf_counter()
+            video_features, chunk_metadata = qwen_chunked_video_features(
+                model,
+                dict(inputs),
+                chunk_frames=request.qwen_vit_chunk_frames,
+            )
+            packed_inputs = build_qwen_inputs_from_video_features(model, inputs, video_features)
+            metrics["latency_ms"]["qwen_vit_prepare"] = _elapsed_ms(start)
+        except Exception as exc:
+            metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
+            metrics["qwen_vit"] = {
+                "mode": request.qwen_vit_mode,
+                "status": "failed_before_generate",
+                "reason": str(exc),
+            }
+            metrics["metric_status"] = {
+                "value": "failed_qwen_chunked_vit",
+                "reason": str(exc),
+            }
+            _record_cuda_memory(metrics)
+            return MllmRunResult(
+                text=None,
+                prompt=request.prompt,
+                video=request.video,
+                image=request.image,
+                adapter=self.name,
+                status="failed_qwen_chunked_vit",
+                metrics=metrics,
+            )
+
+        feature_metadata = packed_inputs.pop("qwen_video_feature_metadata")
+        metrics["qwen_vit"] = {
+            "mode": request.qwen_vit_mode,
+            "status": "inputs_embeds_prepared",
+            **chunk_metadata,
+            **feature_metadata,
+        }
+        metrics["tokens"]["visual_tokens_before_prune"] = feature_metadata["visual_tokens_before_prune"]
+        metrics["tokens"]["visual_tokens_after_prune"] = feature_metadata["visual_tokens_after_prune"]
+        metrics["tokens"]["visual_token_reduction_ratio"] = 1.0
+        input_ids = packed_inputs.get("input_ids")
+        if input_ids is not None and hasattr(input_ids, "shape"):
+            metrics["tokens"]["llm_context_tokens"] = int(input_ids.shape[-1])
+
+        start = time.perf_counter()
+        try:
+            generated_ids = model.generate(**packed_inputs, max_new_tokens=request.max_new_tokens)
+        except Exception as exc:
+            metrics["latency_ms"]["generate"] = _elapsed_ms(start)
+            metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
+            metrics["qwen_vit"]["status"] = "failed_during_generate"
+            metrics["qwen_vit"]["reason"] = str(exc)
+            metrics["metric_status"] = {
+                "value": "failed_qwen_chunked_vit",
+                "reason": str(exc),
+            }
+            _record_cuda_memory(metrics)
+            return MllmRunResult(
+                text=None,
+                prompt=request.prompt,
+                video=request.video,
+                image=request.image,
+                adapter=self.name,
+                status="failed_qwen_chunked_vit",
+                metrics=metrics,
+            )
+
+        metrics["latency_ms"]["generate"] = _elapsed_ms(start)
+        if input_ids is not None:
+            generated_ids = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(input_ids, generated_ids)]
+        text = processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+        metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
+        metrics["metric_status"] = {
+            "value": "executed_qwen_chunked_vit",
+            "reason": (
+                "Qwen ViT features were computed in temporal chunks after processor build, "
+                "then packed into the original MLLM visual placeholders."
+            ),
+        }
+        _record_cuda_memory(metrics)
+        return MllmRunResult(
+            text=text,
+            prompt=request.prompt,
+            video=request.video,
+            image=request.image,
+            adapter=self.name,
+            status="executed",
+            metrics=metrics,
+        )
+
+    def _run_qwen_chunked_vit_autogaze_sparse_generate(self, request: MllmRunRequest) -> MllmRunResult:
+        try:
+            from transformers import AutoModelForImageTextToText, AutoProcessor
+        except ModuleNotFoundError as exc:
+            raise RuntimeError("transformers is required for Qwen grid MLLM execution") from exc
+
+        model_kwargs: dict[str, Any] = {
+            "device_map": request.device_map,
+            "trust_remote_code": request.trust_remote_code,
+        }
+        if request.dtype != "auto":
+            model_kwargs["dtype"] = request.dtype
+        if request.attn_implementation:
+            model_kwargs["attn_implementation"] = request.attn_implementation
+
+        metrics = build_metric_skeleton(request)
+        metrics["feature_packing_probe"] = build_feature_packing_probe(self.name, request)
+        total_start = time.perf_counter()
+        start = time.perf_counter()
+        model = AutoModelForImageTextToText.from_pretrained(request.model_path, **model_kwargs)
+        metrics["latency_ms"]["model_load"] = _elapsed_ms(start)
+        start = time.perf_counter()
+        processor = AutoProcessor.from_pretrained(request.model_path, trust_remote_code=request.trust_remote_code)
+        metrics["latency_ms"]["processor_load"] = _elapsed_ms(start)
+        messages = self.build_messages(request)
+        start = time.perf_counter()
+        inputs = _build_qwen_grid_inputs(processor, messages, request)
+        metrics["latency_ms"]["input_build"] = _elapsed_ms(start)
+        _record_input_token_metrics(metrics, inputs)
+        model_device = getattr(model, "device", None)
+        if model_device is not None and hasattr(inputs, "to"):
+            inputs = inputs.to(model_device)
+
+        try:
+            if not request.sparse_selection_plan_path:
+                raise ValueError(
+                    "qwen_chunked_vit_autogaze_sparse requires --sparse-selection-plan-json "
+                    "or --run-autogaze-selector"
+                )
+            raw_visual_tokens = count_qwen_visual_placeholders(model, inputs)
+            mapping = _qwen_mapping_from_sparse_plan_path(
+                request.sparse_selection_plan_path,
+                model=model,
+                inputs=inputs,
+            )
+            keep_indices = [
+                int(index)
+                for index in (mapping.visual_feature_indices or [])
+                if 0 <= int(index) < int(raw_visual_tokens)
+            ]
+            if not keep_indices:
+                raise ValueError(f"AutoGaze sparse plan did not map to Qwen visual tokens: {mapping.reason}")
+
+            start = time.perf_counter()
+            video_features, chunk_metadata = qwen_chunked_video_features(
+                model,
+                dict(inputs),
+                chunk_frames=request.qwen_vit_chunk_frames,
+                keep_indices=keep_indices,
+            )
+            packed_inputs = build_qwen_inputs_from_video_features(
+                model,
+                inputs,
+                video_features,
+                original_keep_indices=keep_indices,
+                metadata_key="qwen_chunked_vit_sparse_metadata",
+            )
+            metrics["latency_ms"]["qwen_vit_prepare"] = _elapsed_ms(start)
+        except Exception as exc:
+            metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
+            metrics["qwen_vit"] = {
+                "mode": request.qwen_vit_mode,
+                "status": "failed_before_generate",
+                "reason": str(exc),
+            }
+            metrics["metric_status"] = {
+                "value": "failed_qwen_chunked_vit_autogaze_sparse",
+                "reason": str(exc),
+            }
+            _record_cuda_memory(metrics)
+            return MllmRunResult(
+                text=None,
+                prompt=request.prompt,
+                video=request.video,
+                image=request.image,
+                adapter=self.name,
+                status="failed_qwen_chunked_vit_autogaze_sparse",
+                metrics=metrics,
+            )
+
+        feature_metadata = packed_inputs.pop("qwen_chunked_vit_sparse_metadata")
+        metrics["qwen_vit"] = {
+            "mode": request.qwen_vit_mode,
+            "status": "inputs_embeds_prepared",
+            "sparse_selection_plan_path": request.sparse_selection_plan_path,
+            "mllm_mapping": mapping.to_dict(),
+            **chunk_metadata,
+            **feature_metadata,
+        }
+        metrics["tokens"]["visual_tokens_before_prune"] = feature_metadata["visual_tokens_before_prune"]
+        metrics["tokens"]["visual_tokens_after_prune"] = feature_metadata["visual_tokens_after_prune"]
+        if feature_metadata["visual_tokens_after_prune"]:
+            metrics["tokens"]["visual_token_reduction_ratio"] = (
+                feature_metadata["visual_tokens_before_prune"] / feature_metadata["visual_tokens_after_prune"]
+            )
+        input_ids = packed_inputs.get("input_ids")
+        if input_ids is not None and hasattr(input_ids, "shape"):
+            metrics["tokens"]["llm_context_tokens"] = int(input_ids.shape[-1])
+
+        start = time.perf_counter()
+        try:
+            generated_ids = model.generate(**packed_inputs, max_new_tokens=request.max_new_tokens)
+        except Exception as exc:
+            metrics["latency_ms"]["generate"] = _elapsed_ms(start)
+            metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
+            metrics["qwen_vit"]["status"] = "failed_during_generate"
+            metrics["qwen_vit"]["reason"] = str(exc)
+            metrics["metric_status"] = {
+                "value": "failed_qwen_chunked_vit_autogaze_sparse",
+                "reason": str(exc),
+            }
+            _record_cuda_memory(metrics)
+            return MllmRunResult(
+                text=None,
+                prompt=request.prompt,
+                video=request.video,
+                image=request.image,
+                adapter=self.name,
+                status="failed_qwen_chunked_vit_autogaze_sparse",
+                metrics=metrics,
+            )
+
+        metrics["latency_ms"]["generate"] = _elapsed_ms(start)
+        if input_ids is not None:
+            generated_ids = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(input_ids, generated_ids)]
+        text = processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+        metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
+        metrics["metric_status"] = {
+            "value": "executed_qwen_chunked_vit_autogaze_sparse",
+            "reason": (
+                "AutoGaze selected Qwen visual tokens, Qwen ViT ran those sparse tokens in temporal chunks, "
+                "and only matching visual placeholders were packed into the MLLM context."
+            ),
+        }
         _record_cuda_memory(metrics)
         return MllmRunResult(
             text=text,
@@ -1118,6 +1410,101 @@ def build_qwen_pre_vit_sparse_visual_inputs(
     return pruned
 
 
+def build_qwen_inputs_from_video_features(
+    model: Any,
+    inputs: Any,
+    video_features: Any,
+    *,
+    original_keep_indices: list[int] | None = None,
+    metadata_key: str = "qwen_video_feature_metadata",
+) -> dict[str, Any]:
+    try:
+        import torch
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("torch is required for Qwen visual feature packing") from exc
+
+    values = dict(inputs)
+    input_ids = values.get("input_ids")
+    if input_ids is None or not hasattr(input_ids, "shape"):
+        raise ValueError("Qwen video feature packing requires input_ids in processor outputs")
+    if len(input_ids.shape) != 2 or int(input_ids.shape[0]) != 1:
+        raise ValueError("Qwen video feature packing currently supports a single prompt/video batch")
+
+    if len(video_features.shape) == 3:
+        if int(video_features.shape[0]) != 1:
+            raise ValueError("Qwen video feature packing currently supports one video feature batch")
+        video_features = video_features[0]
+    if len(video_features.shape) != 2:
+        raise ValueError(f"Expected 2D Qwen video features, got shape={list(video_features.shape)}")
+
+    video_token_id = qwen_video_token_id(model)
+    embeddings = _qwen_input_embeddings(model)(input_ids)
+    placeholder_positions = (input_ids[0] == video_token_id).nonzero(as_tuple=False).flatten()
+    raw_visual_count = int(placeholder_positions.numel())
+    if original_keep_indices is None:
+        keep = list(range(raw_visual_count))
+    else:
+        keep = [
+            index
+            for index in dict.fromkeys(int(item) for item in original_keep_indices)
+            if 0 <= index < raw_visual_count
+        ]
+        if not keep and raw_visual_count > 0:
+            keep = [0]
+    if int(video_features.shape[0]) != len(keep):
+        raise ValueError(
+            "Qwen video features must match selected visual placeholders "
+            f"({int(video_features.shape[0])} != {len(keep)})"
+        )
+
+    keep_positions = placeholder_positions[torch.tensor(keep, device=placeholder_positions.device, dtype=torch.long)]
+    keep_position_set = {int(item) for item in keep_positions.detach().cpu().tolist()}
+    sequence_keep_mask = torch.ones(input_ids.shape[-1], dtype=torch.bool, device=input_ids.device)
+    for position in placeholder_positions.detach().cpu().tolist():
+        if int(position) not in keep_position_set:
+            sequence_keep_mask[int(position)] = False
+
+    packed: dict[str, Any] = {}
+    for key, value in values.items():
+        if key in {"pixel_values_videos", "video_grid_thw", "pixel_values", "image_grid_thw"}:
+            continue
+        if (
+            hasattr(value, "shape")
+            and len(value.shape) >= 2
+            and int(value.shape[0]) == 1
+            and int(value.shape[1]) == int(input_ids.shape[-1])
+        ):
+            packed[key] = value[:, sequence_keep_mask, ...]
+        else:
+            packed[key] = value
+
+    packed_embeddings = embeddings[:, sequence_keep_mask, :].clone()
+    features = video_features.to(device=packed_embeddings.device, dtype=packed_embeddings.dtype)
+    new_positions: list[int] = []
+    for original_position in keep_positions.detach().cpu().tolist():
+        new_positions.append(int(sequence_keep_mask[: int(original_position) + 1].sum().item()) - 1)
+    for row, new_position in enumerate(new_positions):
+        packed_embeddings[0, new_position, :] = features[row]
+    packed["inputs_embeds"] = packed_embeddings
+    packed["input_ids"] = input_ids[:, sequence_keep_mask]
+    if "attention_mask" in values:
+        packed["attention_mask"] = values["attention_mask"][:, sequence_keep_mask]
+    metadata: dict[str, Any] = {
+        "video_token_id": video_token_id,
+        "visual_tokens_before_prune": raw_visual_count,
+        "visual_tokens_after_prune": len(keep),
+        "dropped_visual_placeholders": raw_visual_count - len(keep),
+        "llm_context_tokens_after_prune": int(packed["input_ids"].shape[-1]),
+    }
+    if original_keep_indices is not None:
+        metadata["kept_original_visual_indices"] = keep
+        metadata["kept_visual_placeholder_positions"] = [
+            int(item) for item in keep_positions.detach().cpu().tolist()
+        ]
+    packed[metadata_key] = metadata
+    return packed
+
+
 def resolve_qwen_visual_keep_indices(
     request: MllmRunRequest,
     *,
@@ -1205,6 +1592,174 @@ def select_qwen_visual_keep_indices(total_visual_tokens: int, gazing_ratio: floa
     return sorted({round(index * (total - 1) / (count - 1)) for index in range(count)})
 
 
+def qwen_grid_chunk_slices(
+    video_grid_thw: Any,
+    *,
+    spatial_merge_size: int,
+    chunk_frames: int,
+) -> list[dict[str, int]]:
+    t, h, w = _single_qwen_grid(video_grid_thw)
+    chunk = max(1, int(chunk_frames))
+    spatial_merge_unit = max(1, int(spatial_merge_size) ** 2)
+    raw_tokens_per_t = h * w
+    if raw_tokens_per_t % spatial_merge_unit != 0:
+        raise ValueError(
+            "Qwen temporal chunking requires h*w to be divisible by spatial_merge_size^2 "
+            f"({raw_tokens_per_t} % {spatial_merge_unit})"
+        )
+    merged_tokens_per_t = raw_tokens_per_t // spatial_merge_unit
+    chunks: list[dict[str, int]] = []
+    for chunk_index, t_start in enumerate(range(0, t, chunk)):
+        t_end = min(t_start + chunk, t)
+        chunks.append(
+            {
+                "chunk_index": chunk_index,
+                "t_start": t_start,
+                "t_end": t_end,
+                "t": t_end - t_start,
+                "h": h,
+                "w": w,
+                "raw_token_start": t_start * raw_tokens_per_t,
+                "raw_token_end": t_end * raw_tokens_per_t,
+                "merged_token_start": t_start * merged_tokens_per_t,
+                "merged_token_end": t_end * merged_tokens_per_t,
+            }
+        )
+    return chunks
+
+
+def qwen_chunked_video_features(
+    model: Any,
+    values: dict[str, Any],
+    *,
+    chunk_frames: int,
+    keep_indices: list[int] | None = None,
+) -> tuple[Any, dict[str, Any]]:
+    try:
+        import torch
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("torch is required for Qwen chunked ViT execution") from exc
+
+    pixel_values_videos = values.get("pixel_values_videos")
+    video_grid_thw = values.get("video_grid_thw")
+    if pixel_values_videos is None or video_grid_thw is None:
+        raise ValueError("Qwen chunked ViT requires pixel_values_videos and video_grid_thw")
+
+    visual = _qwen_visual_module(model)
+    spatial_merge_size = qwen_spatial_merge_size(model)
+    spatial_merge_unit = max(1, int(spatial_merge_size) ** 2)
+    chunks = qwen_grid_chunk_slices(
+        video_grid_thw,
+        spatial_merge_size=spatial_merge_size,
+        chunk_frames=chunk_frames,
+    )
+    keep = None
+    if keep_indices is not None:
+        keep = [int(index) for index in dict.fromkeys(keep_indices)]
+    feature_parts: list[Any] = []
+    chunk_records: list[dict[str, Any]] = []
+    for chunk in chunks:
+        merged_start = chunk["merged_token_start"]
+        merged_end = chunk["merged_token_end"]
+        local_keep: list[int] | None
+        if keep is None:
+            local_keep = list(range(merged_end - merged_start))
+        else:
+            local_keep = [
+                index - merged_start
+                for index in keep
+                if merged_start <= index < merged_end
+            ]
+        if not local_keep:
+            chunk_records.append({**chunk, "selected_merged_tokens": 0, "status": "skipped_empty_selection"})
+            continue
+
+        chunk_pixels = _slice_qwen_video_pixel_values(
+            pixel_values_videos,
+            chunk["raw_token_start"],
+            chunk["raw_token_end"],
+        )
+        chunk_grid = _make_qwen_grid_like(
+            video_grid_thw,
+            t=chunk["t"],
+            h=chunk["h"],
+            w=chunk["w"],
+        )
+        features = _qwen_sparse_visual_forward(
+            visual,
+            chunk_pixels,
+            chunk_grid,
+            local_keep,
+            full_video_grid_thw=video_grid_thw,
+            raw_token_offset=chunk["raw_token_start"],
+        )
+        feature_parts.append(features)
+        chunk_records.append({**chunk, "selected_merged_tokens": len(local_keep), "status": "executed"})
+
+    if not feature_parts:
+        raise ValueError("Qwen chunked ViT produced no features; check AutoGaze sparse keep indices")
+    merged_features = torch.cat(feature_parts, dim=0)
+    t, h, w = _single_qwen_grid(video_grid_thw)
+    visual_tokens_before_prune = (t * h * w) // spatial_merge_unit
+    metadata = {
+        "chunk_frames": max(1, int(chunk_frames)),
+        "chunk_count": len(chunks),
+        "executed_chunk_count": len(feature_parts),
+        "video_grid_thw": [t, h, w],
+        "spatial_merge_size": spatial_merge_size,
+        "spatial_merge_unit": spatial_merge_unit,
+        "raw_patch_tokens_before_vit": t * h * w,
+        "visual_tokens_before_prune": visual_tokens_before_prune,
+        "visual_tokens_after_prune": int(merged_features.shape[0]),
+        "processor_chunking": "after_qwen_processor_pixel_values_videos",
+        "position_policy": "full_video_rotary_position_embedding_sliced_by_raw_token_offset",
+        "chunks": chunk_records,
+    }
+    return merged_features, metadata
+
+
+def _single_qwen_grid(video_grid_thw: Any) -> tuple[int, int, int]:
+    if hasattr(video_grid_thw, "detach"):
+        grid = video_grid_thw.detach().cpu().tolist()
+    elif hasattr(video_grid_thw, "tolist"):
+        grid = video_grid_thw.tolist()
+    else:
+        grid = video_grid_thw
+    if isinstance(grid, tuple):
+        grid = list(grid)
+    if isinstance(grid, list) and len(grid) == 1 and isinstance(grid[0], (list, tuple)):
+        grid = grid[0]
+    if not (isinstance(grid, list) and len(grid) == 3):
+        raise ValueError(f"Qwen chunked ViT currently supports a single video grid, got {grid!r}")
+    return int(grid[0]), int(grid[1]), int(grid[2])
+
+
+def _slice_qwen_video_pixel_values(pixel_values_videos: Any, start: int, end: int) -> Any:
+    if not hasattr(pixel_values_videos, "shape"):
+        return pixel_values_videos[start:end]
+    shape = list(pixel_values_videos.shape)
+    if shape and int(shape[0]) >= int(end):
+        return pixel_values_videos[start:end, ...]
+    if len(shape) >= 2 and int(shape[0]) == 1 and int(shape[1]) >= int(end):
+        return pixel_values_videos[:, start:end, ...]
+    raise ValueError(
+        "Qwen pixel_values_videos first token dimension is smaller than the requested chunk "
+        f"(shape={shape}, start={start}, end={end})"
+    )
+
+
+def _make_qwen_grid_like(reference_grid: Any, *, t: int, h: int, w: int) -> Any:
+    if hasattr(reference_grid, "detach"):
+        import torch
+
+        return torch.tensor(
+            [[int(t), int(h), int(w)]],
+            device=reference_grid.device,
+            dtype=reference_grid.dtype,
+        )
+    return [[int(t), int(h), int(w)]]
+
+
 def qwen_video_token_id(model: Any) -> int:
     for target in (getattr(model, "config", None), getattr(getattr(model, "model", None), "config", None)):
         value = getattr(target, "video_token_id", None)
@@ -1285,7 +1840,15 @@ def _qwen_visual_module(model: Any) -> Any:
     raise ValueError("Qwen model does not expose a visual module for pre-ViT sparse pruning")
 
 
-def _qwen_sparse_visual_forward(visual: Any, pixel_values_videos: Any, video_grid_thw: Any, keep_indices: list[int]) -> Any:
+def _qwen_sparse_visual_forward(
+    visual: Any,
+    pixel_values_videos: Any,
+    video_grid_thw: Any,
+    keep_indices: list[int],
+    *,
+    full_video_grid_thw: Any | None = None,
+    raw_token_offset: int = 0,
+) -> Any:
     try:
         import torch
     except ModuleNotFoundError as exc:
@@ -1312,7 +1875,11 @@ def _qwen_sparse_visual_forward(visual: Any, pixel_values_videos: Any, video_gri
         keep = [0]
     keep_tensor = torch.tensor(keep, device=hidden_states.device, dtype=torch.long)
 
-    rotary_pos_emb = visual.rot_pos_emb(video_grid_thw).to(hidden_states.device)
+    rotary_grid = full_video_grid_thw if full_video_grid_thw is not None else video_grid_thw
+    rotary_pos_emb = visual.rot_pos_emb(rotary_grid).to(hidden_states.device)
+    if full_video_grid_thw is not None or raw_token_offset:
+        start = int(raw_token_offset)
+        rotary_pos_emb = rotary_pos_emb[start : start + seq_len]
     hidden_states = hidden_states.reshape(total_merged_tokens, spatial_merge_unit, -1)[keep_tensor]
     hidden_states = hidden_states.reshape(len(keep) * spatial_merge_unit, -1)
     rotary_pos_emb = rotary_pos_emb.reshape(total_merged_tokens, spatial_merge_unit, -1)[keep_tensor]
@@ -1349,6 +1916,7 @@ def build_metric_skeleton(request: MllmRunRequest) -> dict[str, Any]:
             "model_load": None,
             "processor_load": None,
             "input_build": None,
+            "qwen_vit_prepare": None,
             "generate": None,
             "total": None,
         },
@@ -1364,6 +1932,11 @@ def build_metric_skeleton(request: MllmRunRequest) -> dict[str, Any]:
             "peak_cuda_reserved": None,
         },
         "max_new_tokens": request.max_new_tokens,
+        "qwen_vit": {
+            "mode": request.qwen_vit_mode,
+            "chunk_frames": request.qwen_vit_chunk_frames,
+            "status": "not_started",
+        },
     }
 
 
