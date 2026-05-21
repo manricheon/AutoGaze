@@ -58,6 +58,22 @@ def build_mode_runner_args(
             max_tiles_video=max_tiles_video,
             max_new_tokens=max_new_tokens,
         )
+    if mode == "nvila-video-autogaze-probe":
+        return _base_args(
+            model_family="nvila-video-plugin",
+            model_path=models.get("nvila-video", DEFAULT_MODELS["nvila-video"]),
+            token_selector="autogaze",
+            vision_adapter="nvila-video-vision",
+            mllm_adapter="nvila-video",
+            integration_level="post_encoder_token_prune",
+            row=row,
+            video_path=video_path,
+            output_json=output_json,
+            external_mllm_command=external_mllm_command,
+            num_video_frames=num_video_frames,
+            max_tiles_video=max_tiles_video,
+            max_new_tokens=max_new_tokens,
+        )
     if mode == "longvila-off":
         return _base_args(
             model_family="longvila",
@@ -66,6 +82,22 @@ def build_mode_runner_args(
             vision_adapter="longvila-siglip",
             mllm_adapter="longvila",
             integration_level="none",
+            row=row,
+            video_path=video_path,
+            output_json=output_json,
+            external_mllm_command=external_mllm_command,
+            num_video_frames=num_video_frames,
+            max_tiles_video=max_tiles_video,
+            max_new_tokens=max_new_tokens,
+        )
+    if mode == "longvila-autogaze-probe":
+        return _base_args(
+            model_family="longvila",
+            model_path=models.get("longvila", DEFAULT_MODELS["longvila"]),
+            token_selector="autogaze",
+            vision_adapter="longvila-siglip",
+            mllm_adapter="longvila",
+            integration_level="post_encoder_token_prune",
             row=row,
             video_path=video_path,
             output_json=output_json,
@@ -106,8 +138,8 @@ def build_mode_runner_args(
             max_tiles_video=max_tiles_video,
             max_new_tokens=max_new_tokens,
         )
-    if mode == "qwen3-vl-autogaze-probe":
-        return _base_args(
+    if mode in {"qwen3-vl-autogaze-probe", "qwen3-vl-autogaze-poc", "qwen3-vl-autogaze-prune-generate"}:
+        args = _base_args(
             model_family="qwen3-vl",
             model_path=models.get("qwen3-vl", DEFAULT_MODELS["qwen3-vl"]),
             token_selector="autogaze",
@@ -122,6 +154,27 @@ def build_mode_runner_args(
             max_tiles_video=max_tiles_video,
             max_new_tokens=max_new_tokens,
         )
+        if mode == "qwen3-vl-autogaze-prune-generate":
+            args.append("--enable-qwen-prune-generate")
+        return args
+    if mode == "qwen3-vl-pixelprune-pre-vit":
+        args = _base_args(
+            model_family="qwen3-vl",
+            model_path=models.get("qwen3-vl", DEFAULT_MODELS["qwen3-vl"]),
+            token_selector="keep-all",
+            vision_adapter="qwen3-vl-vision",
+            mllm_adapter="qwen3-vl",
+            integration_level="pre_encoder_sparse",
+            row=row,
+            video_path=video_path,
+            output_json=output_json,
+            external_mllm_command=external_mllm_command,
+            num_video_frames=num_video_frames,
+            max_tiles_video=max_tiles_video,
+            max_new_tokens=max_new_tokens,
+        )
+        args.extend(["--pre-encoder-prune-adapter", "pixelprune"])
+        return args
     raise ValueError(f"Unsupported plugin HLVid mode: {mode}")
 
 
@@ -203,12 +256,12 @@ def build_markdown_report(summary: dict[str, Any]) -> str:
     lines = [
         "# Plugin HLVid Limit Benchmark",
         "",
-        "| mode | total | correct | failed | parse_failed | accuracy_total | accuracy_scored |",
-        "|---|---:|---:|---:|---:|---:|---:|",
+        "| mode | total | correct | failed | parse_failed | accuracy_total | accuracy_scored | status_counts | next_action |",
+        "|---|---:|---:|---:|---:|---:|---:|---|---|",
     ]
     for mode, mode_summary in summary["modes"].items():
         lines.append(
-            "| {mode} | {total} | {correct} | {failed} | {parse_failed} | {accuracy_total:.4f} | {accuracy_scored:.4f} |".format(
+            "| {mode} | {total} | {correct} | {failed} | {parse_failed} | {accuracy_total:.4f} | {accuracy_scored:.4f} | {status_counts} | {next_action} |".format(
                 mode=mode,
                 total=mode_summary["total"],
                 correct=mode_summary["correct"],
@@ -216,6 +269,8 @@ def build_markdown_report(summary: dict[str, Any]) -> str:
                 parse_failed=mode_summary["parse_failed"],
                 accuracy_total=mode_summary["accuracy_total"],
                 accuracy_scored=mode_summary["accuracy_scored"],
+                status_counts=json.dumps(mode_summary.get("status_counts", {}), sort_keys=True),
+                next_action=mode_summary.get("next_action"),
             )
         )
     lines.extend(
@@ -224,7 +279,10 @@ def build_markdown_report(summary: dict[str, Any]) -> str:
             "## Notes",
             "",
             "- `nvila-video-off` and `longvila-off` use the official VILA CLI adapter.",
-            "- AutoGaze-on plugin modes are expected to report `probe_required` until model-specific feature packing is wired.",
+            "- `nvila-video-autogaze-probe` and `longvila-autogaze-probe` record AutoGaze-on feature packing probes.",
+            "- `qwen3-vl-pixelprune-pre-vit` applies PixelPrune before Qwen model load and then runs the native Qwen path.",
+            "- `qwen3-vl-autogaze-poc` records a Qwen AutoGaze post-encoder attachment PoC until visual token packing is wired.",
+            "- `qwen3-vl-autogaze-prune-generate` explicitly enables the experimental Qwen post-encoder prune + generate path.",
             "- `accuracy_total` uses all rows in the denominator; failed and parse-failed rows are separated in the table.",
         ]
     )
@@ -277,13 +335,14 @@ def _base_args(
     ]
     if token_selector == "autogaze":
         args.extend(["--token-selector-path", "weight/AutoGaze"])
+        args.extend(["--gazing-ratio", "0.1"])
     if external_mllm_command:
         args.extend(["--external-mllm-command", external_mllm_command])
     return args
 
 
 def _prediction_status(generation_status: str | None) -> str:
-    if generation_status in {"executed", "probe_required"}:
+    if generation_status in {"executed", "probe_required", "probe_collected", "poc_ready"}:
         return "ok"
     return "failed"
 
@@ -304,8 +363,40 @@ def _summarize_by_mode(predictions: list[dict[str, Any]]) -> dict[str, Any]:
     summaries: dict[str, Any] = {}
     for mode in modes:
         rows = [row for row in predictions if row["mode"] == mode]
-        summaries[mode], _ = score_predictions(rows)
+        summary, _ = score_predictions(rows)
+        summary["status_counts"] = _status_counts(rows)
+        summary["next_action"] = _next_action_for_mode(mode, rows)
+        summaries[mode] = summary
     return {"modes": summaries, "mode_order": modes, "total_predictions": len(predictions)}
+
+
+def _status_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        status = str(row.get("runner_status") or row.get("status") or "unknown")
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def _next_action_for_mode(mode: str, rows: list[dict[str, Any]]) -> str:
+    statuses = _status_counts(rows)
+    if mode in {"nvila-video-autogaze-probe", "longvila-autogaze-probe"}:
+        if statuses.get("probe_collected"):
+            return "instrument_vila_remote_code_feature_packing"
+        return "run_vila_feature_packing_probe"
+    if mode == "qwen3-vl-autogaze-prune-generate":
+        if statuses.get("executed"):
+            return "score_qwen_pruned_generation"
+        return "inspect_qwen_prune_generate_failure"
+    if mode in {"qwen3-vl-autogaze-poc", "qwen3-vl-autogaze-probe"}:
+        return "implement_qwen_visual_feature_prune_generate"
+    if mode == "qwen3-vl-pixelprune-pre-vit" and statuses.get("failed_missing_dependency"):
+        return "install_pixelprune_and_rerun"
+    if any(status.startswith("failed") for status in statuses):
+        return "fix_failed_runtime_dependency"
+    if statuses.get("executed"):
+        return "score_and_compare_metrics"
+    return "inspect_outputs"
 
 
 def parse_model_overrides(values: list[str] | None) -> dict[str, str]:

@@ -7,14 +7,13 @@ description: >
 experiment_identity:
   model_family: qwen3-vl
   token_selector: keep-all
-  autogaze_applicability: plugin_off_native
+  autogaze_applicability: not_autogaze_pixelprune_pre_vit_reference
   autogaze_integration_level: pre_encoder_sparse
   pre_encoder_prune_adapter: pixelprune
 
 flexible_runner:
   args:
     mode: single
-    dry_run: true
     model_path: weight/Qwen3-VL-8B-Instruct
     model_family: qwen3-vl
     token_selector_adapter: keep-all
@@ -24,4 +23,4 @@ flexible_runner:
     pre_encoder_prune_adapter: pixelprune
     pixelprune_threshold: 0.0
     num_video_frames: 128
-    output_json: outputs/autogaze_repro/flexible_qwen3_vl_pixelprune_pre_vit_dry_run.json
+    output_json: outputs/autogaze_repro/flexible_qwen3_vl_pixelprune_pre_vit.json

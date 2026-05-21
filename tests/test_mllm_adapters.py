@@ -1,14 +1,17 @@
 import os
 
 from repro.plugins.mllm_adapters import (
+    build_qwen_pruned_visual_inputs,
     InternVL3CliMllmAdapter,
     MllmRunRequest,
+    MllmRunResult,
     PlannedMllmAdapter,
     QwenGridMllmAdapter,
     VilaCliMllmAdapter,
     build_metric_skeleton,
     extract_assistant_text,
     resolve_mllm_adapter,
+    resolve_qwen_visual_keep_indices,
 )
 
 
@@ -27,9 +30,13 @@ def make_request(**overrides):
         "max_new_tokens": 32,
         "token_selector_kind": "keep-all",
         "integration_level": "none",
+        "pre_encoder_prune_adapter": "none",
+        "gazing_ratio": None,
         "num_video_frames": 128,
         "max_tiles_video": 1,
         "external_mllm_command": "vila-infer",
+        "enable_qwen_prune_generate": False,
+        "sparse_selection_plan_path": None,
     }
     values.update(overrides)
     return MllmRunRequest(**values)
@@ -126,7 +133,7 @@ def test_qwen_grid_adapter_describes_post_encoder_probe_for_autogaze_request():
     )
 
 
-def test_qwen_grid_adapter_keeps_autogaze_request_as_probe_required():
+def test_qwen_grid_adapter_builds_autogaze_post_encoder_poc_plan():
     adapter = resolve_mllm_adapter("qwen3-vl")
 
     result = adapter.run(
@@ -135,11 +142,179 @@ def test_qwen_grid_adapter_keeps_autogaze_request_as_probe_required():
             mllm_adapter="qwen3-vl",
             token_selector_kind="autogaze",
             integration_level="post_encoder_token_prune",
+            gazing_ratio=0.1,
         )
     )
 
-    assert result.status == "probe_required"
+    assert result.status == "poc_ready"
     assert result.metrics["feature_packing_probe"]["family_group"] == "qwen_grid_vl"
+    assert result.metrics["sparse_selection_plan"]["selector_name"] == "autogaze"
+    assert result.metrics["tokens"]["visual_tokens_before_prune"] == 25088
+    assert result.metrics["tokens"]["visual_tokens_after_prune"] == 2509
+
+
+def test_qwen_pruned_visual_inputs_keep_selected_visual_placeholders_only():
+    torch = __import__("torch")
+
+    class FakeQwenModel:
+        def __init__(self):
+            self.config = type("Config", (), {"video_token_id": 999})()
+            self.embedding = torch.nn.Embedding(1200, 4)
+
+        def get_input_embeddings(self):
+            return self.embedding
+
+        def get_video_features(self, pixel_values_videos=None, video_grid_thw=None):
+            return torch.tensor(
+                [
+                    [10.0, 0.0, 0.0, 0.0],
+                    [20.0, 0.0, 0.0, 0.0],
+                    [30.0, 0.0, 0.0, 0.0],
+                    [40.0, 0.0, 0.0, 0.0],
+                ]
+            )
+
+    inputs = {
+        "input_ids": torch.tensor([[1, 999, 999, 999, 999, 2]]),
+        "attention_mask": torch.ones((1, 6), dtype=torch.long),
+        "pixel_values_videos": torch.zeros((1, 3, 2, 2)),
+        "video_grid_thw": torch.tensor([[1, 2, 2]]),
+    }
+
+    pruned = build_qwen_pruned_visual_inputs(FakeQwenModel(), inputs, keep_indices=[0, 2])
+
+    assert pruned["input_ids"].tolist() == [[1, 999, 999, 2]]
+    assert pruned["attention_mask"].tolist() == [[1, 1, 1, 1]]
+    assert list(pruned["inputs_embeds"].shape) == [1, 4, 4]
+    assert pruned["inputs_embeds"][0, 1].tolist() == [10.0, 0.0, 0.0, 0.0]
+    assert pruned["inputs_embeds"][0, 2].tolist() == [30.0, 0.0, 0.0, 0.0]
+    assert "pixel_values_videos" not in pruned
+    assert "video_grid_thw" not in pruned
+    assert pruned["qwen_prune_generate_metadata"]["visual_tokens_before_prune"] == 4
+    assert pruned["qwen_prune_generate_metadata"]["visual_tokens_after_prune"] == 2
+
+
+def test_qwen_grid_adapter_runs_prune_generate_path_when_explicitly_enabled(monkeypatch):
+    adapter = resolve_mllm_adapter("qwen3-vl")
+
+    def fake_run(self, request):
+        return MllmRunResult(
+            text="pruned answer",
+            prompt=request.prompt,
+            video=request.video,
+            image=request.image,
+            adapter=self.name,
+            status="executed",
+            metrics={
+                "latency_ms": {"total": 22.0},
+                "tokens": {
+                    "visual_tokens_before_prune": 100,
+                    "visual_tokens_after_prune": 10,
+                },
+                "memory_bytes": {},
+                "qwen_prune_generate": {"enabled": True},
+            },
+        )
+
+    monkeypatch.setattr(QwenGridMllmAdapter, "_run_qwen_autogaze_prune_generate", fake_run)
+
+    result = adapter.run(
+        make_request(
+            model_family="qwen3-vl",
+            mllm_adapter="qwen3-vl",
+            token_selector_kind="autogaze",
+            integration_level="post_encoder_token_prune",
+            gazing_ratio=0.1,
+            enable_qwen_prune_generate=True,
+        )
+    )
+
+    assert result.status == "executed"
+    assert result.text == "pruned answer"
+    assert result.metrics["qwen_prune_generate"]["enabled"] is True
+
+
+def test_resolve_qwen_visual_keep_indices_prefers_sparse_plan_json(tmp_path):
+    torch = __import__("torch")
+    plan_json = tmp_path / "sparse_plan.json"
+    plan_json.write_text(
+        """
+        {
+          "selector_name": "autogaze",
+          "source_video": {"path": "inputs/example.mp4", "sampled_frame_indices": [0]},
+          "preprocess_space": {"resized_width": 64, "resized_height": 64},
+          "patch_space": {"autogaze_patch_size": 16, "encoder_patch_size": 16, "scale_sizes": [64]},
+          "selected_patches": [
+            {
+              "frame_index": 0,
+              "frame_order": 0,
+              "tile_id": 0,
+              "scale_id": 0,
+              "scale_size": 64,
+              "patch_index": 10,
+              "bbox_resized_xyxy": [32, 32, 48, 48],
+              "bbox_original_xyxy": [32.0, 32.0, 48.0, 48.0],
+              "autoregressive_order": 1
+            }
+          ],
+          "encoder_mapping": {"status": "not_mapped"},
+          "mllm_mapping": {"status": "not_mapped"}
+        }
+        """
+    )
+    inputs = {
+        "input_ids": torch.tensor([[1, 999, 999, 999, 999, 2]]),
+        "video_grid_thw": torch.tensor([[1, 4, 4]]),
+    }
+
+    keep_indices, metadata = resolve_qwen_visual_keep_indices(
+        make_request(
+            gazing_ratio=0.25,
+            sparse_selection_plan_path=str(plan_json),
+        ),
+        model=object(),
+        inputs=inputs,
+        visual_count=16,
+    )
+
+    assert keep_indices == [10]
+    assert metadata["selection_source"] == "sparse_selection_plan"
+    assert metadata["mllm_mapping"]["status"] == "exact_grid"
+
+
+def test_qwen_grid_adapter_runs_pixelprune_pre_vit_path(monkeypatch):
+    adapter = resolve_mllm_adapter("qwen3-vl")
+
+    def fake_run(self, request):
+        return MllmRunResult(
+            text="pixelprune answer",
+            prompt=request.prompt,
+            video=request.video,
+            image=request.image,
+            adapter=self.name,
+            status="executed",
+            metrics={
+                "latency_ms": {"total": 12.0},
+                "tokens": {"input_ids_tokens": 42},
+                "memory_bytes": {},
+            },
+        )
+
+    monkeypatch.setattr(QwenGridMllmAdapter, "_run_qwen_generate", fake_run)
+
+    result = adapter.run(
+        make_request(
+            model_family="qwen3-vl",
+            mllm_adapter="qwen3-vl",
+            integration_level="pre_encoder_sparse",
+            pre_encoder_prune_adapter="pixelprune",
+        )
+    )
+
+    assert result.status == "executed"
+    assert result.text == "pixelprune answer"
+    assert result.metrics["pre_encoder_prune"]["adapter"] == "pixelprune"
+    assert result.metrics["pre_encoder_prune"]["integration_level"] == "pre_encoder_sparse"
 
 
 def test_llava_onevision_adapter_uses_path_style_video_content():
@@ -260,7 +435,58 @@ def test_vila_cli_adapter_keeps_autogaze_requested_run_as_probe_required():
     assert result.status == "probe_required"
     assert result.metrics["feature_packing_probe"]["autogaze_applicability"] == "plugin_on_off_experiment"
     assert result.metrics["feature_packing_probe"]["family_group"] == "longvila"
+    assert result.metrics["feature_packing_probe"]["next_probe_command"]["goal"] == "capture_vila_feature_packing"
+    assert result.metrics["feature_packing_probe"]["next_probe_command"]["requires_code_probe"] is True
     assert result.metrics["metric_status"]["reason"] == "AutoGaze-on VILA-family integration still requires a feature packing probe"
+
+
+def test_vila_cli_adapter_collects_static_feature_probe_when_config_exists(tmp_path):
+    model_dir = tmp_path / "LongVILA"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(
+        '{"model_type": "llava", "architectures": ["LongVILAForCausalLM"], "vision_tower": "siglip"}'
+    )
+    adapter = resolve_mllm_adapter("longvila")
+
+    result = adapter.run(
+        make_request(
+            model_family="longvila",
+            model_path=str(model_dir),
+            mllm_adapter="longvila",
+            token_selector_kind="autogaze",
+            integration_level="post_encoder_token_prune",
+        )
+    )
+
+    assert result.status == "probe_collected"
+    assert result.metrics["vila_feature_probe"]["status"] == "static_probe_collected"
+    assert result.metrics["vila_feature_probe"]["config_summary"]["architectures"] == ["LongVILAForCausalLM"]
+    assert result.metrics["metric_status"]["value"] == "probe_collected"
+
+
+def test_nvila_video_autogaze_probe_includes_next_runtime_probe_command(tmp_path):
+    adapter = resolve_mllm_adapter("nvila-video")
+
+    result = adapter.run(
+        make_request(
+            model_family="nvila-video-plugin",
+            model_path=str(tmp_path / "missing_nvila_model"),
+            mllm_adapter="nvila-video",
+            token_selector_kind="autogaze",
+            integration_level="post_encoder_token_prune",
+        )
+    )
+
+    command = result.metrics["feature_packing_probe"]["next_probe_command"]
+    assert result.status == "probe_required"
+    assert command["goal"] == "capture_vila_feature_packing"
+    assert command["adapter"] == "nvila-video"
+    assert command["expected_outputs"] == [
+        "processor video tensor/frame contract",
+        "vision feature shape",
+        "projector output shape",
+        "LLM visual token insertion boundary",
+    ]
 
 
 def test_vila_cli_adapter_executes_available_command_and_extracts_last_output_line(tmp_path):

@@ -109,7 +109,12 @@ def test_plugin_experiment_configs_mark_on_off_identity():
             "experimental_plugin_requested",
             "post_encoder_token_prune",
         ),
-        "qwen3_vl_pixelprune_pre_vit.yaml": ("qwen3-vl", "keep-all", "plugin_off_native", "pre_encoder_sparse"),
+        "qwen3_vl_pixelprune_pre_vit.yaml": (
+            "qwen3-vl",
+            "keep-all",
+            "not_autogaze_pixelprune_pre_vit_reference",
+            "pre_encoder_sparse",
+        ),
         "qwen2_vl_plugin_off.yaml": ("qwen2-vl", "keep-all", "plugin_off_native", "none"),
         "qwen2_vl_plugin_autogaze_post_prune.yaml": (
             "qwen2-vl",
@@ -160,4 +165,25 @@ def test_plugin_hlvid_limit3_config_defines_comparison_modes():
     assert "nvila-video-off" in config.plugin_hlvid_benchmark.args.modes
     assert "longvila-off" in config.plugin_hlvid_benchmark.args.modes
     assert "internvl3-off" in config.plugin_hlvid_benchmark.args.modes
+    assert "qwen3-vl-pixelprune-pre-vit" in config.plugin_hlvid_benchmark.args.modes
     assert "qwen3-vl-autogaze-probe" in config.plugin_hlvid_benchmark.args.modes
+    assert "qwen3-vl-autogaze-prune-generate" in config.plugin_hlvid_benchmark.args.modes
+
+
+def test_autogaze_priority_validation_config_lists_four_tracks():
+    root = Path(__file__).resolve().parents[1]
+    config = OmegaConf.load(root / "configs" / "repro" / "autogaze_priority_validation.yaml")
+
+    assert [track.name for track in config.priority_tracks] == [
+        "nvila_hd_autogaze_profile",
+        "nvila_video_baseline_autogaze_on_off",
+        "longvila_autogaze_poc",
+        "qwen3_vl_autogaze_poc",
+    ]
+    assert config.priority_tracks[0].runner.module == "repro.hlvid_batch_benchmark"
+    assert "hd_autogaze" in config.priority_tracks[0].runner.modes
+    assert "nvila-video-off" in config.priority_tracks[1].runner.modes
+    assert "nvila-video-autogaze-probe" in config.priority_tracks[1].runner.modes
+    assert "longvila-autogaze-probe" in config.priority_tracks[2].runner.modes
+    assert "qwen3-vl-autogaze-poc" in config.priority_tracks[3].runner.modes
+    assert "qwen3-vl-autogaze-prune-generate" in config.priority_tracks[3].runner.optional_modes

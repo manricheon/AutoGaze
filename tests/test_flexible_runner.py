@@ -2,6 +2,7 @@ from pathlib import Path
 import json
 
 from repro.flexible_runner import build_inspect_payload, parse_args, run_inspect, run_single
+from repro.plugins.mllm_adapters import MllmRunResult, QwenGridMllmAdapter
 
 
 def test_flexible_runner_builds_longvila_autogaze_plugin_spec():
@@ -240,6 +241,253 @@ def test_flexible_runner_supports_qwen3_vl_family_and_four_step_plan():
     assert payload["four_step_execution_plan"]["pre_encoder_sparse"]["status"] == "pixelprune_reference_available"
     assert payload["adapter_plan"]["pre_encoder_prune"]["adapter"] == "pixelprune"
     assert payload["adapter_plan"]["pre_encoder_prune"]["status"]["value"] == "candidate"
+
+
+def test_flexible_runner_pixelprune_pre_vit_fails_before_dense_qwen_when_hook_missing(monkeypatch, tmp_path):
+    output_json = tmp_path / "qwen3_pixelprune_missing.json"
+    args = parse_args(
+        [
+            "--mode",
+            "single",
+            "--model-family",
+            "qwen3-vl",
+            "--model-path",
+            "weight/Qwen3-VL-8B-Instruct",
+            "--token-selector-adapter",
+            "keep-all",
+            "--vision-encoder-adapter",
+            "qwen3-vl-vision",
+            "--mllm-adapter",
+            "qwen3-vl",
+            "--autogaze-integration-level",
+            "pre_encoder_sparse",
+            "--pre-encoder-prune-adapter",
+            "pixelprune",
+            "--video",
+            "inputs/example.mp4",
+            "--output-json",
+            str(output_json),
+        ]
+    )
+
+    monkeypatch.setattr(
+        "repro.flexible_runner.apply_pixelprune_if_available",
+        lambda config: {
+            "applied": False,
+            "reason": "pixelprune package is not installed",
+            "model_key": config.model_key,
+            "environment": config.apply_environment(),
+        },
+    )
+
+    payload = run_single(args)
+
+    assert payload["implementation_status"] == "failed_missing_dependency"
+    assert payload["pre_encoder_prune_runtime"]["applied"] is False
+    assert payload["generation"]["status"] == "failed_missing_dependency"
+    assert payload["generation"]["metrics"]["metric_status"]["reason"] == "pixelprune package is not installed"
+
+
+def test_flexible_runner_pixelprune_pre_vit_runs_qwen_after_hook_applied(monkeypatch, tmp_path):
+    output_json = tmp_path / "qwen3_pixelprune_ok.json"
+    args = parse_args(
+        [
+            "--mode",
+            "single",
+            "--model-family",
+            "qwen3-vl",
+            "--model-path",
+            "weight/Qwen3-VL-8B-Instruct",
+            "--token-selector-adapter",
+            "keep-all",
+            "--vision-encoder-adapter",
+            "qwen3-vl-vision",
+            "--mllm-adapter",
+            "qwen3-vl",
+            "--autogaze-integration-level",
+            "pre_encoder_sparse",
+            "--pre-encoder-prune-adapter",
+            "pixelprune",
+            "--video",
+            "inputs/example.mp4",
+            "--output-json",
+            str(output_json),
+        ]
+    )
+
+    monkeypatch.setattr(
+        "repro.flexible_runner.apply_pixelprune_if_available",
+        lambda config: {
+            "applied": True,
+            "reason": None,
+            "model_key": config.model_key,
+            "environment": config.apply_environment(),
+        },
+    )
+
+    def fake_run(self, request):
+        return MllmRunResult(
+            text="ok",
+            prompt=request.prompt,
+            video=request.video,
+            image=request.image,
+            adapter=self.name,
+            status="executed",
+            metrics={"latency_ms": {"total": 1.0}, "tokens": {}, "memory_bytes": {}},
+        )
+
+    monkeypatch.setattr(QwenGridMllmAdapter, "_run_qwen_generate", fake_run)
+
+    payload = run_single(args)
+
+    assert payload["implementation_status"] == "executed"
+    assert payload["pre_encoder_prune_runtime"]["applied"] is True
+    assert payload["generation"]["text"] == "ok"
+    assert payload["generation"]["metrics"]["pre_encoder_prune"]["adapter"] == "pixelprune"
+
+
+def test_flexible_runner_qwen_autogaze_post_encoder_returns_poc_plan(tmp_path):
+    output_json = tmp_path / "qwen3_autogaze_poc.json"
+    args = parse_args(
+        [
+            "--mode",
+            "single",
+            "--model-family",
+            "qwen3-vl",
+            "--model-path",
+            "weight/Qwen3-VL-8B-Instruct",
+            "--token-selector-adapter",
+            "autogaze",
+            "--token-selector-path",
+            "weight/AutoGaze",
+            "--vision-encoder-adapter",
+            "qwen3-vl-vision",
+            "--mllm-adapter",
+            "qwen3-vl",
+            "--autogaze-integration-level",
+            "post_encoder_token_prune",
+            "--gazing-ratio",
+            "0.1",
+            "--video",
+            "inputs/example.mp4",
+            "--output-json",
+            str(output_json),
+        ]
+    )
+
+    payload = run_single(args)
+
+    assert payload["implementation_status"] == "poc_ready"
+    assert payload["generation"]["status"] == "poc_ready"
+    assert payload["generation"]["metrics"]["sparse_selection_plan"]["selector_name"] == "autogaze"
+    assert payload["generation"]["metrics"]["metric_status"]["value"] == "autogaze_qwen_poc_ready"
+
+
+def test_flexible_runner_can_enable_qwen_autogaze_prune_generate(monkeypatch, tmp_path):
+    output_json = tmp_path / "qwen3_autogaze_prune_generate.json"
+    args = parse_args(
+        [
+            "--mode",
+            "single",
+            "--model-family",
+            "qwen3-vl",
+            "--model-path",
+            "weight/Qwen3-VL-8B-Instruct",
+            "--token-selector-adapter",
+            "autogaze",
+            "--token-selector-path",
+            "weight/AutoGaze",
+            "--vision-encoder-adapter",
+            "qwen3-vl-vision",
+            "--mllm-adapter",
+            "qwen3-vl",
+            "--autogaze-integration-level",
+            "post_encoder_token_prune",
+            "--enable-qwen-prune-generate",
+            "--gazing-ratio",
+            "0.1",
+            "--video",
+            "inputs/example.mp4",
+            "--output-json",
+            str(output_json),
+        ]
+    )
+
+    def fake_run(self, request):
+        return MllmRunResult(
+            text="qwen pruned",
+            prompt=request.prompt,
+            video=request.video,
+            image=request.image,
+            adapter=self.name,
+            status="executed",
+            metrics={
+                "latency_ms": {"total": 10.0},
+                "tokens": {"visual_tokens_before_prune": 100, "visual_tokens_after_prune": 10},
+                "memory_bytes": {},
+                "qwen_prune_generate": {"enabled": True},
+            },
+        )
+
+    monkeypatch.setattr(QwenGridMllmAdapter, "_run_qwen_autogaze_prune_generate", fake_run)
+
+    payload = run_single(args)
+
+    assert payload["implementation_status"] == "executed"
+    assert payload["post_encoder_prune_runtime"]["status"] == "experimental_prune_generate_enabled"
+    assert payload["generation"]["text"] == "qwen pruned"
+    assert payload["generation"]["metrics"]["qwen_prune_generate"]["enabled"] is True
+
+
+def test_flexible_runner_passes_sparse_selection_plan_json_to_qwen_prune_generate(monkeypatch, tmp_path):
+    output_json = tmp_path / "qwen3_autogaze_plan.json"
+    plan_json = tmp_path / "sparse_plan.json"
+    plan_json.write_text('{"selector_name": "autogaze", "selected_patches": []}')
+    args = parse_args(
+        [
+            "--mode",
+            "single",
+            "--model-family",
+            "qwen3-vl",
+            "--model-path",
+            "weight/Qwen3-VL-8B-Instruct",
+            "--token-selector-adapter",
+            "autogaze",
+            "--token-selector-path",
+            "weight/AutoGaze",
+            "--vision-encoder-adapter",
+            "qwen3-vl-vision",
+            "--mllm-adapter",
+            "qwen3-vl",
+            "--autogaze-integration-level",
+            "post_encoder_token_prune",
+            "--enable-qwen-prune-generate",
+            "--sparse-selection-plan-json",
+            str(plan_json),
+            "--video",
+            "inputs/example.mp4",
+            "--output-json",
+            str(output_json),
+        ]
+    )
+
+    def fake_run(self, request):
+        assert request.sparse_selection_plan_path == str(plan_json)
+        return MllmRunResult(
+            text="qwen plan",
+            prompt=request.prompt,
+            video=request.video,
+            image=request.image,
+            adapter=self.name,
+            status="executed",
+            metrics={"latency_ms": {"total": 1.0}, "tokens": {}, "memory_bytes": {}},
+        )
+
+    monkeypatch.setattr(QwenGridMllmAdapter, "_run_qwen_autogaze_prune_generate", fake_run)
+
+    payload = run_single(args)
+
+    assert payload["generation"]["text"] == "qwen plan"
 
 
 def test_flexible_runner_supports_llava_onevision_and_internvl_status():

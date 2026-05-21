@@ -625,9 +625,9 @@ AutoGaze once
 
 ### Phase A: SparseGazePlan Schema
 
-- [ ] `repro/plugins/gaze_plan.py` 추가
-- [ ] `SparseGazePlan`, `SelectedPatch`, `EncoderMapping`, `MllmMapping` dataclass 정의
-- [ ] JSON serialization 테스트
+- [x] `repro/plugins/gaze_plan.py` 추가
+- [x] `SparseSelectionPlan`, `SelectedPatch`, `EncoderMapping`, `MllmMapping` dataclass 정의
+- [x] JSON serialization 테스트
 - [ ] 기존 visualization output과 연결
 
 Acceptance:
@@ -636,6 +636,7 @@ Acceptance:
 
 ### Phase B: PixelPrune / Qwen Pre-ViT Reference Probe
 
+- [x] Qwen3-VL PixelPrune pre-ViT 실행 gate 추가: hook 성공 시 Qwen native generation, 실패 시 dense 실행 차단
 - [ ] PixelPrune Qwen3-VL hook 위치 조사: processor, patch embedding, vision forward, grid metadata 중 어디를 바꾸는지 기록
 - [ ] Qwen3-VL에서 PixelPrune on/off token count, ViT latency, LLM prefill latency를 같은 입력으로 비교
 - [ ] `video_grid_thw`, MRoPE/position 관련 tensor가 pruning 전후 어떻게 변하는지 shape report 생성
@@ -673,15 +674,19 @@ Acceptance:
 
 ### Phase E: Post-Encoder Token Prune
 
-- [ ] Qwen 계열부터 구현
+- [x] Qwen3-VL AutoGaze post-encoder attachment PoC 구현: `SparseSelectionPlan`, feature packing probe, visual token estimate 기록
+- [x] Qwen 계열 post-encoder feature prune/generate 실험 경로 추가: `--enable-qwen-prune-generate`
+- [x] AutoGaze `SparseSelectionPlan.selected_patches`를 Qwen `video_grid_thw` visual feature index로 매핑하는 helper 추가
+- [ ] 실제 AutoGaze runner output에서 concrete `selected_patches`를 저장해 Qwen path에 공급
 - [ ] `get_video_features` output token index와 AutoGaze patch mapping 연결
-- [ ] selected feature만 MLLM context에 insert
-- [ ] before/after LLM context, TTFT, peak memory 기록
-- [ ] 실패 시 `probe_required` 또는 `mapping_failed`로 원인 기록
+- [x] selected feature만 MLLM context에 insert하는 `inputs_embeds` bridge helper 추가
+- [x] before/after LLM context와 visual token count 기록
+- [ ] TTFT, peak memory를 Qwen prune-generate path에서 CUDA smoke로 검증
+- [x] 실패 시 `failed_qwen_prune_generate`로 원인 기록
 
 Acceptance:
 
-- ViT latency는 그대로지만 LLM visual token, prefill context, KV cache estimate가 줄어든다.
+- ViT latency는 그대로지만 LLM visual token, prefill context, KV cache estimate가 줄어든다. 현재 구현은 AutoGaze index mapping 전 단계라 `gazing_ratio` 기반 placeholder selection으로 표시된다.
 
 ### Phase F: InternVL3 Tile Sparse
 
@@ -721,7 +726,8 @@ Acceptance:
 ### Phase I: HLVid / Long Video Benchmark 연결
 
 - [ ] `plugin_hlvid_benchmark`에 connection report merge
-- [ ] `--modes`에 `qwen3-vl-pixelprune-pre-vit`, `qwen3-vl-autogaze-post-prune`, `internvl3-tile-sparse` 추가
+- [x] `--modes`에 `qwen3-vl-pixelprune-pre-vit`, `qwen3-vl-autogaze-prune-generate` 추가
+- [ ] `--modes`에 `internvl3-tile-sparse` 추가
 - [ ] Markdown report에 resolution/position/feature/token 표 추가
 - [ ] failed/probe_required/mapping_failed를 score denominator와 분리
 

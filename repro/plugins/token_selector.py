@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from repro.plugins.gaze_plan import SparseSelectionPlan
+
 
 @dataclass(frozen=True)
 class TokenSelectorInput:
@@ -24,6 +26,7 @@ class TokenSelectorOutput:
     peak_memory_bytes: int | None
     status: str
     metric_status: dict[str, str | None]
+    sparse_selection_plan: SparseSelectionPlan | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -36,6 +39,9 @@ class TokenSelectorOutput:
             "peak_memory_bytes": self.peak_memory_bytes,
             "status": self.status,
             "metric_status": self.metric_status,
+            "sparse_selection_plan": (
+                self.sparse_selection_plan.to_dict() if self.sparse_selection_plan is not None else None
+            ),
         }
 
 
@@ -94,6 +100,14 @@ class AutoGazeSelectorPlan:
                 "value": "planned",
                 "reason": "AutoGaze model execution is wired in a later adapter step.",
             },
+            sparse_selection_plan=SparseSelectionPlan.placeholder(
+                selector_name="autogaze",
+                source_path=None,
+                raw_patch_tokens=selector_input.raw_patch_tokens,
+                selected_patch_tokens=selected_patch_tokens,
+                frame_indices=selector_input.frame_indices,
+                reason="AutoGaze standalone selector has not emitted concrete patch coordinates yet.",
+            ),
         )
 
 

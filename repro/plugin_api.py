@@ -87,6 +87,7 @@ class ExperimentSpec:
     max_tiles_video: int
     resize_longest_edge: int | None
     resize_shortest_edge: int | None
+    gazing_ratio: float | None
     output_dir: Path
     pre_encoder_prune_adapter: str = "none"
 
@@ -108,6 +109,7 @@ class ExperimentSpec:
             max_tiles_video=int(getattr(args, "max_tiles_video", 0) or 0),
             resize_longest_edge=_optional_int(getattr(args, "video_resize_longest_edge", None)),
             resize_shortest_edge=_optional_int(getattr(args, "video_resize_shortest_edge", None)),
+            gazing_ratio=_optional_float(getattr(args, "gazing_ratio", None)),
             output_dir=output_dir,
             pre_encoder_prune_adapter=str(getattr(args, "pre_encoder_prune_adapter", "none")),
         )
@@ -153,6 +155,7 @@ class ExperimentSpec:
             "max_tiles_video": self.max_tiles_video,
             "resize_longest_edge": self.resize_longest_edge,
             "resize_shortest_edge": self.resize_shortest_edge,
+            "gazing_ratio": self.gazing_ratio,
             "output_dir": str(self.output_dir),
             "pre_encoder_prune_adapter": self.pre_encoder_prune_adapter,
             "uses_autogaze": self.uses_autogaze,
@@ -178,6 +181,12 @@ def _optional_int(value: Any) -> int | None:
     if value is None:
         return None
     return int(value)
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    return float(value)
 
 
 def _json_ready(value: Any) -> Any:

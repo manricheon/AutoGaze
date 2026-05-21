@@ -1,0 +1,88 @@
+description: >
+  Priority validation matrix before broader plugin generalization. The order is:
+  NVILA-HD AutoGaze profiling, NVILA-8B-Video baseline on/off, LongVILA
+  AutoGaze PoC, Qwen3-VL AutoGaze PoC, and Qwen prune-generate smoke.
+
+priority_tracks:
+  - name: nvila_hd_autogaze_profile
+    objective: >
+      Re-validate the native NVILA-HD AutoGaze path with latency, memory, token,
+      and HLVid accuracy reports.
+    runner:
+      module: repro.hlvid_batch_benchmark
+      modes:
+        - hd_keep_all_optional
+        - hd_autogaze
+      recommended_args:
+        paper_hd_autogaze: true
+        include_hd_keep_all_optional: true
+        limit: 3
+        num_video_frames: 1024
+        num_video_frames_thumbnail: 64
+        max_tiles_video: 48
+    completion_gate:
+      - keep-all and AutoGaze rows are both present for the same HLVid questions
+      - summary includes preprocessing, AutoGaze, vision encoder, LLM, total latency
+      - summary includes visual token and patch reduction before/after AutoGaze
+      - summary includes peak memory and failure stage when OOM happens
+
+  - name: nvila_video_baseline_autogaze_on_off
+    objective: >
+      Run the non-HD NVILA-8B-Video baseline/off path and an AutoGaze-on probe on
+      the same input set without mixing this with the paper baseline semantics.
+    runner:
+      module: repro.plugin_hlvid_benchmark
+      modes:
+        - nvila-video-off
+        - nvila-video-autogaze-probe
+      recommended_args:
+        limit: 3
+        num_video_frames: 256
+        max_tiles_video: 8
+        external_mllm_command: vila-infer
+    completion_gate:
+      - nvila-video-off executes through official VILA CLI
+      - nvila-video-autogaze-probe records feature packing probe_required
+      - paper baseline and plugin on/off identities are separated in report
+
+  - name: longvila_autogaze_poc
+    objective: >
+      Run LongVILA native/off and AutoGaze-on probe on the same inputs to locate
+      the long-video feature packing boundary.
+    runner:
+      module: repro.plugin_hlvid_benchmark
+      modes:
+        - longvila-off
+        - longvila-autogaze-probe
+      recommended_args:
+        limit: 3
+        num_video_frames: 256
+        max_tiles_video: 8
+        external_mllm_command: vila-infer
+    completion_gate:
+      - longvila-off executes through official VILA CLI
+      - longvila-autogaze-probe records post-encoder and pre-encoder hook targets
+      - report records exact failure/dependency status if CLI/model is missing
+
+  - name: qwen3_vl_autogaze_poc
+    objective: >
+      Run Qwen3-VL native/off and AutoGaze post-encoder attachment PoC on the same
+      input set. PixelPrune pre-ViT can be added as a reference sidecar, but it is
+      not a replacement for AutoGaze+Qwen.
+    runner:
+      module: repro.plugin_hlvid_benchmark
+      modes:
+        - qwen3-vl-off
+        - qwen3-vl-autogaze-poc
+      optional_modes:
+        - qwen3-vl-pixelprune-pre-vit
+        - qwen3-vl-autogaze-prune-generate
+      recommended_args:
+        limit: 3
+        num_video_frames: 128
+        max_tiles_video: 1
+        max_new_tokens: 8
+    completion_gate:
+      - qwen3-vl-off executes native Qwen generation
+      - qwen3-vl-autogaze-poc emits SparseSelectionPlan and token estimate
+      - qwen3-vl-autogaze-prune-generate either executes or records the exact Qwen generate incompatibility

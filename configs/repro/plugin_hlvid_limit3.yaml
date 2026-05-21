@@ -1,7 +1,8 @@
 description: >
   HLVid limit-3 plugin comparison wrapper for extensibility checks. This runs
-  native/off modes where available and keeps AutoGaze-on modes as explicit
-  feature-packing probes until model-specific visual token insertion is wired.
+  native/off modes where available, a Qwen3-VL PixelPrune pre-ViT execution
+  mode, an AutoGaze-on Qwen attachment probe, and an explicit experimental
+  Qwen post-encoder prune-generate mode.
 
 plugin_hlvid_benchmark:
   module: repro.plugin_hlvid_benchmark
@@ -15,7 +16,9 @@ plugin_hlvid_benchmark:
       - longvila-off
       - internvl3-off
       - qwen3-vl-off
+      - qwen3-vl-pixelprune-pre-vit
       - qwen3-vl-autogaze-probe
+      - qwen3-vl-autogaze-prune-generate
     external_mllm_command: vila-infer
     num_video_frames: 256
     max_tiles_video: 8

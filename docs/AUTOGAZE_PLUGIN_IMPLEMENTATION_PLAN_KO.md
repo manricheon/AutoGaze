@@ -590,9 +590,12 @@ Acceptance:
 ### Phase 3: Token selector 분리
 
 - [x] `KeepAllTokenSelector`, `NoTokenSelector`, `AutoGazeSelectorPlan` 계약을 만든다.
+- [x] `SparseSelectionPlan`, `SelectedPatch`, `EncoderMapping`, `MllmMapping` 표준 schema를 만든다.
 - [ ] NVILA-HD native processor path는 우선 wrapper adapter로 감싼다.
-- [ ] AutoGaze standalone path는 selected mask/position을 표준 `TokenSelectorOutput`으로 변환한다.
-- [ ] `gazing_ratio`, `task_loss_requirement`, first-frame keep policy를 output metadata에 기록한다.
+- [x] AutoGaze planned output은 표준 `TokenSelectorOutput.sparse_selection_plan`으로 변환한다.
+- [x] `gazing_ratio`는 flexible runner spec과 Qwen AutoGaze PoC token estimate에 기록한다.
+- [ ] 실제 AutoGaze standalone 실행 output을 concrete selected patch 좌표로 변환한다.
+- [ ] `task_loss_requirement`, first-frame keep policy를 output metadata에 기록한다.
 
 ### Phase 4: Vision encoder integration
 
@@ -600,7 +603,8 @@ Acceptance:
 - [ ] `NVILAVideoVisionEncoderAdapter`는 먼저 full encode/off path를 안정화한다.
 - [ ] `LongVILAVisionEncoderAdapter`는 model load와 feature extraction entrypoint를 조사한 뒤 full encode/off path를 안정화한다.
 - [x] 공통 `post_encoder_token_prune` 결과와 `pre_encoder_sparse` probe 결과 계약을 만든다.
-- [x] Qwen3-VL용 PixelPrune pre-ViT adapter hook 계약을 만든다.
+- [x] Qwen3-VL용 PixelPrune pre-ViT adapter hook 계약과 실행 gate를 만든다.
+- [x] Qwen3-VL PixelPrune pre-ViT는 hook 성공 시 Qwen native generation까지 내려가고, hook 실패 시 dense 실행을 막는다.
 - [ ] `pre_encoder_sparse`가 불가능한 모델은 `post_encoder_token_prune`로 fallback하고 report에 명시한다.
 - [ ] patch size 14/16 mismatch check를 adapter 공통 metadata로 이동한다.
 
@@ -611,6 +615,9 @@ Acceptance:
 - [x] `longvila` native/off 실행도 공식 VILA `vila-infer` CLI adapter로 분리한다.
 - [x] `internvl3` native/off 실행은 `repro.internvl3_off_infer` helper CLI adapter로 분리한다.
 - [x] Qwen2/2.5/3-VL AutoGaze on은 post-encoder feature packing probe로 분리한다.
+- [x] Qwen3-VL AutoGaze post-encoder attachment PoC는 `SparseSelectionPlan`과 before/after visual token estimate를 기록한다.
+- [x] VILA 계열 AutoGaze-on 요청은 로컬 `config.json` 기반 static feature packing probe를 `probe_collected`로 기록한다.
+- [x] Qwen3-VL은 `--enable-qwen-prune-generate` 실험 플래그에서 `get_video_features` 이후 visual feature를 줄인 `inputs_embeds` generate 경로를 시도한다.
 - [ ] `NVILAHDMllmAdapter`, `NVILAVideoMllmAdapter`, `LongVILAMllmAdapter`를 만든다.
 - [ ] prompt packing과 visual feature packing을 adapter method로 분리한다.
 - [ ] TTFT, LLM prefill, KV cache estimate를 공통 output field로 기록한다.

@@ -3,11 +3,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 import json
+from pathlib import Path
 import shlex
 import shutil
 import subprocess
 import time
 from typing import Any
+
+from repro.plugins.gaze_plan import (
+    SparseSelectionPlan,
+    qwen_visual_indices_from_sparse_plan,
+    sparse_selection_plan_from_dict,
+)
+from repro.vila_feature_probe import run_vila_feature_probe
 
 
 @dataclass(frozen=True)
@@ -25,9 +33,13 @@ class MllmRunRequest:
     max_new_tokens: int
     token_selector_kind: str = "keep-all"
     integration_level: str = "none"
+    pre_encoder_prune_adapter: str = "none"
+    gazing_ratio: float | None = None
     num_video_frames: int = 128
     max_tiles_video: int = 1
     external_mllm_command: str = "vila-infer"
+    enable_qwen_prune_generate: bool = False
+    sparse_selection_plan_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -143,17 +155,34 @@ class VilaCliMllmAdapter(BaseMllmAdapter):
         if request.token_selector_kind == "autogaze" or request.integration_level != "none":
             metrics = build_metric_skeleton(request)
             metrics["feature_packing_probe"] = build_feature_packing_probe(self.name, request)
-            metrics["metric_status"] = {
-                "value": "probe_required",
-                "reason": "AutoGaze-on VILA-family integration still requires a feature packing probe",
-            }
+            vila_probe = run_vila_feature_probe(
+                model_path=request.model_path,
+                model_family=request.model_family,
+                video=request.video or request.image,
+                prompt=request.prompt,
+                num_video_frames=request.num_video_frames,
+                max_tiles_video=request.max_tiles_video,
+            )
+            metrics["vila_feature_probe"] = vila_probe
+            if vila_probe["status"] == "static_probe_collected":
+                status = "probe_collected"
+                metrics["metric_status"] = {
+                    "value": "probe_collected",
+                    "reason": "Static VILA-family config probe was collected; runtime feature packing instrumentation is still required.",
+                }
+            else:
+                status = "probe_required"
+                metrics["metric_status"] = {
+                    "value": "probe_required",
+                    "reason": "AutoGaze-on VILA-family integration still requires a feature packing probe",
+                }
             return MllmRunResult(
                 text=None,
                 prompt=request.prompt,
                 video=request.video,
                 image=request.image,
                 adapter=self.name,
-                status="probe_required",
+                status=status,
                 metrics=metrics,
             )
 
@@ -381,7 +410,11 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
         return description
 
     def run(self, request: MllmRunRequest) -> MllmRunResult:
-        if request.token_selector_kind == "autogaze" or request.integration_level != "none":
+        if request.token_selector_kind == "autogaze" and request.integration_level == "post_encoder_token_prune":
+            if request.enable_qwen_prune_generate:
+                return self._run_qwen_autogaze_prune_generate(request)
+            return self._run_autogaze_post_encoder_poc(request)
+        if self._requires_probe_only(request):
             metrics = build_metric_skeleton(request)
             metrics["feature_packing_probe"] = build_feature_packing_probe(self.name, request)
             metrics["metric_status"] = {
@@ -398,6 +431,63 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
                 metrics=metrics,
             )
 
+        result = self._run_qwen_generate(request)
+        if request.pre_encoder_prune_adapter != "none":
+            result.metrics["pre_encoder_prune"] = {
+                "adapter": request.pre_encoder_prune_adapter,
+                "integration_level": request.integration_level,
+                "status": "applied_before_model_load",
+            }
+        return result
+
+    def _run_autogaze_post_encoder_poc(self, request: MllmRunRequest) -> MllmRunResult:
+        metrics = build_metric_skeleton(request)
+        raw_visual_tokens = _estimate_qwen_visual_tokens(request)
+        selected_visual_tokens = _estimate_selected_tokens(raw_visual_tokens, request.gazing_ratio)
+        plan = SparseSelectionPlan.placeholder(
+            selector_name="autogaze",
+            source_path=request.video or request.image,
+            raw_patch_tokens=raw_visual_tokens,
+            selected_patch_tokens=selected_visual_tokens,
+            frame_indices=list(range(max(int(request.num_video_frames), 0))),
+            reason=(
+                "Qwen AutoGaze post-encoder PoC has a standardized SparseSelectionPlan and "
+                "feature packing probe; actual visual feature pruning/insertion still needs "
+                "model-specific runtime surgery."
+            ),
+        )
+        metrics["tokens"]["visual_tokens_before_prune"] = raw_visual_tokens
+        metrics["tokens"]["visual_tokens_after_prune"] = selected_visual_tokens
+        metrics["tokens"]["visual_token_reduction_ratio"] = (
+            raw_visual_tokens / selected_visual_tokens if selected_visual_tokens else None
+        )
+        metrics["sparse_selection_plan"] = plan.to_dict()
+        metrics["feature_packing_probe"] = build_feature_packing_probe(self.name, request)
+        metrics["metric_status"] = {
+            "value": "autogaze_qwen_poc_ready",
+            "reason": (
+                "AutoGaze + Qwen attachment PoC is materialized as a post-encoder SparseSelectionPlan; "
+                "it does not yet mutate Qwen visual embeddings for scored generation."
+            ),
+        }
+        return MllmRunResult(
+            text=None,
+            prompt=request.prompt,
+            video=request.video,
+            image=request.image,
+            adapter=self.name,
+            status="poc_ready",
+            metrics=metrics,
+        )
+
+    def _requires_probe_only(self, request: MllmRunRequest) -> bool:
+        if request.integration_level == "none" and request.token_selector_kind != "autogaze":
+            return False
+        if request.integration_level == "pre_encoder_sparse" and request.pre_encoder_prune_adapter == "pixelprune":
+            return False
+        return True
+
+    def _run_qwen_generate(self, request: MllmRunRequest) -> MllmRunResult:
         try:
             from transformers import AutoModelForImageTextToText, AutoProcessor
         except ModuleNotFoundError as exc:
@@ -435,6 +525,130 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
             generated_ids = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(input_ids, generated_ids)]
         text = processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
+        _record_cuda_memory(metrics)
+        return MllmRunResult(
+            text=text,
+            prompt=request.prompt,
+            video=request.video,
+            image=request.image,
+            adapter=self.name,
+            status="executed",
+            metrics=metrics,
+        )
+
+    def _run_qwen_autogaze_prune_generate(self, request: MllmRunRequest) -> MllmRunResult:
+        try:
+            from transformers import AutoModelForImageTextToText, AutoProcessor
+        except ModuleNotFoundError as exc:
+            raise RuntimeError("transformers is required for Qwen grid MLLM execution") from exc
+
+        model_kwargs: dict[str, Any] = {
+            "device_map": request.device_map,
+            "trust_remote_code": request.trust_remote_code,
+        }
+        if request.dtype != "auto":
+            model_kwargs["dtype"] = request.dtype
+        if request.attn_implementation:
+            model_kwargs["attn_implementation"] = request.attn_implementation
+
+        metrics = build_metric_skeleton(request)
+        metrics["feature_packing_probe"] = build_feature_packing_probe(self.name, request)
+        total_start = time.perf_counter()
+        start = time.perf_counter()
+        model = AutoModelForImageTextToText.from_pretrained(request.model_path, **model_kwargs)
+        metrics["latency_ms"]["model_load"] = _elapsed_ms(start)
+        start = time.perf_counter()
+        processor = AutoProcessor.from_pretrained(request.model_path, trust_remote_code=request.trust_remote_code)
+        metrics["latency_ms"]["processor_load"] = _elapsed_ms(start)
+        messages = self.build_messages(request)
+        start = time.perf_counter()
+        inputs = _build_qwen_grid_inputs(processor, messages, request)
+        metrics["latency_ms"]["input_build"] = _elapsed_ms(start)
+        _record_input_token_metrics(metrics, inputs)
+        model_device = getattr(model, "device", None)
+        if model_device is not None and hasattr(inputs, "to"):
+            inputs = inputs.to(model_device)
+
+        try:
+            raw_visual_tokens = count_qwen_visual_placeholders(model, inputs)
+            keep_indices, selection_metadata = resolve_qwen_visual_keep_indices(
+                request,
+                model=model,
+                inputs=inputs,
+                visual_count=raw_visual_tokens,
+            )
+            pruned_inputs = build_qwen_pruned_visual_inputs(model, inputs, keep_indices)
+        except Exception as exc:
+            metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
+            metrics["qwen_prune_generate"] = {
+                "enabled": True,
+                "status": "failed_before_generate",
+                "reason": str(exc),
+            }
+            metrics["metric_status"] = {
+                "value": "failed_qwen_prune_generate",
+                "reason": str(exc),
+            }
+            _record_cuda_memory(metrics)
+            return MllmRunResult(
+                text=None,
+                prompt=request.prompt,
+                video=request.video,
+                image=request.image,
+                adapter=self.name,
+                status="failed_qwen_prune_generate",
+                metrics=metrics,
+            )
+
+        prune_metadata = pruned_inputs.pop("qwen_prune_generate_metadata")
+        metrics["qwen_prune_generate"] = {
+            "enabled": True,
+            "status": "inputs_embeds_prepared",
+            **prune_metadata,
+            **selection_metadata,
+        }
+        metrics["tokens"]["visual_tokens_before_prune"] = prune_metadata["visual_tokens_before_prune"]
+        metrics["tokens"]["visual_tokens_after_prune"] = prune_metadata["visual_tokens_after_prune"]
+        if prune_metadata["visual_tokens_after_prune"]:
+            metrics["tokens"]["visual_token_reduction_ratio"] = (
+                prune_metadata["visual_tokens_before_prune"] / prune_metadata["visual_tokens_after_prune"]
+            )
+        input_ids = pruned_inputs.get("input_ids")
+        if input_ids is not None and hasattr(input_ids, "shape"):
+            metrics["tokens"]["llm_context_tokens"] = int(input_ids.shape[-1])
+
+        start = time.perf_counter()
+        try:
+            generated_ids = model.generate(**pruned_inputs, max_new_tokens=request.max_new_tokens)
+        except Exception as exc:
+            metrics["latency_ms"]["generate"] = _elapsed_ms(start)
+            metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
+            metrics["qwen_prune_generate"]["status"] = "failed_during_generate"
+            metrics["qwen_prune_generate"]["reason"] = str(exc)
+            metrics["metric_status"] = {
+                "value": "failed_qwen_prune_generate",
+                "reason": str(exc),
+            }
+            _record_cuda_memory(metrics)
+            return MllmRunResult(
+                text=None,
+                prompt=request.prompt,
+                video=request.video,
+                image=request.image,
+                adapter=self.name,
+                status="failed_qwen_prune_generate",
+                metrics=metrics,
+            )
+
+        metrics["latency_ms"]["generate"] = _elapsed_ms(start)
+        if input_ids is not None:
+            generated_ids = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(input_ids, generated_ids)]
+        text = processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+        metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
+        metrics["metric_status"] = {
+            "value": "executed_qwen_prune_generate",
+            "reason": "Qwen visual features were pruned after get_video_features and passed to generate through inputs_embeds.",
+        }
         _record_cuda_memory(metrics)
         return MllmRunResult(
             text=text,
@@ -548,6 +762,229 @@ def _build_qwen_grid_inputs(processor: Any, messages: list[dict[str, Any]], requ
     )
 
 
+def build_qwen_pruned_visual_inputs(model: Any, inputs: Any, keep_indices: list[int]) -> dict[str, Any]:
+    try:
+        import torch
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("torch is required for Qwen visual feature pruning") from exc
+
+    values = dict(inputs)
+    input_ids = values.get("input_ids")
+    if input_ids is None or not hasattr(input_ids, "shape"):
+        raise ValueError("Qwen prune-generate requires input_ids in processor outputs")
+    if len(input_ids.shape) != 2 or int(input_ids.shape[0]) != 1:
+        raise ValueError("Qwen prune-generate currently supports a single prompt/video batch")
+
+    video_token_id = qwen_video_token_id(model)
+    embeddings = _qwen_input_embeddings(model)(input_ids)
+    video_features = _qwen_video_features(model, values)
+    if len(video_features.shape) == 3:
+        if int(video_features.shape[0]) != 1:
+            raise ValueError("Qwen prune-generate currently supports one video feature batch")
+        video_features = video_features[0]
+    if len(video_features.shape) != 2:
+        raise ValueError(f"Expected 2D Qwen video features, got shape={list(video_features.shape)}")
+
+    visual_count = int(video_features.shape[0])
+    keep = [index for index in dict.fromkeys(int(item) for item in keep_indices) if 0 <= index < visual_count]
+    if not keep and visual_count > 0:
+        keep = [0]
+    placeholder_positions = (input_ids[0] == video_token_id).nonzero(as_tuple=False).flatten()
+    if int(placeholder_positions.numel()) < visual_count:
+        raise ValueError(
+            "Qwen input has fewer video token placeholders than video features "
+            f"({int(placeholder_positions.numel())} < {visual_count})"
+        )
+
+    visual_positions = placeholder_positions[:visual_count]
+    keep_positions = visual_positions[torch.tensor(keep, device=visual_positions.device, dtype=torch.long)]
+    keep_position_set = {int(item) for item in keep_positions.detach().cpu().tolist()}
+    sequence_keep_mask = torch.ones(input_ids.shape[-1], dtype=torch.bool, device=input_ids.device)
+    for position in visual_positions.detach().cpu().tolist():
+        if int(position) not in keep_position_set:
+            sequence_keep_mask[int(position)] = False
+
+    pruned: dict[str, Any] = {}
+    for key, value in values.items():
+        if key in {"pixel_values_videos", "video_grid_thw", "pixel_values", "image_grid_thw"}:
+            continue
+        if hasattr(value, "shape") and len(value.shape) >= 2 and int(value.shape[0]) == 1 and int(value.shape[1]) == int(input_ids.shape[-1]):
+            pruned[key] = value[:, sequence_keep_mask, ...]
+        else:
+            pruned[key] = value
+
+    pruned_embeddings = embeddings[:, sequence_keep_mask, :].clone()
+    kept_features = video_features[torch.tensor(keep, device=video_features.device, dtype=torch.long)]
+    kept_features = kept_features.to(device=pruned_embeddings.device, dtype=pruned_embeddings.dtype)
+    new_positions: list[int] = []
+    for original_position in keep_positions.detach().cpu().tolist():
+        new_positions.append(int(sequence_keep_mask[: int(original_position) + 1].sum().item()) - 1)
+    for row, new_position in enumerate(new_positions):
+        pruned_embeddings[0, new_position, :] = kept_features[row]
+    pruned["inputs_embeds"] = pruned_embeddings
+    pruned["input_ids"] = input_ids[:, sequence_keep_mask]
+    if "attention_mask" in values:
+        pruned["attention_mask"] = values["attention_mask"][:, sequence_keep_mask]
+    pruned["qwen_prune_generate_metadata"] = {
+        "video_token_id": video_token_id,
+        "visual_tokens_before_prune": visual_count,
+        "visual_tokens_after_prune": len(keep),
+        "dropped_visual_placeholders": visual_count - len(keep),
+        "kept_visual_indices": keep,
+        "kept_visual_placeholder_positions": [int(item) for item in keep_positions.detach().cpu().tolist()],
+        "llm_context_tokens_after_prune": int(pruned["input_ids"].shape[-1]),
+    }
+    return pruned
+
+
+def resolve_qwen_visual_keep_indices(
+    request: MllmRunRequest,
+    *,
+    model: Any,
+    inputs: Any,
+    visual_count: int,
+) -> tuple[list[int], dict[str, Any]]:
+    if request.sparse_selection_plan_path:
+        mapping = _qwen_mapping_from_sparse_plan_path(
+            request.sparse_selection_plan_path,
+            model=model,
+            inputs=inputs,
+        )
+        keep = [
+            int(index)
+            for index in (mapping.visual_feature_indices or [])
+            if 0 <= int(index) < int(visual_count)
+        ]
+        if keep:
+            return keep, {
+                "selection_source": "sparse_selection_plan",
+                "sparse_selection_plan_path": request.sparse_selection_plan_path,
+                "mllm_mapping": mapping.to_dict(),
+            }
+        return select_qwen_visual_keep_indices(visual_count, request.gazing_ratio), {
+            "selection_source": "gazing_ratio_fallback_after_sparse_plan_mapping_failed",
+            "sparse_selection_plan_path": request.sparse_selection_plan_path,
+            "mllm_mapping": mapping.to_dict(),
+        }
+    return select_qwen_visual_keep_indices(visual_count, request.gazing_ratio), {
+        "selection_source": "gazing_ratio_placeholder_until_autogaze_indices_are_mapped",
+    }
+
+
+def _qwen_mapping_from_sparse_plan_path(
+    path: str,
+    *,
+    model: Any,
+    inputs: Any,
+) -> Any:
+    with Path(path).open("r", encoding="utf-8") as handle:
+        plan = sparse_selection_plan_from_dict(json.load(handle))
+    video_grid_thw = _qwen_video_grid_thw(inputs)
+    if video_grid_thw is None:
+        from repro.plugins.gaze_plan import MllmMapping
+
+        return MllmMapping(
+            status="mapping_failed",
+            visual_feature_indices=[],
+            reason="Qwen processor outputs did not include video_grid_thw",
+        )
+    return qwen_visual_indices_from_sparse_plan(
+        plan,
+        video_grid_thw=video_grid_thw,
+        spatial_merge_size=qwen_spatial_merge_size(model),
+    )
+
+
+def _qwen_video_grid_thw(inputs: Any) -> Any:
+    values = dict(inputs)
+    return values.get("video_grid_thw")
+
+
+def count_qwen_visual_placeholders(model: Any, inputs: Any) -> int:
+    values = dict(inputs)
+    input_ids = values.get("input_ids")
+    if input_ids is None:
+        return 0
+    video_token_id = qwen_video_token_id(model)
+    return int((input_ids == video_token_id).sum().item())
+
+
+def select_qwen_visual_keep_indices(total_visual_tokens: int, gazing_ratio: float | None) -> list[int]:
+    total = max(int(total_visual_tokens), 0)
+    if total == 0:
+        return []
+    if gazing_ratio is None:
+        return list(range(total))
+    ratio = max(0.0, min(1.0, float(gazing_ratio)))
+    count = max(1, min(total, int(round(total * ratio))))
+    if count == total:
+        return list(range(total))
+    if count == 1:
+        return [0]
+    return sorted({round(index * (total - 1) / (count - 1)) for index in range(count)})
+
+
+def qwen_video_token_id(model: Any) -> int:
+    for target in (getattr(model, "config", None), getattr(getattr(model, "model", None), "config", None)):
+        value = getattr(target, "video_token_id", None)
+        if value is not None:
+            return int(value)
+    raise ValueError("Qwen model config does not expose video_token_id")
+
+
+def qwen_spatial_merge_size(model: Any) -> int:
+    candidates = (
+        getattr(model, "config", None),
+        getattr(getattr(model, "config", None), "vision_config", None),
+        getattr(getattr(model, "model", None), "config", None),
+        getattr(getattr(getattr(model, "model", None), "config", None), "vision_config", None),
+    )
+    for target in candidates:
+        value = getattr(target, "spatial_merge_size", None)
+        if value is not None:
+            return max(1, int(value))
+    return 1
+
+
+def _qwen_input_embeddings(model: Any) -> Any:
+    for target in (model, getattr(model, "model", None)):
+        getter = getattr(target, "get_input_embeddings", None)
+        if getter is not None:
+            embeddings = getter()
+            if embeddings is not None:
+                return embeddings
+    raise ValueError("Qwen model does not expose get_input_embeddings")
+
+
+def _qwen_video_features(model: Any, values: dict[str, Any]) -> Any:
+    getter = None
+    for target in (model, getattr(model, "model", None)):
+        getter = getattr(target, "get_video_features", None)
+        if getter is not None:
+            break
+    if getter is None:
+        raise ValueError("Qwen model does not expose get_video_features")
+    pixel_values_videos = values.get("pixel_values_videos")
+    video_grid_thw = values.get("video_grid_thw")
+    try:
+        output = getter(pixel_values_videos=pixel_values_videos, video_grid_thw=video_grid_thw)
+    except TypeError:
+        output = getter(pixel_values_videos, video_grid_thw)
+    return _first_tensor_like(output)
+
+
+def _first_tensor_like(value: Any) -> Any:
+    if hasattr(value, "shape"):
+        return value
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            try:
+                return _first_tensor_like(item)
+            except ValueError:
+                continue
+    raise ValueError("Qwen get_video_features did not return a tensor-like value")
+
+
 def build_metric_skeleton(request: MllmRunRequest) -> dict[str, Any]:
     return {
         "latency_ms": {
@@ -570,6 +1007,22 @@ def build_metric_skeleton(request: MllmRunRequest) -> dict[str, Any]:
         },
         "max_new_tokens": request.max_new_tokens,
     }
+
+
+def _estimate_qwen_visual_tokens(request: MllmRunRequest) -> int:
+    frames = max(int(request.num_video_frames), 1)
+    tiles = max(int(request.max_tiles_video), 1)
+    # Qwen grid models expose the exact visual count through processor outputs at runtime.
+    # For a model-load-free AutoGaze attachment PoC, 196 tokens/frame/tile is the same
+    # coarse video token unit used by several pooled video MLLM paths and keeps estimates explicit.
+    return frames * tiles * 196
+
+
+def _estimate_selected_tokens(raw_visual_tokens: int, gazing_ratio: float | None) -> int | None:
+    if gazing_ratio is None:
+        return None
+    ratio = max(0.0, min(1.0, float(gazing_ratio)))
+    return max(1, int(round(raw_visual_tokens * ratio)))
 
 
 def build_feature_packing_probe(adapter_name: str, request: MllmRunRequest) -> dict[str, Any]:
@@ -621,6 +1074,7 @@ def build_feature_packing_probe(adapter_name: str, request: MllmRunRequest) -> d
                 if request.model_family == "nvila-video-baseline"
                 else "plugin_on_off_experiment"
             ),
+            next_probe_command=_vila_feature_probe_command(adapter_name, request),
         )
     if adapter_name == "longvila":
         return _planned_probe(
@@ -643,6 +1097,7 @@ def build_feature_packing_probe(adapter_name: str, request: MllmRunRequest) -> d
                 "LLM prefill context token count",
             ],
             autogaze_applicability="plugin_on_off_experiment",
+            next_probe_command=_vila_feature_probe_command(adapter_name, request),
         )
     if adapter_name == "internvl3":
         return _planned_probe(
@@ -699,6 +1154,7 @@ def _planned_probe(
     required_runtime_checks: list[str],
     token_accounting_targets: list[str],
     autogaze_applicability: str,
+    next_probe_command: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "adapter": adapter_name,
@@ -713,10 +1169,30 @@ def _planned_probe(
         "required_runtime_checks": required_runtime_checks,
         "token_accounting_targets": token_accounting_targets,
         "autogaze_applicability": autogaze_applicability,
+        "next_probe_command": next_probe_command,
         "loads_model": False,
         "notes": [
             "This planned adapter does not run generation yet.",
             "Use it to make the next CUDA probe explicit before wiring AutoGaze into the model-specific processor path.",
+        ],
+    }
+
+
+def _vila_feature_probe_command(adapter_name: str, request: MllmRunRequest) -> dict[str, Any]:
+    return {
+        "goal": "capture_vila_feature_packing",
+        "adapter": adapter_name,
+        "requires_code_probe": True,
+        "suggested_entrypoint": "repro.flexible_runner",
+        "model_path": request.model_path,
+        "video": request.video,
+        "num_video_frames": request.num_video_frames,
+        "max_tiles_video": request.max_tiles_video,
+        "expected_outputs": [
+            "processor video tensor/frame contract",
+            "vision feature shape",
+            "projector output shape",
+            "LLM visual token insertion boundary",
         ],
     }
 

@@ -70,8 +70,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mllm-path")
     parser.add_argument("--autogaze-integration-level", choices=AUTOGAZE_INTEGRATION_LEVEL_CHOICES, required=True)
     parser.add_argument("--pre-encoder-prune-adapter", choices=PRE_ENCODER_PRUNE_ADAPTER_CHOICES, default="none")
+    parser.add_argument("--gazing-ratio", type=float)
     parser.add_argument("--pixelprune-threshold", type=float, default=0.0)
     parser.add_argument("--pixelprune-verbose", action="store_true")
+    parser.add_argument("--enable-qwen-prune-generate", action="store_true")
+    parser.add_argument("--sparse-selection-plan-json")
     parser.add_argument("--video")
     parser.add_argument("--image")
     parser.add_argument("--prompt", default="Describe the video.")
@@ -307,6 +310,7 @@ def run_single(args: argparse.Namespace) -> dict[str, Any]:
     payload["post_encoder_prune_runtime"] = build_post_encoder_prune_runtime_plan(
         payload["experiment_spec"]["integration_level"],
         payload["four_step_execution_plan"]["post_encoder_token_prune"]["hook"],
+        enabled=bool(getattr(args, "enable_qwen_prune_generate", False)),
     )
     if getattr(args, "dry_run", False):
         payload["implementation_status"] = "dry_run"
@@ -314,6 +318,14 @@ def run_single(args: argparse.Namespace) -> dict[str, Any]:
         return payload
 
     pixelprune_status = maybe_apply_pre_encoder_prune(args, payload["experiment_spec"]["model_family"])
+    if _pre_encoder_prune_failed(args, pixelprune_status):
+        payload["implementation_status"] = "failed_missing_dependency"
+        payload["pre_encoder_prune_runtime"] = pixelprune_status
+        payload["generation"] = _pre_encoder_prune_failure_result(args, pixelprune_status)
+        payload["measurement_plan"] = payload["generation"]["metrics"]
+        write_json(args.output_json, payload)
+        return payload
+
     output = adapter.run(request).to_dict()
     payload["implementation_status"] = output.get("status", "executed")
     payload["pre_encoder_prune_runtime"] = pixelprune_status
@@ -335,9 +347,18 @@ def maybe_apply_pre_encoder_prune(args: argparse.Namespace, model_family: str) -
     return {"adapter": "pixelprune", **result}
 
 
-def build_post_encoder_prune_runtime_plan(integration_level: str, hook: str) -> dict[str, Any]:
+def build_post_encoder_prune_runtime_plan(integration_level: str, hook: str, *, enabled: bool = False) -> dict[str, Any]:
     if integration_level != "post_encoder_token_prune":
         return {"status": "not_requested"}
+    if enabled:
+        return {
+            "status": "experimental_prune_generate_enabled",
+            "hook": hook,
+            "runtime_behavior": (
+                "Qwen-family adapters attempt get_video_features, reduce visual placeholders, "
+                "and call generate with pruned inputs_embeds."
+            ),
+        }
     return {
         "status": "shape_probe_required",
         "hook": hook,
@@ -360,10 +381,57 @@ def build_mllm_run_request(args: argparse.Namespace) -> MllmRunRequest:
         max_new_tokens=args.max_new_tokens,
         token_selector_kind=args.token_selector_adapter,
         integration_level=args.autogaze_integration_level,
+        pre_encoder_prune_adapter=args.pre_encoder_prune_adapter,
+        gazing_ratio=args.gazing_ratio,
         num_video_frames=args.num_video_frames,
         max_tiles_video=args.max_tiles_video,
         external_mllm_command=args.external_mllm_command,
+        enable_qwen_prune_generate=args.enable_qwen_prune_generate,
+        sparse_selection_plan_path=args.sparse_selection_plan_json,
     )
+
+
+def _pre_encoder_prune_failed(args: argparse.Namespace, status: dict[str, Any]) -> bool:
+    if getattr(args, "pre_encoder_prune_adapter", "none") != "pixelprune":
+        return False
+    return status.get("applied") is False
+
+
+def _pre_encoder_prune_failure_result(args: argparse.Namespace, status: dict[str, Any]) -> dict[str, Any]:
+    reason = str(status.get("reason") or "pre-encoder prune adapter was not applied")
+    return {
+        "text": None,
+        "prompt": args.prompt,
+        "video": args.video,
+        "image": args.image,
+        "adapter": args.mllm_adapter,
+        "status": "failed_missing_dependency",
+        "metrics": {
+            "latency_ms": {
+                "model_load": None,
+                "processor_load": None,
+                "input_build": None,
+                "generate": None,
+                "total": None,
+            },
+            "tokens": {
+                "prompt_tokens_estimated": len(args.prompt.split()),
+                "input_ids_tokens": None,
+                "visual_tokens_before_prune": None,
+                "visual_tokens_after_prune": None,
+                "llm_context_tokens": None,
+            },
+            "memory_bytes": {
+                "peak_cuda_allocated": None,
+                "peak_cuda_reserved": None,
+            },
+            "pre_encoder_prune": status,
+            "metric_status": {
+                "value": "failed_missing_dependency",
+                "reason": reason,
+            },
+        },
+    }
 
 
 def _token_selector_status(spec: ExperimentSpec) -> MetricStatus:
