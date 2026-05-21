@@ -683,12 +683,14 @@ Acceptance:
 - [x] before/after LLM context와 visual token count 기록
 - [x] `qwen_full_vit`, `qwen_chunked_vit`, `qwen_chunked_vit_autogaze_sparse` 비교 모드 추가
 - [x] Qwen chunked ViT에 temporal chunk뿐 아니라 Qwen processor patch grid 기준 spatial tile chunk도 추가
+- [x] Qwen 경로에 NVILA runner식 앞단 video sample/resize 옵션 추가: `--video-resize-shortest-edge`, `--video-resize-longest-edge`, `--video-resize-width/height`
+- [x] Qwen 경로에 thumbnail append 실험 모드 추가: `--num-video-frames-thumbnail N --qwen-thumbnail-mode append-video`
 - [ ] TTFT, peak memory를 Qwen prune-generate path에서 CUDA smoke로 검증
 - [x] 실패 시 `failed_qwen_prune_generate`로 원인 기록
 
 Acceptance:
 
-- `qwen_chunked_vit_autogaze_sparse`에서는 AutoGaze index mapping 결과를 Qwen merged visual token index로 바꾸고, 선택된 token만 temporal+spatial chunked Qwen ViT와 MLLM context에 통과시킨다. 단, 현재 spatial chunking은 Qwen processor 이후 `pixel_values_videos` / `video_grid_thw` 단계이므로 원본 video decode/resize 절감은 별도 후속 과제다.
+- `qwen_chunked_vit_autogaze_sparse`에서는 AutoGaze index mapping 결과를 Qwen merged visual token index로 바꾸고, 선택된 token만 temporal+spatial chunked Qwen ViT와 MLLM context에 통과시킨다. spatial chunking 자체는 Qwen processor 이후 `pixel_values_videos` / `video_grid_thw` 단계에서 일어나지만, `--video-resize-*`를 켜면 Qwen processor 앞에서 runner가 sampled/resized frame list를 만들어 전달하고 direct AutoGaze selector도 같은 resized effective frame 기준으로 `--max-tiles-video` tile grid를 계산한다. `--qwen-thumbnail-mode append-video`를 켜면 main sampled frames 뒤에 thumbnail frames를 같은 video stream으로 붙이고, sparse path에서는 이 temporal tail을 keep-all token으로 유지한다. 따라서 4K/긴 비디오의 decode/resize 입력 크기, thumbnail overview 유지 여부, AutoGaze tile grid를 같은 기준으로 통제할 수 있다. 아직 processor 이전 spatial crop을 여러 tile video로 materialize하는 경로는 후속 과제다.
 
 ### Phase F: InternVL3 Tile Sparse
 

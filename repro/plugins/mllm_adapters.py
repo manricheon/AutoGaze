@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import re
 import json
 from pathlib import Path
@@ -37,6 +38,7 @@ class MllmRunRequest:
     pre_encoder_prune_adapter: str = "none"
     gazing_ratio: float | None = None
     num_video_frames: int = 128
+    num_video_frames_thumbnail: int = 0
     max_tiles_video: int = 1
     external_mllm_command: str = "vila-infer"
     enable_qwen_prune_generate: bool = False
@@ -48,6 +50,11 @@ class MllmRunRequest:
     qwen_vit_mode: str = "qwen_full_vit"
     qwen_vit_chunk_frames: int = 16
     qwen_vit_max_spatial_chunks: int = 1
+    qwen_thumbnail_mode: str = "none"
+    video_resize_shortest_edge: int | None = None
+    video_resize_longest_edge: int | None = None
+    video_resize_width: int | None = None
+    video_resize_height: int | None = None
 
 
 @dataclass(frozen=True)
@@ -429,6 +436,8 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
                 "fps": request.qwen_video_fps,
                 "max_pixels": request.qwen_video_max_pixels,
                 "min_pixels": request.qwen_video_min_pixels,
+                "runner_resize": qwen_runner_resize_summary(request),
+                "thumbnail": qwen_thumbnail_summary(request),
                 "note": "These constraints are passed to qwen_vl_utils through the video message item.",
             }
         description["qwen_vit"] = {
@@ -753,9 +762,14 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
                 model=model,
                 inputs=inputs,
             )
+            thumbnail_keep, thumbnail_metadata = qwen_thumbnail_visual_keep_indices(
+                request,
+                video_grid_thw=_qwen_video_grid_thw(inputs),
+                spatial_merge_size=qwen_spatial_merge_size(model),
+            )
             keep_indices = [
                 int(index)
-                for index in (mapping.visual_feature_indices or [])
+                for index in dict.fromkeys(list(mapping.visual_feature_indices or []) + thumbnail_keep)
                 if 0 <= int(index) < int(raw_visual_tokens)
             ]
             if not keep_indices:
@@ -805,6 +819,7 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
             "status": "inputs_embeds_prepared",
             "sparse_selection_plan_path": request.sparse_selection_plan_path,
             "mllm_mapping": mapping.to_dict(),
+            "thumbnail_keep_all": thumbnail_metadata,
             **chunk_metadata,
             **feature_metadata,
         }
@@ -906,9 +921,14 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
                 model=model,
                 inputs=inputs,
             )
+            thumbnail_keep, thumbnail_metadata = qwen_thumbnail_visual_keep_indices(
+                request,
+                video_grid_thw=_qwen_video_grid_thw(inputs),
+                spatial_merge_size=qwen_spatial_merge_size(model),
+            )
             keep_indices = [
                 int(index)
-                for index in (mapping.visual_feature_indices or [])
+                for index in dict.fromkeys(list(mapping.visual_feature_indices or []) + thumbnail_keep)
                 if 0 <= int(index) < int(raw_visual_tokens)
             ]
             if not keep_indices:
@@ -946,6 +966,7 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
             "selection_source": "sparse_selection_plan",
             "sparse_selection_plan_path": request.sparse_selection_plan_path,
             "mllm_mapping": mapping.to_dict(),
+            "thumbnail_keep_all": thumbnail_metadata,
             **sparse_metadata,
         }
         metrics["tokens"]["visual_tokens_before_prune"] = sparse_metadata["visual_tokens_before_prune"]
@@ -1206,8 +1227,169 @@ def resolve_mllm_adapter(name: str) -> BaseMllmAdapter:
     return PlannedMllmAdapter(name)
 
 
+def qwen_runner_resize_enabled(request: MllmRunRequest) -> bool:
+    return any(
+        value is not None
+        for value in (
+            request.video_resize_shortest_edge,
+            request.video_resize_longest_edge,
+            request.video_resize_width,
+            request.video_resize_height,
+        )
+    )
+
+
+def qwen_runner_resize_summary(request: MllmRunRequest) -> dict[str, Any]:
+    enabled = qwen_runner_resize_enabled(request)
+    return {
+        "enabled": enabled,
+        "shortest_edge": request.video_resize_shortest_edge,
+        "longest_edge": request.video_resize_longest_edge,
+        "width": request.video_resize_width,
+        "height": request.video_resize_height,
+        "mode": "preloaded_resized_frames" if enabled else "qwen_vl_utils_path_decode",
+    }
+
+
+def qwen_thumbnail_count(request: MllmRunRequest) -> int:
+    if request.qwen_thumbnail_mode != "append-video":
+        return 0
+    return max(0, min(int(request.num_video_frames_thumbnail or 0), qwen_main_video_frame_count(request)))
+
+
+def qwen_main_video_frame_count(request: MllmRunRequest) -> int:
+    return max(1, int(request.qwen_video_nframes or request.num_video_frames or 1))
+
+
+def qwen_thumbnail_summary(request: MllmRunRequest) -> dict[str, Any]:
+    count = qwen_thumbnail_count(request)
+    return {
+        "mode": request.qwen_thumbnail_mode,
+        "requested_frames": int(request.num_video_frames_thumbnail or 0),
+        "effective_frames": count,
+        "placement": "appended_after_main_video_frames" if count else "none",
+        "pruning_policy": "keep_all" if count else "not_applicable",
+    }
+
+
+def read_video_metadata(video: str) -> dict[str, Any]:
+    from repro.nvila_runner import read_video_metadata as _read_video_metadata
+
+    return _read_video_metadata(video)
+
+
+def uniform_sample_indices(total_frames: int, sample_count: int) -> list[int]:
+    from repro.nvila_runner import uniform_sample_indices as _uniform_sample_indices
+
+    return _uniform_sample_indices(total_frames, sample_count)
+
+
+def apply_resize_to_dimensions(**kwargs: Any) -> dict[str, int | str]:
+    from repro.nvila_runner import apply_resize_to_dimensions as _apply_resize_to_dimensions
+
+    return _apply_resize_to_dimensions(**kwargs)
+
+
+def load_sampled_video_frames(
+    video: str,
+    sample_count: int,
+    resize: dict[str, int | str],
+    *,
+    decode_strategy: str = "auto",
+) -> tuple[list[Any], dict[str, Any]]:
+    from repro.nvila_runner import load_sampled_video_frames as _load_sampled_video_frames
+
+    return _load_sampled_video_frames(
+        video,
+        sample_count,
+        resize,
+        decode_strategy=decode_strategy,
+    )
+
+
+def _qwen_preloaded_video_frames(request: MllmRunRequest) -> tuple[list[Any], dict[str, Any]]:
+    if not request.video:
+        raise ValueError("Qwen preloaded video frames require request.video")
+    sample_count = qwen_main_video_frame_count(request)
+    metadata = read_video_metadata(request.video)
+    width = metadata.get("width")
+    height = metadata.get("height")
+    if width is None or height is None:
+        raise ValueError("Qwen preloaded video frames require video width/height metadata")
+    resize = apply_resize_to_dimensions(
+        width=int(width),
+        height=int(height),
+        shortest_edge=request.video_resize_shortest_edge,
+        longest_edge=request.video_resize_longest_edge,
+        exact_width=request.video_resize_width,
+        exact_height=request.video_resize_height,
+    )
+    frames, decode_stats = load_sampled_video_frames(
+        request.video,
+        sample_count,
+        resize,
+        decode_strategy="auto",
+    )
+    sampled_indices = uniform_sample_indices(int(metadata.get("frames") or sample_count), sample_count)
+    thumbnail_count = qwen_thumbnail_count(request)
+    thumbnail_positions = qwen_thumbnail_frame_positions(sample_count, thumbnail_count)
+    thumbnail_frames = [frames[position] for position in thumbnail_positions if 0 <= position < len(frames)]
+    thumbnail_indices = [sampled_indices[position] for position in thumbnail_positions if 0 <= position < len(sampled_indices)]
+    return frames, {
+        "mode": "preloaded_resized_frames",
+        "sample_count": sample_count,
+        "thumbnail_count": len(thumbnail_frames),
+        "sampled_frame_indices": sampled_indices,
+        "thumbnail_frame_indices": thumbnail_indices,
+        "source_metadata": metadata,
+        "resize": resize,
+        "decode": decode_stats,
+        "frames_for_processor": frames + thumbnail_frames,
+    }
+
+
+def qwen_thumbnail_frame_positions(main_count: int, thumbnail_count: int) -> list[int]:
+    count = max(0, min(int(thumbnail_count), int(main_count)))
+    if count <= 0:
+        return []
+    if main_count > count:
+        step = max(1, main_count // count)
+        return list(range(0, main_count, step))[:count]
+    return list(range(main_count))
+
+
 def _build_qwen_grid_inputs(processor: Any, messages: list[dict[str, Any]], request: MllmRunRequest) -> Any:
     if request.video:
+        if qwen_runner_resize_enabled(request) or qwen_thumbnail_count(request):
+            text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            try:
+                frames, metadata = _qwen_preloaded_video_frames(request)
+            except Exception as exc:
+                raise RuntimeError(
+                    "Qwen runner-side video resize/decode failed before processor tokenization. "
+                    f"{_qwen_video_debug_context(request)}"
+                ) from exc
+            processor_kwargs: dict[str, Any] = {
+                "text": [text],
+                "images": None,
+                "videos": [metadata["frames_for_processor"]],
+                "return_tensors": "pt",
+            }
+            if not qwen_runner_resize_enabled(request):
+                if request.qwen_video_max_pixels is not None:
+                    processor_kwargs["max_pixels"] = int(request.qwen_video_max_pixels)
+                if request.qwen_video_min_pixels is not None:
+                    processor_kwargs["min_pixels"] = int(request.qwen_video_min_pixels)
+            if request.qwen_video_fps is not None:
+                processor_kwargs["fps"] = float(request.qwen_video_fps)
+            try:
+                return processor(**processor_kwargs)
+            except Exception as exc:
+                raise RuntimeError(
+                    "Qwen processor failed after runner-side video resize/decode. "
+                    f"{_qwen_video_debug_context(request)} "
+                    "Check that the Qwen processor accepts preloaded video frame lists for this checkpoint."
+                ) from exc
         try:
             from qwen_vl_utils import process_vision_info  # type: ignore
         except ModuleNotFoundError as exc:
@@ -1253,7 +1435,8 @@ def _build_qwen_grid_inputs(processor: Any, messages: list[dict[str, Any]], requ
 def _qwen_video_debug_context(request: MllmRunRequest) -> str:
     return (
         f"video={request.video!r}, nframes={request.qwen_video_nframes!r}, fps={request.qwen_video_fps!r}, "
-        f"max_pixels={request.qwen_video_max_pixels!r}, min_pixels={request.qwen_video_min_pixels!r}"
+        f"max_pixels={request.qwen_video_max_pixels!r}, min_pixels={request.qwen_video_min_pixels!r}, "
+        f"runner_resize={qwen_runner_resize_summary(request)!r}, thumbnail={qwen_thumbnail_summary(request)!r}"
     )
 
 
@@ -1528,11 +1711,18 @@ def resolve_qwen_visual_keep_indices(
             for index in (mapping.visual_feature_indices or [])
             if 0 <= int(index) < int(visual_count)
         ]
+        thumbnail_keep, thumbnail_metadata = qwen_thumbnail_visual_keep_indices(
+            request,
+            video_grid_thw=_qwen_video_grid_thw(inputs),
+            spatial_merge_size=qwen_spatial_merge_size(model),
+        )
+        keep = [int(index) for index in dict.fromkeys(keep + thumbnail_keep) if 0 <= int(index) < int(visual_count)]
         if keep:
             return keep, {
                 "selection_source": "sparse_selection_plan",
                 "sparse_selection_plan_path": request.sparse_selection_plan_path,
                 "mllm_mapping": mapping.to_dict(),
+                "thumbnail_keep_all": thumbnail_metadata,
             }
         return select_qwen_visual_keep_indices(visual_count, request.gazing_ratio), {
             "selection_source": "gazing_ratio_fallback_after_sparse_plan_mapping_failed",
@@ -1541,6 +1731,39 @@ def resolve_qwen_visual_keep_indices(
         }
     return select_qwen_visual_keep_indices(visual_count, request.gazing_ratio), {
         "selection_source": "gazing_ratio_placeholder_until_autogaze_indices_are_mapped",
+    }
+
+
+def qwen_thumbnail_visual_keep_indices(
+    request: MllmRunRequest,
+    *,
+    video_grid_thw: Any,
+    spatial_merge_size: int = 1,
+) -> tuple[list[int], dict[str, Any]]:
+    thumbnail_count = qwen_thumbnail_count(request)
+    if thumbnail_count <= 0 or video_grid_thw is None:
+        return [], {
+            "enabled": False,
+            "reason": "thumbnail append-video mode is not active or video_grid_thw is unavailable",
+        }
+    t, h, w = _single_qwen_grid(video_grid_thw)
+    merge = max(1, int(spatial_merge_size or 1))
+    merged_h = max(1, math.ceil(h / merge))
+    merged_w = max(1, math.ceil(w / merge))
+    main_count = qwen_main_video_frame_count(request)
+    total_count = max(main_count + thumbnail_count, 1)
+    thumbnail_start = min(max(int(round(main_count * t / total_count)), 0), t)
+    per_frame_tokens = merged_h * merged_w
+    indices = list(range(thumbnail_start * per_frame_tokens, t * per_frame_tokens))
+    return indices, {
+        "enabled": True,
+        "mode": request.qwen_thumbnail_mode,
+        "main_frames": main_count,
+        "thumbnail_frames": thumbnail_count,
+        "qwen_temporal_tokens": t,
+        "thumbnail_temporal_start": thumbnail_start,
+        "thumbnail_visual_tokens": len(indices),
+        "pruning_policy": "keep_all",
     }
 
 
@@ -2085,6 +2308,7 @@ def build_metric_skeleton(request: MllmRunRequest) -> dict[str, Any]:
             "max_spatial_chunks": request.qwen_vit_max_spatial_chunks,
             "status": "not_started",
         },
+        "qwen_thumbnail": qwen_thumbnail_summary(request),
     }
 
 

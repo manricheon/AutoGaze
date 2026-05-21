@@ -1613,7 +1613,26 @@ qwen_chunked_vit_autogaze_sparse
         -> selected visual placeholder만 MLLM context에 packing
 ```
 
-여기서 “spatial tile”은 NVILA처럼 원본 프레임을 먼저 crop해서 Qwen processor에 여러 비디오로 넣는 완전한 전처리 tile은 아닙니다. 현재 1차 구현은 Qwen processor가 resize/patchify한 뒤 나온 `video_grid_thw=[T,H,W]`의 `H/W` patch grid를 NVILA식 max-tile ratio로 나눕니다. 그래서 ViT block residency와 sparse token 계산량 비교에는 쓸 수 있지만, Qwen processor의 decode/resize peak 자체를 줄이려면 후속으로 processor 이전 spatial crop path가 필요합니다.
+여기서 “spatial tile”은 NVILA처럼 원본 프레임을 먼저 crop해서 Qwen processor에 여러 비디오로 넣는 완전한 전처리 tile은 아닙니다. 현재 Qwen chunked ViT 구현은 Qwen processor가 resize/patchify한 뒤 나온 `video_grid_thw=[T,H,W]`의 `H/W` patch grid를 NVILA식 max-tile ratio로 나눕니다. 그래서 ViT block residency와 sparse token 계산량 비교에 씁니다.
+
+비디오 해상도 자체를 Qwen processor 앞에서 줄이고 싶으면 `flexible_runner`에서도 NVILA runner와 같은 resize 옵션을 사용할 수 있습니다.
+
+- `--video-resize-shortest-edge N`
+- `--video-resize-longest-edge N`
+- `--video-resize-width W --video-resize-height H`
+
+이 옵션 중 하나를 켜면 Qwen adapter는 `qwen_vl_utils`에 비디오 path decode를 맡기지 않고, runner가 먼저 전체 비디오에서 `--qwen-video-nframes` 또는 `--num-video-frames`만큼 샘플링한 뒤 PIL frame을 resize해서 Qwen processor에 `videos=[frames]` 형태로 넘깁니다. direct AutoGaze selector도 같은 resize request를 받아서 resized effective frame 크기 기준으로 `--max-tiles-video` tile grid를 계산하고, 그 tiled canvas에서 선택 patch 좌표를 기록합니다. 이 경로에서는 중복 resize를 피하기 위해 `--qwen-video-max-pixels`/`--qwen-video-min-pixels`를 processor kwargs로 다시 넘기지 않습니다. 반대로 `--video-resize-*`를 켜지 않으면 기존처럼 `qwen_vl_utils`가 path decode/resize를 담당하고, 이때는 `--qwen-video-max-pixels`가 유효합니다.
+
+Qwen에는 NVILA-HD처럼 별도 thumbnail stream이 있는 것은 아니므로, `flexible_runner`에서는 실험용으로 `--qwen-thumbnail-mode append-video`를 제공합니다. 이 모드는 main sampled frames 뒤에 `--num-video-frames-thumbnail`만큼의 thumbnail frames를 같은 Qwen video frame list에 append합니다. sparse AutoGaze 모드에서는 append된 thumbnail temporal tail을 keep-all visual token으로 추가해서, 본 영상은 AutoGaze로 줄이고 thumbnail은 reference overview로 유지하는 NVILA식 비교에 가깝게 볼 수 있습니다.
+
+```bash
+--num-video-frames 32 \
+--qwen-video-nframes 32 \
+--num-video-frames-thumbnail 8 \
+--qwen-thumbnail-mode append-video
+```
+
+해석할 때는 이 모드가 “Qwen native thumbnail 입력”이 아니라 “같은 video stream 뒤에 thumbnail frame을 추가하는 근사”라는 점을 분리해서 기록하세요. 결과 JSON에서는 `mllm_runtime.qwen_video_input.thumbnail`, `generation.metrics.qwen_thumbnail`, sparse 경로의 `thumbnail_keep_all`에서 적용 여부와 keep-all token 수를 확인합니다.
 
 단일 비디오에서 비교:
 
@@ -1630,7 +1649,9 @@ qwen_chunked_vit_autogaze_sparse
   --qwen-vit-mode qwen_full_vit \
   --num-video-frames 32 \
   --qwen-video-nframes 32 \
-  --qwen-video-max-pixels 200704 \
+  --num-video-frames-thumbnail 8 \
+  --qwen-thumbnail-mode append-video \
+  --video-resize-longest-edge 448 \
   --video /path/to/video.mp4 \
   --output-json outputs/autogaze_repro/qwen_full_vit.json
 
@@ -1648,7 +1669,9 @@ qwen_chunked_vit_autogaze_sparse
   --qwen-vit-max-spatial-chunks 4 \
   --num-video-frames 32 \
   --qwen-video-nframes 32 \
-  --qwen-video-max-pixels 200704 \
+  --num-video-frames-thumbnail 8 \
+  --qwen-thumbnail-mode append-video \
+  --video-resize-longest-edge 448 \
   --video /path/to/video.mp4 \
   --output-json outputs/autogaze_repro/qwen_chunked_vit.json
 
@@ -1677,7 +1700,9 @@ qwen_chunked_vit_autogaze_sparse
   --qwen-vit-max-spatial-chunks 4 \
   --num-video-frames 32 \
   --qwen-video-nframes 32 \
-  --qwen-video-max-pixels 200704 \
+  --num-video-frames-thumbnail 8 \
+  --qwen-thumbnail-mode append-video \
+  --video-resize-longest-edge 448 \
   --gazing-ratio 0.75 \
   --task-loss-requirement 0.7 \
   --video /path/to/video.mp4 \
@@ -1687,10 +1712,12 @@ qwen_chunked_vit_autogaze_sparse
 확인할 핵심 필드:
 
 - `generation.metrics.qwen_vit.mode`: 세 비교 모드 중 어떤 경로인지
-- `generation.metrics.qwen_vit.processor_chunking`: 현재는 Qwen processor가 만든 `pixel_values_videos` 이후 chunking입니다. 즉 decode/resize 메모리는 아직 Qwen processor 정책의 영향을 받습니다.
+- `generation.metrics.qwen_vit.processor_chunking`: Qwen processor가 만든 `pixel_values_videos` 이후 chunking입니다. `--video-resize-*`를 켜면 decode/sample/resize는 runner 앞단에서 먼저 수행되고, 그 결과 frame list가 Qwen processor로 들어갑니다.
 - `generation.metrics.qwen_vit.spatial_chunking.tile_grid`: Qwen patch grid를 몇 개 spatial tile로 나눴는지입니다. `--qwen-vit-max-spatial-chunks`를 지정하지 않으면 Qwen chunked 모드는 `--max-tiles-video` 값을 기본으로 씁니다.
+- `direct_autogaze_selector.preprocess_video_plan`: direct AutoGaze selector가 본 source/effective resize 크기, `--max-tiles-video`로 결정된 tile grid, runner-side resize 적용 여부입니다.
 - `generation.metrics.qwen_vit.raw_patch_tokens_before_vit`: Qwen ViT patch embedding 입력 토큰 수
 - `generation.metrics.qwen_vit.visual_tokens_before_prune / visual_tokens_after_prune`: Qwen merged visual token 기준 AutoGaze 전후 수
+- `generation.metrics.qwen_vit.thumbnail_keep_all` 또는 `generation.metrics.qwen_pre_vit_sparse.thumbnail_keep_all`: `append-video` thumbnail tail을 keep-all로 유지한 token 수입니다.
 - `generation.metrics.tokens.visual_token_reduction_ratio`: 분모는 AutoGaze 전 Qwen visual placeholder 수, 분자는 AutoGaze 후 placeholder 수입니다.
 - `generation.metrics.latency_ms.qwen_vit_prepare`: chunked/sparse path에서 ViT feature 생성과 MLLM input packing에 걸린 시간입니다.
 
@@ -1698,9 +1725,15 @@ qwen_chunked_vit_autogaze_sparse
 
 - `qwen_chunked_vit`는 peak ViT residency를 줄이기 위한 temporal+spatial chunked feature extraction 실험입니다. AutoGaze off라서 최종 visual token 수는 줄지 않습니다.
 - `qwen_chunked_vit_autogaze_sparse`는 AutoGaze 선택 token만 Qwen visual transformer block과 MLLM context에 통과시킵니다.
-- 아직 “진짜 decode streaming”은 아닙니다. 긴 4K 영상에서 decode/resize 자체 OOM이 나면 `--qwen-video-nframes`, `--qwen-video-max-pixels`를 먼저 줄여야 합니다.
+- `--video-resize-*` 경로는 runner-side sample/resize 후 Qwen processor로 넘기는 방식입니다. direct AutoGaze selector의 `--max-tiles-video`도 이 resized effective frame 기준으로 계산됩니다. 단, Qwen processor 이전 spatial crop을 여러 비디오 tile로 나누는 방식은 아니므로, Qwen 자체 입력 해상도 cap은 `--video-resize-longest-edge`/`--video-resize-shortest-edge`로 먼저 조절합니다.
+- `--qwen-thumbnail-mode append-video`는 Qwen processor의 별도 thumbnail stream이 아니라 main video 뒤에 thumbnail frames를 append하는 실험 모드입니다. AutoGaze sparse 경로에서는 thumbnail tail visual token을 keep-all로 유지합니다.
 
-Qwen off 또는 AutoGaze off로 큰 비디오를 넣을 때는 NVILA runner와 다르게 Qwen의 `qwen_vl_utils`가 비디오 디코드/샘플링/resize를 담당합니다. runner는 Qwen 계열 비디오 실행에서 `--qwen-video-nframes`를 기본적으로 `--num-video-frames`와 맞추지만, 4K/긴 영상은 아래처럼 해상도 cap도 같이 주는 편이 안전합니다.
+Qwen off 또는 AutoGaze off로 큰 비디오를 넣을 때는 두 가지 resize 경로 중 하나를 고릅니다.
+
+- NVILA runner와 같은 앞단 resize를 재현하려면 `--video-resize-*`를 사용합니다.
+- Qwen 기본 path를 그대로 보려면 `--qwen-video-max-pixels`를 사용합니다.
+
+runner는 Qwen 계열 비디오 실행에서 `--qwen-video-nframes`를 기본적으로 `--num-video-frames`와 맞추지만, 4K/긴 영상은 아래처럼 앞단 resize를 같이 주는 편이 안전합니다.
 
 ```bash
 .venv/bin/python -m repro.flexible_runner \
@@ -1713,12 +1746,14 @@ Qwen off 또는 AutoGaze off로 큰 비디오를 넣을 때는 NVILA runner와 �
   --autogaze-integration-level none \
   --num-video-frames 32 \
   --qwen-video-nframes 32 \
-  --qwen-video-max-pixels 200704 \
+  --num-video-frames-thumbnail 8 \
+  --qwen-thumbnail-mode append-video \
+  --video-resize-longest-edge 448 \
   --video /path/to/large_4k_video.mp4 \
   --output-json outputs/autogaze_repro/flexible_qwen3_vl_off_large_video.json
 ```
 
-`qwen_vl_utils` 단계에서 죽으면 JSON의 `generation.metrics.metric_status.reason` 또는 터미널 에러에 `video`, `nframes`, `fps`, `max_pixels`가 같이 표시됩니다. 여러 비디오 종류를 테스트하는 것은 좋지만, 우선은 같은 비디오에 대해 `nframes`와 `max_pixels`를 고정한 뒤 비교해야 NVILA runner와 같은 조건이 됩니다.
+앞단 resize 단계에서 죽으면 터미널 에러에 `runner_resize` 설정이 같이 표시됩니다. `qwen_vl_utils` 단계에서 죽으면 JSON의 `generation.metrics.metric_status.reason` 또는 터미널 에러에 `video`, `nframes`, `fps`, `max_pixels`, `runner_resize`가 같이 표시됩니다. 여러 비디오 종류를 테스트하는 것은 좋지만, 우선은 같은 비디오에 대해 `nframes`와 resize 조건을 고정한 뒤 비교해야 NVILA runner와 같은 조건이 됩니다.
 
 HLVid limit3 plugin 비교는 `configs/repro/plugin_hlvid_limit3.yaml`에 대응합니다. CUDA 머신의 HLVid 폴더가 mp4 flat 구조여도 `video_root / basename(video_path)` fallback으로 찾습니다.
 
@@ -1736,7 +1771,9 @@ HLVid limit3 plugin 비교는 `configs/repro/plugin_hlvid_limit3.yaml`에 대응
   --model qwen3-vl=weight/Qwen3-VL-8B-Instruct \
   --num-video-frames 256 \
   --qwen-video-nframes 256 \
-  --qwen-video-max-pixels 200704 \
+  --num-video-frames-thumbnail 32 \
+  --qwen-thumbnail-mode append-video \
+  --video-resize-longest-edge 448 \
   --qwen-vit-chunk-frames 16 \
   --qwen-vit-max-spatial-chunks 8 \
   --max-tiles-video 8

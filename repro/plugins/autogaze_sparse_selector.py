@@ -19,7 +19,7 @@ from repro.autogaze_bench import (
 )
 from repro.common import resolve_device, synchronize, write_json
 from repro.hlvid_example_autogaze import read_video_metadata, uniform_sample_indices
-from repro.nvila_runner import spatial_tile_grid
+from repro.nvila_runner import apply_resize_to_dimensions, load_sampled_video_frames, spatial_tile_grid
 from repro.plugins.gaze_plan import (
     EncoderMapping,
     MllmMapping,
@@ -40,6 +40,8 @@ class AutogazeSelectorRuntimeConfig:
     device: str = "auto"
     dtype: str = "auto"
     num_video_frames: int = 16
+    num_video_frames_thumbnail: int = 0
+    qwen_thumbnail_mode: str = "none"
     chunk_frames: int = 16
     max_tiles_video: int = 1
     tile_size: int = 224
@@ -50,6 +52,65 @@ class AutogazeSelectorRuntimeConfig:
     target_patch_size: int | None = 16
     encoder_patch_size: int | None = None
     generate_only: bool = False
+    video_resize_shortest_edge: int | None = None
+    video_resize_longest_edge: int | None = None
+    video_resize_width: int | None = None
+    video_resize_height: int | None = None
+
+
+def autogaze_selector_resize_enabled(config: AutogazeSelectorRuntimeConfig) -> bool:
+    return any(
+        value is not None
+        for value in (
+            config.video_resize_shortest_edge,
+            config.video_resize_longest_edge,
+            config.video_resize_width,
+            config.video_resize_height,
+        )
+    )
+
+
+def build_autogaze_selector_video_plan(
+    config: AutogazeSelectorRuntimeConfig,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    source_width = int(metadata["width"])
+    source_height = int(metadata["height"])
+    resize = apply_resize_to_dimensions(
+        width=source_width,
+        height=source_height,
+        shortest_edge=config.video_resize_shortest_edge,
+        longest_edge=config.video_resize_longest_edge,
+        exact_width=config.video_resize_width,
+        exact_height=config.video_resize_height,
+    )
+    effective_width = int(resize["width"])
+    effective_height = int(resize["height"])
+    grid = spatial_tile_grid(
+        width=effective_width,
+        height=effective_height,
+        max_tiles_video=int(config.max_tiles_video),
+        image_size=int(config.tile_size),
+    )
+    canvas_width = int(grid["cols"]) * int(config.tile_size)
+    canvas_height = int(grid["rows"]) * int(config.tile_size)
+    return {
+        "source_width": source_width,
+        "source_height": source_height,
+        "effective_width": effective_width,
+        "effective_height": effective_height,
+        "autogaze_canvas_width": canvas_width,
+        "autogaze_canvas_height": canvas_height,
+        "resize": {
+            "enabled": autogaze_selector_resize_enabled(config),
+            "shortest_edge": config.video_resize_shortest_edge,
+            "longest_edge": config.video_resize_longest_edge,
+            "width": config.video_resize_width,
+            "height": config.video_resize_height,
+            "effective": resize,
+        },
+        "grid": grid,
+    }
 
 
 def build_sparse_selection_plan_from_autogaze_outputs(
@@ -95,6 +156,7 @@ def build_sparse_selection_plan_from_autogaze_outputs(
                 target_scales,
                 target_patch_size,
             )
+            tile_id = int(tile_id_offset + batch_index)
             bbox_resized = _bbox_for_patch(
                 scale_size=scale_size,
                 patch_size=target_patch_size,
@@ -102,10 +164,28 @@ def build_sparse_selection_plan_from_autogaze_outputs(
                 resized_width=resized_width,
                 resized_height=resized_height,
             )
+            if tile_grid is not None and tile_size is not None:
+                cols = max(1, int(tile_grid[0]))
+                rows = max(1, int(tile_grid[1])) if len(tile_grid) > 1 else 1
+                col = tile_id % cols
+                row = tile_id // cols
+                offset_x = col * int(tile_size)
+                offset_y = row * int(tile_size)
+                bbox_resized = [
+                    int(bbox_resized[0] + offset_x),
+                    int(bbox_resized[1] + offset_y),
+                    int(bbox_resized[2] + offset_x),
+                    int(bbox_resized[3] + offset_y),
+                ]
+                bbox_space_width = cols * int(tile_size)
+                bbox_space_height = rows * int(tile_size)
+            else:
+                bbox_space_width = resized_width
+                bbox_space_height = resized_height
             bbox_original = _scale_bbox_to_original(
                 bbox_resized,
-                resized_width=resized_width,
-                resized_height=resized_height,
+                resized_width=bbox_space_width,
+                resized_height=bbox_space_height,
                 source_width=source_width,
                 source_height=source_height,
             )
@@ -113,7 +193,7 @@ def build_sparse_selection_plan_from_autogaze_outputs(
                 SelectedPatch(
                     frame_index=int(frame_indices[frame_order]),
                     frame_order=int(frame_order),
-                    tile_id=int(tile_id_offset + batch_index),
+                    tile_id=tile_id,
                     scale_id=int(scale_id),
                     scale_size=int(scale_size),
                     patch_index=int(scale_patch_index),
@@ -182,12 +262,8 @@ def run_direct_autogaze_selector(config: AutogazeSelectorRuntimeConfig) -> dict[
         raise ValueError("num_video_frames must be divisible by direct AutoGaze chunk_frames")
 
     sampled_indices = uniform_sample_indices(int(metadata["frames"]), int(config.num_video_frames))
-    grid = spatial_tile_grid(
-        width=int(metadata["width"]),
-        height=int(metadata["height"]),
-        max_tiles_video=int(config.max_tiles_video),
-        image_size=tile_size,
-    )
+    video_plan = build_autogaze_selector_video_plan(config, metadata)
+    grid = video_plan["grid"]
 
     total_start = time.perf_counter()
     start = time.perf_counter()
@@ -213,64 +289,114 @@ def run_direct_autogaze_selector(config: AutogazeSelectorRuntimeConfig) -> dict[
     total_slots = 0
     chunk_summaries: list[dict[str, Any]] = []
 
-    frame_counts = _counts_by_index(sampled_indices)
-    selected_index_set = set(frame_counts)
     current_frames: list[Image.Image] = []
     current_indices: list[int] = []
     chunk_number = 0
 
-    container = av.open(config.video)
-    try:
-        decoder = container.decode(video=0)
-        for frame_index, frame in enumerate(decoder):
-            if frame_index > sampled_indices[-1]:
-                break
-            if frame_index not in selected_index_set:
-                continue
-            start = time.perf_counter()
-            image = frame.to_image().convert("RGB")
-            decode_ms += _elapsed_ms(start)
-            for _ in range(frame_counts[frame_index]):
-                current_frames.append(image.copy())
-                current_indices.append(frame_index)
-                if len(current_frames) == config.chunk_frames:
-                    chunk_number += 1
-                    chunk_result = _run_autogaze_selector_chunk(
-                        frames=current_frames,
-                        frame_indices=current_indices,
-                        chunk_number=chunk_number,
-                        grid=grid,
-                        tile_size=tile_size,
-                        transform=transform,
-                        model=model,
-                        device=device,
-                        dtype=dtype,
-                        max_batch_size=int(config.max_batch_size),
-                        gazing_ratio=1.0 if config.gazing_ratio is None else float(config.gazing_ratio),
-                        task_loss_requirement=config.task_loss_requirement,
-                        target_scales=target_scales,
-                        target_patch_size=target_patch_size,
-                        encoder_patch_size=config.encoder_patch_size,
-                        source_path=config.video,
-                        source_width=int(metadata["width"]),
-                        source_height=int(metadata["height"]),
-                        autoregressive_order_offset=len(selected_patches),
-                        generate_only=bool(config.generate_only),
-                    )
-                    selected_patches.extend(chunk_result["selected_patches"])
-                    raw_patch_tokens += int(chunk_result["raw_patch_tokens"])
-                    selected_patch_tokens += int(chunk_result["selected_patch_tokens"])
-                    padded_positions += int(chunk_result["padded_gazing_positions"])
-                    total_slots += int(chunk_result["total_gaze_slots"])
-                    tensorize_ms += float(chunk_result["autogaze_tensorize_ms"])
-                    forward_ms += float(chunk_result["autogaze_forward_ms"])
-                    tile_build_ms += float(chunk_result["tile_build_ms"])
-                    peak_tensor_bytes = max(peak_tensor_bytes, int(chunk_result["tensor_bytes_peak"]))
-                    chunk_summaries.append(chunk_result["summary"])
-                    current_frames = []
-                    current_indices = []
-    finally:
-        container.close()
+    if autogaze_selector_resize_enabled(config):
+        start = time.perf_counter()
+        sampled_frames, decode_stats = load_sampled_video_frames(
+            config.video,
+            int(config.num_video_frames),
+            video_plan["resize"]["effective"],
+            decode_strategy="auto",
+        )
+        decode_ms += _elapsed_ms(start)
+        for frame_index, image in zip(sampled_indices, sampled_frames):
+            current_frames.append(image.copy())
+            current_indices.append(int(frame_index))
+            if len(current_frames) == config.chunk_frames:
+                chunk_number += 1
+                chunk_result = _run_autogaze_selector_chunk(
+                    frames=current_frames,
+                    frame_indices=current_indices,
+                    chunk_number=chunk_number,
+                    grid=grid,
+                    tile_size=tile_size,
+                    transform=transform,
+                    model=model,
+                    device=device,
+                    dtype=dtype,
+                    max_batch_size=int(config.max_batch_size),
+                    gazing_ratio=1.0 if config.gazing_ratio is None else float(config.gazing_ratio),
+                    task_loss_requirement=config.task_loss_requirement,
+                    target_scales=target_scales,
+                    target_patch_size=target_patch_size,
+                    encoder_patch_size=config.encoder_patch_size,
+                    source_path=config.video,
+                    source_width=int(metadata["width"]),
+                    source_height=int(metadata["height"]),
+                    autoregressive_order_offset=len(selected_patches),
+                    generate_only=bool(config.generate_only),
+                )
+                selected_patches.extend(chunk_result["selected_patches"])
+                raw_patch_tokens += int(chunk_result["raw_patch_tokens"])
+                selected_patch_tokens += int(chunk_result["selected_patch_tokens"])
+                padded_positions += int(chunk_result["padded_gazing_positions"])
+                total_slots += int(chunk_result["total_gaze_slots"])
+                tensorize_ms += float(chunk_result["autogaze_tensorize_ms"])
+                forward_ms += float(chunk_result["autogaze_forward_ms"])
+                tile_build_ms += float(chunk_result["tile_build_ms"])
+                peak_tensor_bytes = max(peak_tensor_bytes, int(chunk_result["tensor_bytes_peak"]))
+                chunk_summaries.append(chunk_result["summary"])
+                current_frames = []
+                current_indices = []
+        video_plan["decode"] = decode_stats
+    else:
+        frame_counts = _counts_by_index(sampled_indices)
+        selected_index_set = set(frame_counts)
+        container = av.open(config.video)
+        try:
+            decoder = container.decode(video=0)
+            for frame_index, frame in enumerate(decoder):
+                if frame_index > sampled_indices[-1]:
+                    break
+                if frame_index not in selected_index_set:
+                    continue
+                start = time.perf_counter()
+                image = frame.to_image().convert("RGB")
+                decode_ms += _elapsed_ms(start)
+                for _ in range(frame_counts[frame_index]):
+                    current_frames.append(image.copy())
+                    current_indices.append(frame_index)
+                    if len(current_frames) == config.chunk_frames:
+                        chunk_number += 1
+                        chunk_result = _run_autogaze_selector_chunk(
+                            frames=current_frames,
+                            frame_indices=current_indices,
+                            chunk_number=chunk_number,
+                            grid=grid,
+                            tile_size=tile_size,
+                            transform=transform,
+                            model=model,
+                            device=device,
+                            dtype=dtype,
+                            max_batch_size=int(config.max_batch_size),
+                            gazing_ratio=1.0 if config.gazing_ratio is None else float(config.gazing_ratio),
+                            task_loss_requirement=config.task_loss_requirement,
+                            target_scales=target_scales,
+                            target_patch_size=target_patch_size,
+                            encoder_patch_size=config.encoder_patch_size,
+                            source_path=config.video,
+                            source_width=int(metadata["width"]),
+                            source_height=int(metadata["height"]),
+                            autoregressive_order_offset=len(selected_patches),
+                            generate_only=bool(config.generate_only),
+                        )
+                        selected_patches.extend(chunk_result["selected_patches"])
+                        raw_patch_tokens += int(chunk_result["raw_patch_tokens"])
+                        selected_patch_tokens += int(chunk_result["selected_patch_tokens"])
+                        padded_positions += int(chunk_result["padded_gazing_positions"])
+                        total_slots += int(chunk_result["total_gaze_slots"])
+                        tensorize_ms += float(chunk_result["autogaze_tensorize_ms"])
+                        forward_ms += float(chunk_result["autogaze_forward_ms"])
+                        tile_build_ms += float(chunk_result["tile_build_ms"])
+                        peak_tensor_bytes = max(peak_tensor_bytes, int(chunk_result["tensor_bytes_peak"]))
+                        chunk_summaries.append(chunk_result["summary"])
+                        current_frames = []
+                        current_indices = []
+        finally:
+            container.close()
 
     if current_frames:
         raise RuntimeError(f"Unprocessed partial direct AutoGaze chunk with {len(current_frames)} frames")
@@ -286,8 +412,8 @@ def run_direct_autogaze_selector(config: AutogazeSelectorRuntimeConfig) -> dict[
         ),
         preprocess_space=PreprocessSpace(
             resize_policy=f"autogaze_largest_scale={max(target_scales)}",
-            resized_width=max(target_scales),
-            resized_height=max(target_scales),
+            resized_width=int(video_plan["autogaze_canvas_width"]),
+            resized_height=int(video_plan["autogaze_canvas_height"]),
             tile_grid=[int(grid["cols"]), int(grid["rows"])],
             tile_size=tile_size,
         ),
@@ -307,6 +433,7 @@ def run_direct_autogaze_selector(config: AutogazeSelectorRuntimeConfig) -> dict[
             "temporal_chunks": len(chunk_summaries),
             "spatial_tiles": int(grid["tiles"]),
             "generate_only": bool(config.generate_only),
+            "runner_resize": video_plan["resize"],
         },
     )
     write_json(config.output_json, plan.to_dict())
@@ -322,14 +449,18 @@ def run_direct_autogaze_selector(config: AutogazeSelectorRuntimeConfig) -> dict[
             "target_patch_size": target_patch_size,
             "encoder_patch_size": config.encoder_patch_size,
             "num_video_frames": int(config.num_video_frames),
+            "num_video_frames_thumbnail": int(config.num_video_frames_thumbnail),
+            "qwen_thumbnail_mode": config.qwen_thumbnail_mode,
             "chunk_frames": int(config.chunk_frames),
             "max_tiles_video": int(config.max_tiles_video),
             "max_batch_size": int(config.max_batch_size),
             "gazing_ratio": config.gazing_ratio,
             "task_loss_requirement": config.task_loss_requirement,
             "generate_only": bool(config.generate_only),
+            "video_resize": video_plan["resize"],
         },
         "source_metadata": metadata,
+        "preprocess_video_plan": video_plan,
         "tokens": {
             "raw_patch_tokens": raw_patch_tokens,
             "selected_patch_tokens": selected_patch_tokens,
@@ -367,6 +498,8 @@ def runtime_config_from_args(args: Any) -> AutogazeSelectorRuntimeConfig:
         device=str(getattr(args, "autogaze_device", "auto")),
         dtype=str(getattr(args, "autogaze_dtype", "auto")),
         num_video_frames=int(getattr(args, "num_video_frames", 16)),
+        num_video_frames_thumbnail=int(getattr(args, "num_video_frames_thumbnail", 0)),
+        qwen_thumbnail_mode=str(getattr(args, "qwen_thumbnail_mode", "none")),
         chunk_frames=int(getattr(args, "autogaze_chunk_frames", 16)),
         max_tiles_video=int(getattr(args, "max_tiles_video", 1)),
         tile_size=int(getattr(args, "autogaze_tile_size", None) or max(target_scales)),
@@ -381,6 +514,22 @@ def runtime_config_from_args(args: Any) -> AutogazeSelectorRuntimeConfig:
             else None
         ),
         generate_only=bool(getattr(args, "autogaze_generate_only", False)),
+        video_resize_shortest_edge=(
+            int(getattr(args, "video_resize_shortest_edge"))
+            if getattr(args, "video_resize_shortest_edge", None) is not None
+            else None
+        ),
+        video_resize_longest_edge=(
+            int(getattr(args, "video_resize_longest_edge"))
+            if getattr(args, "video_resize_longest_edge", None) is not None
+            else None
+        ),
+        video_resize_width=(
+            int(getattr(args, "video_resize_width")) if getattr(args, "video_resize_width", None) is not None else None
+        ),
+        video_resize_height=(
+            int(getattr(args, "video_resize_height")) if getattr(args, "video_resize_height", None) is not None else None
+        ),
     )
 
 

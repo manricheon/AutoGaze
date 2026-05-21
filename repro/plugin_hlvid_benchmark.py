@@ -41,12 +41,18 @@ def build_mode_runner_args(
     num_video_frames: int,
     max_tiles_video: int,
     max_new_tokens: int,
+    num_video_frames_thumbnail: int = 0,
     qwen_video_nframes: int | None = None,
     qwen_video_fps: float | None = None,
     qwen_video_max_pixels: int | None = None,
     qwen_video_min_pixels: int | None = None,
     qwen_vit_chunk_frames: int = 16,
     qwen_vit_max_spatial_chunks: int | None = None,
+    qwen_thumbnail_mode: str = "none",
+    video_resize_shortest_edge: int | None = None,
+    video_resize_longest_edge: int | None = None,
+    video_resize_width: int | None = None,
+    video_resize_height: int | None = None,
 ) -> list[str]:
     if mode == "nvila-video-off":
         return _base_args(
@@ -61,12 +67,18 @@ def build_mode_runner_args(
             output_json=output_json,
             external_mllm_command=external_mllm_command,
             num_video_frames=num_video_frames,
+            num_video_frames_thumbnail=num_video_frames_thumbnail,
             max_tiles_video=max_tiles_video,
             max_new_tokens=max_new_tokens,
             qwen_video_nframes=qwen_video_nframes,
             qwen_video_fps=qwen_video_fps,
             qwen_video_max_pixels=qwen_video_max_pixels,
             qwen_video_min_pixels=qwen_video_min_pixels,
+            qwen_thumbnail_mode=qwen_thumbnail_mode,
+            video_resize_shortest_edge=video_resize_shortest_edge,
+            video_resize_longest_edge=video_resize_longest_edge,
+            video_resize_width=video_resize_width,
+            video_resize_height=video_resize_height,
         )
     if mode == "nvila-video-autogaze-probe":
         return _base_args(
@@ -81,12 +93,18 @@ def build_mode_runner_args(
             output_json=output_json,
             external_mllm_command=external_mllm_command,
             num_video_frames=num_video_frames,
+            num_video_frames_thumbnail=num_video_frames_thumbnail,
             max_tiles_video=max_tiles_video,
             max_new_tokens=max_new_tokens,
             qwen_video_nframes=qwen_video_nframes,
             qwen_video_fps=qwen_video_fps,
             qwen_video_max_pixels=qwen_video_max_pixels,
             qwen_video_min_pixels=qwen_video_min_pixels,
+            qwen_thumbnail_mode=qwen_thumbnail_mode,
+            video_resize_shortest_edge=video_resize_shortest_edge,
+            video_resize_longest_edge=video_resize_longest_edge,
+            video_resize_width=video_resize_width,
+            video_resize_height=video_resize_height,
         )
     if mode == "longvila-off":
         return _base_args(
@@ -101,12 +119,18 @@ def build_mode_runner_args(
             output_json=output_json,
             external_mllm_command=external_mllm_command,
             num_video_frames=num_video_frames,
+            num_video_frames_thumbnail=num_video_frames_thumbnail,
             max_tiles_video=max_tiles_video,
             max_new_tokens=max_new_tokens,
             qwen_video_nframes=qwen_video_nframes,
             qwen_video_fps=qwen_video_fps,
             qwen_video_max_pixels=qwen_video_max_pixels,
             qwen_video_min_pixels=qwen_video_min_pixels,
+            qwen_thumbnail_mode=qwen_thumbnail_mode,
+            video_resize_shortest_edge=video_resize_shortest_edge,
+            video_resize_longest_edge=video_resize_longest_edge,
+            video_resize_width=video_resize_width,
+            video_resize_height=video_resize_height,
         )
     if mode == "longvila-autogaze-probe":
         return _base_args(
@@ -121,12 +145,18 @@ def build_mode_runner_args(
             output_json=output_json,
             external_mllm_command=external_mllm_command,
             num_video_frames=num_video_frames,
+            num_video_frames_thumbnail=num_video_frames_thumbnail,
             max_tiles_video=max_tiles_video,
             max_new_tokens=max_new_tokens,
             qwen_video_nframes=qwen_video_nframes,
             qwen_video_fps=qwen_video_fps,
             qwen_video_max_pixels=qwen_video_max_pixels,
             qwen_video_min_pixels=qwen_video_min_pixels,
+            qwen_thumbnail_mode=qwen_thumbnail_mode,
+            video_resize_shortest_edge=video_resize_shortest_edge,
+            video_resize_longest_edge=video_resize_longest_edge,
+            video_resize_width=video_resize_width,
+            video_resize_height=video_resize_height,
         )
     if mode == "internvl3-off":
         return _base_args(
@@ -141,6 +171,7 @@ def build_mode_runner_args(
             output_json=output_json,
             external_mllm_command=external_mllm_command,
             num_video_frames=num_video_frames,
+            num_video_frames_thumbnail=num_video_frames_thumbnail,
             max_tiles_video=max_tiles_video,
             max_new_tokens=max_new_tokens,
             qwen_video_nframes=qwen_video_nframes,
@@ -161,12 +192,18 @@ def build_mode_runner_args(
             output_json=output_json,
             external_mllm_command=external_mllm_command,
             num_video_frames=num_video_frames,
+            num_video_frames_thumbnail=num_video_frames_thumbnail,
             max_tiles_video=max_tiles_video,
             max_new_tokens=max_new_tokens,
             qwen_video_nframes=qwen_video_nframes,
             qwen_video_fps=qwen_video_fps,
             qwen_video_max_pixels=qwen_video_max_pixels,
             qwen_video_min_pixels=qwen_video_min_pixels,
+            qwen_thumbnail_mode=qwen_thumbnail_mode,
+            video_resize_shortest_edge=video_resize_shortest_edge,
+            video_resize_longest_edge=video_resize_longest_edge,
+            video_resize_width=video_resize_width,
+            video_resize_height=video_resize_height,
         )
     if mode in {"qwen_full_vit", "qwen_chunked_vit", "qwen_chunked_vit_autogaze_sparse"}:
         sparse = mode == "qwen_chunked_vit_autogaze_sparse"
@@ -182,6 +219,7 @@ def build_mode_runner_args(
             output_json=output_json,
             external_mllm_command=external_mllm_command,
             num_video_frames=num_video_frames,
+            num_video_frames_thumbnail=num_video_frames_thumbnail,
             max_tiles_video=max_tiles_video,
             max_new_tokens=max_new_tokens,
             qwen_video_nframes=qwen_video_nframes,
@@ -191,6 +229,11 @@ def build_mode_runner_args(
             qwen_vit_mode=mode,
             qwen_vit_chunk_frames=qwen_vit_chunk_frames,
             qwen_vit_max_spatial_chunks=qwen_vit_max_spatial_chunks or max_tiles_video,
+            qwen_thumbnail_mode=qwen_thumbnail_mode,
+            video_resize_shortest_edge=video_resize_shortest_edge,
+            video_resize_longest_edge=video_resize_longest_edge,
+            video_resize_width=video_resize_width,
+            video_resize_height=video_resize_height,
         )
         if sparse:
             args.extend(
@@ -223,12 +266,18 @@ def build_mode_runner_args(
             output_json=output_json,
             external_mllm_command=external_mllm_command,
             num_video_frames=num_video_frames,
+            num_video_frames_thumbnail=num_video_frames_thumbnail,
             max_tiles_video=max_tiles_video,
             max_new_tokens=max_new_tokens,
             qwen_video_nframes=qwen_video_nframes,
             qwen_video_fps=qwen_video_fps,
             qwen_video_max_pixels=qwen_video_max_pixels,
             qwen_video_min_pixels=qwen_video_min_pixels,
+            qwen_thumbnail_mode=qwen_thumbnail_mode,
+            video_resize_shortest_edge=video_resize_shortest_edge,
+            video_resize_longest_edge=video_resize_longest_edge,
+            video_resize_width=video_resize_width,
+            video_resize_height=video_resize_height,
         )
         if mode in {"qwen3-vl-autogaze-prune-generate", "qwen3-vl-autogaze-direct-prune-generate"}:
             args.append("--enable-qwen-prune-generate")
@@ -250,12 +299,18 @@ def build_mode_runner_args(
             output_json=output_json,
             external_mllm_command=external_mllm_command,
             num_video_frames=num_video_frames,
+            num_video_frames_thumbnail=num_video_frames_thumbnail,
             max_tiles_video=max_tiles_video,
             max_new_tokens=max_new_tokens,
             qwen_video_nframes=qwen_video_nframes,
             qwen_video_fps=qwen_video_fps,
             qwen_video_max_pixels=qwen_video_max_pixels,
             qwen_video_min_pixels=qwen_video_min_pixels,
+            qwen_thumbnail_mode=qwen_thumbnail_mode,
+            video_resize_shortest_edge=video_resize_shortest_edge,
+            video_resize_longest_edge=video_resize_longest_edge,
+            video_resize_width=video_resize_width,
+            video_resize_height=video_resize_height,
         )
         args.extend(["--pre-encoder-prune-adapter", "pixelprune"])
         return args
@@ -272,6 +327,7 @@ def run_plugin_hlvid_benchmark(
     external_mllm_command: str = "vila-infer",
     limit: int | None = None,
     num_video_frames: int = 256,
+    num_video_frames_thumbnail: int = 0,
     max_tiles_video: int = 8,
     max_new_tokens: int = 8,
     qwen_video_nframes: int | None = None,
@@ -280,6 +336,11 @@ def run_plugin_hlvid_benchmark(
     qwen_video_min_pixels: int | None = None,
     qwen_vit_chunk_frames: int = 16,
     qwen_vit_max_spatial_chunks: int | None = None,
+    qwen_thumbnail_mode: str = "none",
+    video_resize_shortest_edge: int | None = None,
+    video_resize_longest_edge: int | None = None,
+    video_resize_width: int | None = None,
+    video_resize_height: int | None = None,
 ) -> dict[str, Any]:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -301,6 +362,7 @@ def run_plugin_hlvid_benchmark(
                 models=model_paths,
                 external_mllm_command=external_mllm_command,
                 num_video_frames=num_video_frames,
+                num_video_frames_thumbnail=num_video_frames_thumbnail,
                 max_tiles_video=max_tiles_video,
                 max_new_tokens=max_new_tokens,
                 qwen_video_nframes=qwen_video_nframes,
@@ -309,6 +371,11 @@ def run_plugin_hlvid_benchmark(
                 qwen_video_min_pixels=qwen_video_min_pixels,
                 qwen_vit_chunk_frames=qwen_vit_chunk_frames,
                 qwen_vit_max_spatial_chunks=qwen_vit_max_spatial_chunks,
+                qwen_thumbnail_mode=qwen_thumbnail_mode,
+                video_resize_shortest_edge=video_resize_shortest_edge,
+                video_resize_longest_edge=video_resize_longest_edge,
+                video_resize_width=video_resize_width,
+                video_resize_height=video_resize_height,
             )
             payload = run_single(parse_flexible_args(runner_args))
             generation = payload.get("generation", {})
@@ -410,6 +477,12 @@ def _base_args(
     qwen_vit_mode: str | None = None,
     qwen_vit_chunk_frames: int | None = None,
     qwen_vit_max_spatial_chunks: int | None = None,
+    num_video_frames_thumbnail: int = 0,
+    qwen_thumbnail_mode: str = "none",
+    video_resize_shortest_edge: int | None = None,
+    video_resize_longest_edge: int | None = None,
+    video_resize_width: int | None = None,
+    video_resize_height: int | None = None,
 ) -> list[str]:
     args = [
         "--mode",
@@ -432,6 +505,8 @@ def _base_args(
         str(video_path),
         "--num-video-frames",
         str(num_video_frames),
+        "--num-video-frames-thumbnail",
+        str(num_video_frames_thumbnail),
         "--max-tiles-video",
         str(max_tiles_video),
         "--max-new-tokens",
@@ -457,6 +532,16 @@ def _base_args(
             args.extend(["--qwen-vit-chunk-frames", str(qwen_vit_chunk_frames)])
         if qwen_vit_max_spatial_chunks is not None:
             args.extend(["--qwen-vit-max-spatial-chunks", str(qwen_vit_max_spatial_chunks)])
+        if qwen_thumbnail_mode != "none":
+            args.extend(["--qwen-thumbnail-mode", str(qwen_thumbnail_mode)])
+    if video_resize_shortest_edge is not None:
+        args.extend(["--video-resize-shortest-edge", str(video_resize_shortest_edge)])
+    if video_resize_longest_edge is not None:
+        args.extend(["--video-resize-longest-edge", str(video_resize_longest_edge)])
+    if video_resize_width is not None:
+        args.extend(["--video-resize-width", str(video_resize_width)])
+    if video_resize_height is not None:
+        args.extend(["--video-resize-height", str(video_resize_height)])
     if external_mllm_command:
         args.extend(["--external-mllm-command", external_mllm_command])
     return args
@@ -554,6 +639,7 @@ def main() -> None:
     parser.add_argument("--external-mllm-command", default="vila-infer")
     parser.add_argument("--limit", type=int, default=3)
     parser.add_argument("--num-video-frames", type=int, default=256)
+    parser.add_argument("--num-video-frames-thumbnail", type=int, default=0)
     parser.add_argument("--max-tiles-video", type=int, default=8)
     parser.add_argument("--max-new-tokens", type=int, default=8)
     parser.add_argument("--qwen-video-nframes", type=int)
@@ -562,6 +648,11 @@ def main() -> None:
     parser.add_argument("--qwen-video-min-pixels", type=int)
     parser.add_argument("--qwen-vit-chunk-frames", type=int, default=16)
     parser.add_argument("--qwen-vit-max-spatial-chunks", type=int)
+    parser.add_argument("--qwen-thumbnail-mode", choices=["none", "append-video"], default="none")
+    parser.add_argument("--video-resize-shortest-edge", type=int)
+    parser.add_argument("--video-resize-longest-edge", type=int)
+    parser.add_argument("--video-resize-width", type=int)
+    parser.add_argument("--video-resize-height", type=int)
     args = parser.parse_args()
     payload = run_plugin_hlvid_benchmark(
         manifest=args.manifest,
@@ -572,6 +663,7 @@ def main() -> None:
         external_mllm_command=args.external_mllm_command,
         limit=args.limit,
         num_video_frames=args.num_video_frames,
+        num_video_frames_thumbnail=args.num_video_frames_thumbnail,
         max_tiles_video=args.max_tiles_video,
         max_new_tokens=args.max_new_tokens,
         qwen_video_nframes=args.qwen_video_nframes,
@@ -580,6 +672,11 @@ def main() -> None:
         qwen_video_min_pixels=args.qwen_video_min_pixels,
         qwen_vit_chunk_frames=args.qwen_vit_chunk_frames,
         qwen_vit_max_spatial_chunks=args.qwen_vit_max_spatial_chunks,
+        qwen_thumbnail_mode=args.qwen_thumbnail_mode,
+        video_resize_shortest_edge=args.video_resize_shortest_edge,
+        video_resize_longest_edge=args.video_resize_longest_edge,
+        video_resize_width=args.video_resize_width,
+        video_resize_height=args.video_resize_height,
     )
     print(json.dumps(payload["summary"], indent=2, sort_keys=True))
 

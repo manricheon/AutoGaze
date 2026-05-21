@@ -591,6 +591,77 @@ def test_flexible_runner_defaults_qwen_video_nframes_to_num_video_frames():
     assert args.qwen_video_nframes == 32
 
 
+def test_flexible_runner_passes_video_resize_to_qwen_request():
+    args = parse_args(
+        [
+            "--mode",
+            "single",
+            "--model-family",
+            "qwen3-vl",
+            "--model-path",
+            "weight/Qwen3-VL-8B-Instruct",
+            "--token-selector-adapter",
+            "keep-all",
+            "--vision-encoder-adapter",
+            "qwen3-vl-vision",
+            "--mllm-adapter",
+            "qwen3-vl",
+            "--autogaze-integration-level",
+            "none",
+            "--video",
+            "inputs/example.mp4",
+            "--num-video-frames",
+            "8",
+            "--video-resize-shortest-edge",
+            "448",
+        ]
+    )
+
+    from repro.flexible_runner import build_mllm_run_request
+
+    request = build_mllm_run_request(args)
+
+    assert request.video_resize_shortest_edge == 448
+    assert request.video_resize_longest_edge is None
+    assert request.qwen_video_nframes == 8
+
+
+def test_flexible_runner_passes_qwen_thumbnail_mode_to_request():
+    args = parse_args(
+        [
+            "--mode",
+            "single",
+            "--model-family",
+            "qwen3-vl",
+            "--model-path",
+            "weight/Qwen3-VL-8B-Instruct",
+            "--token-selector-adapter",
+            "keep-all",
+            "--vision-encoder-adapter",
+            "qwen3-vl-vision",
+            "--mllm-adapter",
+            "qwen3-vl",
+            "--autogaze-integration-level",
+            "none",
+            "--video",
+            "inputs/example.mp4",
+            "--num-video-frames",
+            "8",
+            "--num-video-frames-thumbnail",
+            "2",
+            "--qwen-thumbnail-mode",
+            "append-video",
+        ]
+    )
+
+    from repro.flexible_runner import build_mllm_run_request
+
+    request = build_mllm_run_request(args)
+
+    assert request.num_video_frames_thumbnail == 2
+    assert request.qwen_thumbnail_mode == "append-video"
+
+
 def test_flexible_runner_accepts_qwen_vit_comparison_mode():
     args = parse_args(
         [

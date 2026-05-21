@@ -1,11 +1,16 @@
 import json
+from types import SimpleNamespace
 
 import torch
 
 from repro.plugins.autogaze_sparse_selector import (
+    AutogazeSelectorRuntimeConfig,
+    build_autogaze_selector_video_plan,
     build_sparse_selection_plan_from_autogaze_outputs,
+    runtime_config_from_args,
 )
 from repro.plugins.gaze_plan import qwen_visual_indices_from_sparse_plan
+from repro.nvila_runner import spatial_tile_grid
 
 
 def test_build_sparse_plan_decodes_autogaze_multiscale_positions():
@@ -35,6 +40,31 @@ def test_build_sparse_plan_decodes_autogaze_multiscale_positions():
     assert [patch.patch_index for patch in plan.selected_patches] == [0, 13, 11]
     assert plan.selected_patches[0].bbox_resized_xyxy == [0, 0, 32, 32]
     assert plan.selected_patches[1].bbox_resized_xyxy == [16, 48, 32, 64]
+
+
+def test_build_sparse_plan_offsets_patch_bbox_by_spatial_tile_id():
+    outputs = {
+        "gazing_pos": torch.tensor([[0], [0]]),
+        "if_padded_gazing": torch.tensor([[False], [False]]),
+        "num_gazing_each_frame": torch.tensor([1]),
+    }
+
+    plan = build_sparse_selection_plan_from_autogaze_outputs(
+        outputs,
+        source_path="inputs/example.mp4",
+        frame_indices=[0],
+        target_scales=[64],
+        target_patch_size=16,
+        encoder_patch_size=16,
+        resized_width=64,
+        resized_height=64,
+        tile_grid=[2, 1],
+        tile_size=64,
+    )
+
+    assert [patch.tile_id for patch in plan.selected_patches] == [0, 1]
+    assert plan.selected_patches[0].bbox_resized_xyxy == [0, 0, 16, 16]
+    assert plan.selected_patches[1].bbox_resized_xyxy == [64, 0, 80, 16]
 
 
 def test_qwen_mapping_spreads_autogaze_frames_over_qwen_temporal_grid():
@@ -83,3 +113,61 @@ def test_sparse_plan_can_be_written_for_qwen_adapter(tmp_path):
     assert payload["selector_name"] == "autogaze-direct"
     assert payload["selected_patches"][0]["patch_index"] == 5
     assert payload["token_accounting"]["reduction_ratio"] == 16.0
+
+
+def test_runtime_config_from_args_carries_runner_video_resize_options():
+    config = runtime_config_from_args(
+        SimpleNamespace(
+            video="inputs/example.mp4",
+            output_json="outputs/run.json",
+            autogaze_target_scales="32+64+112+224",
+            video_resize_shortest_edge=None,
+            video_resize_longest_edge=448,
+            video_resize_width=None,
+            video_resize_height=None,
+        )
+    )
+
+    assert config.video_resize_shortest_edge is None
+    assert config.video_resize_longest_edge == 448
+    assert config.video_resize_width is None
+    assert config.video_resize_height is None
+
+
+def test_autogaze_selector_video_plan_uses_resized_dimensions_for_tile_grid():
+    config = AutogazeSelectorRuntimeConfig(
+        video="inputs/example.mp4",
+        output_json="outputs/plan.json",
+        max_tiles_video=8,
+        tile_size=224,
+        video_resize_longest_edge=448,
+    )
+
+    plan = build_autogaze_selector_video_plan(
+        config,
+        {"width": 3840, "height": 2160, "frames": 100, "fps": 30.0},
+    )
+
+    assert plan["resize"]["enabled"] is True
+    assert plan["resize"]["effective"] == {"width": 448, "height": 252, "mode": "longest_edge"}
+    assert plan["effective_width"] == 448
+    assert plan["effective_height"] == 252
+    assert plan["grid"] == spatial_tile_grid(width=448, height=252, max_tiles_video=8, image_size=224)
+
+
+def test_autogaze_selector_video_plan_uses_source_dimensions_without_resize():
+    config = AutogazeSelectorRuntimeConfig(
+        video="inputs/example.mp4",
+        output_json="outputs/plan.json",
+        max_tiles_video=8,
+        tile_size=224,
+    )
+
+    plan = build_autogaze_selector_video_plan(
+        config,
+        {"width": 3840, "height": 2160, "frames": 100, "fps": 30.0},
+    )
+
+    assert plan["resize"]["enabled"] is False
+    assert plan["resize"]["effective"] == {"width": 3840, "height": 2160, "mode": "none"}
+    assert plan["grid"] == spatial_tile_grid(width=3840, height=2160, max_tiles_video=8, image_size=224)

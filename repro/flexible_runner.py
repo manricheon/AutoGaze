@@ -61,6 +61,7 @@ QWEN_VIT_MODE_CHOICES = (
     "qwen_chunked_vit",
     "qwen_chunked_vit_autogaze_sparse",
 )
+QWEN_THUMBNAIL_MODE_CHOICES = ("none", "append-video")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -102,6 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--qwen-vit-mode", choices=QWEN_VIT_MODE_CHOICES, default="qwen_full_vit")
     parser.add_argument("--qwen-vit-chunk-frames", type=int, default=16)
     parser.add_argument("--qwen-vit-max-spatial-chunks", type=int)
+    parser.add_argument("--qwen-thumbnail-mode", choices=QWEN_THUMBNAIL_MODE_CHOICES, default="none")
     parser.add_argument("--video")
     parser.add_argument("--image")
     parser.add_argument("--prompt", default="Describe the video.")
@@ -117,6 +119,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-tiles-video", type=int, default=1)
     parser.add_argument("--video-resize-longest-edge", type=int)
     parser.add_argument("--video-resize-shortest-edge", type=int)
+    parser.add_argument("--video-resize-width", type=int)
+    parser.add_argument("--video-resize-height", type=int)
     parser.add_argument("--output-json", default="outputs/autogaze_repro/flexible_runner_inspect.json")
     return parser
 
@@ -448,6 +452,7 @@ def build_mllm_run_request(args: argparse.Namespace) -> MllmRunRequest:
         pre_encoder_prune_adapter=args.pre_encoder_prune_adapter,
         gazing_ratio=args.gazing_ratio,
         num_video_frames=args.num_video_frames,
+        num_video_frames_thumbnail=args.num_video_frames_thumbnail,
         max_tiles_video=args.max_tiles_video,
         external_mllm_command=args.external_mllm_command,
         enable_qwen_prune_generate=args.enable_qwen_prune_generate,
@@ -459,6 +464,11 @@ def build_mllm_run_request(args: argparse.Namespace) -> MllmRunRequest:
         qwen_vit_mode=args.qwen_vit_mode,
         qwen_vit_chunk_frames=args.qwen_vit_chunk_frames,
         qwen_vit_max_spatial_chunks=args.qwen_vit_max_spatial_chunks,
+        qwen_thumbnail_mode=args.qwen_thumbnail_mode,
+        video_resize_shortest_edge=args.video_resize_shortest_edge,
+        video_resize_longest_edge=args.video_resize_longest_edge,
+        video_resize_width=args.video_resize_width,
+        video_resize_height=args.video_resize_height,
     )
 
 

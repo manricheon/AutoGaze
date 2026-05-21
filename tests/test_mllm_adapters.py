@@ -1,4 +1,6 @@
 import os
+import sys
+import types
 
 from repro.plugins.mllm_adapters import (
     _build_qwen_grid_inputs,
@@ -16,6 +18,7 @@ from repro.plugins.mllm_adapters import (
     extract_assistant_text,
     qwen_grid_chunk_slices,
     qwen_chunked_video_features,
+    qwen_thumbnail_visual_keep_indices,
     resolve_mllm_adapter,
     resolve_qwen_visual_keep_indices,
 )
@@ -50,6 +53,10 @@ def make_request(**overrides):
         "qwen_vit_mode": "qwen_full_vit",
         "qwen_vit_chunk_frames": 16,
         "qwen_vit_max_spatial_chunks": 1,
+        "num_video_frames_thumbnail": 0,
+        "qwen_thumbnail_mode": "none",
+        "video_resize_shortest_edge": None,
+        "video_resize_longest_edge": None,
     }
     values.update(overrides)
     return MllmRunRequest(**values)
@@ -96,6 +103,184 @@ def test_qwen_grid_adapter_builds_video_chat_message():
     ]
 
 
+def test_qwen_grid_runtime_description_reports_runner_resize_request():
+    adapter = QwenGridMllmAdapter()
+
+    description = adapter.describe_runtime(
+        make_request(video_resize_shortest_edge=448, qwen_video_max_pixels=262144)
+    )
+
+    runner_resize = description["qwen_video_input"]["runner_resize"]
+    assert runner_resize["enabled"] is True
+    assert runner_resize["shortest_edge"] == 448
+    assert runner_resize["longest_edge"] is None
+    assert runner_resize["mode"] == "preloaded_resized_frames"
+    assert description["qwen_video_input"]["max_pixels"] == 262144
+
+
+def test_qwen_grid_runtime_description_reports_append_video_thumbnails():
+    adapter = QwenGridMllmAdapter()
+
+    description = adapter.describe_runtime(
+        make_request(num_video_frames_thumbnail=2, qwen_thumbnail_mode="append-video")
+    )
+
+    assert description["qwen_video_input"]["thumbnail"] == {
+        "mode": "append-video",
+        "requested_frames": 2,
+        "effective_frames": 2,
+        "placement": "appended_after_main_video_frames",
+        "pruning_policy": "keep_all",
+    }
+
+
+def test_build_qwen_grid_inputs_uses_preloaded_resized_frames_when_runner_resize_requested(monkeypatch):
+    frames = [object(), object()]
+    calls = {}
+
+    def fake_load_sampled_video_frames(video, sample_count, resize, *, decode_strategy="auto"):
+        calls["load"] = {
+            "video": video,
+            "sample_count": sample_count,
+            "resize": resize,
+            "decode_strategy": decode_strategy,
+        }
+        return frames, {"decode_strategy": "seek", "decode_frames_read": 2}
+
+    def fail_process_vision_info(*args, **kwargs):
+        raise AssertionError("runner-side resize should not ask qwen_vl_utils to decode the video path")
+
+    fake_qwen_utils = types.SimpleNamespace(process_vision_info=fail_process_vision_info)
+    monkeypatch.setitem(sys.modules, "qwen_vl_utils", fake_qwen_utils)
+    monkeypatch.setattr("repro.plugins.mllm_adapters.load_sampled_video_frames", fake_load_sampled_video_frames)
+    monkeypatch.setattr(
+        "repro.plugins.mllm_adapters.apply_resize_to_dimensions",
+        lambda **kwargs: {"width": 448, "height": 252, "mode": "longest_edge"},
+    )
+    monkeypatch.setattr(
+        "repro.plugins.mllm_adapters.read_video_metadata",
+        lambda video: {"width": 1920, "height": 1080, "frames": 60},
+    )
+
+    class FakeProcessor:
+        def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
+            calls["template"] = {
+                "messages": messages,
+                "tokenize": tokenize,
+                "add_generation_prompt": add_generation_prompt,
+            }
+            return "<video> prompt"
+
+        def __call__(self, **kwargs):
+            calls["processor"] = kwargs
+            return {"input_ids": [1, 2, 3]}
+
+    request = make_request(
+        qwen_video_nframes=2,
+        qwen_video_max_pixels=262144,
+        video_resize_longest_edge=448,
+    )
+
+    output = _build_qwen_grid_inputs(FakeProcessor(), QwenGridMllmAdapter().build_messages(request), request)
+
+    assert output == {"input_ids": [1, 2, 3]}
+    assert calls["load"] == {
+        "video": "inputs/example.mp4",
+        "sample_count": 2,
+        "resize": {"width": 448, "height": 252, "mode": "longest_edge"},
+        "decode_strategy": "auto",
+    }
+    assert calls["processor"]["videos"] == [frames]
+    assert "max_pixels" not in calls["processor"]
+    assert "nframes" not in calls["processor"]
+
+
+def test_build_qwen_grid_inputs_appends_thumbnail_frames_to_preloaded_video(monkeypatch):
+    frames = [object(), object(), object(), object()]
+    calls = {}
+
+    def fake_load_sampled_video_frames(video, sample_count, resize, *, decode_strategy="auto"):
+        calls["load"] = {"sample_count": sample_count, "resize": resize}
+        return frames, {"decode_strategy": "seek", "decode_frames_read": 4}
+
+    monkeypatch.setattr("repro.plugins.mllm_adapters.load_sampled_video_frames", fake_load_sampled_video_frames)
+    monkeypatch.setattr(
+        "repro.plugins.mllm_adapters.apply_resize_to_dimensions",
+        lambda **kwargs: {"width": 448, "height": 252, "mode": "longest_edge"},
+    )
+    monkeypatch.setattr(
+        "repro.plugins.mllm_adapters.read_video_metadata",
+        lambda video: {"width": 1920, "height": 1080, "frames": 60},
+    )
+    monkeypatch.setattr(
+        "repro.plugins.mllm_adapters.uniform_sample_indices",
+        lambda total, count: [0, 10, 20, 30],
+    )
+
+    class FakeProcessor:
+        def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
+            return "<video> prompt"
+
+        def __call__(self, **kwargs):
+            calls["processor"] = kwargs
+            return {"input_ids": [1, 2, 3]}
+
+    request = make_request(
+        qwen_video_nframes=4,
+        num_video_frames_thumbnail=2,
+        qwen_thumbnail_mode="append-video",
+        video_resize_longest_edge=448,
+    )
+
+    _build_qwen_grid_inputs(FakeProcessor(), QwenGridMllmAdapter().build_messages(request), request)
+
+    assert calls["load"]["sample_count"] == 4
+    assert calls["processor"]["videos"] == [[frames[0], frames[1], frames[2], frames[3], frames[0], frames[2]]]
+
+
+def test_build_qwen_grid_inputs_still_passes_qwen_video_kwargs_without_runner_resize(monkeypatch):
+    calls = {}
+
+    def fake_process_vision_info(messages, return_video_kwargs=False):
+        calls["messages"] = messages
+        return ["image"], ["video_tensor"], {"fps": 2.0, "max_pixels": 262144}
+
+    fake_qwen_utils = types.SimpleNamespace(process_vision_info=fake_process_vision_info)
+    monkeypatch.setitem(sys.modules, "qwen_vl_utils", fake_qwen_utils)
+
+    class FakeProcessor:
+        def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
+            return "<video> prompt"
+
+        def __call__(self, **kwargs):
+            calls["processor"] = kwargs
+            return {"input_ids": [1, 2, 3]}
+
+    request = make_request(qwen_video_max_pixels=262144, qwen_video_fps=2.0)
+
+    _build_qwen_grid_inputs(FakeProcessor(), QwenGridMllmAdapter().build_messages(request), request)
+
+    assert calls["messages"][0]["content"][0]["max_pixels"] == 262144
+    assert calls["processor"]["videos"] == ["video_tensor"]
+    assert calls["processor"]["max_pixels"] == 262144
+
+
+def test_qwen_thumbnail_visual_keep_indices_keeps_appended_temporal_tail():
+    indices, metadata = qwen_thumbnail_visual_keep_indices(
+        make_request(
+            qwen_video_nframes=4,
+            num_video_frames_thumbnail=2,
+            qwen_thumbnail_mode="append-video",
+        ),
+        video_grid_thw=[6, 2, 2],
+        spatial_merge_size=1,
+    )
+
+    assert indices == list(range(16, 24))
+    assert metadata["thumbnail_temporal_start"] == 4
+    assert metadata["thumbnail_visual_tokens"] == 8
+
+
 def test_qwen_grid_video_input_error_mentions_qwen_vl_utils_install(monkeypatch):
     import builtins
 
@@ -133,6 +318,7 @@ def test_metric_skeleton_contains_latency_token_memory_slots():
     assert skeleton["tokens"]["visual_tokens_after_prune"] is None
     assert skeleton["memory_bytes"]["peak_cuda_allocated"] is None
     assert skeleton["qwen_vit"]["mode"] == "qwen_full_vit"
+    assert skeleton["qwen_thumbnail"]["mode"] == "none"
 
 
 def test_runtime_description_includes_metric_schema():

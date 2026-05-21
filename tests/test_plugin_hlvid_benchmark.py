@@ -86,6 +86,54 @@ def test_build_mode_runner_args_for_qwen3_pixelprune_pre_vit():
     assert args[args.index("--token-selector-adapter") + 1] == "keep-all"
 
 
+def test_build_mode_runner_args_for_qwen3_passes_runner_video_resize():
+    row = {
+        "video_path": "clip.mp4",
+        "question": "Question? A. one B. two C. three D. four",
+        "answer": "A",
+    }
+
+    args = build_mode_runner_args(
+        mode="qwen3-vl-off",
+        row=row,
+        video_path=Path("/data/clip.mp4"),
+        output_json=Path("/tmp/run.json"),
+        models={"qwen3-vl": "weight/Qwen3-VL"},
+        external_mllm_command="vila-infer",
+        num_video_frames=128,
+        max_tiles_video=1,
+        max_new_tokens=8,
+        video_resize_shortest_edge=448,
+    )
+
+    assert args[args.index("--video-resize-shortest-edge") + 1] == "448"
+
+
+def test_build_mode_runner_args_for_qwen3_passes_thumbnail_mode():
+    row = {
+        "video_path": "clip.mp4",
+        "question": "Question? A. one B. two C. three D. four",
+        "answer": "A",
+    }
+
+    args = build_mode_runner_args(
+        mode="qwen3-vl-off",
+        row=row,
+        video_path=Path("/data/clip.mp4"),
+        output_json=Path("/tmp/run.json"),
+        models={"qwen3-vl": "weight/Qwen3-VL"},
+        external_mllm_command="vila-infer",
+        num_video_frames=128,
+        num_video_frames_thumbnail=16,
+        max_tiles_video=1,
+        max_new_tokens=8,
+        qwen_thumbnail_mode="append-video",
+    )
+
+    assert args[args.index("--num-video-frames-thumbnail") + 1] == "16"
+    assert args[args.index("--qwen-thumbnail-mode") + 1] == "append-video"
+
+
 def test_build_mode_runner_args_for_priority_autogaze_poc_modes():
     row = {
         "video_path": "clip.mp4",
