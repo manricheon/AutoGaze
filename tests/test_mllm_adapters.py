@@ -15,6 +15,7 @@ from repro.plugins.mllm_adapters import (
     QwenGridMllmAdapter,
     VilaCliMllmAdapter,
     build_metric_skeleton,
+    build_mllm_processing_budget_summary,
     extract_assistant_text,
     qwen_grid_chunk_slices,
     qwen_chunked_video_features,
@@ -319,6 +320,31 @@ def test_metric_skeleton_contains_latency_token_memory_slots():
     assert skeleton["memory_bytes"]["peak_cuda_allocated"] is None
     assert skeleton["qwen_vit"]["mode"] == "qwen_full_vit"
     assert skeleton["qwen_thumbnail"]["mode"] == "none"
+    assert skeleton["processing_budget_summary"]["video"]["requested_video_frames"] == 128
+
+
+def test_build_mllm_processing_budget_summary_reports_qwen_resize_thumbnail_and_expected_tokens():
+    summary = build_mllm_processing_budget_summary(
+        make_request(
+            qwen_video_nframes=32,
+            num_video_frames_thumbnail=8,
+            qwen_thumbnail_mode="append-video",
+            max_tiles_video=4,
+            video_resize_longest_edge=448,
+            qwen_vit_mode="qwen_chunked_vit_autogaze_sparse",
+            qwen_vit_max_spatial_chunks=4,
+        )
+    )
+
+    assert summary["video"]["requested_video_frames"] == 32
+    assert summary["video"]["runner_resize"]["longest_edge"] == 448
+    assert summary["thumbnail"]["enabled"] is True
+    assert summary["thumbnail"]["mode"] == "append-video"
+    assert summary["model_processing_unit"]["name"] == "qwen_video_grid_thw"
+    assert summary["tiling"]["spatial_chunks_per_frame_limit"] == 4
+    assert summary["patch_budget_before_vit"]["estimated_total_frames_in_processor"] == 40
+    assert summary["patch_budget_before_vit"]["estimated_visual_tokens_before_prune"] is not None
+    assert summary["patch_budget_before_vit"]["multiscale_policy"] == "not_applicable_qwen_native_grid"
 
 
 def test_runtime_description_includes_metric_schema():

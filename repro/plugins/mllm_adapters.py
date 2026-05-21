@@ -2309,11 +2309,12 @@ def build_metric_skeleton(request: MllmRunRequest) -> dict[str, Any]:
             "status": "not_started",
         },
         "qwen_thumbnail": qwen_thumbnail_summary(request),
+        "processing_budget_summary": build_mllm_processing_budget_summary(request),
     }
 
 
 def _estimate_qwen_visual_tokens(request: MllmRunRequest) -> int:
-    frames = max(int(request.num_video_frames), 1)
+    frames = qwen_main_video_frame_count(request) + qwen_thumbnail_count(request)
     tiles = max(int(request.max_tiles_video), 1)
     # Qwen grid models expose the exact visual count through processor outputs at runtime.
     # For a model-load-free AutoGaze attachment PoC, 196 tokens/frame/tile is the same
@@ -2326,6 +2327,112 @@ def _estimate_selected_tokens(raw_visual_tokens: int, gazing_ratio: float | None
         return None
     ratio = max(0.0, min(1.0, float(gazing_ratio)))
     return max(1, int(round(raw_visual_tokens * ratio)))
+
+
+def build_mllm_processing_budget_summary(request: MllmRunRequest) -> dict[str, Any]:
+    main_frames = qwen_main_video_frame_count(request)
+    thumbnail = qwen_thumbnail_summary(request)
+    thumbnail_frames = int(thumbnail["effective_frames"] or 0)
+    total_frames = main_frames + thumbnail_frames
+    estimated_visual = _estimate_qwen_visual_tokens(request) if request.model_family.startswith("qwen") else None
+    selected_visual = _estimate_selected_tokens(estimated_visual, request.gazing_ratio) if estimated_visual is not None else None
+    source_metadata = _safe_qwen_video_metadata(request.video)
+    resize_effective = _safe_qwen_resize_effective(request, source_metadata)
+    return {
+        "runner": "flexible_runner",
+        "video": {
+            "source_resolution": _format_resolution(
+                source_metadata.get("width") if source_metadata else None,
+                source_metadata.get("height") if source_metadata else None,
+            ),
+            "source_width": source_metadata.get("width") if source_metadata else None,
+            "source_height": source_metadata.get("height") if source_metadata else None,
+            "processor_input_resolution": _format_resolution(
+                resize_effective.get("width") if resize_effective else None,
+                resize_effective.get("height") if resize_effective else None,
+            ),
+            "processor_input_width": resize_effective.get("width") if resize_effective else None,
+            "processor_input_height": resize_effective.get("height") if resize_effective else None,
+            "requested_video_frames": main_frames,
+            "runner_resize": qwen_runner_resize_summary(request),
+            "qwen_video_max_pixels": request.qwen_video_max_pixels,
+            "qwen_video_min_pixels": request.qwen_video_min_pixels,
+        },
+        "model_processing_unit": {
+            "name": "qwen_video_grid_thw" if request.model_family.startswith("qwen") else "adapter_specific_visual_tokens",
+            "description": (
+                "Qwen processor builds pixel_values_videos and video_grid_thw; exact patch/token counts are filled "
+                "from processor outputs at runtime when available."
+            ),
+        },
+        "tiling": {
+            "max_tiles_video": request.max_tiles_video,
+            "spatial_chunks_per_frame_limit": request.qwen_vit_max_spatial_chunks,
+            "qwen_vit_mode": request.qwen_vit_mode,
+            "chunk_frames": request.qwen_vit_chunk_frames,
+            "note": (
+                "For Qwen, spatial chunks split the processor grid for memory/latency measurement; they do not "
+                "duplicate the video frames like NVILA spatial tiling."
+            ),
+        },
+        "thumbnail": {
+            "enabled": thumbnail_frames > 0,
+            **thumbnail,
+        },
+        "patch_budget_before_vit": {
+            "estimated_main_frames_in_processor": main_frames,
+            "estimated_thumbnail_frames_in_processor": thumbnail_frames,
+            "estimated_total_frames_in_processor": total_frames,
+            "estimated_visual_tokens_before_prune": estimated_visual,
+            "estimated_visual_tokens_after_prune": selected_visual,
+            "estimated_visual_token_reduction_ratio": (
+                estimated_visual / selected_visual if estimated_visual is not None and selected_visual else None
+            ),
+            "multiscale_policy": "not_applicable_qwen_native_grid"
+            if request.model_family.startswith("qwen")
+            else "adapter_specific",
+        },
+    }
+
+
+def _safe_qwen_video_metadata(video: str | None) -> dict[str, Any] | None:
+    if not video:
+        return None
+    try:
+        return read_video_metadata(video)
+    except Exception:
+        return None
+
+
+def _safe_qwen_resize_effective(request: MllmRunRequest, source_metadata: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not source_metadata:
+        return None
+    width = source_metadata.get("width")
+    height = source_metadata.get("height")
+    if width is None or height is None:
+        return None
+    try:
+        return dict(
+            apply_resize_to_dimensions(
+                width=int(width),
+                height=int(height),
+                shortest_edge=request.video_resize_shortest_edge,
+                longest_edge=request.video_resize_longest_edge,
+                exact_width=request.video_resize_width,
+                exact_height=request.video_resize_height,
+            )
+        )
+    except Exception:
+        return None
+
+
+def _format_resolution(width: Any, height: Any) -> str | None:
+    if width is None or height is None:
+        return None
+    try:
+        return f"{int(width)}x{int(height)}"
+    except (TypeError, ValueError):
+        return None
 
 
 def build_feature_packing_probe(adapter_name: str, request: MllmRunRequest) -> dict[str, Any]:
@@ -2561,6 +2668,23 @@ def _record_input_token_metrics(metrics: dict[str, Any], inputs: Any) -> None:
         value = inputs.get(key) if isinstance(inputs, dict) else getattr(inputs, key, None)
         if value is not None:
             metrics["tokens"][key] = _shape_list(value)
+            if key == "video_grid_thw":
+                _record_qwen_actual_grid_budget(metrics, value)
+
+
+def _record_qwen_actual_grid_budget(metrics: dict[str, Any], video_grid_thw: Any) -> None:
+    summary = metrics.get("processing_budget_summary")
+    if not isinstance(summary, dict):
+        return
+    patch_budget = summary.get("patch_budget_before_vit")
+    if not isinstance(patch_budget, dict):
+        return
+    try:
+        t, h, w = _single_qwen_grid(video_grid_thw)
+    except Exception:
+        return
+    patch_budget["actual_video_grid_thw"] = [t, h, w]
+    patch_budget["actual_raw_patch_tokens_before_vit"] = t * h * w
 
 
 def _record_cuda_memory(metrics: dict[str, Any]) -> None:

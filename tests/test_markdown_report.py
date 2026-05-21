@@ -24,6 +24,25 @@ def test_render_single_markdown_report_includes_pipeline_and_key_metrics(tmp_pat
             "spatial_tiles_per_video": [8],
             "temporal_chunks_per_video": 8,
         },
+        "processing_budget_summary": {
+            "model_processing_unit": {"name": "nvila_392px_spatial_tile_sequence", "tile_size_px": 392},
+            "tiling": {"spatial_tiles_per_frame": 8, "tile_frame_instances": 1024},
+            "thumbnail": {"enabled": True, "actual_frames": 64, "policy": "keep_all"},
+            "multiscale_patch_space": {
+                "patch_positions_per_tile_frame": 1060,
+                "patch_positions_by_scale": {"56": 16, "112": 64, "196": 196, "392": 784},
+            },
+            "patch_budget_before_siglip": {
+                "keep_all_total_patch_tokens": 1153280,
+                "autogaze_selected_total_patch_tokens": 176384,
+                "total_patch_reduction_ratio": 6.538,
+            },
+            "llm_visual_budget": {
+                "keep_all_visual_tokens_estimated": 128512,
+                "actual_visual_tokens": 19632,
+                "visual_token_reduction_ratio": 6.546,
+            },
+        },
         "key_metrics_summary": {
             "latency_ms": {
                 "total_median": 9000,
@@ -113,6 +132,9 @@ def test_render_single_markdown_report_includes_pipeline_and_key_metrics(tmp_pat
     assert "encoder_patch_tokens_before_keep_all_or_raw" in markdown
     assert "llm_peak_median" in markdown
     assert "## Step-by-step Pipeline Metrics" in markdown
+    assert "## Processing Budget Summary" in markdown
+    assert "nvila_392px_spatial_tile_sequence" in markdown
+    assert "keep_all_total_patch_tokens" in markdown
     assert "## Latency Accounting" in markdown
     assert "### Time Hierarchy" in markdown
     assert "total_ms = video_preprocess_without_autogaze_ms + autogaze_total_ms + generate_ms" in markdown

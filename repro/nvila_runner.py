@@ -1077,6 +1077,99 @@ def _single_or_list(value: Any) -> Any:
     return value
 
 
+def build_processing_budget_summary(
+    *,
+    video_input_summary: dict[str, Any],
+    token_metrics: dict[str, Any],
+    runner: str,
+) -> dict[str, Any]:
+    spatial_tiles = _single_or_list(token_metrics.get("spatial_tiles_per_video"))
+    temporal_chunks = _single_or_list(token_metrics.get("temporal_chunks_per_video"))
+    thumbnail_frames = token_metrics.get("thumbnail_sampled_frames")
+    raw_total = token_metrics.get("encoder_raw_patch_tokens")
+    selected_total = token_metrics.get("encoder_autogaze_selected_patch_tokens")
+    raw_tile = token_metrics.get("encoder_raw_tile_patch_tokens")
+    selected_tile = token_metrics.get("encoder_autogaze_selected_tile_patch_tokens")
+    raw_thumbnail = token_metrics.get("encoder_raw_thumbnail_patch_tokens")
+    selected_thumbnail = token_metrics.get("encoder_autogaze_selected_thumbnail_patch_tokens")
+    keep_all_visual = token_metrics.get("llm_keep_all_visual_tokens_estimated")
+    actual_visual = token_metrics.get("llm_actual_visual_tokens")
+    return {
+        "runner": runner,
+        "video": {
+            "source_resolution": video_input_summary.get("source_resolution"),
+            "source_width": video_input_summary.get("source_width"),
+            "source_height": video_input_summary.get("source_height"),
+            "processor_input_resolution": video_input_summary.get("processor_input_resolution"),
+            "processor_input_width": video_input_summary.get("processor_input_width"),
+            "processor_input_height": video_input_summary.get("processor_input_height"),
+            "resize_enabled": video_input_summary.get("runner_resize_enabled"),
+            "resize_request": video_input_summary.get("runner_resize_request"),
+            "requested_video_frames": video_input_summary.get("requested_video_frames"),
+            "actual_video_frames": token_metrics.get("video_sampled_frames")
+            or video_input_summary.get("actual_video_frames"),
+        },
+        "model_processing_unit": {
+            "name": "nvila_392px_spatial_tile_sequence",
+            "tile_size_px": NVILA_IMAGE_SIZE,
+            "patch_space": "multiscale_patch_positions_before_siglip",
+            "token_shuffle": token_metrics.get("token_shuffle"),
+        },
+        "tiling": {
+            "spatial_tiles_per_frame": spatial_tiles,
+            "temporal_chunks": temporal_chunks,
+            "tile_frame_instances": token_metrics.get("autogaze_input_tile_frame_instances"),
+            "tile_sequences": token_metrics.get("tile_sequences"),
+            "interpretation": "video frames are spatially tiled, then each tile-frame contributes multiscale patch positions",
+        },
+        "thumbnail": {
+            "enabled": bool(thumbnail_frames),
+            "requested_frames": video_input_summary.get("requested_thumbnail_frames"),
+            "actual_frames": thumbnail_frames or video_input_summary.get("actual_thumbnail_frames"),
+            "raw_patch_tokens": raw_thumbnail,
+            "selected_patch_tokens": selected_thumbnail,
+            "policy": "keep_all" if thumbnail_frames else "not_applicable",
+        },
+        "multiscale_patch_space": {
+            "patch_positions_per_tile_frame": token_metrics.get("encoder_patches_per_frame_multiscale"),
+            "patch_positions_by_scale": token_metrics.get("encoder_patches_per_frame_by_scale"),
+            "autogaze_target_scales": token_metrics.get("autogaze_target_scales"),
+            "autogaze_target_patch_size": token_metrics.get("autogaze_target_patch_size"),
+            "vision_encoder_scales": token_metrics.get("vision_encoder_scales"),
+            "vision_encoder_patch_size": token_metrics.get("vision_encoder_patch_size"),
+            "patch_space_mismatch": token_metrics.get("patch_space_mismatch"),
+            "note": token_metrics.get("patch_space_note"),
+        },
+        "patch_budget_before_siglip": {
+            "keep_all_tile_patch_tokens": raw_tile,
+            "autogaze_selected_tile_patch_tokens": selected_tile,
+            "removed_tile_patch_tokens": _numeric_delta(raw_tile, selected_tile),
+            "keep_all_thumbnail_patch_tokens": raw_thumbnail,
+            "autogaze_selected_thumbnail_patch_tokens": selected_thumbnail,
+            "removed_thumbnail_patch_tokens": _numeric_delta(raw_thumbnail, selected_thumbnail),
+            "keep_all_total_patch_tokens": raw_total,
+            "autogaze_selected_total_patch_tokens": selected_total,
+            "removed_total_patch_tokens": _numeric_delta(raw_total, selected_total),
+            "autogaze_input_tile_patch_tokens": token_metrics.get("autogaze_input_patch_tokens"),
+            "autogaze_selected_tile_input_patch_tokens": token_metrics.get("autogaze_selected_patch_tokens"),
+            "tile_patch_reduction_ratio": token_metrics.get("encoder_tile_token_reduction_ratio")
+            or token_metrics.get("autogaze_patch_reduction_ratio"),
+            "total_patch_reduction_ratio": token_metrics.get("encoder_token_reduction_ratio"),
+            "total_patch_reduction_percent": _reduction_percent(raw_total, selected_total),
+            "thumbnail_policy": "keep_all" if thumbnail_frames else "not_applicable",
+            "unit": "encoder patch positions before SigLIP/TokenShuffle/projector",
+        },
+        "llm_visual_budget": {
+            "keep_all_visual_tokens_estimated": keep_all_visual,
+            "actual_visual_tokens": actual_visual,
+            "removed_visual_tokens_estimated": _numeric_delta(keep_all_visual, actual_visual),
+            "visual_token_reduction_ratio": token_metrics.get("llm_visual_token_reduction_ratio"),
+            "visual_token_reduction_percent": _reduction_percent(keep_all_visual, actual_visual),
+            "unit": "LLM visual placeholder tokens after TokenShuffle/projector packing",
+        },
+    }
+
+
 def _integer_division_or_float(numerator: Any, denominator: Any) -> int | float | None:
     if numerator is None or denominator in {None, 0}:
         return None
@@ -1278,6 +1371,7 @@ def build_single_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "prompt": payload.get("prompt"),
         "question": question,
         "video_input_summary": result.get("video_input_summary") if isinstance(result, dict) else None,
+        "processing_budget_summary": result.get("processing_budget_summary") if isinstance(result, dict) else None,
         "autogaze_token_summary": build_autogaze_token_summary(token_metrics),
         "key_autogaze_effect": {
             "gazing_mode": payload.get("gazing_mode"),
@@ -4482,6 +4576,32 @@ def run_stream_profile(args: argparse.Namespace) -> None:
 
     tile_summary = summarize_stream_chunks(temporal_chunks)
     token_metrics = build_stream_profile_token_metrics(plan, tile_summary)
+    stream_video_input_summary = {
+        "source_resolution": _resolution(metadata.get("width"), metadata.get("height")),
+        "source_width": _maybe_int(metadata.get("width")),
+        "source_height": _maybe_int(metadata.get("height")),
+        "processor_input_resolution": _resolution(effective["width"], effective["height"]),
+        "processor_input_width": int(effective["width"]),
+        "processor_input_height": int(effective["height"]),
+        "runner_resize_enabled": bool(video_resize_config(args, metadata).get("enabled")),
+        "runner_resize_request": {
+            "shortest_edge": getattr(args, "video_resize_shortest_edge", None),
+            "longest_edge": getattr(args, "video_resize_longest_edge", None),
+            "width": getattr(args, "video_resize_width", None),
+            "height": getattr(args, "video_resize_height", None),
+        },
+        "requested_video_frames": args.num_video_frames,
+        "actual_video_frames": token_metrics.get("video_sampled_frames"),
+        "requested_thumbnail_frames": args.num_video_frames_thumbnail,
+        "actual_thumbnail_frames": token_metrics.get("thumbnail_sampled_frames"),
+        "spatial_tiles_per_video": token_metrics.get("spatial_tiles_per_video"),
+        "temporal_chunks_per_video": token_metrics.get("temporal_chunks_per_video"),
+    }
+    processing_budget_summary = build_processing_budget_summary(
+        video_input_summary=stream_video_input_summary,
+        token_metrics=token_metrics,
+        runner="nvila_stream_profile",
+    )
     compute_metrics = build_stream_profile_compute_metrics(
         plan,
         tile_summary,
@@ -4542,6 +4662,7 @@ def run_stream_profile(args: argparse.Namespace) -> None:
         "gaze": tile_summary,
         "token_metrics": token_metrics,
         "autogaze_token_summary": build_autogaze_token_summary(token_metrics),
+        "processing_budget_summary": processing_budget_summary,
         "compute_metrics": compute_metrics,
         "timing_ms": {
             "video_decode_scan": stage_total(stage_timings, "video_decode_scan"),
@@ -4641,6 +4762,11 @@ def generate_one(
             video_input_info=video_input_info,
             token_metrics=token_metrics,
         )
+        processing_budget_summary = build_processing_budget_summary(
+            video_input_summary=video_input_summary,
+            token_metrics=token_metrics,
+            runner="nvila_runner",
+        )
 
         target_device = input_device(model, device)
         inputs = move_tensors(inputs, target_device)
@@ -4713,6 +4839,7 @@ def generate_one(
         "video_resolved": resolved_video,
         "video_input_info": video_input_info,
         "video_input_summary": video_input_summary,
+        "processing_budget_summary": processing_budget_summary,
         "gazing_mode": args.gazing_mode,
         "autogaze_generate_only": bool(getattr(args, "autogaze_generate_only", False)),
         "autogaze_target_scales": parse_int_sequence(getattr(args, "autogaze_target_scales", None)),
@@ -4794,6 +4921,7 @@ def run_single(args: argparse.Namespace) -> None:
         "autogaze_target_patch_size": getattr(args, "autogaze_target_patch_size", None),
         "video": args.video,
         "video_input_summary": result.get("video_input_summary"),
+        "processing_budget_summary": result.get("processing_budget_summary"),
         "prompt": args.prompt,
         "result": result,
     }

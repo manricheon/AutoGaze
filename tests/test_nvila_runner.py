@@ -15,6 +15,7 @@ from repro.nvila_runner import (
     build_autogaze_effect_metrics,
     build_h100_decision_row,
     build_latency_accounting,
+    build_processing_budget_summary,
     build_run_identity,
     build_seek_decode_groups,
     build_keep_all_gazing_info,
@@ -1248,6 +1249,74 @@ def test_build_video_input_summary_reports_source_sample_and_resize_context():
         "spatial_tiles_per_video": [8],
         "temporal_chunks_per_video": 8,
     }
+
+
+def test_build_processing_budget_summary_explains_resize_tiling_thumbnail_and_patch_budget():
+    video_input_summary = {
+        "source_resolution": "3840x2160",
+        "source_width": 3840,
+        "source_height": 2160,
+        "processor_input_resolution": "1280x720",
+        "processor_input_width": 1280,
+        "processor_input_height": 720,
+        "runner_resize_enabled": True,
+        "runner_resize_request": {
+            "shortest_edge": 720,
+            "longest_edge": None,
+            "width": None,
+            "height": None,
+        },
+        "requested_video_frames": 128,
+        "actual_video_frames": 128,
+        "requested_thumbnail_frames": 64,
+        "actual_thumbnail_frames": 64,
+        "spatial_tiles_per_video": [8],
+        "temporal_chunks_per_video": [8],
+    }
+    token_metrics = {
+        "video_sampled_frames": 128,
+        "thumbnail_sampled_frames": 64,
+        "spatial_tiles_per_video": [8],
+        "temporal_chunks_per_video": [8],
+        "autogaze_input_tile_frame_instances": 1024,
+        "encoder_patches_per_frame_multiscale": 1060,
+        "encoder_patches_per_frame_by_scale": {"56": 16, "112": 64, "196": 196, "392": 784},
+        "encoder_raw_tile_patch_tokens": 1085440,
+        "encoder_autogaze_selected_tile_patch_tokens": 108544,
+        "encoder_raw_thumbnail_patch_tokens": 67840,
+        "encoder_autogaze_selected_thumbnail_patch_tokens": 67840,
+        "encoder_raw_patch_tokens": 1153280,
+        "encoder_autogaze_selected_patch_tokens": 176384,
+        "encoder_token_reduction_ratio": 1153280 / 176384,
+        "autogaze_input_patch_tokens": 1085440,
+        "autogaze_selected_patch_tokens": 108544,
+        "autogaze_patch_reduction_ratio": 10.0,
+        "llm_keep_all_visual_tokens_estimated": 128512,
+        "llm_actual_visual_tokens": 19632,
+        "llm_visual_token_reduction_ratio": 128512 / 19632,
+        "token_shuffle": 9,
+    }
+
+    summary = build_processing_budget_summary(
+        video_input_summary=video_input_summary,
+        token_metrics=token_metrics,
+        runner="nvila_runner",
+    )
+
+    assert summary["video"]["source_resolution"] == "3840x2160"
+    assert summary["video"]["processor_input_resolution"] == "1280x720"
+    assert summary["tiling"]["spatial_tiles_per_frame"] == 8
+    assert summary["tiling"]["tile_frame_instances"] == 1024
+    assert summary["thumbnail"]["enabled"] is True
+    assert summary["thumbnail"]["actual_frames"] == 64
+    assert summary["multiscale_patch_space"]["patch_positions_per_tile_frame"] == 1060
+    assert summary["multiscale_patch_space"]["patch_positions_by_scale"]["392"] == 784
+    assert summary["patch_budget_before_siglip"]["keep_all_total_patch_tokens"] == 1153280
+    assert summary["patch_budget_before_siglip"]["autogaze_selected_total_patch_tokens"] == 176384
+    assert summary["patch_budget_before_siglip"]["autogaze_selected_tile_patch_tokens"] == 108544
+    assert summary["patch_budget_before_siglip"]["thumbnail_policy"] == "keep_all"
+    assert summary["llm_visual_budget"]["keep_all_visual_tokens_estimated"] == 128512
+    assert summary["llm_visual_budget"]["actual_visual_tokens"] == 19632
 
 
 def test_parse_int_sequence_accepts_plus_comma_and_bracket_formats():

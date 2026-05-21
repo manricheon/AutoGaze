@@ -704,6 +704,40 @@ def render_input_tokenization(payload: dict[str, Any], metrics: dict[str, Any]) 
     )
 
 
+def render_processing_budget_summary(payload: dict[str, Any]) -> str:
+    result = result_payload(payload)
+    summary = as_mapping(result.get("processing_budget_summary") or payload.get("processing_budget_summary"))
+    if not summary:
+        return ""
+    model_unit = as_mapping(summary.get("model_processing_unit"))
+    tiling = as_mapping(summary.get("tiling"))
+    thumbnail = as_mapping(summary.get("thumbnail"))
+    multiscale = as_mapping(summary.get("multiscale_patch_space"))
+    patch_budget = as_mapping(summary.get("patch_budget_before_siglip") or summary.get("patch_budget_before_vit"))
+    llm_budget = as_mapping(summary.get("llm_visual_budget"))
+    rows = [
+        ["model_processing_unit", model_unit.get("name")],
+        ["tile_size_px", model_unit.get("tile_size_px")],
+        ["spatial_tiles_per_frame", tiling.get("spatial_tiles_per_frame") or tiling.get("spatial_chunks_per_frame_limit")],
+        ["tile_frame_instances", tiling.get("tile_frame_instances")],
+        ["thumbnail_enabled", thumbnail.get("enabled")],
+        ["thumbnail_actual_frames", thumbnail.get("actual_frames") or thumbnail.get("effective_frames")],
+        ["thumbnail_policy", thumbnail.get("policy") or thumbnail.get("pruning_policy")],
+        ["multiscale_patch_positions_per_tile_frame", multiscale.get("patch_positions_per_tile_frame")],
+        ["patch_positions_by_scale", multiscale.get("patch_positions_by_scale")],
+        ["keep_all_total_patch_tokens", patch_budget.get("keep_all_total_patch_tokens") or patch_budget.get("estimated_visual_tokens_before_prune")],
+        ["autogaze_selected_total_patch_tokens", patch_budget.get("autogaze_selected_total_patch_tokens") or patch_budget.get("estimated_visual_tokens_after_prune")],
+        ["total_patch_reduction_ratio", patch_budget.get("total_patch_reduction_ratio") or patch_budget.get("estimated_visual_token_reduction_ratio")],
+        ["llm_keep_all_visual_tokens_estimated", llm_budget.get("keep_all_visual_tokens_estimated")],
+        ["llm_actual_visual_tokens", llm_budget.get("actual_visual_tokens")],
+        ["llm_visual_token_reduction_ratio", llm_budget.get("visual_token_reduction_ratio")],
+    ]
+    return "## Processing Budget Summary\n\n" + markdown_table(
+        ["Field", "Value"],
+        [row for row in rows if row[1] is not None],
+    )
+
+
 def render_markdown_report(
     payload: dict[str, Any],
     *,
@@ -716,6 +750,7 @@ def render_markdown_report(
         render_video_and_experiment_info(payload, source_path),
         render_pipeline_section(payload),
         render_input_tokenization(payload, metrics),
+        render_processing_budget_summary(payload),
         render_step_pipeline_metrics(payload, metrics),
         render_key_metrics_section(metrics),
         render_latency_accounting_section(payload, metrics),
