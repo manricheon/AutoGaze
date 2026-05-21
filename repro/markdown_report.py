@@ -91,6 +91,38 @@ def markdown_table(headers: list[str], rows: list[list[Any]]) -> str:
     return "\n".join(lines)
 
 
+def numeric_or_none(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def ratio_before_over_after(before: Any, after: Any) -> float | None:
+    before_value = numeric_or_none(before)
+    after_value = numeric_or_none(after)
+    if before_value is None or after_value in {None, 0.0}:
+        return None
+    return before_value / after_value
+
+
+def reduction_percent(before: Any, after: Any) -> float | None:
+    before_value = numeric_or_none(before)
+    after_value = numeric_or_none(after)
+    if before_value in {None, 0.0} or after_value is None:
+        return None
+    return (1.0 - after_value / before_value) * 100.0
+
+
+def get_budget_value(summary: dict[str, Any], field: str, default: Any = None) -> Any:
+    if field in summary:
+        value = summary.get(field)
+        return default if value is None else value
+    return get_path(summary, field, default)
+
+
 def detect_report_kind(payload: dict[str, Any]) -> str:
     if "readable_summary" in payload and "keep_all" in payload and "autogaze" in payload:
         return "hlvid_benchmark"
@@ -753,6 +785,214 @@ def render_processing_budget_summary(payload: dict[str, Any]) -> str:
     )
 
 
+def render_autogaze_token_patch_flow(payload: dict[str, Any], metrics: dict[str, Any]) -> str:
+    readable_budget = as_mapping(
+        get_path(payload, "readable_summary.processing_budget_summary")
+        or get_path(payload, "readable_performance_summary.processing_budget_summary")
+    )
+    if readable_budget:
+        return render_readable_budget_token_flow(readable_budget)
+
+    result = result_payload(payload)
+    summary = as_mapping(result.get("processing_budget_summary") or payload.get("processing_budget_summary"))
+    if not summary:
+        return ""
+    return render_single_budget_token_flow(summary, metrics)
+
+
+def render_readable_budget_token_flow(readable_budget: dict[str, Any]) -> str:
+    keep_all = as_mapping(readable_budget.get("keep_all_median") or readable_budget.get("mode_median"))
+    autogaze = as_mapping(readable_budget.get("autogaze_median"))
+    rows: list[list[Any]] = []
+
+    def add_row(label: str, off_field: str, auto_baseline_field: str, auto_actual_field: str) -> None:
+        off_baseline = get_budget_value(keep_all, off_field)
+        autogaze_baseline = get_budget_value(autogaze, auto_baseline_field)
+        autogaze_actual = get_budget_value(autogaze, auto_actual_field)
+        rows.append(
+            [
+                label,
+                off_baseline,
+                autogaze_baseline,
+                autogaze_actual,
+                ratio_before_over_after(autogaze_baseline, autogaze_actual),
+                reduction_percent(autogaze_baseline, autogaze_actual),
+            ]
+        )
+
+    add_row(
+        "Full multiscale patch budget before AutoGaze",
+        "patch_budget_before_siglip.keep_all_total_patch_tokens",
+        "patch_budget_before_siglip.keep_all_total_patch_tokens",
+        "patch_budget_before_siglip.autogaze_selected_total_patch_tokens",
+    )
+    add_row(
+        "Tile patch budget before SigLIP",
+        "patch_budget_before_siglip.keep_all_tile_patch_tokens",
+        "patch_budget_before_siglip.keep_all_tile_patch_tokens",
+        "patch_budget_before_siglip.autogaze_selected_tile_patch_tokens",
+    )
+    add_row(
+        "Thumbnail patch budget before SigLIP",
+        "patch_budget_before_siglip.keep_all_thumbnail_patch_tokens",
+        "patch_budget_before_siglip.keep_all_thumbnail_patch_tokens",
+        "patch_budget_before_siglip.autogaze_selected_thumbnail_patch_tokens",
+    )
+    add_row(
+        "Encoder input patch tokens after AutoGaze",
+        "patch_budget_before_siglip.keep_all_total_patch_tokens",
+        "patch_budget_before_siglip.keep_all_total_patch_tokens",
+        "patch_budget_before_siglip.autogaze_selected_total_patch_tokens",
+    )
+    add_row(
+        "LLM visual tokens after TokenShuffle/projector",
+        "llm_visual_budget.keep_all_visual_tokens_estimated",
+        "llm_visual_budget.keep_all_visual_tokens_estimated",
+        "llm_visual_budget.actual_visual_tokens",
+    )
+
+    rows = [row for row in rows if any(value is not None for value in row[1:4])]
+    if not rows:
+        return ""
+    note = (
+        "When an AutoGaze-off run is not present, the AutoGaze-off baseline column is still estimated "
+        "from the AutoGaze-on input shape. Latency speedups still require both modes to be measured."
+    )
+    return (
+        "## AutoGaze Token And Patch Flow\n\n"
+        + note
+        + "\n\n"
+        + markdown_table(
+            [
+                "Stage",
+                "Measured off / keep-all",
+                "Off estimate for AutoGaze input",
+                "AutoGaze-on actual",
+                "Reduction ratio",
+                "Reduction %",
+            ],
+            rows,
+        )
+    )
+
+
+def render_single_budget_token_flow(summary: dict[str, Any], metrics: dict[str, Any]) -> str:
+    tokens = as_mapping(metrics.get("tokens"))
+    patch_budget = as_mapping(summary.get("patch_budget_before_siglip"))
+    if patch_budget:
+        full_patch = first_present(
+            patch_budget.get("keep_all_total_patch_tokens"),
+            tokens.get("encoder_patch_tokens_before_keep_all_or_raw"),
+        )
+        selected_patch = first_present(
+            patch_budget.get("autogaze_selected_total_patch_tokens"),
+            tokens.get("encoder_patch_tokens_after_autogaze"),
+        )
+        tile_full = patch_budget.get("keep_all_tile_patch_tokens")
+        tile_selected = patch_budget.get("autogaze_selected_tile_patch_tokens")
+        thumbnail_full = patch_budget.get("keep_all_thumbnail_patch_tokens")
+        thumbnail_selected = patch_budget.get("autogaze_selected_thumbnail_patch_tokens")
+        llm_budget = as_mapping(summary.get("llm_visual_budget"))
+        llm_before = first_present(
+            llm_budget.get("keep_all_visual_tokens_estimated"),
+            tokens.get("llm_visual_tokens_before_keep_all_estimated"),
+        )
+        llm_after = first_present(
+            llm_budget.get("actual_visual_tokens"),
+            tokens.get("llm_visual_tokens_after_actual"),
+        )
+        rows = [
+            [
+                "full_multiscale_patch_budget_before_autogaze",
+                full_patch,
+                "All multiscale tile plus thumbnail patch positions that keep-all/off would send toward SigLIP.",
+            ],
+            [
+                "autogaze_selected_patch_tokens",
+                selected_patch,
+                "Non-padded AutoGaze-selected patch positions, including keep-all thumbnail positions when enabled.",
+            ],
+            [
+                "encoder_input_patch_tokens_after_autogaze",
+                selected_patch,
+                "The patch-token budget expected at the sparse SigLIP/ViT input boundary for AutoGaze-on.",
+            ],
+            [
+                "tile_patch_tokens_before_to_after",
+                f"{format_value(tile_full)} -> {format_value(tile_selected)}",
+                "Main video tile patch budget before/after AutoGaze selection.",
+            ],
+            [
+                "thumbnail_patch_tokens_before_to_after",
+                f"{format_value(thumbnail_full)} -> {format_value(thumbnail_selected)}",
+                "Thumbnail patch budget; NVILA runner keeps thumbnails all-on unless disabled.",
+            ],
+            [
+                "llm_input_visual_tokens_after_token_shuffle_projector",
+                llm_after,
+                "Visual tokens that the LLM context sees after TokenShuffle/projector packing.",
+            ],
+            [
+                "llm_visual_tokens_keep_all_estimated",
+                llm_before,
+                "Estimated visual-token baseline for AutoGaze-off/keep-all at the same input shape.",
+            ],
+            [
+                "patch_reduction_ratio_before_over_after",
+                ratio_before_over_after(full_patch, selected_patch),
+                "Full patch budget divided by AutoGaze-selected patch budget.",
+            ],
+            [
+                "llm_visual_token_reduction_ratio_before_over_after",
+                ratio_before_over_after(llm_before, llm_after),
+                "Estimated keep-all LLM visual tokens divided by actual AutoGaze LLM visual tokens.",
+            ],
+        ]
+    else:
+        patch_budget = as_mapping(summary.get("patch_budget_before_vit"))
+        full_patch = first_present(
+            patch_budget.get("actual_raw_patch_tokens_before_vit"),
+            patch_budget.get("estimated_visual_tokens_before_prune"),
+            tokens.get("visual_tokens_before_prune"),
+        )
+        selected_patch = first_present(
+            patch_budget.get("estimated_visual_tokens_after_prune"),
+            tokens.get("visual_tokens_after_prune"),
+        )
+        rows = [
+            [
+                "full_patch_budget_before_selector",
+                full_patch,
+                "Raw ViT/Qwen grid token budget before pre-encoder pruning or selector masking.",
+            ],
+            [
+                "autogaze_selected_patch_tokens",
+                selected_patch,
+                "Estimated/actual selected visual patch tokens after the selector.",
+            ],
+            [
+                "encoder_input_patch_tokens_after_autogaze",
+                selected_patch,
+                "The sparse ViT input token budget when the pre-ViT selector path is enabled.",
+            ],
+            [
+                "llm_input_context_tokens",
+                tokens.get("llm_context_tokens"),
+                "Total MLLM context length measured after processor packing when available.",
+            ],
+            [
+                "patch_reduction_ratio_before_over_after",
+                ratio_before_over_after(full_patch, selected_patch),
+                "Raw visual patch budget divided by selected visual patch budget.",
+            ],
+        ]
+
+    rows = [row for row in rows if row[1] is not None and row[1] != "- -> -"]
+    if not rows:
+        return ""
+    return "## AutoGaze Token And Patch Flow\n\n" + markdown_table(["Field", "Value", "Meaning"], rows)
+
+
 def render_markdown_report(
     payload: dict[str, Any],
     *,
@@ -766,6 +1006,7 @@ def render_markdown_report(
         render_pipeline_section(payload),
         render_input_tokenization(payload, metrics),
         render_processing_budget_summary(payload),
+        render_autogaze_token_patch_flow(payload, metrics),
         render_step_pipeline_metrics(payload, metrics),
         render_key_metrics_section(metrics),
         render_latency_accounting_section(payload, metrics),

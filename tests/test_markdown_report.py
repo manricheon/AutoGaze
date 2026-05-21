@@ -135,6 +135,10 @@ def test_render_single_markdown_report_includes_pipeline_and_key_metrics(tmp_pat
     assert "## Processing Budget Summary" in markdown
     assert "nvila_392px_spatial_tile_sequence" in markdown
     assert "keep_all_total_patch_tokens" in markdown
+    assert "## AutoGaze Token And Patch Flow" in markdown
+    assert "full_multiscale_patch_budget_before_autogaze" in markdown
+    assert "encoder_input_patch_tokens_after_autogaze" in markdown
+    assert "llm_input_visual_tokens_after_token_shuffle_projector" in markdown
     assert "## Latency Accounting" in markdown
     assert "### Time Hierarchy" in markdown
     assert "total_ms = video_preprocess_without_autogaze_ms + autogaze_total_ms + generate_ms" in markdown
@@ -320,6 +324,9 @@ def test_render_benchmark_markdown_report_includes_scores_and_comparison_tables(
     assert "| clip2.mp4 | What happened? | B | B | true | A | false | keep_all_only_correct |" in markdown
     assert "## Processing Budget Summary" in markdown
     assert "patch_budget_before_siglip.autogaze_selected_total_patch_tokens" in markdown
+    assert "## AutoGaze Token And Patch Flow" in markdown
+    assert "| Full multiscale patch budget before AutoGaze | 900 | 900 | 300 | 3 | 66.666667 |" in markdown
+    assert "| LLM visual tokens after TokenShuffle/projector | 100 | 100 | 40 | 2.5 | 60 |" in markdown
 
 
 def test_render_benchmark_markdown_keeps_detail_latency_when_autogaze_is_skipped():

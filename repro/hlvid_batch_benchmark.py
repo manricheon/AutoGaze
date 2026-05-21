@@ -372,10 +372,20 @@ def build_readable_summary(
         ),
     }
     processing_budget_comparison_fields = (
+        "patch_budget_before_siglip.keep_all_tile_patch_tokens",
+        "patch_budget_before_siglip.autogaze_selected_tile_patch_tokens",
+        "patch_budget_before_siglip.keep_all_thumbnail_patch_tokens",
+        "patch_budget_before_siglip.autogaze_selected_thumbnail_patch_tokens",
         "patch_budget_before_siglip.keep_all_total_patch_tokens",
         "patch_budget_before_siglip.autogaze_selected_total_patch_tokens",
+        "patch_budget_before_siglip.total_patch_reduction_ratio",
+        "patch_budget_before_vit.estimated_visual_tokens_before_prune",
+        "patch_budget_before_vit.actual_raw_patch_tokens_before_vit",
+        "patch_budget_before_vit.estimated_visual_tokens_after_prune",
+        "patch_budget_before_vit.estimated_visual_token_reduction_ratio",
         "llm_visual_budget.keep_all_visual_tokens_estimated",
         "llm_visual_budget.actual_visual_tokens",
+        "llm_visual_budget.visual_token_reduction_ratio",
     )
     processing_budget_summary = {
         "keep_all_median": summarize_processing_budget_rows(keep_all_rows),

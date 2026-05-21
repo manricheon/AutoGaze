@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from repro.common import write_json, write_jsonl
+from repro.common import compute_stats, write_json, write_jsonl
 from repro.flexible_runner import parse_args as parse_flexible_args
 from repro.flexible_runner import run_single
 from repro.hlvid import read_manifest_file, score_predictions
@@ -393,6 +393,7 @@ def run_plugin_hlvid_benchmark(
                 "runner_status": payload.get("implementation_status"),
                 "metric_status": metrics.get("metric_status"),
                 "metrics": metrics,
+                "processing_budget_summary": metrics.get("processing_budget_summary"),
             }
             prediction.update(_flatten_key_metrics(metrics))
             predictions.append(prediction)
@@ -436,6 +437,50 @@ def build_markdown_report(summary: dict[str, Any]) -> str:
                 next_action=mode_summary.get("next_action"),
             )
         )
+    budget_rows = []
+    for mode, mode_summary in summary["modes"].items():
+        budget = mode_summary.get("processing_budget_summary", {})
+        mode_median = budget.get("mode_median", {}) if isinstance(budget, dict) else {}
+        if not mode_median:
+            continue
+        budget_rows.append(
+            [
+                mode,
+                mode_median.get("video.source_resolution"),
+                mode_median.get("video.processor_input_resolution"),
+                mode_median.get("video.requested_video_frames"),
+                first_present(
+                    mode_median.get("patch_budget_before_siglip.keep_all_total_patch_tokens"),
+                    mode_median.get("patch_budget_before_vit.actual_raw_patch_tokens_before_vit"),
+                    mode_median.get("patch_budget_before_vit.estimated_visual_tokens_before_prune"),
+                ),
+                first_present(
+                    mode_median.get("patch_budget_before_siglip.autogaze_selected_total_patch_tokens"),
+                    mode_median.get("patch_budget_before_vit.estimated_visual_tokens_after_prune"),
+                ),
+                first_present(
+                    mode_median.get("patch_budget_before_siglip.total_patch_reduction_ratio"),
+                    mode_median.get("patch_budget_before_vit.estimated_visual_token_reduction_ratio"),
+                ),
+                mode_median.get("llm_visual_budget.actual_visual_tokens"),
+            ]
+        )
+    if budget_rows:
+        lines.extend(
+            [
+                "",
+                "## Processing Budget By Mode",
+                "",
+                "| mode | source_resolution | processor_input_resolution | frames | full/off patch tokens | selected/actual patch tokens | reduction_ratio | llm_visual_tokens |",
+                "|---|---|---|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for row in budget_rows:
+            lines.append(
+                "| "
+                + " | ".join(_markdown_cell(value) for value in row)
+                + " |"
+            )
     lines.extend(
         [
             "",
@@ -453,6 +498,29 @@ def build_markdown_report(summary: dict[str, Any]) -> str:
         ]
     )
     return "\n".join(lines) + "\n"
+
+
+def first_present(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _markdown_cell(value: Any) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return f"{value:,}"
+    if isinstance(value, float):
+        if abs(value) >= 100:
+            return f"{value:,.3f}".rstrip("0").rstrip(".")
+        return f"{value:.6f}".rstrip("0").rstrip(".")
+    if isinstance(value, (list, dict)):
+        return json.dumps(value, sort_keys=True).replace("|", "\\|")
+    return str(value).replace("|", "\\|")
 
 
 def _base_args(
@@ -586,8 +654,72 @@ def _summarize_by_mode(predictions: list[dict[str, Any]]) -> dict[str, Any]:
         summary, _ = score_predictions(rows)
         summary["status_counts"] = _status_counts(rows)
         summary["next_action"] = _next_action_for_mode(mode, rows)
+        summary["processing_budget_summary"] = _summarize_processing_budget_by_mode(rows)
         summaries[mode] = summary
     return {"modes": summaries, "mode_order": modes, "total_predictions": len(predictions)}
+
+
+def _summarize_processing_budget_by_mode(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    budgets = [
+        row.get("processing_budget_summary") or row.get("metrics", {}).get("processing_budget_summary")
+        for row in rows
+    ]
+    budgets = [budget for budget in budgets if isinstance(budget, dict)]
+    if not budgets:
+        return {
+            "mode_median": {},
+            "fields": [],
+            "note": "No per-row metrics.processing_budget_summary was available for this mode.",
+        }
+    fields = sorted({field for budget in budgets for field, _ in _iter_leaf_values(budget)})
+    mode_median = {
+        field: _summarize_leaf_values([_get_nested_value(budget, field) for budget in budgets])
+        for field in fields
+    }
+    return {
+        "mode_median": mode_median,
+        "fields": fields,
+        "note": (
+            "Numeric values are medians across rows. String, boolean, list, and dict values use the first "
+            "non-null row. Full per-sample details remain in plugin_hlvid_predictions.jsonl."
+        ),
+    }
+
+
+def _iter_leaf_values(value: Any, prefix: str = ""):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            yield from _iter_leaf_values(child, path)
+        return
+    yield prefix, value
+
+
+def _get_nested_value(value: dict[str, Any], dotted_path: str) -> Any:
+    current: Any = value
+    for part in dotted_path.split("."):
+        if not isinstance(current, dict):
+            return None
+        current = current.get(part)
+    return current
+
+
+def _summarize_leaf_values(values: list[Any]) -> Any:
+    non_null = [value for value in values if value is not None]
+    if not non_null:
+        return None
+    numeric: list[float] = []
+    for value in non_null:
+        if isinstance(value, bool):
+            continue
+        try:
+            numeric.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    if numeric and len(numeric) == len(non_null):
+        median = compute_stats(numeric)["median"]
+        return int(median) if float(median).is_integer() else median
+    return non_null[0]
 
 
 def _status_counts(rows: list[dict[str, Any]]) -> dict[str, int]:

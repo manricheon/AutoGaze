@@ -4,6 +4,8 @@ from pathlib import Path
 
 from repro.plugin_hlvid_benchmark import (
     _flatten_key_metrics,
+    _summarize_by_mode,
+    build_markdown_report,
     build_mode_runner_args,
     resolve_hlvid_video_path,
     run_plugin_hlvid_benchmark,
@@ -307,6 +309,53 @@ def test_flatten_key_metrics_includes_qwen_vit_comparison_fields():
     assert flattened["qwen_vit_raw_patch_tokens_before_vit"] == 4000
     assert flattened["qwen_vit_executed_chunk_count"] == 3
     assert flattened["qwen_vit_spatial_tiles"] == 4
+
+
+def test_plugin_hlvid_summary_surfaces_processing_budget_by_mode():
+    summary = _summarize_by_mode(
+        [
+            {
+                "mode": "qwen_chunked_vit_autogaze_sparse",
+                "question_id": "q1",
+                "video_path": "clip.mp4",
+                "question": "Question? A. one B. two C. three D. four",
+                "answer": "B",
+                "expected_answer": "B",
+                "raw_output": "B",
+                "parsed_answer": "B",
+                "correct": True,
+                "status": "ok",
+                "runner_status": "executed",
+                "metrics": {
+                    "processing_budget_summary": {
+                        "video": {
+                            "source_resolution": "3840x2160",
+                            "processor_input_resolution": "1280x720",
+                            "requested_video_frames": 128,
+                        },
+                        "thumbnail": {"enabled": True, "effective_frames": 16},
+                        "patch_budget_before_vit": {
+                            "actual_raw_patch_tokens_before_vit": 1000,
+                            "estimated_visual_tokens_after_prune": 100,
+                            "estimated_visual_token_reduction_ratio": 10.0,
+                        },
+                    }
+                },
+            }
+        ]
+    )
+
+    mode_summary = summary["modes"]["qwen_chunked_vit_autogaze_sparse"]
+    budget = mode_summary["processing_budget_summary"]
+    assert budget["mode_median"]["video.source_resolution"] == "3840x2160"
+    assert budget["mode_median"]["patch_budget_before_vit.actual_raw_patch_tokens_before_vit"] == 1000
+    assert budget["mode_median"]["patch_budget_before_vit.estimated_visual_tokens_after_prune"] == 100
+
+    markdown = build_markdown_report(summary)
+    assert "## Processing Budget By Mode" in markdown
+    assert "qwen_chunked_vit_autogaze_sparse" in markdown
+    assert "1,000" in markdown
+    assert "100" in markdown
 
 
 def test_run_plugin_hlvid_benchmark_writes_predictions_summary_and_markdown(tmp_path):
