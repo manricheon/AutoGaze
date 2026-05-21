@@ -185,12 +185,14 @@ def test_build_mode_runner_args_for_qwen3_direct_autogaze_pre_vit_sparse_mode():
         num_video_frames=128,
         max_tiles_video=1,
         max_new_tokens=8,
+        qwen_video_max_pixels=200704,
     )
 
     assert args[args.index("--autogaze-integration-level") + 1] == "pre_encoder_sparse"
     assert args[args.index("--pre-encoder-prune-adapter") + 1] == "autogaze-sparse"
     assert "--enable-qwen-prune-generate" in args
     assert "--run-autogaze-selector" in args
+    assert args[args.index("--qwen-video-max-pixels") + 1] == "200704"
 
 
 def test_run_plugin_hlvid_benchmark_writes_predictions_summary_and_markdown(tmp_path):

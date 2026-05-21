@@ -41,6 +41,10 @@ def build_mode_runner_args(
     num_video_frames: int,
     max_tiles_video: int,
     max_new_tokens: int,
+    qwen_video_nframes: int | None = None,
+    qwen_video_fps: float | None = None,
+    qwen_video_max_pixels: int | None = None,
+    qwen_video_min_pixels: int | None = None,
 ) -> list[str]:
     if mode == "nvila-video-off":
         return _base_args(
@@ -57,6 +61,10 @@ def build_mode_runner_args(
             num_video_frames=num_video_frames,
             max_tiles_video=max_tiles_video,
             max_new_tokens=max_new_tokens,
+            qwen_video_nframes=qwen_video_nframes,
+            qwen_video_fps=qwen_video_fps,
+            qwen_video_max_pixels=qwen_video_max_pixels,
+            qwen_video_min_pixels=qwen_video_min_pixels,
         )
     if mode == "nvila-video-autogaze-probe":
         return _base_args(
@@ -73,6 +81,10 @@ def build_mode_runner_args(
             num_video_frames=num_video_frames,
             max_tiles_video=max_tiles_video,
             max_new_tokens=max_new_tokens,
+            qwen_video_nframes=qwen_video_nframes,
+            qwen_video_fps=qwen_video_fps,
+            qwen_video_max_pixels=qwen_video_max_pixels,
+            qwen_video_min_pixels=qwen_video_min_pixels,
         )
     if mode == "longvila-off":
         return _base_args(
@@ -89,6 +101,10 @@ def build_mode_runner_args(
             num_video_frames=num_video_frames,
             max_tiles_video=max_tiles_video,
             max_new_tokens=max_new_tokens,
+            qwen_video_nframes=qwen_video_nframes,
+            qwen_video_fps=qwen_video_fps,
+            qwen_video_max_pixels=qwen_video_max_pixels,
+            qwen_video_min_pixels=qwen_video_min_pixels,
         )
     if mode == "longvila-autogaze-probe":
         return _base_args(
@@ -105,6 +121,10 @@ def build_mode_runner_args(
             num_video_frames=num_video_frames,
             max_tiles_video=max_tiles_video,
             max_new_tokens=max_new_tokens,
+            qwen_video_nframes=qwen_video_nframes,
+            qwen_video_fps=qwen_video_fps,
+            qwen_video_max_pixels=qwen_video_max_pixels,
+            qwen_video_min_pixels=qwen_video_min_pixels,
         )
     if mode == "internvl3-off":
         return _base_args(
@@ -121,6 +141,10 @@ def build_mode_runner_args(
             num_video_frames=num_video_frames,
             max_tiles_video=max_tiles_video,
             max_new_tokens=max_new_tokens,
+            qwen_video_nframes=qwen_video_nframes,
+            qwen_video_fps=qwen_video_fps,
+            qwen_video_max_pixels=qwen_video_max_pixels,
+            qwen_video_min_pixels=qwen_video_min_pixels,
         )
     if mode == "qwen3-vl-off":
         return _base_args(
@@ -137,6 +161,10 @@ def build_mode_runner_args(
             num_video_frames=num_video_frames,
             max_tiles_video=max_tiles_video,
             max_new_tokens=max_new_tokens,
+            qwen_video_nframes=qwen_video_nframes,
+            qwen_video_fps=qwen_video_fps,
+            qwen_video_max_pixels=qwen_video_max_pixels,
+            qwen_video_min_pixels=qwen_video_min_pixels,
         )
     if mode in {
         "qwen3-vl-autogaze-probe",
@@ -160,6 +188,10 @@ def build_mode_runner_args(
             num_video_frames=num_video_frames,
             max_tiles_video=max_tiles_video,
             max_new_tokens=max_new_tokens,
+            qwen_video_nframes=qwen_video_nframes,
+            qwen_video_fps=qwen_video_fps,
+            qwen_video_max_pixels=qwen_video_max_pixels,
+            qwen_video_min_pixels=qwen_video_min_pixels,
         )
         if mode in {"qwen3-vl-autogaze-prune-generate", "qwen3-vl-autogaze-direct-prune-generate"}:
             args.append("--enable-qwen-prune-generate")
@@ -183,6 +215,10 @@ def build_mode_runner_args(
             num_video_frames=num_video_frames,
             max_tiles_video=max_tiles_video,
             max_new_tokens=max_new_tokens,
+            qwen_video_nframes=qwen_video_nframes,
+            qwen_video_fps=qwen_video_fps,
+            qwen_video_max_pixels=qwen_video_max_pixels,
+            qwen_video_min_pixels=qwen_video_min_pixels,
         )
         args.extend(["--pre-encoder-prune-adapter", "pixelprune"])
         return args
@@ -201,6 +237,10 @@ def run_plugin_hlvid_benchmark(
     num_video_frames: int = 256,
     max_tiles_video: int = 8,
     max_new_tokens: int = 8,
+    qwen_video_nframes: int | None = None,
+    qwen_video_fps: float | None = None,
+    qwen_video_max_pixels: int | None = None,
+    qwen_video_min_pixels: int | None = None,
 ) -> dict[str, Any]:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -224,6 +264,10 @@ def run_plugin_hlvid_benchmark(
                 num_video_frames=num_video_frames,
                 max_tiles_video=max_tiles_video,
                 max_new_tokens=max_new_tokens,
+                qwen_video_nframes=qwen_video_nframes,
+                qwen_video_fps=qwen_video_fps,
+                qwen_video_max_pixels=qwen_video_max_pixels,
+                qwen_video_min_pixels=qwen_video_min_pixels,
             )
             payload = run_single(parse_flexible_args(runner_args))
             generation = payload.get("generation", {})
@@ -317,6 +361,10 @@ def _base_args(
     num_video_frames: int,
     max_tiles_video: int,
     max_new_tokens: int,
+    qwen_video_nframes: int | None = None,
+    qwen_video_fps: float | None = None,
+    qwen_video_max_pixels: int | None = None,
+    qwen_video_min_pixels: int | None = None,
 ) -> list[str]:
     args = [
         "--mode",
@@ -349,6 +397,15 @@ def _base_args(
     if token_selector == "autogaze":
         args.extend(["--token-selector-path", "weight/AutoGaze"])
         args.extend(["--gazing-ratio", "0.1"])
+    if model_family.startswith("qwen"):
+        if qwen_video_nframes is not None:
+            args.extend(["--qwen-video-nframes", str(qwen_video_nframes)])
+        if qwen_video_fps is not None:
+            args.extend(["--qwen-video-fps", str(qwen_video_fps)])
+        if qwen_video_max_pixels is not None:
+            args.extend(["--qwen-video-max-pixels", str(qwen_video_max_pixels)])
+        if qwen_video_min_pixels is not None:
+            args.extend(["--qwen-video-min-pixels", str(qwen_video_min_pixels)])
     if external_mllm_command:
         args.extend(["--external-mllm-command", external_mllm_command])
     return args
@@ -434,6 +491,10 @@ def main() -> None:
     parser.add_argument("--num-video-frames", type=int, default=256)
     parser.add_argument("--max-tiles-video", type=int, default=8)
     parser.add_argument("--max-new-tokens", type=int, default=8)
+    parser.add_argument("--qwen-video-nframes", type=int)
+    parser.add_argument("--qwen-video-fps", type=float)
+    parser.add_argument("--qwen-video-max-pixels", type=int)
+    parser.add_argument("--qwen-video-min-pixels", type=int)
     args = parser.parse_args()
     payload = run_plugin_hlvid_benchmark(
         manifest=args.manifest,
@@ -446,6 +507,10 @@ def main() -> None:
         num_video_frames=args.num_video_frames,
         max_tiles_video=args.max_tiles_video,
         max_new_tokens=args.max_new_tokens,
+        qwen_video_nframes=args.qwen_video_nframes,
+        qwen_video_fps=args.qwen_video_fps,
+        qwen_video_max_pixels=args.qwen_video_max_pixels,
+        qwen_video_min_pixels=args.qwen_video_min_pixels,
     )
     print(json.dumps(payload["summary"], indent=2, sort_keys=True))
 
