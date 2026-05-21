@@ -1,6 +1,7 @@
 import os
 
 from repro.plugins.mllm_adapters import (
+    _build_qwen_grid_inputs,
     build_qwen_pruned_visual_inputs,
     InternVL3CliMllmAdapter,
     MllmRunRequest,
@@ -81,6 +82,26 @@ def test_qwen_grid_adapter_builds_video_chat_message():
             ],
         }
     ]
+
+
+def test_qwen_grid_video_input_error_mentions_qwen_vl_utils_install(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "qwen_vl_utils":
+            raise ModuleNotFoundError("No module named 'qwen_vl_utils'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    try:
+        _build_qwen_grid_inputs(object(), [{"role": "user", "content": []}], make_request())
+    except RuntimeError as exc:
+        assert "pip install qwen-vl-utils" in str(exc)
+    else:
+        raise AssertionError("expected missing qwen_vl_utils RuntimeError")
 
 
 def test_metric_skeleton_contains_latency_token_memory_slots():

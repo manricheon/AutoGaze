@@ -13,6 +13,7 @@ pandas
 pillow
 pyarrow
 pytest
+qwen-vl-utils
 timm
 torch
 torchvision

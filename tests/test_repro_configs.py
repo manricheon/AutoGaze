@@ -168,6 +168,7 @@ def test_plugin_hlvid_limit3_config_defines_comparison_modes():
     assert "qwen3-vl-pixelprune-pre-vit" in config.plugin_hlvid_benchmark.args.modes
     assert "qwen3-vl-autogaze-probe" in config.plugin_hlvid_benchmark.args.modes
     assert "qwen3-vl-autogaze-prune-generate" in config.plugin_hlvid_benchmark.args.modes
+    assert (root / "scripts" / "download_qwen_model.py").is_file()
 
 
 def test_autogaze_priority_validation_config_lists_four_tracks():

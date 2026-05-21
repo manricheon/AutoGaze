@@ -1451,6 +1451,32 @@ VILA 계열 AutoGaze-on probe는 로컬 모델 폴더에 `config.json`이 있으
   --output-json outputs/autogaze_repro/vila_feature_probe_nvila_video.json
 ```
 
+Qwen3-VL 플러그인 실험의 기준 모델은 Hugging Face의 `Qwen/Qwen3-VL-8B-Instruct`입니다. 로컬 경로는 runner 설정과 맞춰 `weight/Qwen3-VL-8B-Instruct`를 사용합니다. 다운로드는 아래 스크립트로 받습니다.
+
+Qwen 비디오 입력 경로는 별도 helper 패키지인 `qwen-vl-utils`가 필요합니다. 기본 설치는 아래처럼 repro requirements를 다시 설치하면 됩니다.
+
+```bash
+.venv/bin/python -m pip install -r requirements-repro.txt
+```
+
+이미 대부분 설치되어 있고 해당 패키지만 빠졌다면:
+
+```bash
+.venv/bin/python -m pip install qwen-vl-utils
+```
+
+```bash
+.venv/bin/python scripts/download_qwen_model.py \
+  --repo-id Qwen/Qwen3-VL-8B-Instruct \
+  --output-dir weight/Qwen3-VL-8B-Instruct
+```
+
+먼저 어떤 경로로 받을지 확인만 하려면:
+
+```bash
+.venv/bin/python scripts/download_qwen_model.py --dry-run
+```
+
 Qwen3-VL AutoGaze post-encoder probe는 아래처럼 실행합니다. 이 명령은 모델을 로드하지 않고 `poc_ready`를 기록합니다.
 
 ```bash

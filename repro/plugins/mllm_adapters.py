@@ -743,7 +743,11 @@ def _build_qwen_grid_inputs(processor: Any, messages: list[dict[str, Any]], requ
         try:
             from qwen_vl_utils import process_vision_info  # type: ignore
         except ModuleNotFoundError as exc:
-            raise RuntimeError("qwen_vl_utils is required for Qwen-style video inputs") from exc
+            raise RuntimeError(
+                "qwen_vl_utils is required for Qwen-style video inputs. "
+                "Install it with `.venv/bin/python -m pip install qwen-vl-utils` "
+                "or rerun `.venv/bin/python -m pip install -r requirements-repro.txt`."
+            ) from exc
         text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         images, videos, video_kwargs = process_vision_info(messages, return_video_kwargs=True)
         return processor(
