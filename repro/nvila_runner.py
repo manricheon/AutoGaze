@@ -30,6 +30,7 @@ from repro.common import (
     write_json,
     write_jsonl,
 )
+from repro.failure_logging import classify_exception, minimal_runner_failure_payload
 from repro.hlvid import (
     latency_hierarchy_summary,
     load_hlvid_manifest,
@@ -4971,62 +4972,75 @@ def generate_one(
 
 
 def run_single(args: argparse.Namespace) -> None:
-    device = resolve_device(args.device)
-    model, processor = load_model_and_processor(args)
-    warmup_runs = int(args.warmup_runs)
-    repeat_runs = int(args.repeat_runs)
-    for index in range(warmup_runs):
-        print(f"Warmup run {index + 1}/{warmup_runs}", file=sys.stderr)
-        generate_one(model, processor, args.video, args.prompt, device, args, enable_visualization=False)
-    repeat_results: list[dict[str, Any]] = []
-    for index in range(repeat_runs):
-        print(f"Measured run {index + 1}/{repeat_runs}", file=sys.stderr)
-        run_result = generate_one(
-            model,
-            processor,
-            args.video,
-            args.prompt,
-            device,
-            args,
-            enable_visualization=index == repeat_runs - 1,
-        )
-        run_result["repeat_index"] = index
-        repeat_results.append(run_result)
-    result = repeat_results[-1]
-    payload = {
-        "metadata": environment_metadata(device),
-        "model_path": args.model_path,
-        "run_identity": build_run_identity(args),
-        "autogaze_runtime_config": autogaze_runtime_config(args),
-        "autogaze_model": args.autogaze_model,
-        "gazing_mode": args.gazing_mode,
-        "video_resize": video_resize_config(args),
-        "autogaze_target_scales": parse_int_sequence(getattr(args, "autogaze_target_scales", None)),
-        "autogaze_target_patch_size": getattr(args, "autogaze_target_patch_size", None),
-        "video": args.video,
-        "video_input_summary": result.get("video_input_summary"),
-        "processing_budget_summary": result.get("processing_budget_summary"),
-        "prompt": args.prompt,
-        "result": result,
-    }
-    if warmup_runs or repeat_runs > 1:
-        payload["warmup_runs"] = warmup_runs
-        payload["repeat_runs"] = repeat_runs
-        payload["repeat_results"] = repeat_results
-        payload["repeat_summary"] = summarize_repeat_results(repeat_results)
-        payload["repeat_metric_note"] = (
-            "result is the last measured run for backward compatibility. "
-            "Use repeat_summary median/mean/min/max fields for warmup-aware latency and memory claims."
-        )
-    summary = build_single_summary(payload)
-    payload["summary"] = summary
-    if args.summary_json:
-        write_json(args.summary_json, summary)
-    write_json(args.output_json, payload)
-    if args.print_summary:
-        print(json.dumps(summary, indent=2, sort_keys=True))
-    else:
-        print(json.dumps(payload, indent=2, sort_keys=True))
+    try:
+        device = resolve_device(args.device)
+        model, processor = load_model_and_processor(args)
+        warmup_runs = int(args.warmup_runs)
+        repeat_runs = int(args.repeat_runs)
+        for index in range(warmup_runs):
+            print(f"Warmup run {index + 1}/{warmup_runs}", file=sys.stderr)
+            generate_one(model, processor, args.video, args.prompt, device, args, enable_visualization=False)
+        repeat_results: list[dict[str, Any]] = []
+        for index in range(repeat_runs):
+            print(f"Measured run {index + 1}/{repeat_runs}", file=sys.stderr)
+            run_result = generate_one(
+                model,
+                processor,
+                args.video,
+                args.prompt,
+                device,
+                args,
+                enable_visualization=index == repeat_runs - 1,
+            )
+            run_result["repeat_index"] = index
+            repeat_results.append(run_result)
+        result = repeat_results[-1]
+        payload = {
+            "metadata": environment_metadata(device),
+            "model_path": args.model_path,
+            "run_identity": build_run_identity(args),
+            "autogaze_runtime_config": autogaze_runtime_config(args),
+            "autogaze_model": args.autogaze_model,
+            "gazing_mode": args.gazing_mode,
+            "video_resize": video_resize_config(args),
+            "autogaze_target_scales": parse_int_sequence(getattr(args, "autogaze_target_scales", None)),
+            "autogaze_target_patch_size": getattr(args, "autogaze_target_patch_size", None),
+            "video": args.video,
+            "video_input_summary": result.get("video_input_summary"),
+            "processing_budget_summary": result.get("processing_budget_summary"),
+            "prompt": args.prompt,
+            "result": result,
+        }
+        if warmup_runs or repeat_runs > 1:
+            payload["warmup_runs"] = warmup_runs
+            payload["repeat_runs"] = repeat_runs
+            payload["repeat_results"] = repeat_results
+            payload["repeat_summary"] = summarize_repeat_results(repeat_results)
+            payload["repeat_metric_note"] = (
+                "result is the last measured run for backward compatibility. "
+                "Use repeat_summary median/mean/min/max fields for warmup-aware latency and memory claims."
+            )
+        summary = build_single_summary(payload)
+        payload["summary"] = summary
+        if args.summary_json:
+            write_json(args.summary_json, summary)
+        write_json(args.output_json, payload)
+        if args.print_summary:
+            print(json.dumps(summary, indent=2, sort_keys=True))
+        else:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+    except Exception as exc:
+        failure = classify_exception(exc, stage="nvila_single")
+        if failure["kind"] != "oom":
+            raise
+        payload = minimal_runner_failure_payload(args, failure)
+        payload["metadata"] = {"device": getattr(args, "device", None)}
+        payload["run_identity"] = build_run_identity(args)
+        payload["summary"] = {"status": "oom", "failure": failure}
+        if args.summary_json:
+            write_json(args.summary_json, payload["summary"])
+        write_json(args.output_json, payload)
+        print(json.dumps(payload["summary"] if args.print_summary else payload, indent=2, sort_keys=True))
 
 
 def run_preflight(args: argparse.Namespace) -> None:

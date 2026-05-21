@@ -403,6 +403,51 @@ def test_run_plugin_hlvid_benchmark_writes_predictions_summary_and_markdown(tmp_
     assert "accuracy_total" in report
 
 
+def test_run_plugin_hlvid_benchmark_records_oom_row_and_continues(monkeypatch, tmp_path):
+    manifest = tmp_path / "manifest.json"
+    video_root = tmp_path / "videos"
+    output_dir = tmp_path / "out"
+    video_root.mkdir()
+    (video_root / "clip_001.mp4").write_text("fake video")
+    manifest.write_text(
+        json.dumps(
+            [
+                {
+                    "question_id": "q1",
+                    "category": "toy",
+                    "video_path": "clip_001.mp4",
+                    "question": "Question? A. one B. two C. three D. four",
+                    "answer": "B",
+                }
+            ]
+        )
+    )
+
+    def fake_run_single(args):
+        raise RuntimeError("CUDA out of memory in SDPA attention")
+
+    monkeypatch.setattr("repro.plugin_hlvid_benchmark.run_single", fake_run_single)
+
+    payload = run_plugin_hlvid_benchmark(
+        manifest=manifest,
+        video_root=video_root,
+        output_dir=output_dir,
+        modes=["qwen_full_vit"],
+        models={"qwen3-vl": "weight/Qwen3-VL"},
+        limit=1,
+        num_video_frames=8,
+        max_tiles_video=1,
+        max_new_tokens=4,
+    )
+
+    prediction = payload["predictions"][0]
+    assert prediction["status"] == "oom"
+    assert prediction["runner_status"] == "oom"
+    assert prediction["failure"]["stage"] == "llm_prefill_or_generate"
+    assert payload["summary"]["modes"]["qwen_full_vit"]["status_counts"] == {"oom": 1}
+    assert (output_dir / "runs" / "qwen_full_vit" / "00000.json").is_file()
+
+
 def test_plugin_hlvid_summary_reports_probe_and_poc_statuses(tmp_path):
     manifest = tmp_path / "manifest.json"
     video_root = tmp_path / "videos"

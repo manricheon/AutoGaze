@@ -162,8 +162,47 @@ def test_render_single_markdown_report_includes_pipeline_and_key_metrics(tmp_pat
     output = tmp_path / "report.md"
     input_json = tmp_path / "single.json"
     input_json.write_text(json.dumps(payload))
-    write_markdown_report(input_json, output)
+    write_markdown_report(input_json, output, include_charts=False)
     assert output.read_text() == render_markdown_report(payload, source_path=str(input_json))
+
+
+def test_write_markdown_report_adds_chart_assets_by_default(tmp_path):
+    payload = {
+        "key_metrics_summary": {
+            "latency_ms": {
+                "total_median": 9000,
+                "preprocess_without_autogaze_median": 2200,
+                "autogaze_total_median": 800,
+                "vit_encoder_median": 1200,
+                "llm_median": 4000,
+            },
+            "tokens": {
+                "single_scale_dense_siglip_reference_patch_tokens": 852992,
+                "hd_multiscale_keep_all_patch_tokens": 1153280,
+                "autogaze_selected_total_patch_tokens": 176384,
+                "llm_visual_tokens_after_actual": 19632,
+            },
+            "memory_bytes": {
+                "processor_peak_median": 1_500_000_000,
+                "llm_peak_median": 3_500_000_000,
+            },
+        }
+    }
+    input_json = tmp_path / "single.json"
+    output_md = tmp_path / "report.md"
+    input_json.write_text(json.dumps(payload))
+
+    write_markdown_report(input_json, output_md)
+
+    markdown = output_md.read_text()
+    assets = output_md.parent / "report_assets"
+    assert "## Charts" in markdown
+    assert "Latency Breakdown" in markdown
+    assert "Token / Patch Budget" in markdown
+    assert "Memory Peaks" in markdown
+    assert (assets / "latency_breakdown.svg").is_file()
+    assert (assets / "token_patch_budget.svg").is_file()
+    assert (assets / "memory_peaks.svg").is_file()
 
 
 def test_render_benchmark_markdown_report_includes_scores_and_comparison_tables():

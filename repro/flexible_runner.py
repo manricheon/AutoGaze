@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from repro.common import write_json
+from repro.failure_logging import classify_exception, failure_generation_payload
 from repro.plugin_api import ExperimentSpec, MetricStatus
 from repro.plugins.autogaze_sparse_selector import runtime_config_from_args, run_direct_autogaze_selector
 from repro.plugins.mllm_adapters import MllmRunRequest, resolve_mllm_adapter
@@ -359,33 +360,51 @@ def run_single(args: argparse.Namespace) -> dict[str, Any]:
         write_json(args.output_json, payload)
         return payload
 
-    pixelprune_status = maybe_apply_pre_encoder_prune(args, payload["experiment_spec"]["model_family"])
-    if _pre_encoder_prune_failed(args, pixelprune_status):
-        payload["implementation_status"] = "failed_missing_dependency"
-        payload["pre_encoder_prune_runtime"] = pixelprune_status
-        payload["generation"] = _pre_encoder_prune_failure_result(args, pixelprune_status)
-        payload["measurement_plan"] = payload["generation"]["metrics"]
-        write_json(args.output_json, payload)
-        return payload
+    stage = "pre_encoder_prune"
+    pixelprune_status: dict[str, Any] = {"status": "not_started"}
+    direct_selector_status: dict[str, Any] = {"status": "not_started"}
+    try:
+        pixelprune_status = maybe_apply_pre_encoder_prune(args, payload["experiment_spec"]["model_family"])
+        if _pre_encoder_prune_failed(args, pixelprune_status):
+            payload["implementation_status"] = "failed_missing_dependency"
+            payload["pre_encoder_prune_runtime"] = pixelprune_status
+            payload["generation"] = _pre_encoder_prune_failure_result(args, pixelprune_status)
+            payload["measurement_plan"] = payload["generation"]["metrics"]
+            write_json(args.output_json, payload)
+            return payload
 
-    direct_selector_status = maybe_run_direct_autogaze_selector(args)
-    if direct_selector_status.get("status") == "failed":
-        payload["implementation_status"] = "failed_autogaze_selector"
+        stage = "autogaze"
+        direct_selector_status = maybe_run_direct_autogaze_selector(args)
+        if direct_selector_status.get("status") == "failed":
+            payload["implementation_status"] = "failed_autogaze_selector"
+            payload["pre_encoder_prune_runtime"] = pixelprune_status
+            payload["direct_autogaze_selector"] = direct_selector_status
+            write_json(args.output_json, payload)
+            return payload
+
+        stage = "mllm_generate"
+        request = build_mllm_run_request(args)
+        payload["mllm_runtime"] = adapter.describe_runtime(request)
+        output = adapter.run(request).to_dict()
+        payload["implementation_status"] = output.get("status", "executed")
         payload["pre_encoder_prune_runtime"] = pixelprune_status
         payload["direct_autogaze_selector"] = direct_selector_status
+        payload["generation"] = output
+        payload["measurement_plan"] = output.get("metrics", payload["measurement_plan"])
         write_json(args.output_json, payload)
         return payload
-
-    request = build_mllm_run_request(args)
-    payload["mllm_runtime"] = adapter.describe_runtime(request)
-    output = adapter.run(request).to_dict()
-    payload["implementation_status"] = output.get("status", "executed")
-    payload["pre_encoder_prune_runtime"] = pixelprune_status
-    payload["direct_autogaze_selector"] = direct_selector_status
-    payload["generation"] = output
-    payload["measurement_plan"] = output.get("metrics", payload["measurement_plan"])
-    write_json(args.output_json, payload)
-    return payload
+    except Exception as exc:
+        failure = classify_exception(exc, stage=stage)
+        payload["implementation_status"] = failure["kind"]
+        payload["pre_encoder_prune_runtime"] = pixelprune_status
+        payload["direct_autogaze_selector"] = direct_selector_status
+        payload["failure"] = failure
+        payload["generation"] = failure_generation_payload(args, failure)
+        payload["measurement_plan"] = payload["generation"]["metrics"]
+        write_json(args.output_json, payload)
+        if failure["kind"] != "oom":
+            raise
+        return payload
 
 
 def maybe_run_direct_autogaze_selector(args: argparse.Namespace) -> dict[str, Any]:

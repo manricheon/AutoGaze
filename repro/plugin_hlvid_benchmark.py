@@ -6,9 +6,11 @@ from pathlib import Path
 from typing import Any
 
 from repro.common import compute_stats, write_json, write_jsonl
+from repro.failure_logging import classify_exception, failure_generation_payload
 from repro.flexible_runner import parse_args as parse_flexible_args
 from repro.flexible_runner import run_single
 from repro.hlvid import read_manifest_file, score_predictions
+from repro.report_charts import ChartBar, ChartSegment, write_bar_chart
 
 
 DEFAULT_MODELS = {
@@ -377,7 +379,21 @@ def run_plugin_hlvid_benchmark(
                 video_resize_width=video_resize_width,
                 video_resize_height=video_resize_height,
             )
-            payload = run_single(parse_flexible_args(runner_args))
+            parsed_args = parse_flexible_args(runner_args)
+            try:
+                payload = run_single(parsed_args)
+            except Exception as exc:
+                failure = classify_exception(exc, stage="mllm_generate")
+                payload = {
+                    "runner": "flexible_runner",
+                    "mode": "single",
+                    "implementation_status": failure["kind"],
+                    "failure": failure,
+                    "generation": failure_generation_payload(parsed_args, failure),
+                }
+                write_json(run_json, payload)
+                if failure["kind"] != "oom":
+                    raise
             generation = payload.get("generation", {})
             metrics = generation.get("metrics", {})
             prediction = {
@@ -391,6 +407,7 @@ def run_plugin_hlvid_benchmark(
                 "raw_output": generation.get("text"),
                 "status": _prediction_status(generation.get("status")),
                 "runner_status": payload.get("implementation_status"),
+                "failure": payload.get("failure") or generation.get("failure"),
                 "metric_status": metrics.get("metric_status"),
                 "metrics": metrics,
                 "processing_budget_summary": metrics.get("processing_budget_summary"),
@@ -402,9 +419,10 @@ def run_plugin_hlvid_benchmark(
     predictions_path = output / "plugin_hlvid_predictions.jsonl"
     summary_path = output / "plugin_hlvid_summary.json"
     report_path = output / "plugin_hlvid_report.md"
+    assets_dir = output / "plugin_hlvid_report_assets"
     write_jsonl(predictions_path, predictions)
     write_json(summary_path, summary)
-    report_path.write_text(build_markdown_report(summary), encoding="utf-8")
+    report_path.write_text(build_markdown_report(summary, assets_dir=assets_dir, report_dir=output), encoding="utf-8")
     return {
         "predictions": predictions,
         "summary": summary,
@@ -416,7 +434,12 @@ def run_plugin_hlvid_benchmark(
     }
 
 
-def build_markdown_report(summary: dict[str, Any]) -> str:
+def build_markdown_report(
+    summary: dict[str, Any],
+    *,
+    assets_dir: str | Path | None = None,
+    report_dir: str | Path | None = None,
+) -> str:
     lines = [
         "# Plugin HLVid Limit Benchmark",
         "",
@@ -485,6 +508,14 @@ def build_markdown_report(summary: dict[str, Any]) -> str:
                 + " | ".join(_markdown_cell(value) for value in row)
                 + " |"
             )
+    if assets_dir is not None:
+        chart_paths = _write_plugin_summary_charts(summary, Path(assets_dir))
+        if chart_paths:
+            base = Path(report_dir) if report_dir is not None else Path(assets_dir).parent
+            lines.extend(["", "## Charts", ""])
+            for title, path in chart_paths:
+                display = path.relative_to(base) if path.is_relative_to(base) else path
+                lines.extend([f"### {title}", "", f"![{title}]({display})", ""])
     lines.extend(
         [
             "",
@@ -502,6 +533,62 @@ def build_markdown_report(summary: dict[str, Any]) -> str:
         ]
     )
     return "\n".join(lines) + "\n"
+
+
+def _write_plugin_summary_charts(summary: dict[str, Any], assets_dir: Path) -> list[tuple[str, Path]]:
+    modes = summary.get("modes", {})
+    if not isinstance(modes, dict):
+        return []
+    charts: list[tuple[str, Path]] = []
+    latency_bars = []
+    memory_bars = []
+    token_bars = []
+    status_bars = []
+    for mode, mode_summary in modes.items():
+        budget = mode_summary.get("processing_budget_summary", {})
+        mode_median = budget.get("mode_median", {}) if isinstance(budget, dict) else {}
+        selected = first_present(
+            mode_median.get("patch_budget_before_siglip.autogaze_selected_total_patch_tokens"),
+            mode_median.get("patch_budget_before_vit.estimated_visual_tokens_after_prune"),
+        )
+        reduction = first_present(
+            mode_median.get("patch_budget_before_siglip.total_patch_reduction_ratio"),
+            mode_median.get("patch_budget_before_vit.estimated_visual_token_reduction_ratio"),
+        )
+        if selected is not None:
+            token_bars.append(ChartBar(str(mode), [ChartSegment("selected_patch_tokens", float(selected))]))
+        if reduction is not None:
+            status_bars.append(ChartBar(f"{mode}:token_reduction", [ChartSegment("token_reduction_ratio", float(reduction))]))
+        status_counts = mode_summary.get("status_counts", {})
+        if isinstance(status_counts, dict):
+            for status, count in status_counts.items():
+                status_bars.append(ChartBar(f"{mode}:{status}", [ChartSegment(str(status), float(count))]))
+        latency = mode_summary.get("latency_ms", {})
+        if isinstance(latency, dict) and latency.get("total", {}).get("median") is not None:
+            latency_bars.append(ChartBar(str(mode), [ChartSegment("total_ms", float(latency["total"]["median"]))]))
+        memory = mode_summary.get("memory_bytes", {})
+        if isinstance(memory, dict) and memory.get("peak_memory_bytes", {}).get("median") is not None:
+            memory_bars.append(
+                ChartBar(str(mode), [ChartSegment("peak_memory_bytes", float(memory["peak_memory_bytes"]["median"]))])
+            )
+    if latency_bars:
+        artifact = write_bar_chart(assets_dir / "latency_by_mode.svg", title="Latency By Mode", bars=latency_bars, unit="ms")
+        charts.append((artifact.title, artifact.path))
+    if token_bars:
+        artifact = write_bar_chart(
+            assets_dir / "selected_tokens_by_mode.svg",
+            title="Selected Tokens By Mode",
+            bars=token_bars,
+            unit="tokens",
+        )
+        charts.append((artifact.title, artifact.path))
+    if memory_bars:
+        artifact = write_bar_chart(assets_dir / "memory_by_mode.svg", title="Memory By Mode", bars=memory_bars, unit="bytes")
+        charts.append((artifact.title, artifact.path))
+    if status_bars:
+        artifact = write_bar_chart(assets_dir / "status_by_mode.svg", title="Status By Mode", bars=status_bars, unit="count")
+        charts.append((artifact.title, artifact.path))
+    return charts
 
 
 def first_present(*values: Any) -> Any:
@@ -620,6 +707,8 @@ def _base_args(
 
 
 def _prediction_status(generation_status: str | None) -> str:
+    if generation_status == "oom":
+        return "oom"
     if generation_status in {"executed", "probe_required", "probe_collected", "poc_ready"}:
         return "ok"
     return "failed"

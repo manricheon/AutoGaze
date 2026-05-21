@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any
+
+from repro.report_charts import ChartArtifact, build_standard_report_charts
 
 
 PIPELINE_ASCII = """Video file(s)
@@ -473,6 +476,26 @@ def render_key_metrics_section(metrics: dict[str, Any]) -> str:
         else:
             sections.append(render_simple_metric_table(group, memory=is_memory))
     return "\n\n".join(sections)
+
+
+def render_charts_section(artifacts: list[ChartArtifact], *, markdown_dir: Path | None = None) -> str:
+    if not artifacts:
+        return ""
+    rows: list[list[Any]] = []
+    lines = ["## Charts"]
+    for artifact in artifacts:
+        path = artifact.path
+        if markdown_dir is not None:
+            try:
+                display_path = os.path.relpath(path, markdown_dir)
+            except ValueError:
+                display_path = str(path)
+        else:
+            display_path = str(path)
+        rows.append([artifact.title, display_path])
+        lines.append(f"![{artifact.title}]({display_path})")
+    lines.append(markdown_table(["Chart", "File"], rows))
+    return "\n\n".join(lines)
 
 
 def _latency_accounting(payload: dict[str, Any], metrics: dict[str, Any]) -> dict[str, Any]:
@@ -1212,6 +1235,8 @@ def render_markdown_report(
     *,
     source_path: str | None = None,
     title: str = "AutoGaze Reproduction Report",
+    chart_artifacts: list[ChartArtifact] | None = None,
+    markdown_dir: str | Path | None = None,
 ) -> str:
     metrics = enriched_key_metrics(payload, key_metrics(payload))
     sections = [
@@ -1222,6 +1247,7 @@ def render_markdown_report(
         render_processing_budget_summary(payload),
         render_autogaze_token_patch_flow(payload, metrics),
         render_step_pipeline_metrics(payload, metrics),
+        render_charts_section(chart_artifacts or [], markdown_dir=Path(markdown_dir) if markdown_dir else None),
         render_key_metrics_section(metrics),
         render_latency_accounting_section(payload, metrics),
         render_benchmark_score(payload),
@@ -1232,11 +1258,29 @@ def render_markdown_report(
     return "\n\n".join(section for section in sections if section).rstrip() + "\n"
 
 
-def write_markdown_report(input_json: str | Path, output_md: str | Path, *, title: str = "AutoGaze Reproduction Report") -> None:
+def write_markdown_report(
+    input_json: str | Path,
+    output_md: str | Path,
+    *,
+    title: str = "AutoGaze Reproduction Report",
+    include_charts: bool = True,
+    charts_dir: str | Path | None = None,
+) -> None:
     payload = load_json(input_json)
-    markdown = render_markdown_report(payload, source_path=str(input_json), title=title)
     target = Path(output_md)
     target.parent.mkdir(parents=True, exist_ok=True)
+    chart_artifacts: list[ChartArtifact] = []
+    if include_charts:
+        metrics = enriched_key_metrics(payload, key_metrics(payload))
+        chart_output_dir = Path(charts_dir) if charts_dir is not None else target.parent / f"{target.stem}_assets"
+        chart_artifacts = build_standard_report_charts(metrics=metrics, output_dir=chart_output_dir)
+    markdown = render_markdown_report(
+        payload,
+        source_path=str(input_json),
+        title=title,
+        chart_artifacts=chart_artifacts,
+        markdown_dir=target.parent,
+    )
     target.write_text(markdown)
 
 
@@ -1245,12 +1289,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input-json", required=True)
     parser.add_argument("--output-md", required=True)
     parser.add_argument("--title", default="AutoGaze Reproduction Report")
+    parser.add_argument("--no-charts", action="store_true")
+    parser.add_argument("--charts-dir")
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    write_markdown_report(args.input_json, args.output_md, title=args.title)
+    write_markdown_report(
+        args.input_json,
+        args.output_md,
+        title=args.title,
+        include_charts=not args.no_charts,
+        charts_dir=args.charts_dir,
+    )
     print(str(args.output_md))
 
 

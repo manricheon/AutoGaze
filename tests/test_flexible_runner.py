@@ -564,6 +564,46 @@ def test_flexible_runner_runs_direct_autogaze_selector_before_qwen_prune_generat
     assert payload["generation"]["text"] == "qwen direct autogaze"
 
 
+def test_flexible_runner_writes_oom_payload_when_adapter_ooms(monkeypatch, tmp_path):
+    output_json = tmp_path / "qwen_oom.json"
+    args = parse_args(
+        [
+            "--mode",
+            "single",
+            "--model-family",
+            "qwen3-vl",
+            "--model-path",
+            "weight/Qwen3-VL-8B-Instruct",
+            "--token-selector-adapter",
+            "keep-all",
+            "--vision-encoder-adapter",
+            "qwen3-vl-vision",
+            "--mllm-adapter",
+            "qwen3-vl",
+            "--autogaze-integration-level",
+            "none",
+            "--video",
+            "inputs/example.mp4",
+            "--output-json",
+            str(output_json),
+        ]
+    )
+
+    def fake_run(self, request):
+        raise RuntimeError("CUDA out of memory while running qwen_vit_prepare")
+
+    monkeypatch.setattr(QwenGridMllmAdapter, "run", fake_run)
+
+    payload = run_single(args)
+
+    assert payload["implementation_status"] == "oom"
+    assert payload["failure"]["kind"] == "oom"
+    assert payload["failure"]["stage"] == "qwen_vit_prepare"
+    assert payload["generation"]["status"] == "oom"
+    assert payload["generation"]["metrics"]["metric_status"]["value"] == "oom"
+    assert json.loads(output_json.read_text())["failure"]["stage"] == "qwen_vit_prepare"
+
+
 def test_flexible_runner_defaults_qwen_video_nframes_to_num_video_frames():
     args = parse_args(
         [
