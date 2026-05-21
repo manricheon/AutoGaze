@@ -449,3 +449,48 @@ def test_render_stream_profile_markdown_keeps_source_and_effective_resolution_se
 
     assert "source_resolution | 3840x2160" in markdown
     assert "processor_input_resolution | 1280x720" in markdown
+
+
+def test_render_flexible_single_markdown_reads_generation_metrics_processing_budget():
+    payload = {
+        "runner": "flexible_runner",
+        "mode": "single",
+        "model_path": "weight/Qwen3-VL",
+        "video": "clip.mp4",
+        "generation": {
+            "text": "B",
+            "metrics": {
+                "latency_ms": {"total": 1200, "generate": 700},
+                "tokens": {
+                    "visual_tokens_before_prune": 1000,
+                    "visual_tokens_after_prune": 100,
+                    "visual_token_reduction_ratio": 10.0,
+                    "llm_context_tokens": 220,
+                },
+                "memory_bytes": {"peak_cuda_allocated": 10_000},
+                "processing_budget_summary": {
+                    "runner": "flexible_runner",
+                    "video": {
+                        "source_resolution": "3840x2160",
+                        "processor_input_resolution": "1280x720",
+                        "requested_video_frames": 128,
+                    },
+                    "thumbnail": {"enabled": True, "effective_frames": 16},
+                    "patch_budget_before_vit": {
+                        "actual_raw_patch_tokens_before_vit": 1000,
+                        "estimated_visual_tokens_after_prune": 100,
+                        "estimated_visual_token_reduction_ratio": 10.0,
+                    },
+                },
+            },
+        },
+    }
+
+    markdown = render_markdown_report(payload, source_path="flexible_single.json")
+
+    assert "## Processing Budget Summary" in markdown
+    assert "3840x2160" in markdown
+    assert "## AutoGaze Token And Patch Flow" in markdown
+    assert "full_patch_budget_before_selector" in markdown
+    assert "encoder_input_patch_tokens_after_autogaze" in markdown
+    assert "llm_input_context_tokens" in markdown

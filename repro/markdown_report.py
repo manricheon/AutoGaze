@@ -211,6 +211,8 @@ def key_metrics_from_stream_profile(payload: dict[str, Any]) -> dict[str, Any]:
 def key_metrics(payload: dict[str, Any]) -> dict[str, Any]:
     if isinstance(payload.get("key_metrics_summary"), dict):
         return payload["key_metrics_summary"]
+    if isinstance(get_path(payload, "generation.metrics"), dict):
+        return get_path(payload, "generation.metrics")
     if isinstance(get_path(payload, "readable_performance_summary.key_metrics_median"), dict):
         return get_path(payload, "readable_performance_summary.key_metrics_median")
     if isinstance(get_path(payload, "readable_summary.key_metrics_median"), dict):
@@ -738,7 +740,11 @@ def render_input_tokenization(payload: dict[str, Any], metrics: dict[str, Any]) 
 
 def render_processing_budget_summary(payload: dict[str, Any]) -> str:
     result = result_payload(payload)
-    summary = as_mapping(result.get("processing_budget_summary") or payload.get("processing_budget_summary"))
+    summary = as_mapping(
+        result.get("processing_budget_summary")
+        or payload.get("processing_budget_summary")
+        or get_path(payload, "generation.metrics.processing_budget_summary")
+    )
     readable_budget = as_mapping(
         get_path(payload, "readable_summary.processing_budget_summary")
         or get_path(payload, "readable_performance_summary.processing_budget_summary")
@@ -756,6 +762,7 @@ def render_processing_budget_summary(payload: dict[str, Any]) -> str:
         )
     if not summary:
         return ""
+    video = as_mapping(summary.get("video"))
     model_unit = as_mapping(summary.get("model_processing_unit"))
     tiling = as_mapping(summary.get("tiling"))
     thumbnail = as_mapping(summary.get("thumbnail"))
@@ -763,6 +770,11 @@ def render_processing_budget_summary(payload: dict[str, Any]) -> str:
     patch_budget = as_mapping(summary.get("patch_budget_before_siglip") or summary.get("patch_budget_before_vit"))
     llm_budget = as_mapping(summary.get("llm_visual_budget"))
     rows = [
+        ["source_resolution", video.get("source_resolution")],
+        ["processor_input_resolution", video.get("processor_input_resolution")],
+        ["requested_video_frames", video.get("requested_video_frames")],
+        ["actual_video_frames", video.get("actual_video_frames")],
+        ["runner_resize", video.get("resize_request") or video.get("runner_resize")],
         ["model_processing_unit", model_unit.get("name")],
         ["tile_size_px", model_unit.get("tile_size_px")],
         ["spatial_tiles_per_frame", tiling.get("spatial_tiles_per_frame") or tiling.get("spatial_chunks_per_frame_limit")],
@@ -794,7 +806,11 @@ def render_autogaze_token_patch_flow(payload: dict[str, Any], metrics: dict[str,
         return render_readable_budget_token_flow(readable_budget)
 
     result = result_payload(payload)
-    summary = as_mapping(result.get("processing_budget_summary") or payload.get("processing_budget_summary"))
+    summary = as_mapping(
+        result.get("processing_budget_summary")
+        or payload.get("processing_budget_summary")
+        or get_path(payload, "generation.metrics.processing_budget_summary")
+    )
     if not summary:
         return ""
     return render_single_budget_token_flow(summary, metrics)
