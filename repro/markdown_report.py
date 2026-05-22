@@ -25,132 +25,7 @@ PIPELINE_ASCII = """Video file(s)
   -> LLM prefill/generation
   -> Answer or benchmark score"""
 
-DISPLAY_LABELS = {
-    "latency_ms": "Latency",
-    "tokens": "Tokens",
-    "memory_bytes": "Memory",
-    "total_ms": "Total ms",
-    "total": "Total ms",
-    "total_median": "Total ms",
-    "video_decode_read_ms": "Decode/read ms",
-    "video_decode_read_median": "Decode/read ms",
-    "video_decode_ms": "Decode/read ms",
-    "video_decode_median": "Decode/read ms",
-    "video_prepare_total_ms": "Runner video prep ms",
-    "video_frame_resize_ms": "Frame resize ms",
-    "video_tiling_ms": "Tile/tensor prep ms",
-    "selector_input_build_ms": "Selector input ms",
-    "vision_input_build_ms": "Vision input ms",
-    "autogaze_model_forward_ms": "AutoGaze forward ms",
-    "mm_projector_ms": "Projector ms",
-    "preprocess_rest_without_decode_autogaze_ms": "Prep rest ms",
-    "preprocess_rest_without_decode_autogaze_median": "Prep rest ms",
-    "preprocess_without_autogaze_ms": "Preprocess(no AG) ms",
-    "preprocess_without_autogaze_median": "Preprocess(no AG) ms",
-    "preprocess_total_ms": "Preprocess incl. AG ms",
-    "preprocess_total_median": "Preprocess incl. AG ms",
-    "autogaze_total_ms": "AutoGaze ms",
-    "autogaze_ms": "AutoGaze ms",
-    "autogaze_total_median": "AutoGaze ms",
-    "autogaze_median": "AutoGaze ms",
-    "gazing_info_total_ms": "AutoGaze ms",
-    "vit_encoder_ms": "ViT ms",
-    "vision_encoder_ms": "ViT ms",
-    "vit_encoder_median": "ViT ms",
-    "qwen_vit_prepare_ms": "ViT ms",
-    "qwen_vit_prepare": "ViT ms",
-    "llm_ms": "LLM forward ms",
-    "llm_median": "LLM forward ms",
-    "llm_forward_ms": "LLM forward ms",
-    "llm_generation_ms": "LLM generation ms",
-    "llm_generation_median": "LLM generation ms",
-    "generate": "Generate total ms",
-    "generate_ms": "Generate total ms",
-    "generate_median": "Generate total ms",
-    "generation_rest_ms": "Generate rest ms",
-    "generate_rest_ms": "Generate rest ms",
-    "generation_rest_median": "Generate rest ms",
-    "encoder_patch_tokens_before_keep_all_or_raw": "Full patch",
-    "vit_encoder_input_patch_tokens_before_autogaze": "ViT before",
-    "raw_vit_patch_tokens_before_selector": "Full patch",
-    "hd_multiscale_keep_all_patch_tokens": "Full patch",
-    "visual_tokens_before_prune": "Full patch",
-    "autogaze_selected_total_patch_tokens": "Selected patch",
-    "vit_encoder_input_patch_tokens_after_autogaze": "ViT after",
-    "encoder_input_patch_tokens_after_autogaze": "Selected patch",
-    "encoder_patch_tokens_after_autogaze": "Selected patch",
-    "visual_tokens_after_prune": "Selected patch",
-    "encoder_token_reduction_ratio": "Patch x",
-    "autogaze_patch_reduction_ratio": "Patch x",
-    "patch_reduction_ratio_full_or_raw_over_autogaze": "Patch x",
-    "visual_token_reduction_ratio": "Patch x",
-    "llm_visual_tokens_after_actual": "LLM visual",
-    "llm_visual_tokens_before_autogaze": "LLM before",
-    "llm_visual_tokens_after_autogaze": "LLM after",
-    "llm_visual_tokens_actual_from_budget": "LLM visual",
-    "llm_context_tokens": "LLM context",
-    "llm_visual_token_reduction_ratio": "LLM visual x",
-    "llm_visual_token_reduction_ratio_from_budget": "LLM visual x",
-    "processor_peak": "Processor peak",
-    "processor_peak_median": "Processor peak",
-    "autogaze_peak": "AutoGaze peak",
-    "vision_encoder_peak": "ViT peak",
-    "siglip_gazed_hidden_peak": "ViT peak",
-    "llm_peak": "LLM peak",
-    "llm_peak_median": "LLM peak",
-    "overall_peak": "Overall peak",
-    "overall_peak_median": "Overall peak",
-    "peak_cuda_allocated": "Peak GiB",
-    "peak_cuda_reserved": "Peak GiB",
-}
-
-SUMMARY_LATENCY_SPECS = [
-    ("Total ms", ("total_ms", "total", "total_median")),
-    ("Decode/read ms", ("video_decode_read_ms", "video_decode_read_median", "video_decode_ms", "video_decode_median")),
-    ("Prep rest ms", ("preprocess_rest_without_decode_autogaze_ms", "preprocess_rest_without_decode_autogaze_median")),
-    ("Selector input ms", ("selector_input_build_ms", "selector_input_build_median")),
-    ("AutoGaze ms", ("autogaze_total_ms", "autogaze_ms", "autogaze_total_median", "autogaze_median", "gazing_info_total_ms")),
-    ("Vision input ms", ("vision_input_build_ms", "vision_input_build_median")),
-    (
-        "ViT ms",
-        (
-            "vit_encoder_ms",
-            "vision_encoder_ms",
-            "siglip_vision_ms",
-            "vit_encoder_median",
-            "qwen_vit_prepare",
-            "qwen_vit_prepare_ms",
-        ),
-    ),
-    ("Projector ms", ("mm_projector_ms", "projector_ms")),
-    ("Generate total ms", ("generate_ms", "generate_median", "generate")),
-    ("LLM generation ms", ("llm_generation_ms", "llm_generation_median")),
-    ("LLM forward ms", ("llm_ms", "llm_median", "llm_forward_ms")),
-    ("Generate rest ms", ("generation_rest_ms", "generate_rest_ms", "generation_rest_median")),
-]
-
-SUMMARY_TOKEN_SPECS = [
-    (
-        "Full patch",
-        (
-            "hd_multiscale_keep_all_patch_tokens",
-            "single_scale_dense_siglip_reference_patch_tokens",
-            "raw_vit_patch_tokens_before_selector",
-            "encoder_patch_tokens_before_keep_all_or_raw",
-            "visual_tokens_before_prune",
-        ),
-    ),
-    ("Selected patch", ("autogaze_selected_total_patch_tokens", "encoder_input_patch_tokens_after_autogaze", "encoder_patch_tokens_after_autogaze", "visual_tokens_after_prune")),
-    ("Patch x", ("patch_reduction_ratio_full_or_raw_over_autogaze", "encoder_token_reduction_ratio", "visual_token_reduction_ratio")),
-    ("LLM visual", ("llm_visual_tokens_actual_from_budget", "llm_visual_tokens_after_actual", "llm_context_tokens")),
-]
-
-SUMMARY_MEMORY_SPECS = [
-    ("Peak GiB", ("overall_peak", "overall_peak_median", "peak_cuda_allocated", "peak_cuda_reserved", "llm_peak", "llm_peak_median")),
-]
-
 COMPARISON_MODE_ORDER = ("keep_all", "single_scale_dense", "autogaze")
-MODE_METRIC_KEYS = set(COMPARISON_MODE_ORDER)
 MODE_TABLE_LABELS = {
     "keep_all": "Keep-all",
     "single_scale_dense": "Single-scale",
@@ -652,8 +527,8 @@ def add_single_budget_token_metrics(tokens: dict[str, Any], summary: dict[str, A
     )
     selected_patches = first_present(
         patch_budget_siglip.get("autogaze_selected_total_patch_tokens"),
-        patch_budget_vit.get("estimated_visual_tokens_after_prune"),
         tokens.get("visual_tokens_after_prune"),
+        patch_budget_vit.get("estimated_visual_tokens_after_prune"),
     )
     raw_or_multiscale_patches = first_present(hd_multiscale_patches, raw_vit_patches)
     llm_keep_all = first_present(
@@ -818,21 +693,6 @@ def before_after_metric(before: Any, after: Any) -> dict[str, Any]:
     }
 
 
-def metric_display_label(name: str) -> str:
-    return DISPLAY_LABELS.get(name, name)
-
-
-def is_primary_raw_metric(name: str) -> bool:
-    return name not in {"preprocess_total_ms", "preprocess_total_median"}
-
-
-def preprocess_without_autogaze_value(latency: dict[str, Any]) -> Any:
-    return metric_from_aliases(
-        latency,
-        ("preprocess_without_autogaze_ms", "preprocess_without_autogaze_median"),
-    )
-
-
 def video_decode_read_value(latency: dict[str, Any]) -> Any:
     return metric_from_aliases(
         latency,
@@ -863,11 +723,114 @@ def value_from_aliases(group: dict[str, Any], aliases: tuple[str, ...], mode: st
     return None
 
 
-def has_mode_comparison(group: dict[str, Any]) -> bool:
-    return bool(comparison_modes(group))
+def mode_status(payload: dict[str, Any], mode: str | None) -> Any:
+    if mode is None:
+        return first_present(payload.get("implementation_status"), get_path(payload, "generation.status"))
+    return first_present(
+        get_path(payload, f"readable_summary.mode_status.{mode}"),
+        get_path(payload, f"readable_performance_summary.mode_status.{mode}"),
+        get_path(payload, f"{mode}.status"),
+        get_path(payload, f"{mode}.summary.status"),
+    )
 
 
-def render_key_comparison_section(metrics: dict[str, Any]) -> str:
+def mode_accuracy(payload: dict[str, Any], mode: str | None) -> Any:
+    if mode is None:
+        return None
+    return first_present(
+        get_path(payload, f"{mode}.accuracy.accuracy_scored"),
+        get_path(payload, f"{mode}.accuracy.measured_accuracy"),
+        get_path(payload, f"{mode}.summary.accuracy_scored"),
+    )
+
+
+def mode_label(mode: str | None) -> str:
+    if mode is None:
+        return "Current"
+    return MODE_TABLE_LABELS.get(mode, mode)
+
+
+def format_gib_only(value: Any) -> str:
+    if value is None:
+        return "-"
+    number = numeric_or_none(value)
+    if number is None:
+        return format_value(value)
+    return f"{number / (1024**3):.3f}".rstrip("0").rstrip(".") + " GiB"
+
+
+def format_transition(before: Any, after: Any) -> str:
+    if before is None and after is None:
+        return "-"
+    return f"{format_value(before)} -> {format_value(after)}"
+
+
+def format_ratio_x(value: Any) -> str:
+    ratio = numeric_or_none(value)
+    if ratio is None:
+        return "-"
+    return f"{format_value(ratio)}x"
+
+
+def mode_total_latency(latency: dict[str, Any], mode: str | None = None) -> Any:
+    return value_from_aliases(latency, ("total_ms", "total", "total_median"), mode)
+
+
+def mode_decode_latency(latency: dict[str, Any], mode: str | None = None) -> Any:
+    return value_from_aliases(
+        latency,
+        ("video_decode_read_ms", "video_decode_read_median", "video_decode_ms", "video_decode_median"),
+        mode,
+    )
+
+
+def mode_model_side_latency(latency: dict[str, Any], mode: str | None = None) -> float | None:
+    total = numeric_or_none(mode_total_latency(latency, mode))
+    if total is None:
+        return None
+    decode = numeric_or_none(mode_decode_latency(latency, mode)) or 0.0
+    resize = numeric_or_none(value_from_aliases(latency, ("video_frame_resize_ms", "frame_resize_ms"), mode)) or 0.0
+    return max(total - decode - resize, 0.0)
+
+
+def mode_actual_encoder_tokens(tokens: dict[str, Any], mode: str | None = None) -> Any:
+    return value_from_aliases(
+        tokens,
+        (
+            "vit_encoder_input_patch_tokens_after_autogaze",
+            "autogaze_selected_total_patch_tokens",
+            "encoder_input_patch_tokens_after_autogaze",
+            "encoder_patch_tokens_after_autogaze",
+            "visual_tokens_after_prune",
+            "encoder_patch_tokens_before_keep_all_or_raw",
+            "visual_tokens_before_prune",
+        ),
+        mode,
+    )
+
+
+def mode_llm_visual_tokens(tokens: dict[str, Any], mode: str | None = None) -> Any:
+    return value_from_aliases(
+        tokens,
+        (
+            "llm_visual_tokens_after_autogaze",
+            "llm_visual_tokens_actual_from_budget",
+            "llm_visual_tokens_after_actual",
+            "llm_context_tokens",
+        ),
+        mode,
+    )
+
+
+def mode_peak_memory(memory: dict[str, Any], mode: str | None = None) -> Any:
+    return value_from_aliases(
+        memory,
+        ("overall_peak", "overall_peak_median", "peak_cuda_allocated", "peak_cuda_reserved", "llm_peak"),
+        mode,
+    )
+
+
+def render_mode_snapshot(payload: dict[str, Any], metrics: dict[str, Any]) -> str:
     latency = as_mapping(metrics.get("latency_ms"))
     tokens = as_mapping(metrics.get("tokens"))
     memory = as_mapping(metrics.get("memory_bytes"))
@@ -878,22 +841,148 @@ def render_key_comparison_section(metrics: dict[str, Any]) -> str:
         tuple(mode for mode in COMPARISON_MODE_ORDER if mode in mode_set) if mode_set else (None,)
     )
     rows: list[list[Any]] = []
-    headers = [label for label, _ in SUMMARY_LATENCY_SPECS + SUMMARY_TOKEN_SPECS + SUMMARY_MEMORY_SPECS]
     for mode in modes:
-        row = [value_from_aliases(latency, aliases, mode) for _, aliases in SUMMARY_LATENCY_SPECS]
-        row.extend(value_from_aliases(tokens, aliases, mode) for _, aliases in SUMMARY_TOKEN_SPECS)
-        row.extend(value_from_aliases(memory, aliases, mode) for _, aliases in SUMMARY_MEMORY_SPECS)
-        if any(value is not None for value in row):
-            rows.append(([mode] if mode is not None else []) + row)
+        total = mode_total_latency(latency, mode)
+        decode = mode_decode_latency(latency, mode)
+        prep_rest = value_from_aliases(
+            latency,
+            ("preprocess_rest_without_decode_autogaze_ms", "preprocess_rest_without_decode_autogaze_median"),
+            mode,
+        )
+        model_side = mode_model_side_latency(latency, mode)
+        autogaze = value_from_aliases(
+            latency,
+            ("autogaze_total_ms", "autogaze_ms", "autogaze_total_median", "autogaze_median", "gazing_info_total_ms"),
+            mode,
+        )
+        vit = value_from_aliases(
+            latency,
+            ("vit_encoder_ms", "vision_encoder_ms", "siglip_vision_ms", "vit_encoder_median", "qwen_vit_prepare"),
+            mode,
+        )
+        llm_forward = value_from_aliases(latency, ("llm_ms", "llm_median", "llm_forward_ms"), mode)
+        peak = mode_peak_memory(memory, mode)
+        encoder_tokens = mode_actual_encoder_tokens(tokens, mode)
+        llm_tokens = mode_llm_visual_tokens(tokens, mode)
+        row = [
+            mode_label(mode),
+            mode_status(payload, mode),
+            mode_accuracy(payload, mode),
+            total,
+            decode,
+            prep_rest,
+            model_side,
+            autogaze,
+            vit,
+            llm_forward,
+            format_gib_only(peak) if peak is not None else None,
+            encoder_tokens,
+            llm_tokens,
+        ]
+        if any(value is not None for value in row[1:]):
+            rows.append(row)
     if not rows:
         return ""
-    if modes != (None,):
-        headers = ["Mode"] + headers
-    note = (
-        "Decode/read is split out from preprocessing when measured. "
-        "Prep rest excludes both video decode/read and AutoGaze time."
+    return "### Mode Snapshot\n\n" + markdown_table(
+        [
+            "Mode",
+            "Status",
+            "Accuracy",
+            "Total ms",
+            "Decode/read ms",
+            "Prep rest ms",
+            "Model-side ms",
+            "AutoGaze ms",
+            "ViT ms",
+            "LLM forward ms",
+            "Peak",
+            "Encoder tokens",
+            "LLM visual tokens",
+        ],
+        rows,
     )
-    return "## Key Comparison\n\n" + note + "\n\n" + markdown_table(headers, rows)
+
+
+def render_pairwise_gains(payload: dict[str, Any], metrics: dict[str, Any]) -> str:
+    latency = as_mapping(metrics.get("latency_ms"))
+    tokens = as_mapping(metrics.get("tokens"))
+    memory = as_mapping(metrics.get("memory_bytes"))
+    available_modes = set()
+    for group in (latency, tokens, memory):
+        available_modes.update(comparison_modes(group))
+    pairs = [
+        ("keep_all", "autogaze", "AutoGaze vs keep-all"),
+        ("single_scale_dense", "autogaze", "AutoGaze vs single-scale"),
+    ]
+    rows: list[list[Any]] = []
+    for baseline_mode, autogaze_mode, label in pairs:
+        if baseline_mode not in available_modes or autogaze_mode not in available_modes:
+            continue
+        base_total = mode_total_latency(latency, baseline_mode)
+        auto_total = mode_total_latency(latency, autogaze_mode)
+        base_model_side = mode_model_side_latency(latency, baseline_mode)
+        auto_model_side = mode_model_side_latency(latency, autogaze_mode)
+        base_vit = value_from_aliases(
+            latency,
+            ("vit_encoder_ms", "vision_encoder_ms", "siglip_vision_ms", "vit_encoder_median", "qwen_vit_prepare"),
+            baseline_mode,
+        )
+        auto_vit = value_from_aliases(
+            latency,
+            ("vit_encoder_ms", "vision_encoder_ms", "siglip_vision_ms", "vit_encoder_median", "qwen_vit_prepare"),
+            autogaze_mode,
+        )
+        base_encoder_tokens = mode_actual_encoder_tokens(tokens, baseline_mode)
+        auto_encoder_tokens = mode_actual_encoder_tokens(tokens, autogaze_mode)
+        base_llm_tokens = mode_llm_visual_tokens(tokens, baseline_mode)
+        auto_llm_tokens = mode_llm_visual_tokens(tokens, autogaze_mode)
+        base_peak = mode_peak_memory(memory, baseline_mode)
+        auto_peak = mode_peak_memory(memory, autogaze_mode)
+        base_accuracy = mode_accuracy(payload, baseline_mode)
+        auto_accuracy = mode_accuracy(payload, autogaze_mode)
+        rows.append(
+            [
+                label,
+                format_transition(base_total, auto_total),
+                format_ratio_x(ratio_before_over_after(base_total, auto_total)),
+                format_transition(base_model_side, auto_model_side),
+                format_ratio_x(ratio_before_over_after(base_model_side, auto_model_side)),
+                format_transition(base_vit, auto_vit),
+                format_ratio_x(ratio_before_over_after(base_vit, auto_vit)),
+                format_transition(base_encoder_tokens, auto_encoder_tokens),
+                format_ratio_x(ratio_before_over_after(base_encoder_tokens, auto_encoder_tokens)),
+                format_transition(base_llm_tokens, auto_llm_tokens),
+                format_ratio_x(ratio_before_over_after(base_llm_tokens, auto_llm_tokens)),
+                format_transition(format_gib_only(base_peak) if base_peak is not None else None, format_gib_only(auto_peak) if auto_peak is not None else None),
+                format_ratio_x(ratio_before_over_after(base_peak, auto_peak)),
+                format_transition(base_accuracy, auto_accuracy),
+            ]
+        )
+    if not rows:
+        return ""
+    note = (
+        "Gain ratios are shown only for the two intended baselines. "
+        "Mode rows above are raw side-by-side values and do not carry speedup semantics."
+    )
+    return "### Pairwise Gains\n\n" + note + "\n\n" + markdown_table(
+        [
+            "Pair",
+            "Total ms",
+            "Total speedup",
+            "Model-side ms",
+            "Model-side speedup",
+            "ViT ms",
+            "ViT speedup",
+            "Encoder tokens",
+            "Token reduction",
+            "LLM visual tokens",
+            "LLM reduction",
+            "Peak",
+            "Peak reduction",
+            "Accuracy",
+        ],
+        rows,
+    )
 
 
 def render_latency_view_table(bars: list[ChartBar], segment_names: list[str]) -> str:
@@ -977,95 +1066,16 @@ def render_latency_views_section(metrics: dict[str, Any]) -> str:
     return "\n\n".join(sections)
 
 
-def render_simple_metric_table(metrics: dict[str, Any], *, memory: bool = False) -> str:
-    rows: list[list[Any]] = []
-    for name, value in metrics.items():
-        if not is_primary_raw_metric(name):
-            continue
-        rows.append([name, format_bytes(value) if memory else format_value(value)])
-    return markdown_table(["Metric", "Value"], rows)
-
-
-def render_comparison_metric_table(metrics: dict[str, Any], *, memory: bool = False) -> str:
-    modes = comparison_modes(metrics)
-    mode_rows: list[list[Any]] = []
-    before_after_rows: list[list[Any]] = []
-    simple_rows: list[list[Any]] = []
-    for name, value in metrics.items():
-        if not is_primary_raw_metric(name):
-            continue
-        display_name = metric_display_label(name)
-        if isinstance(value, dict) and any(mode in value for mode in COMPARISON_MODE_ORDER):
-            mode_rows.append(
-                [
-                    display_name,
-                    *(
-                        format_bytes(value.get(mode)) if memory else format_value(value.get(mode))
-                        for mode in modes
-                    ),
-                    value.get("speedup_ratio_keep_all_over_autogaze")
-                    or value.get("reduction_ratio_keep_all_over_autogaze"),
-                    value.get("reduction_percent_of_keep_all"),
-                ]
-            )
-        elif isinstance(value, dict):
-            before_after_rows.append(
-                [
-                    display_name,
-                    first_present(
-                        value.get("before_keep_all_or_raw"),
-                        value.get("before_autogaze_selection"),
-                        value.get("before_keep_all_estimated"),
-                    ),
-                    first_present(
-                        value.get("after_autogaze"),
-                        value.get("after_autogaze_selection"),
-                        value.get("after_autogaze_actual"),
-                    ),
-                    value.get("reduction_ratio_before_over_after"),
-                    value.get("reduction_percent_of_before"),
-                ]
-            )
-        else:
-            simple_rows.append([display_name, format_bytes(value) if memory else format_value(value)])
-
-    tables: list[str] = []
-    if mode_rows:
-        tables.append(
-            markdown_table(
-                ["Metric", *(MODE_TABLE_LABELS[mode] for mode in modes), "Speedup", "Reduction %"],
-                mode_rows,
-            )
-        )
-    if before_after_rows:
-        tables.append(
-            markdown_table(
-                ["Metric", "Before / Keep-all", "After / AutoGaze", "Ratio", "Reduction %"],
-                before_after_rows,
-            )
-        )
-    if simple_rows:
-        tables.append(markdown_table(["Metric", "Value"], simple_rows))
-    return "\n\n".join(tables)
-
-
-def render_key_metrics_section(metrics: dict[str, Any]) -> str:
+def render_key_metrics_section(payload: dict[str, Any], metrics: dict[str, Any]) -> str:
     sections = ["## Key Metrics"]
-    for group_name in ("latency_ms", "tokens", "memory_bytes"):
-        group = as_mapping(metrics.get(group_name))
-        if not group:
-            continue
-        sections.append(f"### {metric_display_label(group_name)}")
-        is_memory = group_name == "memory_bytes"
-        if any(isinstance(value, dict) for value in group.values()):
-            sections.append(render_comparison_metric_table(group, memory=is_memory))
-        else:
-            rows: list[list[Any]] = []
-            for name, value in group.items():
-                if not is_primary_raw_metric(name):
-                    continue
-                rows.append([metric_display_label(name), format_bytes(value) if is_memory else format_value(value)])
-            sections.append(markdown_table(["Metric", "Value"], rows))
+    snapshot = render_mode_snapshot(payload, metrics)
+    gains = render_pairwise_gains(payload, metrics)
+    if snapshot:
+        sections.append(snapshot)
+    if gains:
+        sections.append(gains)
+    if len(sections) == 1:
+        return ""
     return "\n\n".join(sections)
 
 
@@ -1804,26 +1814,59 @@ def render_input_tokenization(payload: dict[str, Any], metrics: dict[str, Any]) 
         readable_budget_metric("llm_visual_budget.visual_token_reduction_ratio"),
         single_llm_budget.get("visual_token_reduction_ratio"),
     )
-    rows = [
+    input_rows = [
         ["Video frames", video_frames],
         ["Thumbnail frames", thumbnail_frames],
         ["Processor input resolution", processor_resolution],
         ["Patches/frame multiscale", patches_per_frame_multiscale],
         ["Patches/frame by scale", patches_by_scale],
-        ["Single-scale dense reference patch", single_scale_reference],
-        ["ViT/encoder input before", full_patch],
-        ["ViT/encoder input after", selected_patch],
-        ["Full patch", full_patch],
-        ["Selected patch", selected_patch],
-        ["Patch reduction ratio", patch_reduction],
-        ["LLM visual before", llm_before],
-        ["LLM visual", llm_after],
-        ["LLM visual reduction ratio", llm_reduction],
     ]
-    return "## Frame, Patch, And Tokenization Info\n\n" + markdown_table(
-        ["Field", "Value"],
-        [row for row in rows if row[1] is not None],
+
+    mode_set = set(comparison_modes(tokens))
+    modes: tuple[str | None, ...] = (
+        tuple(mode for mode in COMPARISON_MODE_ORDER if mode in mode_set) if mode_set else (None,)
     )
+    boundary_rows: list[list[Any]] = []
+    for mode in modes:
+        candidate_patch = value_from_aliases(
+            tokens,
+            (
+                "vit_encoder_input_patch_tokens_before_autogaze",
+                "hd_multiscale_keep_all_patch_tokens",
+                "single_scale_dense_siglip_reference_patch_tokens",
+                "raw_vit_patch_tokens_before_selector",
+                "encoder_patch_tokens_before_keep_all_or_raw",
+                "visual_tokens_before_prune",
+            ),
+            mode,
+        )
+        if candidate_patch is None and mode is None:
+            candidate_patch = full_patch
+        encoder_input = mode_actual_encoder_tokens(tokens, mode)
+        if encoder_input is None and mode is None:
+            encoder_input = selected_patch
+        llm_visual = mode_llm_visual_tokens(tokens, mode)
+        if llm_visual is None and mode is None:
+            llm_visual = llm_after
+        row = [mode_label(mode), candidate_patch, encoder_input, llm_visual]
+        if any(value is not None for value in row[1:]):
+            boundary_rows.append(row)
+
+    sections = ["## Frame, Patch, And Tokenization Info"]
+    filtered_input_rows = [row for row in input_rows if row[1] is not None]
+    if filtered_input_rows:
+        sections.append("### Input Shape\n\n" + markdown_table(["Field", "Value"], filtered_input_rows))
+    if boundary_rows:
+        sections.append(
+            "### Token Boundaries By Mode\n\n"
+            + markdown_table(
+                ["Mode", "Candidate/off patch", "Encoder input patch", "LLM visual token"],
+                boundary_rows,
+            )
+        )
+    if len(sections) == 1:
+        return ""
+    return "\n\n".join(sections)
 
 
 def render_processing_budget_summary(payload: dict[str, Any]) -> str:
@@ -1913,73 +1956,69 @@ def render_autogaze_token_patch_flow(payload: dict[str, Any], metrics: dict[str,
 
 def render_readable_budget_token_flow(readable_budget: dict[str, Any]) -> str:
     keep_all = as_mapping(readable_budget.get("keep_all_median") or readable_budget.get("mode_median"))
+    single_scale_dense = as_mapping(readable_budget.get("single_scale_dense_median"))
     autogaze = as_mapping(readable_budget.get("autogaze_median"))
     rows: list[list[Any]] = []
 
-    def add_row(label: str, off_field: str, auto_baseline_field: str, auto_actual_field: str) -> None:
-        off_baseline = get_budget_value(keep_all, off_field)
-        autogaze_baseline = get_budget_value(autogaze, auto_baseline_field)
-        autogaze_actual = get_budget_value(autogaze, auto_actual_field)
+    def add_row(label: str, baseline: Any, actual: Any) -> None:
         rows.append(
             [
                 label,
-                off_baseline,
-                autogaze_baseline,
-                autogaze_actual,
-                ratio_before_over_after(autogaze_baseline, autogaze_actual),
-                reduction_percent(autogaze_baseline, autogaze_actual),
+                baseline,
+                actual,
+                ratio_before_over_after(baseline, actual),
+                reduction_percent(baseline, actual),
             ]
         )
 
     add_row(
-        "Full multiscale patch budget before AutoGaze",
-        "patch_budget_before_siglip.keep_all_total_patch_tokens",
-        "patch_budget_before_siglip.keep_all_total_patch_tokens",
-        "patch_budget_before_siglip.autogaze_selected_total_patch_tokens",
+        "HD multiscale keep-all -> AutoGaze",
+        first_present(
+            get_budget_value(keep_all, "patch_budget_before_siglip.keep_all_total_patch_tokens"),
+            get_budget_value(autogaze, "patch_budget_before_siglip.keep_all_total_patch_tokens"),
+        ),
+        get_budget_value(autogaze, "patch_budget_before_siglip.autogaze_selected_total_patch_tokens"),
     )
     add_row(
-        "Single-scale dense SigLIP reference",
-        "single_scale_dense_vision_budget.total_patch_tokens",
-        "single_scale_dense_vision_budget.total_patch_tokens",
-        "patch_budget_before_siglip.autogaze_selected_total_patch_tokens",
+        "Single-scale dense -> AutoGaze",
+        first_present(
+            get_budget_value(single_scale_dense, "single_scale_dense_vision_budget.total_patch_tokens"),
+            get_budget_value(autogaze, "single_scale_dense_vision_budget.total_patch_tokens"),
+            get_budget_value(keep_all, "single_scale_dense_vision_budget.total_patch_tokens"),
+        ),
+        get_budget_value(autogaze, "patch_budget_before_siglip.autogaze_selected_total_patch_tokens"),
     )
     add_row(
-        "Tile patch budget before SigLIP",
-        "patch_budget_before_siglip.keep_all_tile_patch_tokens",
-        "patch_budget_before_siglip.keep_all_tile_patch_tokens",
-        "patch_budget_before_siglip.autogaze_selected_tile_patch_tokens",
+        "Main tile patch -> AutoGaze",
+        first_present(
+            get_budget_value(keep_all, "patch_budget_before_siglip.keep_all_tile_patch_tokens"),
+            get_budget_value(autogaze, "patch_budget_before_siglip.keep_all_tile_patch_tokens"),
+        ),
+        get_budget_value(autogaze, "patch_budget_before_siglip.autogaze_selected_tile_patch_tokens"),
     )
     add_row(
-        "Thumbnail patch budget before SigLIP",
-        "patch_budget_before_siglip.keep_all_thumbnail_patch_tokens",
-        "patch_budget_before_siglip.keep_all_thumbnail_patch_tokens",
-        "patch_budget_before_siglip.autogaze_selected_thumbnail_patch_tokens",
+        "Thumbnail patch -> AutoGaze",
+        first_present(
+            get_budget_value(keep_all, "patch_budget_before_siglip.keep_all_thumbnail_patch_tokens"),
+            get_budget_value(autogaze, "patch_budget_before_siglip.keep_all_thumbnail_patch_tokens"),
+        ),
+        get_budget_value(autogaze, "patch_budget_before_siglip.autogaze_selected_thumbnail_patch_tokens"),
     )
     add_row(
-        "ViT/encoder input patch tokens before/after AutoGaze",
-        "patch_budget_before_siglip.keep_all_total_patch_tokens",
-        "patch_budget_before_siglip.keep_all_total_patch_tokens",
-        "patch_budget_before_siglip.autogaze_selected_total_patch_tokens",
-    )
-    add_row(
-        "Encoder input patch tokens after AutoGaze",
-        "patch_budget_before_siglip.keep_all_total_patch_tokens",
-        "patch_budget_before_siglip.keep_all_total_patch_tokens",
-        "patch_budget_before_siglip.autogaze_selected_total_patch_tokens",
-    )
-    add_row(
-        "LLM visual tokens after TokenShuffle/projector",
-        "llm_visual_budget.keep_all_visual_tokens_estimated",
-        "llm_visual_budget.keep_all_visual_tokens_estimated",
-        "llm_visual_budget.actual_visual_tokens",
+        "LLM visual -> AutoGaze",
+        first_present(
+            get_budget_value(keep_all, "llm_visual_budget.keep_all_visual_tokens_estimated"),
+            get_budget_value(autogaze, "llm_visual_budget.keep_all_visual_tokens_estimated"),
+        ),
+        get_budget_value(autogaze, "llm_visual_budget.actual_visual_tokens"),
     )
 
-    rows = [row for row in rows if any(value is not None for value in row[1:4])]
+    rows = [row for row in rows if any(value is not None for value in row[1:3])]
     if not rows:
         return ""
     note = (
-        "When an AutoGaze-off run is not present, the AutoGaze-off baseline column is still estimated "
-        "from the AutoGaze-on input shape. Latency speedups still require both modes to be measured."
+        "Patch/token gains use only the two intended denominators: HD multiscale keep-all and "
+        "single-scale dense. Latency speedups still require both modes to be measured."
     )
     return (
         "## AutoGaze Token And Patch Flow\n\n"
@@ -1988,8 +2027,7 @@ def render_readable_budget_token_flow(readable_budget: dict[str, Any]) -> str:
         + markdown_table(
             [
                 "Stage",
-                "Measured off / keep-all",
-                "Off estimate for AutoGaze input",
+                "Baseline patch/token",
                 "AutoGaze-on actual",
                 "Reduction ratio",
                 "Reduction %",
@@ -2193,14 +2231,13 @@ def render_markdown_report(
         f"# {title}",
         render_video_and_experiment_info(payload, source_path),
         render_pipeline_section(payload),
-        render_key_comparison_section(metrics),
+        render_key_metrics_section(payload, metrics),
         render_latency_views_section(metrics),
         render_input_tokenization(payload, metrics),
         render_processing_budget_summary(payload),
         render_autogaze_token_patch_flow(payload, metrics),
         render_step_pipeline_metrics(payload, metrics),
         render_charts_section(chart_artifacts or [], markdown_dir=Path(markdown_dir) if markdown_dir else None),
-        render_key_metrics_section(metrics),
         render_latency_accounting_section(payload, metrics),
         render_benchmark_score(payload),
         render_correctness_comparison(payload),

@@ -59,18 +59,34 @@ plugin_qwen_32f_t8_448_sparse
 
 ## 핵심 비교 표
 
-리더에게 보여줄 첫 표는 아래 구조가 좋습니다.
+리더에게 보여줄 첫 표는 Markdown의 `Key Metrics` 섹션입니다. 이 섹션은 raw field를 그대로 펼치지 않고 두 단계로만 봅니다.
 
-| 모드 | status | accuracy | total ms | Decode/read ms | Prep rest ms | Selector input ms | AutoGaze ms | Vision input ms | ViT ms | Projector ms | Generate total ms | LLM forward ms | Generate rest ms | peak GiB | full patch | selected patch | LLM visual token |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| keep-all |  |  |  |  |  | n/a | n/a |  |  |  |  |  |  |  |  |  |  |
-| single-scale dense |  |  |  |  |  | n/a | n/a |  |  |  |  |  |  |  |  |  |  |
-| AutoGaze |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
-| paper baseline |  |  |  |  |  | n/a | n/a |  |  |  |  |  |  |  |  | n/a |  |
+```text
+Key Metrics
+  Mode Snapshot      # 세 모드의 원값을 나란히 표시. ratio/speedup 없음
+  Pairwise Gains     # AutoGaze vs keep-all, AutoGaze vs single-scale만 gain 계산
+```
+
+`Mode Snapshot`은 세 모드를 나란히 보여주기 위한 표입니다. 여기에는 reduction ratio나 speedup을 넣지 않습니다. ratio는 분모가 다르면 해석이 바로 섞이기 때문입니다.
+
+| 모드 | status | accuracy | total ms | Decode/read ms | Prep rest ms | Model-side ms | AutoGaze ms | ViT ms | LLM forward ms | peak GiB | encoder tokens | LLM visual token |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| keep-all |  |  |  |  |  |  | n/a |  |  |  |  |  |
+| single-scale dense |  |  |  |  |  |  | n/a |  |  |  |  |  |
+| AutoGaze |  |  |  |  |  |  |  |  |  |  |  |  |
+| paper baseline |  |  |  |  |  |  | n/a |  |  |  | n/a |  |
 
 AutoGaze off/keep-all이 OOM이면 latency는 비어 있을 수 있습니다. 그래도 full patch/LLM visual token 예상치와 failure stage를 남기는 것이 중요합니다.
 `single-scale dense`는 기본 HLVid wrapper에서 함께 도는 ablation입니다. `keep-all`이 NVILA-HD multiscale keep-all이라면, single-scale dense는 보통 392px scale 하나만 keep-all로 통과시킨 reference라서 `single_scale_dense_comparison`에서 AutoGaze sparse 결과와 별도로 비교합니다. 제외하려면 `--skip-single-scale-dense`를 사용합니다.
-Markdown의 `Key Comparison`, `Benchmark Score`, `Processing Budget Summary`, latency chart, aggregate rows는 이 세 모드를 같은 순서로 맞춰 보여줍니다. 따라서 HLVid 기본 wrapper 결과를 볼 때는 multiscale keep-all 대비 AutoGaze gain과 single-scale dense 대비 AutoGaze gain을 분리해서 읽으면 됩니다.
+
+`Pairwise Gains`는 딱 두 줄만 봅니다.
+
+| Pair | 해석 |
+| --- | --- |
+| `AutoGaze vs keep-all` | HD multiscale keep-all을 분모로 둔 실제 AutoGaze 적용 이득 |
+| `AutoGaze vs single-scale` | 392px single-scale dense를 분모로 둔 보수적/참고 비교 |
+
+Markdown의 `Benchmark Score`, `Processing Budget Summary`, latency chart, aggregate rows는 세 모드를 같은 순서로 맞춰 보여줍니다. 그러나 speedup/reduction ratio는 `Pairwise Gains`에서만 리더용으로 해석하세요. raw field 이름과 alias는 `Raw Metric Appendix`로 내려갑니다.
 
 정답 비교는 두 층으로 봅니다. 기존 `counts`와 `paired_rates`는 호환성을 위해 `keep_all vs autogaze` 기준을 유지합니다. 세 모드 비교는 `correctness_comparison.pairwise`에 별도로 들어가며 `keep_all_vs_single_scale_dense`, `single_scale_dense_vs_autogaze`, `keep_all_vs_autogaze`를 각각 보여줍니다. Markdown에는 `Pairwise Correctness Summary`와 `Pairwise Correctness Samples`로 표시됩니다.
 
@@ -135,6 +151,25 @@ Aggregate report의 기본 정렬은 `comparison`입니다. 같은 config 안에
 | LLM visual token | projector/token shuffle 이후 LLM context에 들어간 visual token |
 
 모델별로 patch와 LLM visual token은 1:1이 아닐 수 있습니다. 그래서 report는 “encoder 이전 patch 감소”와 “LLM context 감소”를 분리해서 보여야 합니다.
+
+Markdown의 `Frame, Patch, And Tokenization Info`는 이제 두 표로 단순화됩니다.
+
+| 표 | 목적 |
+| --- | --- |
+| `Input Shape` | frame 수, thumbnail 수, processor 입력 해상도, multiscale patch space 같은 입력 조건 |
+| `Token Boundaries By Mode` | 각 모드가 encoder/LLM 경계에서 실제로 몇 token을 쓰는지 |
+
+`AutoGaze Token And Patch Flow`는 중복 행을 줄이고 아래 기준만 표시합니다.
+
+| Stage | 비교 의미 |
+| --- | --- |
+| `HD multiscale keep-all -> AutoGaze` | 논문 HD-style multiscale keep-all budget 대비 selected patch |
+| `Single-scale dense -> AutoGaze` | 392px single-scale dense reference 대비 selected patch |
+| `Main tile patch -> AutoGaze` | thumbnail 제외 main video tile budget |
+| `Thumbnail patch -> AutoGaze` | thumbnail이 켜진 경우 overview token budget |
+| `LLM visual -> AutoGaze` | TokenShuffle/projector 이후 LLM visual token budget |
+
+같은 숫자가 `Full patch`, `ViT before`, `encoder before` 식으로 반복되어 보이면 raw appendix를 보고 있는 것입니다. 메인 해석은 `Key Metrics`, `Frame/Patch`, `AutoGaze Token And Patch Flow`만 보면 됩니다.
 
 ## Memory 해석
 

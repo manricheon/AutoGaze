@@ -245,21 +245,87 @@ def test_key_metrics_summary_uses_readable_labels_and_no_ag_preprocess():
 
     markdown = render_markdown_report(payload, source_path="single.json")
 
-    assert "## Key Comparison" in markdown
-    assert (
-        "| Total ms | Decode/read ms | Prep rest ms | Selector input ms | AutoGaze ms | "
-        "Vision input ms | ViT ms | Projector ms | Generate total ms | LLM generation ms | "
-        "LLM forward ms | Generate rest ms |"
-    ) in markdown
-    assert "| 9,000 | 700 | 1,500 | - | 800 | - | 1,200 | - | - | 4,000 | 4,000 | - |" in markdown
-    assert "### Latency" in markdown
-    assert "### Tokens" in markdown
-    assert "### Memory" in markdown
-    assert "Preprocess(no AG)" in markdown
-    assert "| video_decode_read_ms | 700 |" in markdown
-    assert "| preprocess_rest_without_decode_autogaze_ms | 1,500 |" in markdown
-    assert "encoder_patch_tokens_before_keep_all_or_raw" not in markdown.split("## Raw Metric Appendix")[0]
-    assert "preprocess_total_median" not in markdown.split("## Raw Metric Appendix")[0]
+    assert "## Key Metrics" in markdown
+    key_metrics = markdown.split("## Key Metrics", 1)[1].split("\n\n## ", 1)[0]
+    assert "### Mode Snapshot" in key_metrics
+    assert "| Current | - | - | 9,000 | 700 | 1,500 | 8,300 | 800 | 1,200 | 4,000 | 3.725 GiB | 250,000 | 36,000 |" in key_metrics
+    assert "### Latency" not in key_metrics
+    assert "### Tokens" not in key_metrics
+    assert "### Memory" not in key_metrics
+    assert "Preprocess(no AG)" not in key_metrics
+    assert "encoder_patch_tokens_before_keep_all_or_raw" not in key_metrics
+    assert "preprocess_total_median" not in key_metrics
+
+
+def test_key_metrics_pairwise_gains_hide_duplicate_aliases():
+    payload = {
+        "keep_all": {"accuracy": {"accuracy_scored": 0.4}},
+        "single_scale_dense": {"accuracy": {"accuracy_scored": 0.5}},
+        "autogaze": {"accuracy": {"accuracy_scored": 0.6}},
+        "readable_summary": {
+            "mode_status": {
+                "keep_all": "executed",
+                "single_scale_dense": "executed",
+                "autogaze": "executed",
+            },
+            "key_metrics_median": {
+                "latency_ms": {
+                    "total_ms": {"keep_all": 10000, "single_scale_dense": 8500, "autogaze": 5000},
+                    "video_decode_read_ms": {"keep_all": 500, "single_scale_dense": 500, "autogaze": 500},
+                    "preprocess_rest_without_decode_autogaze_ms": {
+                        "keep_all": 1000,
+                        "single_scale_dense": 800,
+                        "autogaze": 900,
+                    },
+                    "autogaze_total_ms": {"keep_all": 0, "single_scale_dense": 0, "autogaze": 700},
+                    "vit_encoder_ms": {"keep_all": 3000, "single_scale_dense": 1800, "autogaze": 600},
+                    "generate_ms": {"keep_all": 8500, "single_scale_dense": 7200, "autogaze": 3400},
+                    "llm_forward_ms": {"keep_all": 5000, "single_scale_dense": 4800, "autogaze": 2600},
+                },
+                "tokens": {},
+                "memory_bytes": {
+                    "overall_peak": {
+                        "keep_all": 80_000_000_000,
+                        "single_scale_dense": 60_000_000_000,
+                        "autogaze": 45_000_000_000,
+                    },
+                },
+            },
+            "processing_budget_summary": {
+                "keep_all_median": {
+                    "patch_budget_before_siglip.keep_all_total_patch_tokens": 1200,
+                    "patch_budget_before_siglip.autogaze_selected_total_patch_tokens": 1200,
+                    "llm_visual_budget.keep_all_visual_tokens_estimated": 120,
+                    "llm_visual_budget.actual_visual_tokens": 120,
+                },
+                "single_scale_dense_median": {
+                    "single_scale_dense_vision_budget.total_patch_tokens": 800,
+                    "llm_visual_budget.keep_all_visual_tokens_estimated": 80,
+                    "llm_visual_budget.actual_visual_tokens": 80,
+                },
+                "autogaze_median": {
+                    "patch_budget_before_siglip.keep_all_total_patch_tokens": 1200,
+                    "patch_budget_before_siglip.autogaze_selected_total_patch_tokens": 300,
+                    "single_scale_dense_vision_budget.total_patch_tokens": 800,
+                    "llm_visual_budget.keep_all_visual_tokens_estimated": 120,
+                    "llm_visual_budget.actual_visual_tokens": 40,
+                },
+            },
+        },
+    }
+
+    markdown = render_markdown_report(payload, source_path="gain.json")
+    key_metrics = markdown.split("## Key Metrics", 1)[1].split("\n\n## ", 1)[0]
+
+    assert "### Mode Snapshot" in key_metrics
+    assert "### Pairwise Gains" in key_metrics
+    assert "| Keep-all | executed | 0.4 | 10,000 | 500 | 1,000 | 9,500 | 0 | 3,000 | 5,000 | 74.506 GiB | 1,200 | 120 |" in key_metrics
+    assert "| AutoGaze | executed | 0.6 | 5,000 | 500 | 900 | 4,500 | 700 | 600 | 2,600 | 41.91 GiB | 300 | 40 |" in key_metrics
+    assert "| AutoGaze vs keep-all | 10,000 -> 5,000 | 2x | 9,500 -> 4,500 | 2.111111x | 3,000 -> 600 | 5x | 1,200 -> 300 | 4x | 120 -> 40 | 3x | 74.506 GiB -> 41.91 GiB | 1.777778x | 0.4 -> 0.6 |" in key_metrics
+    assert "| AutoGaze vs single-scale | 8,500 -> 5,000 | 1.7x | 8,000 -> 4,500 | 1.777778x | 1,800 -> 600 | 3x | 800 -> 300 | 2.666667x | 80 -> 40 | 2x | 55.879 GiB -> 41.91 GiB | 1.333333x | 0.5 -> 0.6 |" in key_metrics
+    assert "encoder_patch_tokens_before_keep_all_or_raw" not in key_metrics
+    assert "vit_encoder_input_patch_tokens_before_autogaze" not in key_metrics
+    assert "patch_reduction_ratio_full_or_raw_over_autogaze" not in key_metrics
 
 
 def test_key_comparison_does_not_use_inclusive_preprocess_as_no_ag_preprocess():
@@ -277,13 +343,9 @@ def test_key_comparison_does_not_use_inclusive_preprocess_as_no_ag_preprocess():
 
     markdown = render_markdown_report(payload, source_path="single.json")
 
-    assert (
-        "| Total ms | Decode/read ms | Prep rest ms | Selector input ms | AutoGaze ms | "
-        "Vision input ms | ViT ms | Projector ms | Generate total ms | LLM generation ms | "
-        "LLM forward ms | Generate rest ms |"
-    ) in markdown
-    assert "| 9,000 | - | - | - | 800 | - | 1,200 | - | - | 4,000 | 4,000 | - |" in markdown
-    assert "| 9,000 | 3,000 | 800 | 1,200 | 4,000 |" not in markdown
+    key_metrics = markdown.split("## Key Metrics", 1)[1].split("\n\n## ", 1)[0]
+    assert "| Current | - | - | 9,000 | - | - | 9,000 | 800 | 1,200 | 4,000 | - | - | - |" in key_metrics
+    assert "3,000" not in key_metrics
 
 
 def test_markdown_report_includes_decode_read_stage_breakdown():
@@ -349,14 +411,10 @@ def test_key_comparison_fills_patch_counts_from_readable_processing_budget():
 
     markdown = render_markdown_report(payload, source_path="hlvid_gain.json")
 
-    assert (
-        "| Mode | Total ms | Decode/read ms | Prep rest ms | Selector input ms | AutoGaze ms | "
-        "Vision input ms | ViT ms | Projector ms | Generate total ms | LLM generation ms | "
-        "LLM forward ms | Generate rest ms | "
-        "Full patch | Selected patch | Patch x | LLM visual | Peak GiB |"
-    ) in markdown
-    assert "| keep_all | 10,000 | - | - | - | - | - | - | - | - | - | - | - | 900 | 900 | 1 | 100 | - |" in markdown
-    assert "| autogaze | 7,000 | - | - | - | - | - | - | - | - | - | - | - | 900 | 300 | 3 | 40 | - |" in markdown
+    key_metrics = markdown.split("## Key Metrics", 1)[1].split("\n\n## ", 1)[0]
+    assert "| Keep-all | - | - | 10,000 | - | - | 10,000 | - | - | - | - | 900 | 100 |" in key_metrics
+    assert "| AutoGaze | - | - | 7,000 | - | - | 7,000 | - | - | - | - | 300 | 40 |" in key_metrics
+    assert "| AutoGaze vs keep-all | 10,000 -> 7,000 | 1.428571x | 10,000 -> 7,000 | 1.428571x | - | - | 900 -> 300 | 3x | 100 -> 40 | 2.5x | - | - | - |" in key_metrics
 
 
 def test_markdown_report_keeps_single_scale_dense_as_third_comparison_mode():
@@ -401,12 +459,12 @@ def test_markdown_report_keeps_single_scale_dense_as_third_comparison_mode():
 
     markdown = render_markdown_report(payload, source_path="hlvid_gain.json")
 
-    assert "| single_scale_dense | 8,000 | 500 | - | - | - | - | 2,000 | - | - | - | - | - | 784 | 784 | 1 | 88 | - |" in markdown
+    assert "| Single-scale | - | 0.6 | 8,000 | 500 | - | 7,500 | - | 2,000 | - | - | 784 | 88 |" in markdown
+    assert "| AutoGaze vs single-scale | 8,000 -> 6,000 | 1.333333x | 7,500 -> 5,500 | 1.363636x | 2,000 -> 600 | 3.333333x | 784 -> 212 | 3.698113x | 88 -> 24 | 3.666667x | - | - | 0.6 -> 0.8 |" in markdown
     assert "| single_scale_dense | 0.6 | - | 3 | 5 | 0 | - |" in markdown
     assert "| single_scale_dense_vision_budget.total_patch_tokens | - | 784 | 784 |" in markdown
     section = markdown.split("## Frame, Patch, And Tokenization Info", 1)[1].split("\n\n## ", 1)[0]
-    assert '"single_scale_dense": 784' in section
-    assert '"single_scale_dense": 88' in section
+    assert "| Single-scale | 784 | 784 | 88 |" in section
 
 
 def test_frame_patch_tokenization_uses_readable_processing_budget_when_token_metrics_are_empty():
@@ -453,12 +511,98 @@ def test_frame_patch_tokenization_uses_readable_processing_budget_when_token_met
     assert "| Thumbnail frames | 64 |" in section
     assert "| Processor input resolution | 1280x720 |" in section
     assert "| Patches/frame multiscale | 1,060 |" in section
-    assert "| ViT/encoder input before | {\"autogaze\": 900, \"keep_all\": 900} |" in section
-    assert "| ViT/encoder input after | {\"autogaze\": 300, \"keep_all\": 900} |" in section
-    assert "| Full patch | {\"autogaze\": 900, \"keep_all\": 900} |" in section
-    assert "| Selected patch | {\"autogaze\": 300, \"keep_all\": 900} |" in section
-    assert "| LLM visual before | {\"autogaze\": 100, \"keep_all\": 100} |" in section
-    assert "| LLM visual | {\"autogaze\": 40, \"keep_all\": 100} |" in section
+    assert "### Token Boundaries By Mode" in section
+    assert "| Keep-all | 900 | 900 | 100 |" in section
+    assert "| AutoGaze | 900 | 300 | 40 |" in section
+
+
+def test_frame_patch_tokenization_is_compact_and_mode_oriented():
+    payload = {
+        "readable_summary": {
+            "key_metrics_median": {"latency_ms": {}, "tokens": {}},
+            "processing_budget_summary": {
+                "keep_all_median": {
+                    "video.actual_video_frames": 128,
+                    "thumbnail.actual_frames": 64,
+                    "video.processor_input_resolution": "1280x720",
+                    "multiscale_patch_space.patch_positions_per_tile_frame": 1060,
+                    "patch_budget_before_siglip.keep_all_total_patch_tokens": 900,
+                    "patch_budget_before_siglip.autogaze_selected_total_patch_tokens": 900,
+                    "llm_visual_budget.keep_all_visual_tokens_estimated": 100,
+                    "llm_visual_budget.actual_visual_tokens": 100,
+                },
+                "single_scale_dense_median": {
+                    "single_scale_dense_vision_budget.total_patch_tokens": 800,
+                    "llm_visual_budget.keep_all_visual_tokens_estimated": 88,
+                    "llm_visual_budget.actual_visual_tokens": 88,
+                },
+                "autogaze_median": {
+                    "patch_budget_before_siglip.keep_all_total_patch_tokens": 900,
+                    "patch_budget_before_siglip.autogaze_selected_total_patch_tokens": 300,
+                    "llm_visual_budget.keep_all_visual_tokens_estimated": 100,
+                    "llm_visual_budget.actual_visual_tokens": 40,
+                },
+            },
+        }
+    }
+
+    markdown = render_markdown_report(payload, source_path="hlvid_gain.json")
+    section = markdown.split("## Frame, Patch, And Tokenization Info", 1)[1].split("\n\n## ", 1)[0]
+
+    assert "### Input Shape" in section
+    assert "### Token Boundaries By Mode" in section
+    assert "| Keep-all | 900 | 900 | 100 |" in section
+    assert "| Single-scale | 800 | 800 | 88 |" in section
+    assert "| AutoGaze | 900 | 300 | 40 |" in section
+    assert "ViT/encoder input before" not in section
+    assert "ViT/encoder input after" not in section
+    assert "Full patch" not in section
+    assert "Selected patch" not in section
+    assert "Patch reduction ratio" not in section
+
+
+def test_autogaze_token_patch_flow_keeps_only_two_main_gain_denominators():
+    payload = {
+        "readable_summary": {
+            "key_metrics_median": {"latency_ms": {}, "tokens": {}},
+            "processing_budget_summary": {
+                "keep_all_median": {
+                    "patch_budget_before_siglip.keep_all_total_patch_tokens": 900,
+                    "patch_budget_before_siglip.keep_all_tile_patch_tokens": 700,
+                    "patch_budget_before_siglip.keep_all_thumbnail_patch_tokens": 200,
+                    "llm_visual_budget.keep_all_visual_tokens_estimated": 100,
+                    "llm_visual_budget.actual_visual_tokens": 100,
+                },
+                "single_scale_dense_median": {
+                    "single_scale_dense_vision_budget.total_patch_tokens": 800,
+                    "llm_visual_budget.keep_all_visual_tokens_estimated": 88,
+                    "llm_visual_budget.actual_visual_tokens": 88,
+                },
+                "autogaze_median": {
+                    "single_scale_dense_vision_budget.total_patch_tokens": 800,
+                    "patch_budget_before_siglip.keep_all_total_patch_tokens": 900,
+                    "patch_budget_before_siglip.autogaze_selected_total_patch_tokens": 300,
+                    "patch_budget_before_siglip.keep_all_tile_patch_tokens": 700,
+                    "patch_budget_before_siglip.autogaze_selected_tile_patch_tokens": 250,
+                    "patch_budget_before_siglip.keep_all_thumbnail_patch_tokens": 200,
+                    "patch_budget_before_siglip.autogaze_selected_thumbnail_patch_tokens": 50,
+                    "llm_visual_budget.keep_all_visual_tokens_estimated": 100,
+                    "llm_visual_budget.actual_visual_tokens": 40,
+                },
+            },
+        }
+    }
+
+    markdown = render_markdown_report(payload, source_path="hlvid_gain.json")
+    section = markdown.split("## AutoGaze Token And Patch Flow", 1)[1].split("\n\n## ", 1)[0]
+
+    assert "| HD multiscale keep-all -> AutoGaze | 900 | 300 | 3 | 66.666667 |" in section
+    assert "| Single-scale dense -> AutoGaze | 800 | 300 | 2.666667 | 62.5 |" in section
+    assert "| Main tile patch -> AutoGaze | 700 | 250 | 2.8 | 64.285714 |" in section
+    assert "| Thumbnail patch -> AutoGaze | 200 | 50 | 4 | 75 |" in section
+    assert "| LLM visual -> AutoGaze | 100 | 40 | 2.5 | 60 |" in section
+    assert "ViT/encoder input patch tokens before/after AutoGaze" not in section
+    assert "Encoder input patch tokens after AutoGaze" not in section
 
 
 def test_charts_use_readable_processing_budget_token_metrics(tmp_path):
@@ -554,10 +698,10 @@ def test_latency_views_show_generate_rest_when_generate_exceeds_child_timers():
 
     markdown = render_markdown_report(payload, source_path="hlvid_gain.json")
 
-    assert "Generate total ms" in markdown
-    assert "LLM generation ms" in markdown
+    assert "Generate total is the parent" in markdown
+    assert "LLM generation" in markdown
     assert "LLM forward ms" in markdown
-    assert "Generate rest ms" in markdown
+    assert "Generate rest" in markdown
     assert "| autogaze | 300 | - | - | 1,000 | - | 800 | - | 500 | - | 2,700 | 250 |" in markdown
     assert "| autogaze | 1,000 | 800 | 500 | 2,950 |" in markdown
 
@@ -780,10 +924,8 @@ def test_render_benchmark_markdown_report_includes_scores_and_comparison_tables(
     assert "keep_all" in markdown
     assert "autogaze" in markdown
     assert "## Key Metrics" in markdown
-    assert "llm_visual_tokens" in markdown
-    assert "single_scale_dense_reference_vs_autogaze_selected_patches" in markdown
-    assert "| single_scale_dense_reference_vs_autogaze_selected_patches | 800 | 300 | 2.666667 | 62.5 |" in markdown
-    assert "| hd_multiscale_keep_all_vs_autogaze_selected_patches | 900 | 300 | 3 | 66.666667 |" in markdown
+    assert "### Pairwise Gains" in markdown
+    assert "| AutoGaze vs keep-all | 10,000 -> 7,000 | 1.428571x | 8,800 -> 5,900 | 1.491525x | 2,000 -> 500 | 4x | 900 -> 300 | 3x | 100 -> 40 | 2.5x | 74.506 GiB -> 46.566 GiB | 1.6x | 0.5 -> 0.6 |" in markdown
     assert "llm_peak" in markdown
     assert "## Benchmark Samples" in markdown
     assert "clip.mp4" in markdown
@@ -804,9 +946,9 @@ def test_render_benchmark_markdown_report_includes_scores_and_comparison_tables(
     assert "## Processing Budget Summary" in markdown
     assert "patch_budget_before_siglip.autogaze_selected_total_patch_tokens" in markdown
     assert "## AutoGaze Token And Patch Flow" in markdown
-    assert "| Full multiscale patch budget before AutoGaze | 900 | 900 | 300 | 3 | 66.666667 |" in markdown
-    assert "| Single-scale dense SigLIP reference | 800 | 800 | 300 | 2.666667 | 62.5 |" in markdown
-    assert "| LLM visual tokens after TokenShuffle/projector | 100 | 100 | 40 | 2.5 | 60 |" in markdown
+    assert "| HD multiscale keep-all -> AutoGaze | 900 | 300 | 3 | 66.666667 |" in markdown
+    assert "| Single-scale dense -> AutoGaze | 800 | 300 | 2.666667 | 62.5 |" in markdown
+    assert "| LLM visual -> AutoGaze | 100 | 40 | 2.5 | 60 |" in markdown
 
 
 def test_render_benchmark_markdown_keeps_detail_latency_when_autogaze_is_skipped():
@@ -983,3 +1125,37 @@ def test_render_flexible_single_markdown_reads_generation_metrics_processing_bud
     assert "full_patch_budget_before_selector" in markdown
     assert "encoder_input_patch_tokens_after_autogaze" in markdown
     assert "llm_input_context_tokens" in markdown
+
+
+def test_flexible_qwen_report_prefers_measured_pruned_tokens_over_budget_estimate():
+    payload = {
+        "runner": "flexible_runner",
+        "mode": "single",
+        "implementation_status": "executed",
+        "generation": {
+            "status": "executed",
+            "metrics": {
+                "latency_ms": {"total": 1000, "qwen_vit_prepare": 100},
+                "tokens": {
+                    "visual_tokens_before_prune": 98,
+                    "visual_tokens_after_prune": 45,
+                    "llm_context_tokens": 72,
+                },
+                "processing_budget_summary": {
+                    "video": {"processor_input_resolution": "224x224", "requested_video_frames": 16},
+                    "patch_budget_before_vit": {
+                        "actual_raw_patch_tokens_before_vit": 392,
+                        "estimated_visual_tokens_after_prune": 63,
+                        "estimated_visual_tokens_before_prune": 3136,
+                    },
+                },
+            },
+        },
+    }
+
+    markdown = render_markdown_report(payload, source_path="qwen.json")
+    section = markdown.split("## Frame, Patch, And Tokenization Info", 1)[1].split("\n\n## ", 1)[0]
+
+    assert "| Current | 392 | 45 | 72 |" in section
+    key_metrics = markdown.split("## Key Metrics", 1)[1].split("\n\n## ", 1)[0]
+    assert "| Current | executed | - | 1,000 | - | - | 1,000 | - | 100 | - | - | 45 | 72 |" in key_metrics

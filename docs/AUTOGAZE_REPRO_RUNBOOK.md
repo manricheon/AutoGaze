@@ -219,8 +219,9 @@ assets/status_by_config.svg
 
 | Area | Fields to check first |
 | --- | --- |
-| Latency | `total_ms`, `video_decode_read_ms`, `preprocess_rest_without_decode_autogaze_ms`, `selector_input_build_ms`, `autogaze_total_ms`, `vision_input_build_ms`, `siglip_vision_ms`, `vision_encoder_ms`, `generate_ms`, `llm_forward_ms`, `ttft_ms` |
-| Token/patch | full/off expected patch, multiscale candidate patch, selected patch, encoder input token, LLM visual token |
+| Mode Snapshot | Side-by-side raw values for keep-all, single-scale dense, and AutoGaze. Do not read speedup/reduction from this row. |
+| Pairwise Gains | Only `AutoGaze vs keep-all` and `AutoGaze vs single-scale` carry speedup/reduction semantics. |
+| Token/patch | candidate/off patch, encoder input patch, and LLM visual token by mode |
 | Memory | processor/autogaze/vision/LLM/overall peak memory |
 | Benchmark | `accuracy_total`, `accuracy_scored`, `failed`, `parse_failed`, `oom`, `skipped` |
 | OOM | `failure.kind`, `failure.stage`, `failure.message` |
@@ -232,6 +233,7 @@ total_ms = video_preprocess_without_autogaze_ms + autogaze_total_ms + generate_m
 ```
 
 Do not add legacy inclusive preprocess fields again when using this total.
+Long raw aliases are kept in `Raw Metric Appendix` for debugging, not in the leader-facing summary.
 
 `selector_input_build_ms` is derived from measured timers as `autogaze_total_ms - autogaze_model_forward_ms`. `vision_input_build_ms` is derived as `vision_encoder_ms - siglip_vision_ms - mm_projector_ms`. Treat both as residual breakdown fields, not extra total terms.
 

@@ -76,15 +76,15 @@ Qwen3-VL 실험은 `qwen-vl-utils`가 필요합니다. 기본 requirements에 �
 | `--gazing-mode keep-all` | NVILA-HD multiscale keep-all |
 | `--gazing-mode keep-all-single` | 392px single-scale dense keep-all |
 
-실행 후 `nvila_single_summary.json` 또는 Markdown report의 `Key Comparison`에서 먼저 확인할 값은 다음입니다.
+실행 후 `nvila_single_summary.json` 또는 Markdown report의 `Key Metrics`에서 먼저 확인할 값은 다음입니다.
 
 ```text
-Latency: Total / Decode-read / Prep rest / Selector input / AutoGaze / Vision input / ViT / LLM
-Token:   Full patch / Selected patch / Patch x / LLM visual token
-Memory:  processor peak / TTFT peak / LLM peak / overall peak
+Mode Snapshot:  Keep-all / Single-scale / AutoGaze 원값 나란히 보기
+Pairwise Gains: AutoGaze vs keep-all, AutoGaze vs single-scale 두 기준만 speedup/reduction 계산
+Token Boundary: Candidate/off patch -> encoder input patch -> LLM visual token
 ```
 
-`Selector input`은 `autogaze_total_ms - autogaze_model_forward_ms`로 계산한 AutoGaze 내부 residual이고, `Vision input`은 `vision_encoder_ms - siglip_vision_ms - mm_projector_ms`로 계산한 vision path residual입니다. 둘 다 실제 측정된 부모/자식 timer에서 나온 값이며, 별도 독립 timer가 아닐 때는 residual로 해석합니다.
+`Mode Snapshot`에는 ratio를 넣지 않습니다. ratio는 분모가 `keep-all`인지 `single-scale dense`인지에 따라 의미가 달라지므로 `Pairwise Gains`에서만 봅니다. `Selector input`은 상세 latency view나 raw appendix에서 확인할 수 있으며, 메인 요약에서는 AutoGaze total과 ViT/LLM 경계 값을 우선 봅니다.
 
 ## 2. 선택 프레임/AutoGaze Overlay 시각화
 
@@ -254,7 +254,7 @@ HLVid 폴더 전체의 metadata 기반 H100 risk를 보려면 기본 benchmark w
   --output-md outputs/autogaze_repro/hlvid_batch_limit3/hlvid_autogaze_gain_report.md
 ```
 
-HLVid gain report를 변환하면 `Key Comparison`, `Benchmark Score`, latency chart, token/patch 표가 `keep_all -> single_scale_dense -> autogaze` 순서로 정렬됩니다. `single_scale_dense`는 392px single-scale dense keep-all ablation이고, SVG chart에서는 `single-scale`로 짧게 표시됩니다. `preprocess(no AG)` 계열은 AutoGaze 시간을 제외한 값만 메인 비교에 사용하고, `video_preprocess_ms` 같은 legacy inclusive 값은 appendix 성격으로 봅니다.
+HLVid gain report를 변환하면 `Key Metrics`, `Benchmark Score`, latency chart, token/patch 표가 `keep_all -> single_scale_dense -> autogaze` 순서로 정렬됩니다. `single_scale_dense`는 392px single-scale dense keep-all ablation이고, SVG chart에서는 `single-scale`로 짧게 표시됩니다. 메인 speedup/reduction은 `Pairwise Gains`의 `AutoGaze vs keep-all`, `AutoGaze vs single-scale` 두 줄만 기준으로 해석합니다. `video_preprocess_ms` 같은 legacy inclusive 값과 긴 raw alias는 `Raw Metric Appendix`에서만 디버깅용으로 봅니다.
 
 정답 비교도 같은 관점으로 읽습니다. top-level correctness count는 기존 호환용 `keep_all vs autogaze`이고, 3모드 비교는 Markdown의 `Pairwise Correctness Summary`에서 `keep_all vs single_scale_dense`, `single_scale_dense vs autogaze`, `keep_all vs autogaze`를 각각 확인하세요.
 
