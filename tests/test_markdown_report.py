@@ -158,6 +158,8 @@ def test_render_single_markdown_report_includes_pipeline_and_key_metrics(tmp_pat
     assert "nvila_392px_spatial_tile_sequence" in markdown
     assert "keep_all_total_patch_tokens" in markdown
     assert "## AutoGaze Token And Patch Flow" in markdown
+    assert "vit_encoder_input_patch_tokens_before_autogaze" in markdown
+    assert "vit_encoder_input_patch_tokens_after_autogaze" in markdown
     assert "full_multiscale_patch_budget_before_autogaze" in markdown
     assert "single_scale_dense_siglip_reference_patch_tokens" in markdown
     assert "852,992" in markdown
@@ -388,8 +390,11 @@ def test_frame_patch_tokenization_uses_readable_processing_budget_when_token_met
     assert "| Thumbnail frames | 64 |" in section
     assert "| Processor input resolution | 1280x720 |" in section
     assert "| Patches/frame multiscale | 1,060 |" in section
+    assert "| ViT/encoder input before | {\"autogaze\": 900, \"keep_all\": 900} |" in section
+    assert "| ViT/encoder input after | {\"autogaze\": 300, \"keep_all\": 900} |" in section
     assert "| Full patch | {\"autogaze\": 900, \"keep_all\": 900} |" in section
     assert "| Selected patch | {\"autogaze\": 300, \"keep_all\": 900} |" in section
+    assert "| LLM visual before | 100 |" in section
     assert "| LLM visual | {\"autogaze\": 40, \"keep_all\": 100} |" in section
 
 
@@ -423,11 +428,13 @@ def test_charts_use_readable_processing_budget_token_metrics(tmp_path):
     write_markdown_report(input_json, output_md)
 
     token_svg = (tmp_path / "gain_assets" / "token_patch_budget.svg").read_text()
-    assert "Full patch" in token_svg
-    assert "Selected patch" in token_svg
-    assert "LLM visual" in token_svg
+    assert "ViT before" in token_svg
+    assert "ViT after" in token_svg
+    assert "LLM before" in token_svg
+    assert "LLM after" in token_svg
     assert "900 tokens" in token_svg
     assert "300 tokens" in token_svg
+    assert "100 tokens" in token_svg
     assert "40 tokens" in token_svg
 
 

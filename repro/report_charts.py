@@ -38,6 +38,10 @@ STAGE_COLORS = {
     "Other": "#adb5bd",
     "Full patch": "#5b8def",
     "Selected patch": "#f59f00",
+    "ViT before": "#5b8def",
+    "ViT after": "#f59f00",
+    "LLM before": "#9775fa",
+    "LLM after": "#7048e8",
     "LLM visual": "#7048e8",
     "Peak": "#495057",
     "Overall": "#495057",
@@ -535,8 +539,9 @@ def _token_bars(metrics: dict[str, Any]) -> list[ChartBar]:
             ),
         ),
         (
-            "Full patch",
+            "ViT before",
             (
+                "vit_encoder_input_patch_tokens_before_autogaze",
                 "hd_multiscale_keep_all_patch_tokens",
                 "raw_vit_patch_tokens_before_selector",
                 "encoder_patch_tokens_before_keep_all_or_raw",
@@ -544,8 +549,9 @@ def _token_bars(metrics: dict[str, Any]) -> list[ChartBar]:
             ),
         ),
         (
-            "Selected patch",
+            "ViT after",
             (
+                "vit_encoder_input_patch_tokens_after_autogaze",
                 "autogaze_selected_total_patch_tokens",
                 "encoder_input_patch_tokens_after_autogaze",
                 "encoder_patch_tokens_after_autogaze",
@@ -553,8 +559,17 @@ def _token_bars(metrics: dict[str, Any]) -> list[ChartBar]:
             ),
         ),
         (
-            "LLM visual",
+            "LLM before",
             (
+                "llm_visual_tokens_before_autogaze",
+                "llm_visual_tokens_keep_all_estimated_from_budget",
+                "llm_visual_tokens_before_keep_all_estimated",
+            ),
+        ),
+        (
+            "LLM after",
+            (
+                "llm_visual_tokens_after_autogaze",
                 "llm_visual_tokens_actual_from_budget",
                 "llm_visual_tokens_after_actual",
                 "llm_context_tokens",

@@ -63,10 +63,12 @@ DISPLAY_LABELS = {
     "generate": "LLM ms",
     "generate_ms": "LLM ms",
     "encoder_patch_tokens_before_keep_all_or_raw": "Full patch",
+    "vit_encoder_input_patch_tokens_before_autogaze": "ViT before",
     "raw_vit_patch_tokens_before_selector": "Full patch",
     "hd_multiscale_keep_all_patch_tokens": "Full patch",
     "visual_tokens_before_prune": "Full patch",
     "autogaze_selected_total_patch_tokens": "Selected patch",
+    "vit_encoder_input_patch_tokens_after_autogaze": "ViT after",
     "encoder_input_patch_tokens_after_autogaze": "Selected patch",
     "encoder_patch_tokens_after_autogaze": "Selected patch",
     "visual_tokens_after_prune": "Selected patch",
@@ -75,6 +77,8 @@ DISPLAY_LABELS = {
     "patch_reduction_ratio_full_or_raw_over_autogaze": "Patch x",
     "visual_token_reduction_ratio": "Patch x",
     "llm_visual_tokens_after_actual": "LLM visual",
+    "llm_visual_tokens_before_autogaze": "LLM before",
+    "llm_visual_tokens_after_autogaze": "LLM after",
     "llm_visual_tokens_actual_from_budget": "LLM visual",
     "llm_context_tokens": "LLM context",
     "llm_visual_token_reduction_ratio": "LLM visual x",
@@ -563,6 +567,8 @@ def add_single_budget_token_metrics(tokens: dict[str, Any], summary: dict[str, A
     add_if_present(tokens, "hd_multiscale_keep_all_patch_tokens", hd_multiscale_patches)
     add_if_present(tokens, "raw_vit_patch_tokens_before_selector", raw_vit_patches)
     add_if_present(tokens, "autogaze_selected_total_patch_tokens", selected_patches)
+    add_if_present(tokens, "vit_encoder_input_patch_tokens_before_autogaze", raw_or_multiscale_patches)
+    add_if_present(tokens, "vit_encoder_input_patch_tokens_after_autogaze", selected_patches)
     add_if_present(tokens, "encoder_input_patch_tokens_after_autogaze", selected_patches)
     add_if_present(
         tokens,
@@ -580,6 +586,8 @@ def add_single_budget_token_metrics(tokens: dict[str, Any], summary: dict[str, A
     )
     add_if_present(tokens, "llm_visual_tokens_keep_all_estimated_from_budget", llm_keep_all)
     add_if_present(tokens, "llm_visual_tokens_actual_from_budget", llm_actual)
+    add_if_present(tokens, "llm_visual_tokens_before_autogaze", llm_keep_all)
+    add_if_present(tokens, "llm_visual_tokens_after_autogaze", llm_actual)
     add_if_present(
         tokens,
         "llm_visual_token_reduction_ratio_from_budget",
@@ -639,6 +647,14 @@ def add_readable_budget_token_metrics(tokens: dict[str, Any], readable_budget: d
             "keep_all": hd_keep_all,
             "autogaze": selected,
         }
+        tokens["vit_encoder_input_patch_tokens_before_autogaze"] = {
+            "keep_all": hd_keep_all,
+            "autogaze": hd_keep_all,
+        }
+        tokens["vit_encoder_input_patch_tokens_after_autogaze"] = {
+            "keep_all": hd_keep_all,
+            "autogaze": selected,
+        }
         tokens["patch_reduction_ratio_full_or_raw_over_autogaze"] = {
             "keep_all": ratio_before_over_after(hd_keep_all, hd_keep_all),
             "autogaze": ratio_before_over_after(hd_keep_all, selected),
@@ -646,6 +662,14 @@ def add_readable_budget_token_metrics(tokens: dict[str, Any], readable_budget: d
     if llm_keep_all is not None or llm_actual is not None:
         tokens["llm_visual_budget_keep_all_vs_actual"] = before_after_metric(llm_keep_all, llm_actual)
         tokens["llm_visual_tokens_actual_from_budget"] = {
+            "keep_all": llm_keep_all,
+            "autogaze": llm_actual,
+        }
+        tokens["llm_visual_tokens_before_autogaze"] = {
+            "keep_all": llm_keep_all,
+            "autogaze": llm_keep_all,
+        }
+        tokens["llm_visual_tokens_after_autogaze"] = {
             "keep_all": llm_keep_all,
             "autogaze": llm_actual,
         }
@@ -1506,6 +1530,8 @@ def render_input_tokenization(payload: dict[str, Any], metrics: dict[str, Any]) 
         ["Patches/frame multiscale", patches_per_frame_multiscale],
         ["Patches/frame by scale", patches_by_scale],
         ["Single-scale dense reference patch", single_scale_reference],
+        ["ViT/encoder input before", full_patch],
+        ["ViT/encoder input after", selected_patch],
         ["Full patch", full_patch],
         ["Selected patch", selected_patch],
         ["Patch reduction ratio", patch_reduction],
@@ -1642,6 +1668,12 @@ def render_readable_budget_token_flow(readable_budget: dict[str, Any]) -> str:
         "patch_budget_before_siglip.autogaze_selected_thumbnail_patch_tokens",
     )
     add_row(
+        "ViT/encoder input patch tokens before/after AutoGaze",
+        "patch_budget_before_siglip.keep_all_total_patch_tokens",
+        "patch_budget_before_siglip.keep_all_total_patch_tokens",
+        "patch_budget_before_siglip.autogaze_selected_total_patch_tokens",
+    )
+    add_row(
         "Encoder input patch tokens after AutoGaze",
         "patch_budget_before_siglip.keep_all_total_patch_tokens",
         "patch_budget_before_siglip.keep_all_total_patch_tokens",
@@ -1730,6 +1762,16 @@ def render_single_budget_token_flow(summary: dict[str, Any], metrics: dict[str, 
                 "Reference visual-token estimate after TokenShuffle for the single-scale dense SigLIP budget.",
             ],
             [
+                "vit_encoder_input_patch_tokens_before_autogaze",
+                full_patch,
+                "Patch tokens that would enter SigLIP/ViT before AutoGaze selection for the same input shape.",
+            ],
+            [
+                "vit_encoder_input_patch_tokens_after_autogaze",
+                selected_patch,
+                "Patch tokens that enter SigLIP/ViT after AutoGaze selection.",
+            ],
+            [
                 "autogaze_selected_patch_tokens",
                 selected_patch,
                 "Non-padded AutoGaze-selected patch positions, including keep-all thumbnail positions when enabled.",
@@ -1748,6 +1790,16 @@ def render_single_budget_token_flow(summary: dict[str, Any], metrics: dict[str, 
                 "thumbnail_patch_tokens_before_to_after",
                 f"{format_value(thumbnail_full)} -> {format_value(thumbnail_selected)}",
                 "Thumbnail patch budget; NVILA runner keeps thumbnails all-on unless disabled.",
+            ],
+            [
+                "llm_visual_tokens_before_autogaze",
+                llm_before,
+                "Estimated keep-all/off visual token budget at the LLM input boundary for the same input shape.",
+            ],
+            [
+                "llm_visual_tokens_after_autogaze",
+                llm_after,
+                "Actual/estimated visual token budget at the LLM input boundary after AutoGaze.",
             ],
             [
                 "llm_input_visual_tokens_after_token_shuffle_projector",
@@ -1796,6 +1848,16 @@ def render_single_budget_token_flow(summary: dict[str, Any], metrics: dict[str, 
                 "full_patch_budget_before_selector",
                 full_patch,
                 "Raw ViT/Qwen grid token budget before pre-encoder pruning or selector masking.",
+            ],
+            [
+                "vit_encoder_input_patch_tokens_before_autogaze",
+                full_patch,
+                "Raw ViT/Qwen grid token budget before pre-encoder pruning or selector masking.",
+            ],
+            [
+                "vit_encoder_input_patch_tokens_after_autogaze",
+                selected_patch,
+                "Sparse ViT/Qwen input token budget after selector masking or pruning.",
             ],
             [
                 "autogaze_selected_patch_tokens",
