@@ -73,6 +73,14 @@ MODEL_FAMILY_CHOICES = (
 TOKEN_SELECTOR_ADAPTER_CHOICES = ("auto", "none", "keep-all", "autogaze")
 VISION_ENCODER_ADAPTER_CHOICES = ("auto", "nvila-hd-siglip", "nvila-video-vision")
 MLLM_ADAPTER_CHOICES = ("auto", "nvila-hd", "nvila-video")
+GAZING_MODE_AUTOGAZE = "autogaze"
+GAZING_MODE_KEEP_ALL = "keep-all"
+GAZING_MODE_KEEP_ALL_SINGLE = "keep-all-single"
+GAZING_MODE_CHOICES = (
+    GAZING_MODE_AUTOGAZE,
+    GAZING_MODE_KEEP_ALL,
+    GAZING_MODE_KEEP_ALL_SINGLE,
+)
 PAPER_PRESET_BASELINE = "autogaze-hlvid-baseline"
 PAPER_PRESET_HD = "autogaze-hlvid-hd"
 PAPER_PRESET_CHOICES = (PAPER_PRESET_BASELINE, PAPER_PRESET_HD)
@@ -393,7 +401,7 @@ def effective_gazing_ratio_tile(args: argparse.Namespace) -> float | list[float]
 
 
 def autogaze_runtime_config(args: argparse.Namespace) -> dict[str, Any]:
-    if getattr(args, "gazing_mode", None) == "keep-all":
+    if getattr(args, "gazing_mode", None) == GAZING_MODE_KEEP_ALL:
         ratio: float | list[float] | str = 1
         task_loss = None
     else:
@@ -401,6 +409,8 @@ def autogaze_runtime_config(args: argparse.Namespace) -> dict[str, Any]:
         task_loss = getattr(args, "task_loss_requirement_tile", None)
     return {
         "gazing_mode": getattr(args, "gazing_mode", None),
+        "requested_gazing_mode": getattr(args, "requested_gazing_mode", getattr(args, "gazing_mode", None)),
+        "gazing_mode_alias": getattr(args, "gazing_mode_alias", None),
         "gazing_ratio_tile": ratio,
         "stream_gazing_ratio": effective_stream_gazing_ratio(args),
         "task_loss_requirement_tile": task_loss,
@@ -473,6 +483,26 @@ def apply_pipeline_preset_alias(args: argparse.Namespace) -> argparse.Namespace:
     return args
 
 
+def apply_gazing_mode_aliases(
+    args: argparse.Namespace,
+    provided_options: set[str] | None = None,
+) -> argparse.Namespace:
+    provided_options = provided_options or set()
+    requested = getattr(args, "gazing_mode", None)
+    args.requested_gazing_mode = requested
+    args.gazing_mode_alias = None
+    if requested != GAZING_MODE_KEEP_ALL_SINGLE:
+        return args
+
+    args.gazing_mode_alias = GAZING_MODE_KEEP_ALL_SINGLE
+    args.gazing_mode = GAZING_MODE_KEEP_ALL
+    if "--autogaze-target-scales" not in provided_options and "--autogaze-resize-scales" not in provided_options:
+        args.autogaze_target_scales = "392"
+    if "--autogaze-target-patch-size" not in provided_options:
+        args.autogaze_target_patch_size = NVILA_VISION_PATCH_SIZE
+    return args
+
+
 def effective_model_family(args: argparse.Namespace) -> str:
     explicit = getattr(args, "model_family", MODEL_FAMILY_AUTO)
     if explicit and explicit != MODEL_FAMILY_AUTO:
@@ -513,7 +543,7 @@ def effective_token_selector_adapter(args: argparse.Namespace) -> str:
     family = effective_model_family(args)
     if family == MODEL_FAMILY_VIDEO_BASELINE:
         return "none"
-    if getattr(args, "gazing_mode", None) == "keep-all":
+    if getattr(args, "gazing_mode", None) == GAZING_MODE_KEEP_ALL:
         return "keep-all"
     return "autogaze"
 
@@ -561,7 +591,11 @@ def effective_component_names(args: argparse.Namespace) -> dict[str, str]:
         if token_adapter == "none":
             token_name = "not_applicable"
         elif token_adapter == "keep-all":
-            token_name = "keep_all"
+            token_name = (
+                "keep_all_single_scale"
+                if getattr(args, "gazing_mode_alias", None) == GAZING_MODE_KEEP_ALL_SINGLE
+                else "keep_all"
+            )
         else:
             token_name = str(getattr(args, "autogaze_model", "nvidia/AutoGaze"))
     if vision_name is None:
@@ -607,9 +641,11 @@ def apply_component_defaults(args: argparse.Namespace) -> argparse.Namespace:
     args.vision_encoder_adapter = effective_vision_encoder_adapter(args)
     args.mllm_adapter = effective_mllm_adapter(args)
     if args.token_selector_adapter == "autogaze":
-        args.gazing_mode = "autogaze"
+        args.gazing_mode = GAZING_MODE_AUTOGAZE
+        args.requested_gazing_mode = GAZING_MODE_AUTOGAZE
+        args.gazing_mode_alias = None
     elif args.token_selector_adapter in {"keep-all", "none"} and effective_model_family(args) == MODEL_FAMILY_HD_AUTOGAZE:
-        args.gazing_mode = "keep-all"
+        args.gazing_mode = GAZING_MODE_KEEP_ALL
     token_path = effective_token_selector_path(args)
     args.token_selector_path = token_path
     if token_path is not None and args.token_selector_adapter == "autogaze":
@@ -691,6 +727,12 @@ def autogaze_applicability(args: argparse.Namespace) -> str:
         return "not_applicable"
     if family == MODEL_FAMILY_HD_AUTOGAZE and token_selector_adapter == "autogaze":
         return "enabled"
+    if (
+        family == MODEL_FAMILY_HD_AUTOGAZE
+        and token_selector_adapter in {"keep-all", "none"}
+        and getattr(args, "gazing_mode_alias", None) == GAZING_MODE_KEEP_ALL_SINGLE
+    ):
+        return "hd_keep_all_single_scale_ablation"
     if family == MODEL_FAMILY_HD_AUTOGAZE and token_selector_adapter in {"keep-all", "none"}:
         return "hd_keep_all_ablation"
     return "unknown"
@@ -749,6 +791,9 @@ def build_run_identity(args: argparse.Namespace) -> dict[str, Any]:
         "model_family": family,
         "paper_preset": preset,
         "model_path": effective_mllm_path(args),
+        "requested_gazing_mode": getattr(args, "requested_gazing_mode", getattr(args, "gazing_mode", None)),
+        "gazing_mode": getattr(args, "gazing_mode", None),
+        "gazing_mode_alias": getattr(args, "gazing_mode_alias", None),
         "paper_reference_score": reference["paper_reference_score"],
         "paper_reference_metric": "HLVid accuracy percent",
         "paper_reference_frames": reference["paper_reference_frames"],
@@ -3693,6 +3738,26 @@ def model_patches_per_frame(model) -> int:
     return sum(model_patches_per_frame_by_scale(model).values())
 
 
+def model_vision_patch_size(model) -> int:
+    vision_tower = getattr(model, "vision_tower", None)
+    config = getattr(vision_tower, "config", None)
+    return int(getattr(config, "patch_size", NVILA_VISION_PATCH_SIZE) or NVILA_VISION_PATCH_SIZE)
+
+
+def model_patches_per_frame_by_runtime_scale(
+    model,
+    args: argparse.Namespace,
+) -> dict[str, int]:
+    explicit_scales = parse_int_sequence(getattr(args, "autogaze_target_scales", None))
+    if explicit_scales is None:
+        return model_patches_per_frame_by_scale(model)
+    return patch_positions_by_scale(explicit_scales, model_vision_patch_size(model))
+
+
+def model_patches_per_frame_runtime(model, args: argparse.Namespace) -> int:
+    return sum(model_patches_per_frame_by_runtime_scale(model, args).values())
+
+
 def model_patches_per_frame_by_scale(model) -> dict[str, int]:
     vision_tower = getattr(model, "vision_tower", None)
     config = getattr(vision_tower, "config", None)
@@ -5045,14 +5110,31 @@ def generate_one(
 
         inputs = dict(inputs)
         processor_inputs = inputs
+        runtime_patches_by_scale = model_patches_per_frame_by_runtime_scale(model, args)
+        runtime_patches_per_frame = sum(runtime_patches_by_scale.values())
         token_metrics = compute_visual_token_metrics(
             inputs,
             video_token_id=resolve_video_token_id(model, processor),
-            patches_per_frame_value=model_patches_per_frame(model),
-            patches_per_frame_by_scale=model_patches_per_frame_by_scale(model),
+            patches_per_frame_value=runtime_patches_per_frame,
+            patches_per_frame_by_scale=runtime_patches_by_scale,
             token_shuffle=NVILA_TOKEN_SHUFFLE,
         )
         token_metrics.update(build_patch_space_metadata(model, processor))
+        token_metrics.update(
+            {
+                "runtime_vision_encoder_scales": [
+                    int(scale) for scale in runtime_patches_by_scale.keys()
+                ],
+                "runtime_vision_encoder_patch_size": model_vision_patch_size(model),
+                "runtime_vision_encoder_patches_per_frame_by_scale": runtime_patches_by_scale,
+                "runtime_vision_encoder_patches_per_frame_total": runtime_patches_per_frame,
+                "runtime_patch_budget_note": (
+                    "When --autogaze-target-scales is set, runtime token metrics use that scale list. "
+                    "This lets keep-all single-scale dense runs be reported separately from NVILA-HD "
+                    "multiscale keep-all."
+                ),
+            }
+        )
         input_token_count = int(inputs["input_ids"].shape[1])
         compute_metrics = build_autogaze_effect_metrics(
             inputs,
@@ -5060,7 +5142,7 @@ def generate_one(
             token_metrics=token_metrics,
             input_token_count=input_token_count,
             dtype_bytes=_model_dtype_bytes(model),
-            patches_per_frame_value=model_patches_per_frame(model),
+            patches_per_frame_value=runtime_patches_per_frame,
             token_shuffle=NVILA_TOKEN_SHUFFLE,
         )
         gaze_metrics = extract_gaze_metrics(inputs)
@@ -5444,6 +5526,97 @@ def completed_question_ids(path: Path) -> set[Any]:
     return {json.loads(line)["question_id"] for line in path.read_text().splitlines() if line.strip()}
 
 
+def safe_empty_device_cache() -> None:
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+            torch.mps.empty_cache()
+    except Exception:
+        return
+
+
+def summarize_failure_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    kind_counts: Counter[str] = Counter()
+    stage_counts: Counter[str] = Counter()
+    for row in rows:
+        failure = row.get("failure")
+        if not isinstance(failure, dict):
+            continue
+        kind = str(failure.get("kind") or row.get("runner_status") or "exception")
+        stage = str(failure.get("stage") or "unknown")
+        kind_counts[kind] += 1
+        stage_counts[stage] += 1
+    return {
+        "total": sum(kind_counts.values()),
+        **dict(kind_counts),
+        "by_stage": dict(stage_counts),
+    }
+
+
+def hlvid_failure_prediction(
+    row: dict[str, Any],
+    args: argparse.Namespace,
+    failure: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        **row,
+        "status": "failed",
+        "runner_status": failure.get("kind", "exception"),
+        "error": f"{failure.get('exception_type', 'Exception')}: {failure.get('message', '')}",
+        "failure": failure,
+        "raw_output": None,
+        "model_path": args.model_path,
+        "run_identity": build_run_identity(args),
+        "autogaze_model": args.autogaze_model,
+        "num_video_frames": args.num_video_frames,
+        "num_video_frames_thumbnail": args.num_video_frames_thumbnail,
+        "max_tiles_video": args.max_tiles_video,
+        "gazing_mode": args.gazing_mode,
+        "autogaze_generate_only": bool(getattr(args, "autogaze_generate_only", False)),
+        "video_resize": video_resize_config(args),
+        "autogaze_target_scales": parse_int_sequence(getattr(args, "autogaze_target_scales", None)),
+        "autogaze_target_patch_size": getattr(args, "autogaze_target_patch_size", None),
+        "autogaze_runtime_config": autogaze_runtime_config(args),
+        "task_loss_requirement_tile": args.task_loss_requirement_tile,
+    }
+
+
+def finalize_hlvid_outputs(
+    *,
+    args: argparse.Namespace,
+    output_path: Path,
+    extra_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    all_rows = []
+    if output_path.exists():
+        all_rows = [json.loads(line) for line in output_path.read_text().splitlines() if line.strip()]
+    summary, scored = score_predictions(all_rows)
+    summary["token_budget_summary"] = summarize_token_budget_rows(all_rows)
+    summary["failure_summary"] = summarize_failure_rows(all_rows)
+    if extra_summary:
+        summary.update(extra_summary)
+    write_json(args.summary, summary)
+    write_jsonl(args.scored_predictions, scored)
+    return summary
+
+
+def append_hlvid_failure_rows(
+    *,
+    rows: list[dict[str, Any]],
+    args: argparse.Namespace,
+    output_path: Path,
+    completed_ids: set[Any],
+    failure: dict[str, Any],
+) -> list[dict[str, Any]]:
+    pending = [row for row in rows if row.get("question_id") not in completed_ids]
+    if not pending:
+        pending = rows
+    failure_rows = [hlvid_failure_prediction(row, args, failure) for row in pending]
+    append_jsonl(output_path, failure_rows)
+    return failure_rows
+
+
 def run_hlvid(args: argparse.Namespace) -> None:
     device = resolve_device(args.device)
     if args.manifest:
@@ -5452,24 +5625,49 @@ def run_hlvid(args: argparse.Namespace) -> None:
             rows = rows[: args.limit]
     else:
         rows = load_hlvid_manifest(split=args.split, limit=args.limit, config=args.config)
-    model, processor = load_model_and_processor(args)
     output_path = Path(args.predictions)
     completed_ids = completed_question_ids(output_path) if args.resume else set()
+    try:
+        model, processor = load_model_and_processor(args)
+    except Exception as exc:
+        if not args.continue_on_error:
+            raise
+        failure = classify_exception(exc, stage="nvila_hlvid_model_load")
+        append_hlvid_failure_rows(
+            rows=rows,
+            args=args,
+            output_path=output_path,
+            completed_ids=completed_ids,
+            failure=failure,
+        )
+        safe_empty_device_cache()
+        summary = finalize_hlvid_outputs(args=args, output_path=output_path)
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return
 
     warmup_rows = [row for row in rows if row["question_id"] not in completed_ids] or rows[:1]
+    warmup_failures: list[dict[str, Any]] = []
     if warmup_rows and args.warmup_runs:
         warmup_row = warmup_rows[0]
         for index in range(args.warmup_runs):
             print(f"HLVid warmup run {index + 1}/{args.warmup_runs}", file=sys.stderr)
-            generate_one(
-                model,
-                processor,
-                warmup_row["video_path"],
-                warmup_row["question"],
-                device,
-                args,
-                enable_visualization=False,
-            )
+            try:
+                generate_one(
+                    model,
+                    processor,
+                    warmup_row["video_path"],
+                    warmup_row["question"],
+                    device,
+                    args,
+                    enable_visualization=False,
+                )
+            except Exception as exc:
+                if not args.continue_on_error:
+                    raise
+                failure = classify_exception(exc, stage="nvila_hlvid_warmup")
+                warmup_failures.append(failure)
+                safe_empty_device_cache()
+                break
 
     for row in rows:
         if row["question_id"] in completed_ids:
@@ -5490,25 +5688,10 @@ def run_hlvid(args: argparse.Namespace) -> None:
         except Exception as exc:
             if not args.continue_on_error:
                 raise
-            prediction = {
-                **row,
-                "status": "failed",
-                "error": repr(exc),
-                "model_path": args.model_path,
-                "run_identity": build_run_identity(args),
-                "autogaze_model": args.autogaze_model,
-                "num_video_frames": args.num_video_frames,
-                "num_video_frames_thumbnail": args.num_video_frames_thumbnail,
-                "max_tiles_video": args.max_tiles_video,
-                "gazing_mode": args.gazing_mode,
-                "autogaze_generate_only": bool(getattr(args, "autogaze_generate_only", False)),
-                "video_resize": video_resize_config(args),
-                "autogaze_target_scales": parse_int_sequence(getattr(args, "autogaze_target_scales", None)),
-                "autogaze_target_patch_size": getattr(args, "autogaze_target_patch_size", None),
-                "autogaze_runtime_config": autogaze_runtime_config(args),
-                "task_loss_requirement_tile": args.task_loss_requirement_tile,
-            }
+            failure = classify_exception(exc, stage="nvila_hlvid_row")
+            prediction = hlvid_failure_prediction(row, args, failure)
             append_jsonl(output_path, [prediction])
+            safe_empty_device_cache()
             continue
         prediction = {
             **row,
@@ -5530,13 +5713,8 @@ def run_hlvid(args: argparse.Namespace) -> None:
         }
         append_jsonl(output_path, [prediction])
 
-    all_rows = []
-    if output_path.exists():
-        all_rows = [json.loads(line) for line in output_path.read_text().splitlines() if line.strip()]
-    summary, scored = score_predictions(all_rows)
-    summary["token_budget_summary"] = summarize_token_budget_rows(all_rows)
-    write_json(args.summary, summary)
-    write_jsonl(args.scored_predictions, scored)
+    extra_summary = {"warmup_failures": warmup_failures} if warmup_failures else None
+    summary = finalize_hlvid_outputs(args=args, output_path=output_path, extra_summary=extra_summary)
     print(json.dumps(summary, indent=2, sort_keys=True))
 
 
@@ -5591,7 +5769,7 @@ def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentPar
     parser.add_argument("--video-resize-width", type=int)
     parser.add_argument("--video-resize-height", type=int)
     parser.add_argument("--video-decode-strategy", choices=["auto", "seek", "scan"], default="auto")
-    parser.add_argument("--gazing-mode", choices=["autogaze", "keep-all"], default="autogaze")
+    parser.add_argument("--gazing-mode", choices=GAZING_MODE_CHOICES, default=GAZING_MODE_AUTOGAZE)
     parser.add_argument("--autogaze-target-scales", "--autogaze-resize-scales", dest="autogaze_target_scales")
     parser.add_argument("--autogaze-target-patch-size", type=int)
     parser.add_argument("--gazing-ratio-tile")
@@ -5655,8 +5833,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     known, _ = bootstrap.parse_known_args(argv)
     defaults = load_preset_defaults(known.preset_config)
     args = build_parser(defaults).parse_args(argv)
+    provided = provided_cli_options(argv)
     apply_pipeline_preset_alias(args)
-    apply_paper_preset_defaults(args, provided_cli_options(argv))
+    apply_paper_preset_defaults(args, provided)
+    apply_gazing_mode_aliases(args, provided)
     apply_component_defaults(args)
     validate_thumbnail_compatibility(args)
     return args

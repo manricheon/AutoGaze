@@ -359,6 +359,56 @@ def test_key_comparison_fills_patch_counts_from_readable_processing_budget():
     assert "| autogaze | 7,000 | - | - | - | - | - | - | - | - | - | - | - | 900 | 300 | 3 | 40 | - |" in markdown
 
 
+def test_markdown_report_keeps_single_scale_dense_as_third_comparison_mode():
+    payload = {
+        "keep_all": {"accuracy": {"accuracy_scored": 0.4, "correct": 2, "scored": 5, "failed": 0}},
+        "single_scale_dense": {
+            "accuracy": {"accuracy_scored": 0.6, "correct": 3, "scored": 5, "failed": 0}
+        },
+        "autogaze": {"accuracy": {"accuracy_scored": 0.8, "correct": 4, "scored": 5, "failed": 0}},
+        "readable_summary": {
+            "key_metrics_median": {
+                "latency_ms": {
+                    "total_ms": {"keep_all": 10000, "single_scale_dense": 8000, "autogaze": 6000},
+                    "video_decode_read_ms": {"keep_all": 500, "single_scale_dense": 500, "autogaze": 500},
+                    "siglip_vision_ms": {"keep_all": 3000, "single_scale_dense": 2000, "autogaze": 600},
+                },
+                "tokens": {},
+            },
+            "processing_budget_summary": {
+                "keep_all_median": {
+                    "patch_budget_before_siglip.keep_all_total_patch_tokens": 1060,
+                    "patch_budget_before_siglip.autogaze_selected_total_patch_tokens": 1060,
+                    "llm_visual_budget.keep_all_visual_tokens_estimated": 120,
+                    "llm_visual_budget.actual_visual_tokens": 120,
+                },
+                "single_scale_dense_median": {
+                    "single_scale_dense_vision_budget.total_patch_tokens": 784,
+                    "single_scale_dense_vision_budget.llm_visual_tokens_estimated": 88,
+                    "llm_visual_budget.keep_all_visual_tokens_estimated": 88,
+                    "llm_visual_budget.actual_visual_tokens": 88,
+                },
+                "autogaze_median": {
+                    "single_scale_dense_vision_budget.total_patch_tokens": 784,
+                    "patch_budget_before_siglip.keep_all_total_patch_tokens": 1060,
+                    "patch_budget_before_siglip.autogaze_selected_total_patch_tokens": 212,
+                    "llm_visual_budget.keep_all_visual_tokens_estimated": 120,
+                    "llm_visual_budget.actual_visual_tokens": 24,
+                },
+            },
+        },
+    }
+
+    markdown = render_markdown_report(payload, source_path="hlvid_gain.json")
+
+    assert "| single_scale_dense | 8,000 | 500 | - | - | - | - | 2,000 | - | - | - | - | - | 784 | 784 | 1 | 88 | - |" in markdown
+    assert "| single_scale_dense | 0.6 | - | 3 | 5 | 0 | - |" in markdown
+    assert "| single_scale_dense_vision_budget.total_patch_tokens | - | 784 | 784 |" in markdown
+    section = markdown.split("## Frame, Patch, And Tokenization Info", 1)[1].split("\n\n## ", 1)[0]
+    assert '"single_scale_dense": 784' in section
+    assert '"single_scale_dense": 88' in section
+
+
 def test_frame_patch_tokenization_uses_readable_processing_budget_when_token_metrics_are_empty():
     payload = {
         "readable_summary": {
@@ -629,6 +679,63 @@ def test_render_benchmark_markdown_report_includes_scores_and_comparison_tables(
                 "autogaze_only_correct": 0.25,
                 "both_wrong": 0.25,
             },
+            "pairwise": {
+                "keep_all_vs_single_scale_dense": {
+                    "left_mode": "keep_all",
+                    "right_mode": "single_scale_dense",
+                    "counts": {
+                        "total_unique": 4,
+                        "paired": 4,
+                        "both_correct": 2,
+                        "left_only_correct": 1,
+                        "right_only_correct": 0,
+                        "both_wrong": 1,
+                        "left_missing": 0,
+                        "right_missing": 0,
+                    },
+                    "paired_rates": {
+                        "both_correct": 0.5,
+                        "left_only_correct": 0.25,
+                        "right_only_correct": 0.0,
+                        "both_wrong": 0.25,
+                    },
+                    "samples": [
+                        {
+                            "target_video": "clip-ss.mp4",
+                            "question": "What happened?",
+                            "correct_answer": "B",
+                            "left_mode": "keep_all",
+                            "right_mode": "single_scale_dense",
+                            "left_answer": "B",
+                            "left_correct": True,
+                            "right_answer": "A",
+                            "right_correct": False,
+                            "bucket": "left_only_correct",
+                        }
+                    ],
+                },
+                "single_scale_dense_vs_autogaze": {
+                    "left_mode": "single_scale_dense",
+                    "right_mode": "autogaze",
+                    "counts": {
+                        "total_unique": 4,
+                        "paired": 4,
+                        "both_correct": 1,
+                        "left_only_correct": 0,
+                        "right_only_correct": 2,
+                        "both_wrong": 1,
+                        "left_missing": 0,
+                        "right_missing": 0,
+                    },
+                    "paired_rates": {
+                        "both_correct": 0.25,
+                        "left_only_correct": 0.0,
+                        "right_only_correct": 0.5,
+                        "both_wrong": 0.25,
+                    },
+                    "samples": [],
+                },
+            },
             "samples": [
                 {
                     "target_video": "clip2.mp4",
@@ -688,6 +795,11 @@ def test_render_benchmark_markdown_report_includes_scores_and_comparison_tables(
     assert "## Benchmark Correctness Comparison" in markdown
     assert "| keep_all_only_correct | 1 | 0.25 |" in markdown
     assert "| autogaze_only_correct | 1 | 0.25 |" in markdown
+    assert "### Pairwise Correctness Summary" in markdown
+    assert "| keep_all vs single_scale_dense | keep_all | single_scale_dense | 4 | 4 | 2 | 1 | 0 | 1 | 0 | 0 | 0.5 | 0.25 | 0 |" in markdown
+    assert "| single_scale_dense vs autogaze | single_scale_dense | autogaze | 4 | 4 | 1 | 0 | 2 | 1 | 0 | 0 | 0.25 | 0 | 0.5 |" in markdown
+    assert "### Pairwise Correctness Samples" in markdown
+    assert "| keep_all vs single_scale_dense | clip-ss.mp4 | What happened? | B | B | true | A | false | left_only_correct |" in markdown
     assert "| clip2.mp4 | What happened? | B | B | true | A | false | keep_all_only_correct |" in markdown
     assert "## Processing Budget Summary" in markdown
     assert "patch_budget_before_siglip.autogaze_selected_total_patch_tokens" in markdown

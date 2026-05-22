@@ -125,6 +125,29 @@ def test_standard_charts_include_wall_clock_and_attribution_latency_views(tmp_pa
     assert "Vision pipeline" in attribution_svg
 
 
+def test_standard_charts_include_single_scale_dense_third_mode(tmp_path):
+    metrics = {
+        "latency_ms": {
+            "total_ms": {"keep_all": 7000, "single_scale_dense": 6100, "autogaze": 5300},
+            "video_decode_read_ms": {"keep_all": 300, "single_scale_dense": 300, "autogaze": 300},
+            "video_tiling_ms": {"keep_all": 600, "single_scale_dense": 450, "autogaze": 600},
+            "autogaze_total_ms": {"keep_all": 0, "single_scale_dense": 0, "autogaze": 800},
+            "vit_encoder_ms": {"keep_all": 2000, "single_scale_dense": 1300, "autogaze": 500},
+            "generate_ms": {"keep_all": 4100, "single_scale_dense": 4050, "autogaze": 3400},
+            "llm_ms": {"keep_all": 3800, "single_scale_dense": 3600, "autogaze": 2870},
+        }
+    }
+
+    stage = latency_stage_bars(metrics)
+    artifacts = build_standard_report_charts(metrics=metrics, output_dir=tmp_path)
+
+    assert [bar.label for bar in stage] == ["keep_all", "single_scale_dense", "autogaze"]
+    svg = (tmp_path / "latency_breakdown.svg").read_text()
+    assert "single-scale" in svg
+    assert "single_scale_dense" not in svg
+    assert any(artifact.title == "Latency Breakdown (Wall Clock)" for artifact in artifacts)
+
+
 def test_model_side_latency_view_excludes_video_io_and_resize(tmp_path):
     metrics = {
         "latency_ms": {

@@ -33,7 +33,7 @@ AutoGaze를 실제 비디오 MLLM 파이프라인에 붙였을 때 다음을 재
 | --- | --- | --- |
 | 단일 비디오 inference | `python -m repro.nvila_runner --mode single` | NVILA-HD + AutoGaze 안정 경로. 시각화와 상세 timing/token/memory 기록 가능 |
 | Direct HLVid 실행 | `python -m repro.nvila_runner --mode hlvid` | 한 가지 `gazing-mode`로 HLVid manifest를 직접 실행 |
-| 기본 HLVid benchmark | `python scripts/run_hlvid_folder_benchmark.py` | keep-all/autogaze 비교, paper baseline 비교, H100 preflight, gain report |
+| 기본 HLVid benchmark | `python scripts/run_hlvid_folder_benchmark.py` | 기본 3모드 keep-all/single-scale dense/autogaze 비교, paper baseline 비교, H100 preflight, gain report |
 | Plugin HLVid benchmark | `python -m repro.plugin_hlvid_benchmark` | Qwen/LongVILA/NVILA-Video 등 확장 실험용 benchmark |
 | Plugin single/inspect | `python -m repro.flexible_runner` | token selector / ViT / MLLM 조합을 명시해 실험 |
 | Streaming profile | `python -m repro.nvila_runner --mode stream-profile` | LLM 없이 decode/tile/AutoGaze/SigLIP 구간 profile |
@@ -45,7 +45,7 @@ AutoGaze를 실제 비디오 MLLM 파이프라인에 붙였을 때 다음을 재
 
 | 구분 | 기준 | 사용처 |
 | --- | --- | --- |
-| 기본 HLVid benchmark | `scripts/run_hlvid_folder_benchmark.py` / `repro.hlvid_batch_benchmark` | NVILA-HD keep-all/autogaze 비교, 논문 baseline, H100 OOM preflight |
+| 기본 HLVid benchmark | `scripts/run_hlvid_folder_benchmark.py` / `repro.hlvid_batch_benchmark` | 기본 3모드: NVILA-HD keep-all, single-scale dense, AutoGaze 비교. 논문 baseline, H100 OOM preflight |
 | Direct HLVid runner | `repro.nvila_runner --mode hlvid` | wrapper 없이 한 mode만 직접 실행하거나 debugging할 때 |
 | Plugin HLVid benchmark | `repro.plugin_hlvid_benchmark` | Qwen, LongVILA, NVILA-Video, InternVL 등 확장 조합을 같은 HLVid row로 비교 |
 

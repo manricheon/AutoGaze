@@ -18,6 +18,8 @@ from repro.markdown_report import (
 )
 from repro.report_charts import ChartBar, ChartSegment, nonnegative_difference, numeric_or_none, shorten_label, write_bar_chart
 
+HLVID_MODE_ORDER = ("keep_all", "single_scale_dense", "autogaze")
+
 
 ROW_FIELDS = [
     "source_path",
@@ -73,8 +75,8 @@ def normalize_report_file(path: str | Path) -> list[dict[str, Any]]:
     payload = load_json(source)
     if "modes" in payload and isinstance(payload.get("modes"), dict):
         return [_normalize_plugin_mode(source, mode, summary) for mode, summary in payload["modes"].items()]
-    if "readable_summary" in payload and ("keep_all" in payload or "autogaze" in payload):
-        return [_normalize_hlvid_mode(source, payload, mode) for mode in ("keep_all", "autogaze")]
+    if "readable_summary" in payload and any(mode in payload for mode in HLVID_MODE_ORDER):
+        return [_normalize_hlvid_mode(source, payload, mode) for mode in HLVID_MODE_ORDER if mode in payload]
     return [_normalize_single(source, payload)]
 
 
@@ -158,7 +160,8 @@ def _normalize_single(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
 
 def _normalize_hlvid_mode(path: Path, payload: dict[str, Any], mode: str) -> dict[str, Any]:
     row = _blank_row(path, report_kind="hlvid_benchmark", mode=mode, model_path=payload.get("model_path"))
-    row["status"] = "ok"
+    mode_status = get_path(payload, f"readable_summary.mode_status.{mode}")
+    row["status"] = "skipped" if mode_status == "skipped_or_missing" else "ok"
     accuracy = as_mapping(get_path(payload, f"{mode}.accuracy", {}))
     row["accuracy_total"] = numeric_or_none(accuracy.get("accuracy_total"))
     row["accuracy_scored"] = numeric_or_none(accuracy.get("accuracy_scored"))
@@ -231,7 +234,14 @@ def _apply_metrics(row: dict[str, Any], metrics: dict[str, Any], *, mode: str | 
     )
     row["vision_encoder_ms"] = _metric(
         latency,
-        ("vit_encoder_ms", "vision_encoder_ms", "vit_encoder_median", "qwen_vit_prepare", "qwen_vit_prepare_ms"),
+        (
+            "vit_encoder_ms",
+            "vision_encoder_ms",
+            "siglip_vision_ms",
+            "vit_encoder_median",
+            "qwen_vit_prepare",
+            "qwen_vit_prepare_ms",
+        ),
         mode,
     )
     row["mm_projector_ms"] = _metric(latency, ("mm_projector_ms", "projector_ms"), mode)
@@ -262,6 +272,8 @@ def _apply_metrics(row: dict[str, Any], metrics: dict[str, Any], *, mode: str | 
         tokens,
         (
             "hd_multiscale_keep_all_patch_tokens",
+            "vit_encoder_input_patch_tokens_before_autogaze",
+            "single_scale_dense_siglip_reference_patch_tokens",
             "raw_vit_patch_tokens_before_selector",
             "encoder_patch_tokens_before_keep_all_or_raw",
             "visual_tokens_before_prune",
@@ -272,6 +284,7 @@ def _apply_metrics(row: dict[str, Any], metrics: dict[str, Any], *, mode: str | 
         tokens,
         (
             "autogaze_selected_total_patch_tokens",
+            "vit_encoder_input_patch_tokens_after_autogaze",
             "encoder_input_patch_tokens_after_autogaze",
             "encoder_patch_tokens_after_autogaze",
             "visual_tokens_after_prune",
@@ -447,11 +460,13 @@ def _selector_rank(row: dict[str, Any]) -> int:
     gazing_mode = str(row.get("gazing_mode") or "").lower()
     if mode in {"keep-all", "keepall", "off", "baseline"} or "keep-all" in mode or gazing_mode == "keep-all":
         return 0
-    if mode == "autogaze" or "autogaze" in mode:
+    if mode in {"single-scale-dense", "keep-all-single", "single-scale"} or "single-scale" in mode:
         return 1
+    if mode == "autogaze" or "autogaze" in mode:
+        return 2
     if "probe" in mode or "sidecar" in mode:
-        return 3
-    return 2
+        return 4
+    return 3
 
 
 def _config_group_key(row: dict[str, Any]) -> tuple[Any, ...]:
@@ -591,9 +606,10 @@ def _write_trend_charts(rows: list[dict[str, Any]], assets: Path) -> dict[str, P
 
 def _row_label(row: dict[str, Any], index: int) -> str:
     mode = row.get("mode") or "run"
+    mode_label = {"single_scale_dense": "single-scale"}.get(str(mode), str(mode))
     frames = row.get("frames")
     resolution = row.get("processor_input_resolution")
-    parts = [str(mode)]
+    parts = [mode_label]
     if frames is not None:
         parts.append(f"{int(float(frames))}f")
     if resolution:

@@ -1,5 +1,6 @@
 import argparse
 import json
+import subprocess
 from pathlib import Path
 
 from repro.hlvid_batch_benchmark import (
@@ -14,6 +15,8 @@ from repro.hlvid_batch_benchmark import (
     flatten_metric_row,
     flatten_paper_comparison_row,
     paper_mode_args,
+    run_command,
+    single_scale_dense_args,
 )
 from repro.nvila_runner import MODEL_FAMILY_VIDEO_BASELINE, PAPER_PRESET_BASELINE, PAPER_PRESET_HD
 
@@ -284,6 +287,49 @@ def test_batch_parser_accepts_gazing_ratio_tile_override():
     assert args.autogaze_generate_only is True
 
 
+def test_batch_parser_runs_single_scale_dense_by_default_and_accepts_compat_flag():
+    default_args = build_parser().parse_args(["--dataset-dir", "."])
+
+    assert default_args.single_scale_dense is True
+    assert default_args.single_scale_dense_scales == "392"
+
+    args = build_parser().parse_args(
+        [
+            "--dataset-dir",
+            ".",
+            "--single-scale-dense",
+            "--single-scale-dense-scales",
+            "392",
+        ]
+    )
+
+    assert args.single_scale_dense is True
+    assert args.single_scale_dense_scales == "392"
+
+
+def test_batch_parser_can_skip_single_scale_dense_mode():
+    args = build_parser().parse_args(["--dataset-dir", ".", "--skip-single-scale-dense"])
+
+    assert args.single_scale_dense is False
+
+
+def test_single_scale_dense_args_uses_keep_all_single_alias():
+    base = argparse.Namespace(
+        single_scale_dense_scales="392",
+        autogaze_target_patch_size=None,
+        token_selector_adapter="auto",
+        token_selector_name=None,
+    )
+
+    args = single_scale_dense_args(base)
+
+    assert args.gazing_mode == "keep-all-single"
+    assert args.autogaze_target_scales == "392"
+    assert args.autogaze_target_patch_size == 14
+    assert args.token_selector_adapter == "keep-all"
+    assert args.token_selector_name == "keep_all_single_scale_392"
+
+
 def test_paper_mode_args_sets_preset_defaults_without_mutating_base_args():
     base = argparse.Namespace(
         model_path="nvidia/NVILA-8B-HD-Video",
@@ -478,10 +524,12 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
     assert report["benchmark_samples"]["autogaze"][0]["correct_answer"] == "A"
     assert report["readable_summary"]["run_counts"] == {
         "keep_all_rows": 1,
+        "single_scale_dense_rows": 0,
         "autogaze_rows": 1,
         "count_note": (
-            "Counts are prediction rows per mode. With --limit 3 and both modes enabled, "
-            "expect keep_all_rows=3 and autogaze_rows=3; warmup runs are not counted."
+            "Counts are prediction rows per mode. With --limit 3 and default modes enabled, "
+            "expect keep_all_rows=3, single_scale_dense_rows=3, and autogaze_rows=3; "
+            "warmup runs are not counted."
         ),
     }
     assert report["readable_summary"]["latency_ms_median"]["total_ms"] == {
@@ -778,6 +826,7 @@ def test_build_gain_report_marks_keep_all_as_missing_when_skipped():
     assert report["autogaze"]["accuracy"]["total"] == 1
     assert report["readable_summary"]["mode_status"] == {
         "keep_all": "skipped_or_missing",
+        "single_scale_dense": "skipped_or_missing",
         "autogaze": "available",
         "note": "A skipped/missing mode is still shown, but cross-mode ratios are null because no baseline rows exist.",
     }
@@ -803,6 +852,53 @@ def test_build_gain_report_marks_keep_all_as_missing_when_skipped():
     assert report["gains"]["latency_speedup_median"]["total_ms"] is None
     assert report["gains"]["memory_reduction_ratio_median"]["llm_peak_memory_bytes"] is None
     assert report["gains"]["reduction_percent_median"]["latency_ms"]["total_ms"] is None
+
+
+def test_build_gain_report_can_include_single_scale_dense_reference():
+    single_scale_rows = [
+        {
+            "question_id": 1,
+            "answer": "A",
+            "raw_output": "A",
+            "status": "ok",
+            "total_ms": 80.0,
+            "siglip_vision_ms": 30.0,
+            "llm_forward_ms": 25.0,
+            "token_metrics": {
+                "encoder_raw_patch_tokens": 784,
+                "encoder_autogaze_selected_patch_tokens": 784,
+                "llm_actual_visual_tokens": 88,
+                "llm_keep_all_visual_tokens_estimated": 88,
+            },
+        }
+    ]
+    autogaze_rows = [
+        {
+            "question_id": 1,
+            "answer": "A",
+            "raw_output": "A",
+            "status": "ok",
+            "total_ms": 40.0,
+            "siglip_vision_ms": 10.0,
+            "llm_forward_ms": 15.0,
+            "token_metrics": {
+                "encoder_raw_patch_tokens": 1060,
+                "encoder_autogaze_selected_patch_tokens": 212,
+                "llm_actual_visual_tokens": 24,
+                "llm_keep_all_visual_tokens_estimated": 118,
+            },
+        }
+    ]
+
+    report = build_gain_report(
+        keep_all_rows=[],
+        autogaze_rows=autogaze_rows,
+        single_scale_dense_rows=single_scale_rows,
+    )
+
+    assert report["single_scale_dense"]["accuracy"]["accuracy_scored"] == 1.0
+    assert report["single_scale_dense_comparison"]["latency_speedup_median"]["total_ms"] == 2.0
+    assert report["single_scale_dense_comparison"]["token_reduction_median"]["encoder_patch_tokens"] == 784 / 212
 
 
 def test_build_gain_report_splits_paired_correctness_between_modes():
@@ -915,6 +1011,62 @@ def test_build_gain_report_splits_paired_correctness_between_modes():
     assert report["benchmark_samples"]["correctness_comparison"] == comparison["samples"]
 
 
+def test_build_gain_report_adds_pairwise_correctness_for_single_scale_dense():
+    keep_all_rows = [
+        {"question_id": 1, "answer": "A", "raw_output": "A", "video_path": "clip1.mp4", "question": "Q1?"},
+        {"question_id": 2, "answer": "B", "raw_output": "B", "video_path": "clip2.mp4", "question": "Q2?"},
+        {"question_id": 3, "answer": "C", "raw_output": "A", "video_path": "clip3.mp4", "question": "Q3?"},
+    ]
+    single_scale_dense_rows = [
+        {"question_id": 1, "answer": "A", "raw_output": "A", "video_path": "clip1.mp4", "question": "Q1?"},
+        {"question_id": 2, "answer": "B", "raw_output": "A", "video_path": "clip2.mp4", "question": "Q2?"},
+        {"question_id": 4, "answer": "D", "raw_output": "D", "video_path": "clip4.mp4", "question": "Q4?"},
+    ]
+    autogaze_rows = [
+        {"question_id": 1, "answer": "A", "raw_output": "A", "video_path": "clip1.mp4", "question": "Q1?"},
+        {"question_id": 2, "answer": "B", "raw_output": "B", "video_path": "clip2.mp4", "question": "Q2?"},
+        {"question_id": 3, "answer": "C", "raw_output": "C", "video_path": "clip3.mp4", "question": "Q3?"},
+    ]
+
+    report = build_gain_report(
+        keep_all_rows=keep_all_rows,
+        single_scale_dense_rows=single_scale_dense_rows,
+        autogaze_rows=autogaze_rows,
+    )
+
+    pairwise = report["correctness_comparison"]["pairwise"]
+    assert list(pairwise) == [
+        "keep_all_vs_single_scale_dense",
+        "single_scale_dense_vs_autogaze",
+        "keep_all_vs_autogaze",
+    ]
+    assert pairwise["keep_all_vs_single_scale_dense"]["counts"] == {
+        "total_unique": 4,
+        "paired": 2,
+        "both_correct": 1,
+        "left_only_correct": 1,
+        "right_only_correct": 0,
+        "both_wrong": 0,
+        "left_missing": 1,
+        "right_missing": 1,
+    }
+    assert pairwise["single_scale_dense_vs_autogaze"]["counts"] == {
+        "total_unique": 4,
+        "paired": 2,
+        "both_correct": 1,
+        "left_only_correct": 0,
+        "right_only_correct": 1,
+        "both_wrong": 0,
+        "left_missing": 1,
+        "right_missing": 1,
+    }
+    assert pairwise["keep_all_vs_autogaze"]["counts"]["right_only_correct"] == 1
+    assert pairwise["keep_all_vs_single_scale_dense"]["samples"][1]["left_mode"] == "keep_all"
+    assert pairwise["keep_all_vs_single_scale_dense"]["samples"][1]["right_mode"] == "single_scale_dense"
+    assert pairwise["keep_all_vs_single_scale_dense"]["samples"][1]["bucket"] == "left_only_correct"
+    assert report["benchmark_samples"]["correctness_pairwise"] == pairwise
+
+
 def test_flatten_metric_row_creates_csv_friendly_summary():
     report = {
         "gains": {"latency_speedup_median": {"total_ms": 2.0}},
@@ -927,7 +1079,18 @@ def test_flatten_metric_row_creates_csv_friendly_summary():
                 "keep_all_only_correct": 2,
                 "autogaze_only_correct": 1,
                 "both_wrong": 3,
-            }
+            },
+            "pairwise": {
+                "keep_all_vs_single_scale_dense": {
+                    "counts": {
+                        "paired": 8,
+                        "both_correct": 3,
+                        "left_only_correct": 2,
+                        "right_only_correct": 1,
+                        "both_wrong": 2,
+                    }
+                }
+            },
         },
     }
 
@@ -941,3 +1104,170 @@ def test_flatten_metric_row_creates_csv_friendly_summary():
     assert row["correctness_keep_all_only_correct"] == 2
     assert row["correctness_autogaze_only_correct"] == 1
     assert row["correctness_both_wrong"] == 3
+    assert row["correctness_keep_all_vs_single_scale_dense_paired"] == 8
+    assert row["correctness_keep_all_vs_single_scale_dense_left_only_correct"] == 2
+
+
+def test_run_command_records_oom_subprocess_failure_when_continue_on_error(tmp_path: Path, monkeypatch):
+    predictions = tmp_path / "predictions.jsonl"
+    summary = tmp_path / "summary.json"
+    scored = tmp_path / "scored.jsonl"
+
+    def raise_called_process_error(command, check):
+        raise subprocess.CalledProcessError(137, command)
+
+    monkeypatch.setattr(subprocess, "run", raise_called_process_error)
+
+    failure = run_command(
+        ["python", "-m", "repro.nvila_runner", "--mode", "hlvid"],
+        continue_on_error=True,
+        predictions=predictions,
+        summary=summary,
+        scored_predictions=scored,
+        mode_key="autogaze",
+    )
+
+    rows = [json.loads(line) for line in predictions.read_text().splitlines()]
+    summary_payload = json.loads(summary.read_text())
+
+    assert failure["kind"] == "oom"
+    assert rows == [
+        {
+            "status": "failed",
+            "runner_status": "oom",
+            "mode_key": "autogaze",
+            "error": "Subprocess exited with return code 137",
+            "failure": {
+                "kind": "oom",
+                "stage": "subprocess",
+                "returncode": 137,
+                "command": ["python", "-m", "repro.nvila_runner", "--mode", "hlvid"],
+                "message": "Subprocess exited with return code 137",
+            },
+        }
+    ]
+    assert summary_payload["failed"] == 1
+    assert summary_payload["subprocess_failure"]["kind"] == "oom"
+
+
+def test_run_command_expands_subprocess_failure_to_pending_manifest_rows(tmp_path: Path, monkeypatch):
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text(
+        "\n".join(
+            json.dumps(row)
+            for row in [
+                {
+                    "question_id": 1,
+                    "category": "av",
+                    "video_path": "clip1.mp4",
+                    "question": "Q? A. a B. b C. c D. d",
+                    "answer": "A",
+                },
+                {
+                    "question_id": 2,
+                    "category": "av",
+                    "video_path": "clip2.mp4",
+                    "question": "Q? A. a B. b C. c D. d",
+                    "answer": "B",
+                },
+            ]
+        )
+        + "\n"
+    )
+    predictions = tmp_path / "predictions.jsonl"
+    summary = tmp_path / "summary.json"
+    scored = tmp_path / "scored.jsonl"
+
+    def raise_called_process_error(command, check):
+        raise subprocess.CalledProcessError(137, command)
+
+    monkeypatch.setattr(subprocess, "run", raise_called_process_error)
+
+    run_command(
+        [
+            "python",
+            "-m",
+            "repro.nvila_runner",
+            "--mode",
+            "hlvid",
+            "--manifest",
+            str(manifest),
+            "--limit",
+            "2",
+        ],
+        continue_on_error=True,
+        predictions=predictions,
+        summary=summary,
+        scored_predictions=scored,
+        mode_key="keep_all",
+    )
+
+    rows = [json.loads(line) for line in predictions.read_text().splitlines()]
+    summary_payload = json.loads(summary.read_text())
+
+    assert [row["question_id"] for row in rows] == [1, 2]
+    assert all(row["status"] == "failed" for row in rows)
+    assert all(row["failure"]["kind"] == "oom" for row in rows)
+    assert summary_payload["failed"] == 2
+    assert summary_payload["failure_summary"]["oom"] == 2
+
+
+def test_build_runner_command_supports_single_scale_dense_target_scales(tmp_path: Path):
+    args = argparse.Namespace(
+        model_path="local-nvila",
+        model_family="auto",
+        paper_preset=None,
+        token_selector_adapter="keep-all",
+        token_selector_name="single_scale_dense",
+        token_selector_path=None,
+        vision_encoder_adapter="nvila-hd-siglip",
+        vision_encoder_name="local-siglip",
+        vision_encoder_path="auto",
+        mllm_adapter="nvila-hd",
+        mllm_name="local-nvila-hd",
+        mllm_path=None,
+        autogaze_model="local-autogaze",
+        device="cuda",
+        device_map="auto",
+        num_video_frames=128,
+        num_video_frames_thumbnail=64,
+        max_tiles_video=8,
+        max_batch_size_autogaze=16,
+        max_batch_size_siglip=32,
+        max_new_tokens=4,
+        warmup_runs=0,
+        measure_ttft=False,
+        video_resize_shortest_edge=720,
+        video_resize_longest_edge=None,
+        video_resize_width=None,
+        video_resize_height=None,
+        video_decode_strategy="seek",
+        autogaze_target_scales="392",
+        autogaze_target_patch_size=14,
+        visualization_output_dir=None,
+        visualization_fps=None,
+        visualization_alpha=None,
+        visualization_selected_max_long_side=None,
+        gazing_ratio_tile=None,
+        task_loss_requirement_tile=0.7,
+        autogaze_generate_only=False,
+        continue_on_error=True,
+        limit=3,
+        split="test",
+        config="default",
+        extra_runner_args=[],
+    )
+
+    command = build_runner_command(
+        args,
+        gazing_mode="keep-all",
+        manifest=tmp_path / "manifest.jsonl",
+        video_root=tmp_path / "videos",
+        predictions=tmp_path / "pred.jsonl",
+        summary=tmp_path / "summary.json",
+        scored_predictions=tmp_path / "scored.jsonl",
+    )
+
+    assert command[command.index("--gazing-mode") + 1] == "keep-all"
+    assert command[command.index("--autogaze-target-scales") + 1] == "392"
+    assert command[command.index("--token-selector-name") + 1] == "single_scale_dense"

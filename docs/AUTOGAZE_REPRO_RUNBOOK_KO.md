@@ -68,7 +68,13 @@ Qwen3-VL 실험은 `qwen-vl-utils`가 필요합니다. 기본 requirements에 �
   --output-json outputs/autogaze_repro/nvila_single.json
 ```
 
-같은 입력에서 AutoGaze off/keep-all을 보려면 `--gazing-mode keep-all`만 바꿉니다. 상대 latency를 비교할 때는 같은 frame 수, thumbnail 수, resize, max tiles, dtype, batch size를 유지하세요.
+같은 입력에서 AutoGaze off/keep-all을 보려면 `--gazing-mode keep-all`만 바꿉니다. 392px single-scale dense keep-all은 `--gazing-mode keep-all-single`을 사용합니다. 이 alias는 내부적으로 `keep-all + --autogaze-target-scales 392 + --autogaze-target-patch-size 14`로 정규화됩니다. 상대 latency를 비교할 때는 같은 frame 수, thumbnail 수, resize, max tiles, dtype, batch size를 유지하세요.
+
+| single mode | 의미 |
+| --- | --- |
+| `--gazing-mode autogaze` | AutoGaze selector on |
+| `--gazing-mode keep-all` | NVILA-HD multiscale keep-all |
+| `--gazing-mode keep-all-single` | 392px single-scale dense keep-all |
 
 실행 후 `nvila_single_summary.json` 또는 Markdown report의 `Key Comparison`에서 먼저 확인할 값은 다음입니다.
 
@@ -120,12 +126,14 @@ AutoGaze가 어떤 프레임과 패치를 남겼는지 확인하려면 visualiza
   --continue-on-error
 ```
 
-기본 wrapper는 keep-all과 AutoGaze를 같은 설정으로 각각 실행한 뒤 gain report를 만듭니다. 핵심 산출물은 다음과 같습니다.
+기본 wrapper는 HD multiscale keep-all, 392px single-scale dense keep-all, AutoGaze를 같은 설정으로 각각 실행한 뒤 gain report를 만듭니다. 핵심 산출물은 다음과 같습니다.
 
 ```text
 hlvid_keep_all_predictions.jsonl
+hlvid_single_scale_dense_predictions.jsonl
 hlvid_autogaze_predictions.jsonl
 hlvid_keep_all_summary.json
+hlvid_single_scale_dense_summary.json
 hlvid_autogaze_summary.json
 hlvid_autogaze_gain_report.json
 hlvid_autogaze_gain_report.csv
@@ -145,6 +153,16 @@ hlvid_autogaze_gain_report.csv
   --summary outputs/autogaze_repro/hlvid_autogaze_summary.json \
   --scored-predictions outputs/autogaze_repro/hlvid_autogaze_scored.jsonl
 ```
+
+필요한 모드만 빼려면 skip 옵션을 사용합니다.
+
+```bash
+  --skip-keep-all              # HD multiscale keep-all 제외
+  --skip-single-scale-dense    # 392px single-scale dense 제외
+  --skip-autogaze              # AutoGaze 제외
+```
+
+`--single-scale-dense`는 이전 명령과의 호환을 위해 남아 있지만 이제 기본값이 on입니다. single-scale dense scale을 바꾸고 싶을 때만 `--single-scale-dense-scales 392`처럼 값을 지정하세요. `hlvid_single_scale_dense_*` 파일과 gain report의 `single_scale_dense_comparison`에서 AutoGaze 대비 latency/token 차이를 확인합니다.
 
 ## 4. Paper Baseline 비교
 
@@ -236,6 +254,10 @@ HLVid 폴더 전체의 metadata 기반 H100 risk를 보려면 기본 benchmark w
   --output-md outputs/autogaze_repro/hlvid_batch_limit3/hlvid_autogaze_gain_report.md
 ```
 
+HLVid gain report를 변환하면 `Key Comparison`, `Benchmark Score`, latency chart, token/patch 표가 `keep_all -> single_scale_dense -> autogaze` 순서로 정렬됩니다. `single_scale_dense`는 392px single-scale dense keep-all ablation이고, SVG chart에서는 `single-scale`로 짧게 표시됩니다. `preprocess(no AG)` 계열은 AutoGaze 시간을 제외한 값만 메인 비교에 사용하고, `video_preprocess_ms` 같은 legacy inclusive 값은 appendix 성격으로 봅니다.
+
+정답 비교도 같은 관점으로 읽습니다. top-level correctness count는 기존 호환용 `keep_all vs autogaze`이고, 3모드 비교는 Markdown의 `Pairwise Correctness Summary`에서 `keep_all vs single_scale_dense`, `single_scale_dense vs autogaze`, `keep_all vs autogaze`를 각각 확인하세요.
+
 chart가 필요 없으면 `--no-charts`를 붙입니다.
 
 ## 8. Aggregate Trend Report
@@ -260,7 +282,7 @@ assets/memory_peak_by_config.svg
 assets/status_by_config.svg
 ```
 
-OOM이 난 실행도 가능한 경우 `failure.kind=oom`, `failure.stage`와 함께 row로 남고, aggregate report의 status chart에 반영됩니다.
+OOM이 난 실행도 가능한 경우 `failure.kind=oom`, `failure.stage`와 함께 row로 남고, aggregate report의 status chart에 반영됩니다. HLVid direct runner는 model load/row inference failure를 기록하고, 기본 wrapper는 subprocess가 137 등으로 죽어도 partial JSONL/summary를 생성합니다. 단, OS가 프로세스를 즉시 kill한 경우 child 내부 stack trace는 남지 않을 수 있으므로 wrapper의 `failure.stage=subprocess`를 기준으로 보세요.
 
 ## 결과 해석 Quick Guide
 

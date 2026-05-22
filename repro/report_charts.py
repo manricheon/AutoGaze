@@ -51,6 +51,13 @@ STAGE_COLORS = {
     "Overall": "#495057",
 }
 
+COMPARISON_MODE_ORDER = ("keep_all", "single_scale_dense", "autogaze")
+CHART_MODE_LABELS = {
+    "keep_all": "keep_all",
+    "single_scale_dense": "single-scale",
+    "autogaze": "autogaze",
+}
+
 
 @dataclass(frozen=True)
 class ChartSegment:
@@ -91,6 +98,10 @@ def shorten_label(value: str, *, max_chars: int = 32) -> str:
     left = max(1, keep // 2)
     right = max(1, keep - left)
     return f"{text[:left]}...{text[-right:]}"
+
+
+def chart_label(value: str) -> str:
+    return CHART_MODE_LABELS.get(str(value), str(value))
 
 
 def numeric_or_none(value: Any) -> float | None:
@@ -174,7 +185,9 @@ def write_bar_chart(
     for row_index, bar in enumerate(clean_bars):
         y = top + row_index * row_height
         total = sum(max(float(segment.value), 0.0) for segment in bar.segments)
-        svg.append(f'<text class="label" x="16" y="{y + 20}">{html.escape(shorten_label(bar.label))}</text>')
+        svg.append(
+            f'<text class="label" x="16" y="{y + 20}">{html.escape(shorten_label(chart_label(bar.label)))}</text>'
+        )
         svg.append(f'<rect x="{label_width}" y="{y + 6}" width="{bar_width}" height="22" fill="#f1f3f5"/>')
         x = label_width
         for segment in bar.segments:
@@ -306,11 +319,20 @@ def _positive_segment(name: str, value: float | None) -> ChartSegment | None:
 
 
 def _has_mode_comparison(group: dict[str, Any]) -> bool:
-    return any(isinstance(value, dict) and ("keep_all" in value or "autogaze" in value) for value in group.values())
+    return any(isinstance(value, dict) and any(mode in value for mode in COMPARISON_MODE_ORDER) for value in group.values())
 
 
 def _latency_modes(latency: dict[str, Any]) -> tuple[str | None, ...]:
-    return ("keep_all", "autogaze") if _has_mode_comparison(latency) else (None,)
+    if not _has_mode_comparison(latency):
+        return (None,)
+    modes = {
+        mode
+        for value in latency.values()
+        if isinstance(value, dict)
+        for mode in COMPARISON_MODE_ORDER
+        if mode in value
+    }
+    return tuple(mode for mode in COMPARISON_MODE_ORDER if mode in modes)
 
 
 def _total_latency(latency: dict[str, Any], mode: str | None = None) -> float | None:
@@ -353,7 +375,14 @@ def _autogaze_latency(latency: dict[str, Any], mode: str | None = None) -> float
 def _vit_latency(latency: dict[str, Any], mode: str | None = None) -> float | None:
     return _metric(
         latency,
-        ("vit_encoder_ms", "vision_encoder_ms", "vit_encoder_median", "qwen_vit_prepare", "qwen_vit_prepare_ms"),
+        (
+            "vit_encoder_ms",
+            "vision_encoder_ms",
+            "siglip_vision_ms",
+            "vit_encoder_median",
+            "qwen_vit_prepare",
+            "qwen_vit_prepare_ms",
+        ),
         mode,
     )
 

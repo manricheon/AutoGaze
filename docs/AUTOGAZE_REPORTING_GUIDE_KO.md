@@ -24,6 +24,8 @@ runner output JSON/JSONL
 
 기본적으로 chart SVG가 함께 생성됩니다. chart 없이 표만 원하면 `--no-charts`를 붙입니다.
 
+HLVid gain report를 입력하면 Markdown은 기본 비교축을 `keep_all -> single_scale_dense -> autogaze` 순서로 표시합니다. `single_scale_dense`는 raw JSON field 이름이고 chart 라벨은 잘리지 않도록 `single-scale`로 짧게 표시됩니다. 해당 모드를 `--skip-single-scale-dense`로 제외한 경우에는 score/status에는 skipped 또는 missing으로 남고, latency/token 비율은 계산 가능한 축만 채웁니다.
+
 ## 여러 실험 trend report
 
 ```bash
@@ -62,10 +64,15 @@ plugin_qwen_32f_t8_448_sparse
 | 모드 | status | accuracy | total ms | Decode/read ms | Prep rest ms | Selector input ms | AutoGaze ms | Vision input ms | ViT ms | Projector ms | Generate total ms | LLM forward ms | Generate rest ms | peak GiB | full patch | selected patch | LLM visual token |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | keep-all |  |  |  |  |  | n/a | n/a |  |  |  |  |  |  |  |  |  |  |
+| single-scale dense |  |  |  |  |  | n/a | n/a |  |  |  |  |  |  |  |  |  |  |
 | AutoGaze |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
 | paper baseline |  |  |  |  |  | n/a | n/a |  |  |  |  |  |  |  |  | n/a |  |
 
 AutoGaze off/keep-all이 OOM이면 latency는 비어 있을 수 있습니다. 그래도 full patch/LLM visual token 예상치와 failure stage를 남기는 것이 중요합니다.
+`single-scale dense`는 기본 HLVid wrapper에서 함께 도는 ablation입니다. `keep-all`이 NVILA-HD multiscale keep-all이라면, single-scale dense는 보통 392px scale 하나만 keep-all로 통과시킨 reference라서 `single_scale_dense_comparison`에서 AutoGaze sparse 결과와 별도로 비교합니다. 제외하려면 `--skip-single-scale-dense`를 사용합니다.
+Markdown의 `Key Comparison`, `Benchmark Score`, `Processing Budget Summary`, latency chart, aggregate rows는 이 세 모드를 같은 순서로 맞춰 보여줍니다. 따라서 HLVid 기본 wrapper 결과를 볼 때는 multiscale keep-all 대비 AutoGaze gain과 single-scale dense 대비 AutoGaze gain을 분리해서 읽으면 됩니다.
+
+정답 비교는 두 층으로 봅니다. 기존 `counts`와 `paired_rates`는 호환성을 위해 `keep_all vs autogaze` 기준을 유지합니다. 세 모드 비교는 `correctness_comparison.pairwise`에 별도로 들어가며 `keep_all_vs_single_scale_dense`, `single_scale_dense_vs_autogaze`, `keep_all_vs_autogaze`를 각각 보여줍니다. Markdown에는 `Pairwise Correctness Summary`와 `Pairwise Correctness Samples`로 표시됩니다.
 
 ## Latency 해석
 
@@ -113,8 +120,9 @@ Markdown과 SVG chart는 raw JSON field 대신 짧은 표시명을 우선 사용
 | `Full patch` | selector 적용 전 patch/token 분모 |
 | `Selected patch` | AutoGaze/token selector 이후 남은 patch/token |
 | `Patch x` | `Full patch / Selected patch` |
+| `Single-scale dense patch` | 392px single-scale dense reference. multiscale keep-all과 분모가 다르므로 별도 축으로 표기 |
 
-Aggregate report의 기본 정렬은 `comparison`입니다. 같은 config 안에서 keep-all/off baseline을 먼저, AutoGaze/token selector를 다음, probe/sidecar/OOM을 뒤로 배치합니다. 필요하면 `--sort latency|token-reduction|memory|accuracy|status`로 바꿀 수 있습니다.
+Aggregate report의 기본 정렬은 `comparison`입니다. 같은 config 안에서 keep-all/off baseline을 먼저, single-scale dense ablation을 다음, AutoGaze/token selector를 그 다음, probe/sidecar/OOM을 뒤로 배치합니다. 필요하면 `--sort latency|token-reduction|memory|accuracy|status`로 바꿀 수 있습니다.
 
 ## Token/Patch 해석
 
@@ -162,6 +170,7 @@ OOM이 나도 가능한 경우 다음 값을 남깁니다.
 | memory peak bar | config별 peak GiB 비교 |
 | status chart | success/OOM/parse_failed/skipped 분포 |
 | accuracy table | keep-all, AutoGaze, paper baseline 점수 비교 |
+| pairwise correctness table | keep-all/single-scale/AutoGaze 중 어떤 모드만 정답을 맞췄는지 paired sample 기준으로 비교 |
 
 ## 결과 코멘트 템플릿
 
