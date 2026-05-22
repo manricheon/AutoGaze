@@ -140,6 +140,7 @@ READABLE_STAGE_TIMING_FIELDS = (
 )
 MODULE_LATENCY_FIELDS = (
     ("total_ms", "total_ms"),
+    ("video_decode_read_ms", "video_decode_ms"),
     ("preprocess_without_autogaze_ms", "video_preprocess_without_autogaze_ms"),
     ("preprocess_total_ms", "video_preprocess_ms"),
     ("autogaze_ms", "autogaze_ms"),
@@ -269,6 +270,28 @@ def _comparison_summary(
     }
 
 
+def _difference_value(before: float | None, after: float | None) -> float | None:
+    if before is None or after is None:
+        return None
+    return max(float(before) - float(after), 0.0)
+
+
+def _add_preprocess_rest_comparison(latency: dict[str, dict[str, float | None]]) -> None:
+    preprocess = latency.get("preprocess_without_autogaze_ms", {})
+    decode = latency.get("video_decode_read_ms", {})
+    keep_all = _difference_value(preprocess.get("keep_all"), decode.get("keep_all"))
+    autogaze = _difference_value(preprocess.get("autogaze"), decode.get("autogaze"))
+    speedup = None
+    if autogaze not in {None, 0} and keep_all is not None:
+        speedup = float(keep_all) / float(autogaze)
+    latency["preprocess_rest_without_decode_autogaze_ms"] = {
+        "keep_all": keep_all,
+        "autogaze": autogaze,
+        "speedup_ratio_keep_all_over_autogaze": speedup,
+        "reduction_percent_of_keep_all": _percent_reduction(keep_all, autogaze),
+    }
+
+
 def _autogaze_before_after_summary(
     rows: list[dict[str, Any]],
     before_field: str,
@@ -327,6 +350,7 @@ def build_readable_summary(
         )
         for label, field in MODULE_LATENCY_FIELDS
     }
+    _add_preprocess_rest_comparison(latency)
     memory = {
         field: _comparison_summary(
             keep_all_rows,
@@ -443,6 +467,8 @@ def build_readable_summary(
         "latency_accounting": latency_accounting_summary(),
         "latency_field_note": (
             "Summary-level latency is intentionally coarse: "
+            "video_decode_read separates common video read/decode cost when measured, "
+            "preprocess_rest_without_decode_autogaze is the remaining non-AutoGaze processor work, "
             "preprocess_without_autogaze=video_preprocess_without_autogaze_ms, "
             "preprocess_total=legacy inclusive video_preprocess_ms, autogaze=autogaze_total_ms, "
             "vit_encoder=siglip_vision_ms, llm=llm_forward_ms. "

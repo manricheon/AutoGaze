@@ -44,6 +44,7 @@ def test_standard_latency_chart_uses_stable_readable_stage_colors(tmp_path):
             "latency_ms": {
                 "total_ms": {"keep_all": 7000, "autogaze": 5300},
                 "preprocess_without_autogaze_ms": {"keep_all": 1000, "autogaze": 1000},
+                "video_decode_ms": {"keep_all": 300, "autogaze": 300},
                 "preprocess_total_ms": {"keep_all": 1000, "autogaze": 1800},
                 "autogaze_total_ms": {"keep_all": 0, "autogaze": 800},
                 "vit_encoder_ms": {"keep_all": 2000, "autogaze": 500},
@@ -55,11 +56,14 @@ def test_standard_latency_chart_uses_stable_readable_stage_colors(tmp_path):
 
     latency_svg = next(artifact.path for artifact in artifacts if artifact.path.name == "latency_breakdown.svg")
     svg = latency_svg.read_text()
-    assert "Pre(no AG)" in svg
+    assert "Decode/read" in svg
+    assert "Prep rest" in svg
+    assert "Pre(no AG)" not in svg
     assert "AutoGaze" in svg
     assert "ViT" in svg
     assert "LLM" in svg
     assert "#5b8def" in svg
+    assert "#15aabf" in svg
     assert "#f59f00" in svg
     assert "#2f9e44" in svg
     assert "#7048e8" in svg

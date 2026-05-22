@@ -81,6 +81,7 @@ READABLE_STAGE_TIMING_FIELDS = (
 )
 MODULE_LATENCY_FIELDS = (
     ("total_ms", "total_ms"),
+    ("video_decode_read_ms", "video_decode_ms"),
     ("preprocess_without_autogaze_ms", "video_preprocess_without_autogaze_ms"),
     ("preprocess_total_ms", "video_preprocess_ms"),
     ("autogaze_ms", "autogaze_ms"),
@@ -378,9 +379,19 @@ def key_medians(
     return {label: median_from_stats(stats, field) for label, field in fields}
 
 
+def add_preprocess_rest_latency(summary: dict[str, float | int | None]) -> None:
+    preprocess = summary.get("preprocess_without_autogaze_ms")
+    decode = summary.get("video_decode_read_ms")
+    if preprocess is None or decode is None:
+        summary["preprocess_rest_without_decode_autogaze_ms"] = None
+        return
+    summary["preprocess_rest_without_decode_autogaze_ms"] = max(float(preprocess) - float(decode), 0.0)
+
+
 LATENCY_HIERARCHY_ASCII = """total_ms = video_preprocess_without_autogaze_ms + autogaze_total_ms + generate_ms
 |-- video_preprocess_without_autogaze_ms
-|   |-- video_decode_ms (included; not an extra total term)
+|   |-- video_decode_read_ms / video_decode_ms (included; common video read/decode cost)
+|   |-- preprocess_rest_without_decode_autogaze_ms (included; non-decode, non-AutoGaze processor work)
 |   |-- video_tiling_ms (included; not an extra total term)
 |   `-- other processor/tokenization overhead
 |-- autogaze_total_ms
@@ -409,6 +420,8 @@ def latency_hierarchy_summary(metrics: dict[str, Any] | None = None) -> dict[str
         metrics,
         "video_preprocess_without_autogaze_ms",
     )
+    video_decode_read_ms = first_metric_value(metrics, "video_decode_read_ms", "video_decode_ms")
+    preprocess_rest_ms = first_metric_value(metrics, "preprocess_rest_without_decode_autogaze_ms")
     return {
         "total_formula": "total_ms = video_preprocess_without_autogaze_ms + autogaze_total_ms + generate_ms",
         "legacy_inclusive_formula": "total_ms = video_preprocess_ms + generate_ms",
@@ -426,6 +439,7 @@ def latency_hierarchy_summary(metrics: dict[str, Any] | None = None) -> dict[str
             "legacy_inclusive_preprocess_field": "video_preprocess_ms",
             "is_video_decode_in_preprocess_ms": True,
             "where_is_video_decode_ms_included": "video_preprocess_without_autogaze_ms",
+            "how_to_compare_non_decode_preprocess": "preprocess_rest_without_decode_autogaze_ms",
             "is_ttft_in_total_ms": False,
         },
         "nodes": {
@@ -437,7 +451,11 @@ def latency_hierarchy_summary(metrics: dict[str, Any] | None = None) -> dict[str
             "video_preprocess_without_autogaze_ms": {
                 "value_ms": preprocess_without_autogaze_ms,
                 "included_in": "total_ms",
-                "includes": ["video_decode_ms", "video_tiling_ms"],
+                "includes": [
+                    "video_decode_read_ms",
+                    "preprocess_rest_without_decode_autogaze_ms",
+                    "video_tiling_ms",
+                ],
                 "description": "Preprocess work excluding the AutoGaze stage.",
             },
             "video_preprocess_ms": {
@@ -451,6 +469,18 @@ def latency_hierarchy_summary(metrics: dict[str, Any] | None = None) -> dict[str
                 "included_in": "video_preprocess_without_autogaze_ms",
                 "add_to_total_ms": False,
                 "description": "Video frame decode/sample/resize timing when measured.",
+            },
+            "video_decode_read_ms": {
+                "value_ms": video_decode_read_ms,
+                "included_in": "video_preprocess_without_autogaze_ms",
+                "add_to_total_ms": False,
+                "description": "Video read/decode/sample timing split out as a mostly common comparison cost.",
+            },
+            "preprocess_rest_without_decode_autogaze_ms": {
+                "value_ms": preprocess_rest_ms,
+                "included_in": "video_preprocess_without_autogaze_ms",
+                "add_to_total_ms": False,
+                "description": "Remaining processor work after subtracting video_decode_read_ms and excluding AutoGaze.",
             },
             "video_tiling_ms": {
                 "value_ms": metrics.get("video_tiling_ms"),
@@ -580,6 +610,7 @@ def summarize_prediction_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     compute = stats_by_field(rows, COMPUTE_FIELDS)
     processing_budget = summarize_processing_budget_rows(rows)
     latency_summary = key_medians(latency, MODULE_LATENCY_FIELDS)
+    add_preprocess_rest_latency(latency_summary)
     token_summary = key_medians(tokens, KEY_TOKEN_FIELDS)
     memory_summary = key_medians(memory, KEY_MEMORY_FIELDS)
     return {
@@ -609,6 +640,8 @@ def summarize_prediction_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "latency_accounting": latency_accounting_summary(),
             "latency_field_note": (
                 "Summary-level latency is intentionally coarse: "
+                "video_decode_read separates common video read/decode cost when measured, "
+                "preprocess_rest_without_decode_autogaze is the remaining non-AutoGaze processor work, "
                 "preprocess_without_autogaze=video_preprocess_without_autogaze_ms, "
                 "preprocess_total=legacy inclusive video_preprocess_ms, autogaze=autogaze_total_ms, "
                 "vit_encoder=siglip_vision_ms, llm=llm_forward_ms. "
