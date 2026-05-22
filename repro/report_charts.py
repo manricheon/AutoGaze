@@ -18,7 +18,8 @@ DEFAULT_COLORS = (
 )
 
 STAGE_COLORS = {
-    "Pre(no AG)": "#5b8def",
+    "Decode/read": "#5b8def",
+    "Prep rest": "#15aabf",
     "AutoGaze": "#f59f00",
     "ViT": "#2f9e44",
     "LLM": "#7048e8",
@@ -101,6 +102,14 @@ def first_number(*values: Any) -> float | None:
         if number is not None:
             return number
     return None
+
+
+def nonnegative_difference(before: Any, after: Any) -> float | None:
+    before_value = first_number(before)
+    after_value = first_number(after)
+    if before_value is None or after_value is None:
+        return None
+    return max(before_value - after_value, 0.0)
 
 
 def write_bar_chart(
@@ -223,6 +232,23 @@ def _metric(group: dict[str, Any], names: tuple[str, ...], mode: str | None = No
     return None
 
 
+def _prep_rest_metric(latency: dict[str, Any], mode: str | None = None) -> float | None:
+    explicit = _metric(
+        latency,
+        ("preprocess_rest_without_decode_autogaze_ms", "preprocess_rest_without_decode_autogaze_median"),
+        mode,
+    )
+    if explicit is not None:
+        return explicit
+    preprocess = _metric(latency, ("preprocess_without_autogaze_ms", "preprocess_without_autogaze_median"), mode)
+    decode = _metric(
+        latency,
+        ("video_decode_read_ms", "video_decode_read_median", "video_decode_ms", "video_decode_median"),
+        mode,
+    )
+    return nonnegative_difference(preprocess, decode)
+
+
 def _has_mode_comparison(group: dict[str, Any]) -> bool:
     return any(isinstance(value, dict) and ("keep_all" in value or "autogaze" in value) for value in group.values())
 
@@ -237,7 +263,15 @@ def _latency_bars(metrics: dict[str, Any]) -> list[ChartBar]:
         label = mode or "current"
         total = _metric(latency, ("total_ms", "total", "total_median"), mode)
         segments = [
-            ("Pre(no AG)", _metric(latency, ("preprocess_without_autogaze_ms", "preprocess_without_autogaze_median"), mode)),
+            (
+                "Decode/read",
+                _metric(
+                    latency,
+                    ("video_decode_read_ms", "video_decode_read_median", "video_decode_ms", "video_decode_median"),
+                    mode,
+                ),
+            ),
+            ("Prep rest", _prep_rest_metric(latency, mode)),
             ("AutoGaze", _metric(latency, ("autogaze_total_ms", "autogaze_ms", "autogaze_total_median", "autogaze_median", "gazing_info_total_ms"), mode)),
             ("ViT", _metric(latency, ("vit_encoder_ms", "vision_encoder_ms", "vit_encoder_median", "qwen_vit_prepare", "qwen_vit_prepare_ms"), mode)),
             ("LLM", _metric(latency, ("llm_ms", "llm_median", "generate", "generate_ms"), mode)),

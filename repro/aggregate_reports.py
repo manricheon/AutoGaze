@@ -16,7 +16,7 @@ from repro.markdown_report import (
     key_metrics,
     processing_budget_summary,
 )
-from repro.report_charts import ChartBar, ChartSegment, numeric_or_none, shorten_label, write_bar_chart
+from repro.report_charts import ChartBar, ChartSegment, nonnegative_difference, numeric_or_none, shorten_label, write_bar_chart
 
 
 ROW_FIELDS = [
@@ -31,6 +31,8 @@ ROW_FIELDS = [
     "failure_message",
     "total_ms",
     "preprocess_ms",
+    "video_decode_read_ms",
+    "preprocess_rest_ms",
     "autogaze_ms",
     "vision_encoder_ms",
     "llm_ms",
@@ -80,6 +82,8 @@ def _blank_row(path: Path, *, report_kind: str, mode: str | None, model_path: st
         "failure_message": None,
         "total_ms": None,
         "preprocess_ms": None,
+        "video_decode_read_ms": None,
+        "preprocess_rest_ms": None,
         "autogaze_ms": None,
         "vision_encoder_ms": None,
         "llm_ms": None,
@@ -176,6 +180,18 @@ def _apply_metrics(row: dict[str, Any], metrics: dict[str, Any], *, mode: str | 
         ("preprocess_without_autogaze_ms", "preprocess_without_autogaze_median"),
         mode,
     )
+    row["video_decode_read_ms"] = _metric(
+        latency,
+        ("video_decode_read_ms", "video_decode_read_median", "video_decode_ms", "video_decode_median"),
+        mode,
+    )
+    row["preprocess_rest_ms"] = _metric(
+        latency,
+        ("preprocess_rest_without_decode_autogaze_ms", "preprocess_rest_without_decode_autogaze_median"),
+        mode,
+    )
+    if row["preprocess_rest_ms"] is None:
+        row["preprocess_rest_ms"] = nonnegative_difference(row["preprocess_ms"], row["video_decode_read_ms"])
     row["autogaze_ms"] = _metric(
         latency,
         ("autogaze_total_ms", "autogaze_ms", "autogaze_total_median", "autogaze_median", "gazing_info_total_ms"),
@@ -405,11 +421,33 @@ def _comparison_key(row: dict[str, Any]) -> tuple[str, str]:
 def _write_trend_charts(rows: list[dict[str, Any]], assets: Path) -> dict[str, Path]:
     charts: dict[str, Path] = {}
     labels = [_row_label(row, index) for index, row in enumerate(rows)]
-    latency_bars = [
-        ChartBar(label, [ChartSegment("total_ms", value)])
-        for label, row in zip(labels, rows)
-        if (value := numeric_or_none(row.get("total_ms"))) is not None
-    ]
+    latency_bars: list[ChartBar] = []
+    for label, row in zip(labels, rows):
+        segments = [
+            ChartSegment("Decode/read", value)
+            for value in [numeric_or_none(row.get("video_decode_read_ms"))]
+            if value is not None and value > 0
+        ]
+        prep_rest = numeric_or_none(row.get("preprocess_rest_ms"))
+        if prep_rest is not None and prep_rest > 0:
+            segments.append(ChartSegment("Prep rest", prep_rest))
+        autogaze = numeric_or_none(row.get("autogaze_ms"))
+        if autogaze is not None and autogaze > 0:
+            segments.append(ChartSegment("AutoGaze", autogaze))
+        vision = numeric_or_none(row.get("vision_encoder_ms"))
+        if vision is not None and vision > 0:
+            segments.append(ChartSegment("ViT", vision))
+        llm = numeric_or_none(row.get("llm_ms"))
+        if llm is not None and llm > 0:
+            segments.append(ChartSegment("LLM", llm))
+        total = numeric_or_none(row.get("total_ms"))
+        known = sum(segment.value for segment in segments)
+        if total is not None and total > known:
+            segments.append(ChartSegment("Other", total - known))
+        if not segments and total is not None:
+            segments.append(ChartSegment("total_ms", total))
+        if segments:
+            latency_bars.append(ChartBar(label, segments))
     charts["latency"] = write_bar_chart(
         assets / "latency_by_config.svg",
         title="Latency By Config",
@@ -482,7 +520,8 @@ def _render_markdown(rows: list[dict[str, Any]], charts: dict[str, Path], output
         ("frames", "Frames"),
         ("processor_input_resolution", "Input res"),
         ("total_ms", "Total ms"),
-        ("preprocess_ms", "Preprocess(no AG) ms"),
+        ("video_decode_read_ms", "Decode/read ms"),
+        ("preprocess_rest_ms", "Prep rest ms"),
         ("autogaze_ms", "AutoGaze ms"),
         ("vision_encoder_ms", "ViT ms"),
         ("llm_ms", "LLM ms"),

@@ -59,11 +59,11 @@ plugin_qwen_32f_t8_448_sparse
 
 리더에게 보여줄 첫 표는 아래 구조가 좋습니다.
 
-| 모드 | status | accuracy | total ms | Preprocess(no AG) ms | AutoGaze ms | ViT ms | LLM ms | peak GiB | full patch | selected patch | LLM visual token |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| keep-all |  |  |  |  | n/a |  |  |  |  |  |  |
-| AutoGaze |  |  |  |  |  |  |  |  |  |  |  |
-| paper baseline |  |  |  |  | n/a |  |  |  |  | n/a |  |
+| 모드 | status | accuracy | total ms | Decode/read ms | Prep rest ms | AutoGaze ms | ViT ms | LLM ms | peak GiB | full patch | selected patch | LLM visual token |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| keep-all |  |  |  |  |  | n/a |  |  |  |  |  |  |
+| AutoGaze |  |  |  |  |  |  |  |  |  |  |  |  |
+| paper baseline |  |  |  |  |  | n/a |  |  |  |  | n/a |  |
 
 AutoGaze off/keep-all이 OOM이면 latency는 비어 있을 수 있습니다. 그래도 full patch/LLM visual token 예상치와 failure stage를 남기는 것이 중요합니다.
 
@@ -78,12 +78,14 @@ total_ms = video_preprocess_without_autogaze_ms + autogaze_total_ms + generate_m
 | 항목 | 해석 |
 | --- | --- |
 | `video_preprocess_without_autogaze_ms` | decode/sample/resize/tile/tensorize. AutoGaze 제외 |
+| `video_decode_read_ms` | 비디오 keyframe scan, seek, decode, frame->PIL 등 읽기/디코드 공통 비용 |
+| `preprocess_rest_without_decode_autogaze_ms` | `video_preprocess_without_autogaze_ms - video_decode_read_ms`. decode와 AutoGaze를 뺀 resize/tile/thumbnail/tensorize/packing 비용 |
 | `autogaze_total_ms` | AutoGaze 입력 준비, 모델 실행, patch 선택 정리 |
 | `vision_encoder_ms` | SigLIP/ViT encoder 구간 |
 | `generate_ms` | visual embedding, projector, LLM prefill/decode를 포함한 generation 호출 |
 | `ttft_ms` | 별도 1-token generation으로 잰 time-to-first-token. total에는 보통 별도 포함 |
 
-summary에는 너무 세부적인 field보다 `Preprocess(no AG) / AutoGaze / ViT / LLM / total` 5개 축을 먼저 보여주는 것이 좋습니다. `video_preprocess_ms`처럼 AutoGaze가 포함된 legacy inclusive field는 appendix에서만 확인하고, 메인 비교/차트에는 쓰지 않습니다.
+summary에는 너무 세부적인 field보다 `Decode/read / Prep rest / AutoGaze / ViT / LLM / total` 축을 먼저 보여주는 것이 좋습니다. `video_preprocess_ms`처럼 AutoGaze가 포함된 legacy inclusive field는 appendix에서만 확인하고, 메인 비교/차트에는 쓰지 않습니다.
 
 ## 표시명과 정렬
 
@@ -91,7 +93,8 @@ Markdown과 SVG chart는 raw JSON field 대신 짧은 표시명을 우선 사용
 
 | 표시명 | 의미 |
 | --- | --- |
-| `Preprocess(no AG)` | AutoGaze를 제외한 decode/sample/resize/tile/tensorize |
+| `Decode/read` | 비디오 읽기, seek, decode, frame 변환. 같은 비디오/sampling이면 on/off 공통 비용에 가까움 |
+| `Prep rest` | decode/read와 AutoGaze를 제외한 resize/tile/thumbnail/tensorize/packing |
 | `AutoGaze` | selector 입력 준비와 selector 실행 |
 | `ViT` | SigLIP/ViT vision encoder |
 | `LLM` | generate/prefill/decode 구간 |
@@ -142,7 +145,7 @@ OOM이 나도 가능한 경우 다음 값을 남깁니다.
 
 | chart | 목적 |
 | --- | --- |
-| stacked latency bar | Preprocess(no AG)/AutoGaze/ViT/LLM 중 어디가 병목인지 표시. 같은 stage는 항상 같은 색상 |
+| stacked latency bar | Decode/read/Prep rest/AutoGaze/ViT/LLM 중 어디가 병목인지 표시. 같은 stage는 항상 같은 색상 |
 | token reduction bar | full patch 대비 selected patch, LLM visual token 감소 표시 |
 | memory peak bar | config별 peak GiB 비교 |
 | status chart | success/OOM/parse_failed/skipped 분포 |

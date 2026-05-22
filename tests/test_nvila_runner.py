@@ -974,6 +974,8 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
     assert summary["module_latency_ms"] == {
         "total_median": 90.0,
         "generate_median": 77.0,
+        "video_decode_read_median": 2.0,
+        "preprocess_rest_without_decode_autogaze_median": None,
         "preprocess_without_autogaze_median": 1.0,
         "preprocess_total_median": 13.0,
         "autogaze_median": 12.0,
@@ -1011,6 +1013,8 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
         "latency_ms": {
             "total_median": 90.0,
             "generate_median": 77.0,
+            "video_decode_read_median": 2.0,
+            "preprocess_rest_without_decode_autogaze_median": None,
             "preprocess_without_autogaze_median": 1.0,
             "preprocess_total_median": 13.0,
             "autogaze_median": 12.0,

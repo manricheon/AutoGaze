@@ -212,6 +212,7 @@ def test_key_metrics_summary_uses_readable_labels_and_no_ag_preprocess():
                 "total_median": 9000,
                 "preprocess_without_autogaze_median": 2200,
                 "preprocess_total_median": 3000,
+                "video_decode_ms": 700,
                 "autogaze_total_median": 800,
                 "vit_encoder_median": 1200,
                 "llm_median": 4000,
@@ -231,12 +232,14 @@ def test_key_metrics_summary_uses_readable_labels_and_no_ag_preprocess():
     markdown = render_markdown_report(payload, source_path="single.json")
 
     assert "## Key Comparison" in markdown
-    assert "| Total ms | Preprocess(no AG) ms | AutoGaze ms | ViT ms | LLM ms |" in markdown
-    assert "| 9,000 | 2,200 | 800 | 1,200 | 4,000 |" in markdown
+    assert "| Total ms | Decode/read ms | Prep rest ms | AutoGaze ms | ViT ms | LLM ms |" in markdown
+    assert "| 9,000 | 700 | 1,500 | 800 | 1,200 | 4,000 |" in markdown
     assert "### Latency" in markdown
     assert "### Tokens" in markdown
     assert "### Memory" in markdown
     assert "Preprocess(no AG)" in markdown
+    assert "| video_decode_read_ms | 700 |" in markdown
+    assert "| preprocess_rest_without_decode_autogaze_ms | 1,500 |" in markdown
     assert "encoder_patch_tokens_before_keep_all_or_raw" not in markdown.split("## Raw Metric Appendix")[0]
     assert "preprocess_total_median" not in markdown.split("## Raw Metric Appendix")[0]
 
@@ -256,8 +259,8 @@ def test_key_comparison_does_not_use_inclusive_preprocess_as_no_ag_preprocess():
 
     markdown = render_markdown_report(payload, source_path="single.json")
 
-    assert "| Total ms | Preprocess(no AG) ms | AutoGaze ms | ViT ms | LLM ms |" in markdown
-    assert "| 9,000 | - | 800 | 1,200 | 4,000 |" in markdown
+    assert "| Total ms | Decode/read ms | Prep rest ms | AutoGaze ms | ViT ms | LLM ms |" in markdown
+    assert "| 9,000 | - | - | 800 | 1,200 | 4,000 |" in markdown
     assert "| 9,000 | 3,000 | 800 | 1,200 | 4,000 |" not in markdown
 
 
@@ -289,9 +292,9 @@ def test_key_comparison_fills_patch_counts_from_readable_processing_budget():
 
     markdown = render_markdown_report(payload, source_path="hlvid_gain.json")
 
-    assert "| Mode | Total ms | Preprocess(no AG) ms | AutoGaze ms | ViT ms | LLM ms | Full patch | Selected patch | Patch x | LLM visual | Peak GiB |" in markdown
-    assert "| keep_all | 10,000 | 1,000 | - | - | - | 900 | 900 | 1 | 100 | - |" in markdown
-    assert "| autogaze | 7,000 | 1,000 | - | - | - | 900 | 300 | 3 | 40 | - |" in markdown
+    assert "| Mode | Total ms | Decode/read ms | Prep rest ms | AutoGaze ms | ViT ms | LLM ms | Full patch | Selected patch | Patch x | LLM visual | Peak GiB |" in markdown
+    assert "| keep_all | 10,000 | - | - | - | - | - | 900 | 900 | 1 | 100 | - |" in markdown
+    assert "| autogaze | 7,000 | - | - | - | - | - | 900 | 300 | 3 | 40 | - |" in markdown
 
 
 def test_render_benchmark_markdown_report_includes_scores_and_comparison_tables():

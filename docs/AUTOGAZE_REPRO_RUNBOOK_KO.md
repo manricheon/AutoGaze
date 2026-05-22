@@ -257,7 +257,7 @@ OOM이 난 실행도 가능한 경우 `failure.kind=oom`, `failure.stage`와 함
 | 영역 | 먼저 볼 필드 |
 | --- | --- |
 | 전체 시간 | `total_ms`, `latency_accounting.additive_total_ms` |
-| 전처리 | `video_preprocess_without_autogaze_ms`, `video_decode_ms`, `video_tiling_ms` |
+| 전처리 | `video_decode_read_ms`, `preprocess_rest_without_decode_autogaze_ms`, `video_preprocess_without_autogaze_ms`, `video_decode_ms`, `video_tiling_ms` |
 | AutoGaze | `autogaze_total_ms`, `autogaze_forward_ms`, `autogaze_model_forward_ms` |
 | Vision encoder | `vision_encoder_ms`, `siglip_vision_ms`, Qwen의 `qwen_vit_prepare_ms` |
 | LLM | `generate_ms`, `llm_forward_ms`, `ttft_ms` |
@@ -271,6 +271,8 @@ Primary latency 공식은 다음입니다.
 ```text
 total_ms = video_preprocess_without_autogaze_ms + autogaze_total_ms + generate_ms
 ```
+
+메인 비교 표에서는 `video_preprocess_without_autogaze_ms`를 다시 `Decode/read ms`와 `Prep rest ms`로 나눠 봅니다. 같은 비디오와 같은 sampling이면 decode/read는 on/off 공통 비용에 가깝기 때문에, AutoGaze의 실제 이득은 `Prep rest + AutoGaze + ViT + LLM` 쪽에서 더 잘 보입니다.
 
 `video_preprocess_ms`는 AutoGaze를 포함한 legacy inclusive field라 primary total에 다시 더하지 않습니다.
 

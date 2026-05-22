@@ -23,6 +23,8 @@ def test_normalize_single_report_extracts_latency_tokens_memory_and_failure(tmp_
                     "metrics": {
                         "latency_ms": {
                             "total": 1200,
+                            "preprocess_without_autogaze_ms": 1000,
+                            "video_decode_ms": 300,
                             "preprocess_total_median": 300,
                             "qwen_vit_prepare": 700,
                         },
@@ -52,9 +54,11 @@ def test_normalize_single_report_extracts_latency_tokens_memory_and_failure(tmp_
             "oom_stage": "qwen_vit_prepare",
             "failure_kind": "oom",
             "failure_message": "CUDA out of memory",
-            "total_ms": 1200.0,
-            "preprocess_ms": None,
-            "autogaze_ms": None,
+                "total_ms": 1200.0,
+                "preprocess_ms": 1000.0,
+                "video_decode_read_ms": 300.0,
+                "preprocess_rest_ms": 700.0,
+                "autogaze_ms": None,
             "vision_encoder_ms": 700.0,
             "llm_ms": None,
             "single_scale_dense_patch_tokens": None,

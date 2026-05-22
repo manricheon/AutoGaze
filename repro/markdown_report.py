@@ -25,6 +25,12 @@ DISPLAY_LABELS = {
     "total_ms": "Total ms",
     "total": "Total ms",
     "total_median": "Total ms",
+    "video_decode_read_ms": "Decode/read ms",
+    "video_decode_read_median": "Decode/read ms",
+    "video_decode_ms": "Decode/read ms",
+    "video_decode_median": "Decode/read ms",
+    "preprocess_rest_without_decode_autogaze_ms": "Prep rest ms",
+    "preprocess_rest_without_decode_autogaze_median": "Prep rest ms",
     "preprocess_without_autogaze_ms": "Preprocess(no AG) ms",
     "preprocess_without_autogaze_median": "Preprocess(no AG) ms",
     "preprocess_total_ms": "Preprocess incl. AG ms",
@@ -75,7 +81,8 @@ DISPLAY_LABELS = {
 
 SUMMARY_LATENCY_SPECS = [
     ("Total ms", ("total_ms", "total", "total_median")),
-    ("Preprocess(no AG) ms", ("preprocess_without_autogaze_ms", "preprocess_without_autogaze_median")),
+    ("Decode/read ms", ("video_decode_read_ms", "video_decode_read_median", "video_decode_ms", "video_decode_median")),
+    ("Prep rest ms", ("preprocess_rest_without_decode_autogaze_ms", "preprocess_rest_without_decode_autogaze_median")),
     ("AutoGaze ms", ("autogaze_total_ms", "autogaze_ms", "autogaze_total_median", "autogaze_median", "gazing_info_total_ms")),
     ("ViT ms", ("vit_encoder_ms", "vision_encoder_ms", "vit_encoder_median", "qwen_vit_prepare", "qwen_vit_prepare_ms")),
     ("LLM ms", ("llm_ms", "llm_median", "generate", "generate_ms")),
@@ -193,6 +200,14 @@ def reduction_percent(before: Any, after: Any) -> float | None:
     return (1.0 - after_value / before_value) * 100.0
 
 
+def nonnegative_difference(before: Any, after: Any) -> float | None:
+    before_value = numeric_or_none(before)
+    after_value = numeric_or_none(after)
+    if before_value is None or after_value is None:
+        return None
+    return max(before_value - after_value, 0.0)
+
+
 def get_budget_value(summary: dict[str, Any], field: str, default: Any = None) -> Any:
     if field in summary:
         value = summary.get(field)
@@ -227,6 +242,11 @@ def key_metrics_from_stream_profile(payload: dict[str, Any]) -> dict[str, Any]:
         value = stage.get("total_ms")
         return float(value) if value is not None else None
 
+    def sum_present(names: tuple[str, ...]) -> float | None:
+        values = [stage_total(name) for name in names]
+        present = [value for value in values if value is not None]
+        return sum(present) if present else None
+
     preprocess_parts = [
         stage_total("video_keyframe_index_scan"),
         stage_total("video_decode_seek"),
@@ -243,6 +263,16 @@ def key_metrics_from_stream_profile(payload: dict[str, Any]) -> dict[str, Any]:
         for part in [stage_total("tile_autogaze_tensorize"), stage_total("tile_autogaze_forward")]
         if part is not None
     )
+    video_decode_read = sum_present(
+        (
+            "video_keyframe_index_scan",
+            "video_seek",
+            "video_decode_seek",
+            "video_decode_scan",
+            "video_frame_to_pil",
+        )
+    )
+    preprocess_rest = nonnegative_difference(preprocess_total, video_decode_read)
     vit_total = stage_total("siglip_gazed_forward") or stage_total("siglip_keep_all_forward")
     tokens = as_mapping(get_path(payload, "stream_plan.tokens", {}))
     gaze = as_mapping(payload.get("gaze"))
@@ -250,6 +280,8 @@ def key_metrics_from_stream_profile(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "latency_ms": {
             "total_ms": preprocess_total + autogaze_total + (vit_total or 0.0),
+            "video_decode_read_ms": video_decode_read,
+            "preprocess_rest_without_decode_autogaze_ms": preprocess_rest,
             "preprocess_without_autogaze_ms": preprocess_total,
             "preprocess_total_ms": preprocess_total,
             "autogaze_ms": autogaze_total,
@@ -302,6 +334,13 @@ def key_metrics(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "latency_ms": {
             "total_ms": result.get("total_ms"),
+            "video_decode_read_ms": first_present(
+                result.get("video_decode_read_ms"),
+                result.get("video_decode_ms"),
+            ),
+            "preprocess_rest_without_decode_autogaze_ms": result.get(
+                "preprocess_rest_without_decode_autogaze_ms"
+            ),
             "preprocess_without_autogaze_ms": result.get("video_preprocess_without_autogaze_ms"),
             "preprocess_total_ms": result.get("video_preprocess_ms"),
             "autogaze_ms": result.get("autogaze_ms"),
@@ -349,8 +388,72 @@ def readable_processing_budget_summary(payload: dict[str, Any]) -> dict[str, Any
     )
 
 
+def metric_from_aliases(group: dict[str, Any], aliases: tuple[str, ...], mode: str | None = None) -> Any:
+    for alias in aliases:
+        value = group.get(alias)
+        if mode is not None and isinstance(value, dict):
+            mode_value = value.get(mode)
+            if mode_value is not None:
+                return mode_value
+        if mode is None and value is not None and not isinstance(value, dict):
+            return value
+    return None
+
+
+def comparison_modes(group: dict[str, Any]) -> tuple[str, ...]:
+    modes: set[str] = set()
+    for value in group.values():
+        if isinstance(value, dict):
+            for key in ("keep_all", "autogaze"):
+                if key in value:
+                    modes.add(key)
+    ordered = [mode for mode in ("keep_all", "autogaze") if mode in modes]
+    return tuple(ordered)
+
+
+def add_latency_decomposition_metrics(latency: dict[str, Any]) -> dict[str, Any]:
+    enriched = dict(latency)
+    decode_aliases = ("video_decode_read_ms", "video_decode_read_median", "video_decode_ms", "video_decode_median")
+    preprocess_aliases = ("preprocess_without_autogaze_ms", "preprocess_without_autogaze_median")
+    rest_aliases = (
+        "preprocess_rest_without_decode_autogaze_ms",
+        "preprocess_rest_without_decode_autogaze_median",
+    )
+    modes = comparison_modes(enriched)
+    if modes:
+        if "video_decode_read_ms" not in enriched:
+            decode_by_mode = {mode: metric_from_aliases(enriched, decode_aliases, mode) for mode in modes}
+            if any(value is not None for value in decode_by_mode.values()):
+                enriched["video_decode_read_ms"] = decode_by_mode
+        if all(metric_from_aliases(enriched, rest_aliases, mode) is None for mode in modes):
+            rest_by_mode = {
+                mode: nonnegative_difference(
+                    metric_from_aliases(enriched, preprocess_aliases, mode),
+                    metric_from_aliases(enriched, decode_aliases, mode),
+                )
+                for mode in modes
+            }
+            if any(value is not None for value in rest_by_mode.values()):
+                enriched["preprocess_rest_without_decode_autogaze_ms"] = rest_by_mode
+        return enriched
+
+    if "video_decode_read_ms" not in enriched:
+        decode_value = metric_from_aliases(enriched, decode_aliases)
+        if decode_value is not None:
+            enriched["video_decode_read_ms"] = decode_value
+    if metric_from_aliases(enriched, rest_aliases) is None:
+        rest_value = nonnegative_difference(
+            metric_from_aliases(enriched, preprocess_aliases),
+            metric_from_aliases(enriched, decode_aliases),
+        )
+        if rest_value is not None:
+            enriched["preprocess_rest_without_decode_autogaze_ms"] = rest_value
+    return enriched
+
+
 def enriched_key_metrics(payload: dict[str, Any], metrics: dict[str, Any]) -> dict[str, Any]:
     enriched = {key: dict(value) if isinstance(value, dict) else value for key, value in metrics.items()}
+    latency = add_latency_decomposition_metrics(dict(as_mapping(enriched.get("latency_ms"))))
     tokens = dict(as_mapping(enriched.get("tokens")))
 
     readable_budget = readable_processing_budget_summary(payload)
@@ -361,6 +464,8 @@ def enriched_key_metrics(payload: dict[str, Any], metrics: dict[str, Any]) -> di
 
     if tokens:
         enriched["tokens"] = tokens
+    if latency:
+        enriched["latency_ms"] = latency
     return enriched
 
 
@@ -520,9 +625,23 @@ def is_primary_raw_metric(name: str) -> bool:
 
 
 def preprocess_without_autogaze_value(latency: dict[str, Any]) -> Any:
-    return first_present(
-        latency.get("preprocess_without_autogaze_ms"),
-        latency.get("preprocess_without_autogaze_median"),
+    return metric_from_aliases(
+        latency,
+        ("preprocess_without_autogaze_ms", "preprocess_without_autogaze_median"),
+    )
+
+
+def video_decode_read_value(latency: dict[str, Any]) -> Any:
+    return metric_from_aliases(
+        latency,
+        ("video_decode_read_ms", "video_decode_read_median", "video_decode_ms", "video_decode_median"),
+    )
+
+
+def preprocess_rest_value(latency: dict[str, Any]) -> Any:
+    return metric_from_aliases(
+        latency,
+        ("preprocess_rest_without_decode_autogaze_ms", "preprocess_rest_without_decode_autogaze_median"),
     )
 
 
@@ -563,7 +682,10 @@ def render_key_comparison_section(metrics: dict[str, Any]) -> str:
         return ""
     if modes != (None,):
         headers = ["Mode"] + headers
-    note = "Preprocess(no AG) excludes AutoGaze time. AutoGaze is shown as its own latency stage."
+    note = (
+        "Decode/read is split out from preprocessing when measured. "
+        "Prep rest excludes both video decode/read and AutoGaze time."
+    )
     return "## Key Comparison\n\n" + note + "\n\n" + markdown_table(headers, rows)
 
 
@@ -862,7 +984,7 @@ def render_step_pipeline_metrics(payload: dict[str, Any], metrics: dict[str, Any
             f"{format_value(first_present(info.get('source_frames'), get_path(payload, 'sampling.num_video_frames')))} frames; "
             f"{first_present(info.get('source_resolution'), resolution(info.get('width'), info.get('height')), '-')}",
             f"sampled={format_value(tokens.get('video_sampled_frames'))}; thumbnail={format_value(tokens.get('thumbnail_sampled_frames'))}",
-            preprocess_without_autogaze_value(latency),
+            video_decode_read_value(latency),
             first_present(memory.get("raw_frame_buffer_peak"), memory.get("processor_peak"), memory.get("processor_peak_median")),
         ],
         [
@@ -870,7 +992,7 @@ def render_step_pipeline_metrics(payload: dict[str, Any], metrics: dict[str, Any
             "Resize / tile / thumbnail",
             info.get("processor_input_resolution") or resolution(info.get("width"), info.get("height")),
             f"spatial_tiles={format_value(info.get('spatial_tiles_per_video'))}; chunks={format_value(info.get('temporal_chunks_per_video'))}",
-            preprocess_without_autogaze_value(latency),
+            preprocess_rest_value(latency),
             memory.get("processor_peak") or memory.get("processor_peak_median"),
         ],
         [
