@@ -431,6 +431,38 @@ def test_charts_use_readable_processing_budget_token_metrics(tmp_path):
     assert "40 tokens" in token_svg
 
 
+def test_latency_views_merge_detail_fields_for_stage_and_model_side_views():
+    payload = {
+        "readable_summary": {
+            "key_metrics_median": {
+                "latency_ms": {
+                    "total_ms": {"keep_all": 7000, "autogaze": 5550},
+                    "preprocess_without_autogaze_ms": {"keep_all": 1200, "autogaze": 1300},
+                    "autogaze_total_ms": {"keep_all": 0, "autogaze": 800},
+                    "vit_encoder_ms": {"keep_all": 2000, "autogaze": 500},
+                    "llm_ms": {"keep_all": 3800, "autogaze": 2870},
+                },
+                "tokens": {},
+            },
+            "latency_ms_detail_median": {
+                "video_decode_read_ms": {"keep_all": 300, "autogaze": 300},
+                "video_frame_resize_ms": {"keep_all": 100, "autogaze": 100},
+                "video_tiling_ms": {"keep_all": 600, "autogaze": 600},
+                "selector_input_build_ms": {"keep_all": 0, "autogaze": 50},
+                "mm_projector_ms": {"keep_all": 200, "autogaze": 80},
+            },
+        }
+    }
+
+    markdown = render_markdown_report(payload, source_path="hlvid_gain.json")
+
+    assert "### Wall-clock Stage View" in markdown
+    assert "| autogaze | 300 | 100 | 600 | 250 | 50 | 800 | 500 | 80 | 2,870 |" in markdown
+    assert "### Model-side Latency View" in markdown
+    assert "excludes video decode/read and measured frame resize" in markdown
+    assert "| autogaze | 850 | 850 | 580 | 2,870 |" in markdown
+
+
 def test_render_benchmark_markdown_report_includes_scores_and_comparison_tables():
     payload = {
         "dataset": {

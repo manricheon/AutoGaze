@@ -1,5 +1,11 @@
 from repro.report_charts import ChartBar, ChartSegment, write_bar_chart
-from repro.report_charts import build_standard_report_charts, latency_attribution_bars, latency_stage_bars, shorten_label
+from repro.report_charts import (
+    build_standard_report_charts,
+    latency_attribution_bars,
+    latency_model_side_bars,
+    latency_stage_bars,
+    shorten_label,
+)
 
 
 def test_write_bar_chart_creates_self_contained_svg(tmp_path):
@@ -113,6 +119,39 @@ def test_standard_charts_include_wall_clock_and_attribution_latency_views(tmp_pa
     attribution_svg = (tmp_path / "latency_attribution.svg").read_text()
     assert "AutoGaze pipeline" in attribution_svg
     assert "Vision pipeline" in attribution_svg
+
+
+def test_model_side_latency_view_excludes_video_io_and_resize(tmp_path):
+    metrics = {
+        "latency_ms": {
+            "total_ms": {"keep_all": 7000, "autogaze": 5300},
+            "video_decode_read_ms": {"keep_all": 300, "autogaze": 300},
+            "video_frame_resize_ms": {"keep_all": 100, "autogaze": 100},
+            "preprocess_rest_without_decode_autogaze_ms": {"keep_all": 900, "autogaze": 1000},
+            "video_tiling_ms": {"keep_all": 600, "autogaze": 600},
+            "selector_input_build_ms": {"keep_all": 0, "autogaze": 50},
+            "autogaze_total_ms": {"keep_all": 0, "autogaze": 800},
+            "vit_encoder_ms": {"keep_all": 2000, "autogaze": 500},
+            "mm_projector_ms": {"keep_all": 200, "autogaze": 80},
+            "llm_ms": {"keep_all": 3800, "autogaze": 2870},
+        }
+    }
+
+    model_side = latency_model_side_bars(metrics)
+    artifacts = build_standard_report_charts(metrics=metrics, output_dir=tmp_path)
+
+    assert model_side[1].segments == [
+        ChartSegment("Model input prep", 850.0),
+        ChartSegment("Selector+AutoGaze", 850.0),
+        ChartSegment("Vision+projector", 580.0),
+        ChartSegment("LLM", 2870.0),
+    ]
+    assert (tmp_path / "latency_model_side.svg").is_file()
+    assert any(artifact.title == "Model-side Latency (excludes video I/O + resize)" for artifact in artifacts)
+    model_svg = (tmp_path / "latency_model_side.svg").read_text()
+    assert "Model input prep" in model_svg
+    assert "Video I/O" not in model_svg
+    assert "Frame resize" not in model_svg
 
 
 def test_standard_latency_chart_does_not_show_inclusive_preprocess_as_no_ag(tmp_path):

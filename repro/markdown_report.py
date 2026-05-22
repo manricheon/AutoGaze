@@ -11,6 +11,7 @@ from repro.report_charts import (
     ChartBar,
     build_standard_report_charts,
     latency_attribution_bars,
+    latency_model_side_bars,
     latency_stage_bars,
 )
 
@@ -476,9 +477,31 @@ def add_latency_decomposition_metrics(latency: dict[str, Any]) -> dict[str, Any]
     return enriched
 
 
+def merge_latency_detail_metrics(payload: dict[str, Any], latency: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(latency)
+    detail = get_path(payload, "readable_summary.latency_ms_detail_median")
+    if detail is None:
+        detail = get_path(payload, "readable_performance_summary.latency_ms_detail_median")
+    if not isinstance(detail, dict):
+        return merged
+
+    for field, detail_value in detail.items():
+        current_value = merged.get(field)
+        if current_value is None:
+            merged[field] = detail_value
+        elif isinstance(current_value, dict) and isinstance(detail_value, dict):
+            combined = dict(current_value)
+            for key, value in detail_value.items():
+                if combined.get(key) is None and value is not None:
+                    combined[key] = value
+            merged[field] = combined
+    return merged
+
+
 def enriched_key_metrics(payload: dict[str, Any], metrics: dict[str, Any]) -> dict[str, Any]:
     enriched = {key: dict(value) if isinstance(value, dict) else value for key, value in metrics.items()}
-    latency = add_latency_decomposition_metrics(dict(as_mapping(enriched.get("latency_ms"))))
+    latency = merge_latency_detail_metrics(payload, dict(as_mapping(enriched.get("latency_ms"))))
+    latency = add_latency_decomposition_metrics(latency)
     tokens = dict(as_mapping(enriched.get("tokens")))
 
     readable_budget = readable_processing_budget_summary(payload)
@@ -726,13 +749,17 @@ def render_latency_view_table(bars: list[ChartBar], segment_names: list[str]) ->
 def render_latency_views_section(metrics: dict[str, Any]) -> str:
     stage_bars = latency_stage_bars(metrics)
     attribution_bars = latency_attribution_bars(metrics)
-    if not stage_bars and not attribution_bars:
+    model_side_bars = latency_model_side_bars(metrics)
+    if not stage_bars and not attribution_bars and not model_side_bars:
         return ""
     sections = [
         "## Latency Views",
         (
             "Wall-clock view shows the measured execution order. Attribution view groups input-build costs with the "
-            "module they support when that split is available; otherwise unresolved preprocessing stays in pre-model prep."
+            "module they support when that split is available; otherwise unresolved preprocessing stays in pre-model prep. "
+            "Model-side view excludes video decode/read and measured frame resize so model-specific prep, selector, "
+            "vision, and LLM costs can be compared more fairly. If frame resize was not split by the runner, it may "
+            "remain inside model input prep."
         ),
     ]
     if stage_bars:
@@ -765,6 +792,21 @@ def render_latency_views_section(metrics: dict[str, Any]) -> str:
                     "AutoGaze pipeline",
                     "Vision pipeline",
                     "MLLM pipeline",
+                    "Other",
+                ],
+            )
+        )
+    if model_side_bars:
+        sections.append(
+            "### Model-side Latency View\n\n"
+            "This view excludes video decode/read and measured frame resize.\n\n"
+            + render_latency_view_table(
+                model_side_bars,
+                [
+                    "Model input prep",
+                    "Selector+AutoGaze",
+                    "Vision+projector",
+                    "LLM",
                     "Other",
                 ],
             )
