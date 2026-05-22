@@ -4,6 +4,7 @@ import types
 
 from repro.plugins.mllm_adapters import (
     _build_qwen_grid_inputs,
+    build_llava_onevision_pruned_visual_inputs,
     build_qwen_inputs_from_video_features,
     build_qwen_pruned_visual_inputs,
     build_qwen_pre_vit_sparse_visual_inputs,
@@ -46,6 +47,7 @@ def make_request(**overrides):
         "max_tiles_video": 1,
         "external_mllm_command": "vila-infer",
         "enable_qwen_prune_generate": False,
+        "enable_visual_prune_generate": False,
         "sparse_selection_plan_path": None,
         "qwen_video_nframes": None,
         "qwen_video_fps": None,
@@ -349,6 +351,16 @@ def test_build_mllm_processing_budget_summary_reports_qwen_resize_thumbnail_and_
     assert summary["single_scale_dense_vision_budget"]["patch_positions_per_reference_tile_frame"] == 784
     assert summary["single_scale_dense_vision_budget"]["estimated_total_patch_tokens"] == 106624
     assert summary["single_scale_dense_vision_budget"]["reference_tile_count_source"] == "runner_max_tiles_video"
+
+
+def test_build_mllm_processing_budget_summary_uses_model_specific_non_qwen_notes():
+    summary = build_mllm_processing_budget_summary(
+        make_request(model_family="longvila", mllm_adapter="longvila")
+    )
+
+    assert summary["model_processing_unit"]["name"] == "adapter_specific_visual_tokens"
+    assert "VILA-family" in summary["model_processing_unit"]["description"]
+    assert "non-Qwen plugin modes" in summary["tiling"]["note"]
 
 
 def test_runtime_description_includes_metric_schema():
@@ -972,6 +984,92 @@ def test_llava_onevision_adapter_uses_path_style_video_content():
     ]
 
 
+def test_llava_onevision_autogaze_on_returns_probe_instead_of_dense_generate():
+    adapter = resolve_mllm_adapter("llava-onevision")
+
+    result = adapter.run(
+        make_request(
+            model_family="llava-onevision",
+            mllm_adapter="llava-onevision",
+            token_selector_kind="autogaze",
+            integration_level="post_encoder_token_prune",
+        )
+    )
+
+    assert result.status == "probe_required"
+    assert result.text is None
+    assert result.metrics["metric_status"]["value"] == "probe_required"
+    assert result.metrics["metric_status"]["reason"] == (
+        "AutoGaze-on LLaVA-OneVision integration requires a video pooling and visual token packing probe"
+    )
+    assert result.metrics["feature_packing_probe"]["family_group"] == "llava_onevision"
+
+
+def test_llava_onevision_autogaze_on_dispatches_prune_generate_when_enabled(monkeypatch):
+    adapter = resolve_mllm_adapter("llava-onevision")
+
+    def fake_prune_generate(self, request):
+        return MllmRunResult(
+            text="llava sparse answer",
+            prompt=request.prompt,
+            video=request.video,
+            image=request.image,
+            adapter=self.name,
+            status="executed",
+            metrics={"llava_onevision_prune_generate": {"enabled": True}},
+        )
+
+    monkeypatch.setattr(type(adapter), "_run_llava_onevision_autogaze_prune_generate", fake_prune_generate)
+
+    result = adapter.run(
+        make_request(
+            model_family="llava-onevision",
+            mllm_adapter="llava-onevision",
+            token_selector_kind="autogaze",
+            integration_level="post_encoder_token_prune",
+            enable_visual_prune_generate=True,
+        )
+    )
+
+    assert result.status == "executed"
+    assert result.text == "llava sparse answer"
+    assert result.metrics["llava_onevision_prune_generate"]["enabled"] is True
+
+
+def test_build_llava_onevision_pruned_visual_inputs_removes_unselected_video_placeholders():
+    import torch
+
+    class FakeEmbeddings:
+        def __call__(self, input_ids):
+            batch, length = input_ids.shape
+            hidden = 4
+            return torch.arange(batch * length * hidden, dtype=torch.float32).reshape(batch, length, hidden)
+
+    class FakeConfig:
+        video_token_id = 99
+
+    class FakeModel:
+        config = FakeConfig()
+
+        def get_input_embeddings(self):
+            return FakeEmbeddings()
+
+    inputs = {
+        "input_ids": torch.tensor([[1, 99, 99, 99, 2]]),
+        "attention_mask": torch.ones(1, 5, dtype=torch.long),
+    }
+    video_features = torch.tensor([[[10.0, 10.0, 10.0, 10.0], [20.0, 20.0, 20.0, 20.0], [30.0, 30.0, 30.0, 30.0]]])
+
+    pruned = build_llava_onevision_pruned_visual_inputs(FakeModel(), inputs, video_features, keep_indices=[0, 2])
+
+    assert "input_ids_for_decode" in pruned
+    assert "input_ids" not in pruned
+    assert list(pruned["inputs_embeds"].shape) == [1, 4, 4]
+    assert pruned["attention_mask"].tolist() == [[1, 1, 1, 1]]
+    assert pruned["llava_onevision_prune_generate_metadata"]["visual_tokens_before_prune"] == 3
+    assert pruned["llava_onevision_prune_generate_metadata"]["visual_tokens_after_prune"] == 2
+
+
 def test_planned_adapter_describes_model_specific_feature_probe():
     adapter = resolve_mllm_adapter("internvl3")
 
@@ -1077,6 +1175,30 @@ def test_vila_cli_adapter_keeps_autogaze_requested_run_as_probe_required():
     assert result.metrics["feature_packing_probe"]["next_probe_command"]["goal"] == "capture_vila_feature_packing"
     assert result.metrics["feature_packing_probe"]["next_probe_command"]["requires_code_probe"] is True
     assert result.metrics["metric_status"]["reason"] == "AutoGaze-on VILA-family integration still requires a feature packing probe"
+
+
+def test_vila_cli_adapter_can_run_dense_generation_with_autogaze_sidecar(tmp_path):
+    script = tmp_path / "vila-infer"
+    script.write_text("#!/bin/sh\necho loading model\necho sidecar answer\n")
+    os.chmod(script, 0o755)
+    adapter = resolve_mllm_adapter("longvila")
+
+    result = adapter.run(
+        make_request(
+            model_family="longvila",
+            mllm_adapter="longvila",
+            token_selector_kind="autogaze",
+            integration_level="post_encoder_token_prune",
+            enable_visual_prune_generate=True,
+            external_mllm_command=str(script),
+            sparse_selection_plan_path="outputs/autogaze_plan.json",
+        )
+    )
+
+    assert result.status == "executed_dense_with_autogaze_sidecar"
+    assert result.text == "sidecar answer"
+    assert result.metrics["autogaze_attachment"]["selector_executed"] is True
+    assert result.metrics["autogaze_attachment"]["visual_pruning_applied"] is False
 
 
 def test_vila_cli_adapter_collects_static_feature_probe_when_config_exists(tmp_path):
@@ -1198,3 +1320,27 @@ def test_internvl3_cli_adapter_keeps_autogaze_requested_run_as_probe_required():
     assert result.status == "probe_required"
     assert result.metrics["feature_packing_probe"]["family_group"] == "internvl"
     assert result.metrics["metric_status"]["reason"] == "AutoGaze-on InternVL3 integration still requires a dynamic tiling probe"
+
+
+def test_internvl3_cli_adapter_can_run_dense_generation_with_autogaze_sidecar(tmp_path):
+    script = tmp_path / "internvl-helper"
+    script.write_text("#!/bin/sh\necho '{\"answer\":\"B\"}'\n")
+    os.chmod(script, 0o755)
+    adapter = resolve_mllm_adapter("internvl3")
+
+    result = adapter.run(
+        make_request(
+            model_family="internvl3",
+            mllm_adapter="internvl3",
+            token_selector_kind="autogaze",
+            integration_level="post_encoder_token_prune",
+            enable_visual_prune_generate=True,
+            external_mllm_command=str(script),
+            sparse_selection_plan_path="outputs/autogaze_plan.json",
+        )
+    )
+
+    assert result.status == "executed_dense_with_autogaze_sidecar"
+    assert result.text == "B"
+    assert result.metrics["autogaze_attachment"]["selector_executed"] is True
+    assert result.metrics["autogaze_attachment"]["visual_pruning_applied"] is False

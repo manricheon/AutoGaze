@@ -97,6 +97,32 @@ summary에는 너무 세부적인 field보다 `preprocess / AutoGaze / ViT / LLM
 
 모델별로 patch와 LLM visual token은 1:1이 아닐 수 있습니다. 그래서 report는 “encoder 이전 patch 감소”와 “LLM context 감소”를 분리해서 보여야 합니다.
 
+Plugin benchmark에서는 같은 의미를 아래 flatten field로도 남깁니다.
+
+| field | 의미 |
+| --- | --- |
+| `raw_patch_tokens` | selector/processor 기준 full/off patch token 분모 |
+| `selected_patch_tokens` | AutoGaze 또는 sparse plan 이후 남은 patch token |
+| `patch_token_reduction_ratio` | `raw_patch_tokens / selected_patch_tokens` |
+| `encoder_input_tokens` | ViT/vision encoder에 실제 들어가도록 mapping된 token |
+| `llm_visual_tokens` | MLLM context에 들어간 visual token |
+| `selector_ms`, `vision_encoder_ms`, `generate_ms` | selector, ViT, MLLM 주요 latency |
+| `failure_stage` | OOM/실패가 난 pipeline stage |
+| `autogaze_attachment_mode` | sidecar mode인지 실제 prune/sparse mode인지 확인 |
+| `visual_pruning_applied` | AutoGaze 결과가 모델 내부 visual token pruning에 적용됐는지 |
+| `vision_encoder_latency_reduced` | ViT/vision encoder 계산량 감소를 주장할 수 있는지 |
+| `mllm_context_reduced` | LLM context/prefill token 감소를 주장할 수 있는지 |
+
+Plugin mode에서는 status를 먼저 분리해서 봅니다.
+
+| status | 해석 |
+| --- | --- |
+| `executed` | generation이 실행됨. Qwen sparse/LLaVA prune mode는 token 감소 field를 확인 |
+| `executed_dense_with_autogaze_sidecar` | AutoGaze selector는 sidecar로 실행/기록됐지만 dense model generation은 그대로. compute gain 주장의 근거로 쓰면 안 됨 |
+| `probe_required` / `probe_collected` | 모델별 visual packing mapping을 확인하는 단계 |
+| `failed_missing_dependency` | 외부 CLI 또는 package/model dependency 누락 |
+| `oom` | memory failure. `failure_stage`와 stack trace 요약 확인 |
+
 ## Memory 해석
 
 | 메모리 | 의미 |

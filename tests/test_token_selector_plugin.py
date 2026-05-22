@@ -36,11 +36,15 @@ def test_keep_all_token_selector_preserves_patch_tokens_for_native_off_compariso
     assert output.status == "keep_all"
 
 
-def test_autogaze_selector_plan_records_expected_selection_without_running_model():
+def test_autogaze_selector_plan_marks_probe_required_without_concrete_patch_coordinates():
     output = AutoGazeSelectorPlan().select(make_input(raw_patch_tokens=1000))
 
-    assert output.selected_positions == "planned_autogaze_positions"
+    assert output.selected_positions is None
     assert output.selected_patch_tokens == 100
     assert output.reduction_ratio == 10.0
-    assert output.status == "planned"
-    assert output.metric_status["reason"] == "AutoGaze model execution is wired in a later adapter step."
+    assert output.status == "probe_required"
+    assert output.metric_status["value"] == "probe_required"
+    assert output.metric_status["reason"] == "AutoGaze selector has not emitted concrete patch coordinates."
+    assert output.sparse_selection_plan is not None
+    assert output.sparse_selection_plan.encoder_mapping.status == "not_mapped"
+    assert output.sparse_selection_plan.mllm_mapping.status == "not_mapped"

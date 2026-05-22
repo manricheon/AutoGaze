@@ -46,6 +46,7 @@ class MllmRunRequest:
     max_tiles_video: int = 1
     external_mllm_command: str = "vila-infer"
     enable_qwen_prune_generate: bool = False
+    enable_visual_prune_generate: bool = False
     sparse_selection_plan_path: str | None = None
     qwen_video_nframes: int | None = None
     qwen_video_fps: float | None = None
@@ -172,8 +173,29 @@ class VilaCliMllmAdapter(BaseMllmAdapter):
 
     def run(self, request: MllmRunRequest) -> MllmRunResult:
         if request.token_selector_kind == "autogaze" or request.integration_level != "none":
+            if request.enable_visual_prune_generate:
+                return run_external_dense_with_autogaze_sidecar(
+                    adapter_name=self.name,
+                    request=request,
+                    command=self.build_command(request),
+                    feature_probe=build_feature_packing_probe(self.name, request),
+                    sparse_plan_reason=(
+                        "VILA-family AutoGaze sidecar records selector output, but the external VILA CLI "
+                        "does not expose a stable visual-token pruning hook yet."
+                    ),
+                    success_reason=(
+                        "Dense VILA-family generation executed with AutoGaze selector sidecar metrics; "
+                        "visual pruning was not applied inside the external CLI."
+                    ),
+                    missing_dependency_reason="vila-infer command was not found",
+                )
             metrics = build_metric_skeleton(request)
             metrics["feature_packing_probe"] = build_feature_packing_probe(self.name, request)
+            metrics["sparse_selection_plan"] = build_probe_sparse_selection_plan(
+                request,
+                selector_name="autogaze",
+                reason="VILA-family AutoGaze-on path requires feature packing instrumentation before patch coordinates can be applied.",
+            ).to_dict()
             vila_probe = run_vila_feature_probe(
                 model_path=request.model_path,
                 model_family=request.model_family,
@@ -315,8 +337,29 @@ class InternVL3CliMllmAdapter(BaseMllmAdapter):
 
     def run(self, request: MllmRunRequest) -> MllmRunResult:
         if request.token_selector_kind == "autogaze" or request.integration_level != "none":
+            if request.enable_visual_prune_generate:
+                return run_external_dense_with_autogaze_sidecar(
+                    adapter_name=self.name,
+                    request=request,
+                    command=self.build_command(request),
+                    feature_probe=build_feature_packing_probe(self.name, request),
+                    sparse_plan_reason=(
+                        "InternVL3 AutoGaze sidecar records selector output, but dynamic tile and "
+                        "num_patches_list pruning are not applied inside the external helper yet."
+                    ),
+                    success_reason=(
+                        "Dense InternVL3 generation executed with AutoGaze selector sidecar metrics; "
+                        "visual pruning was not applied inside the external helper."
+                    ),
+                    missing_dependency_reason="InternVL3 external command was not found",
+                )
             metrics = build_metric_skeleton(request)
             metrics["feature_packing_probe"] = build_feature_packing_probe(self.name, request)
+            metrics["sparse_selection_plan"] = build_probe_sparse_selection_plan(
+                request,
+                selector_name="autogaze",
+                reason="InternVL3 AutoGaze-on path requires dynamic tiling and num_patches_list mapping before patch coordinates can be applied.",
+            ).to_dict()
             metrics["metric_status"] = {
                 "value": "probe_required",
                 "reason": "AutoGaze-on InternVL3 integration still requires a dynamic tiling probe",
@@ -1167,6 +1210,174 @@ class LlavaOneVisionMllmAdapter(QwenGridMllmAdapter):
         return [{"role": "user", "content": content}]
 
     def run(self, request: MllmRunRequest) -> MllmRunResult:
+        if request.token_selector_kind == "autogaze" or request.integration_level != "none":
+            if (
+                request.token_selector_kind == "autogaze"
+                and request.integration_level == "post_encoder_token_prune"
+                and request.enable_visual_prune_generate
+            ):
+                return self._run_llava_onevision_autogaze_prune_generate(request)
+            metrics = build_metric_skeleton(request)
+            metrics["feature_packing_probe"] = build_feature_packing_probe(self.name, request)
+            metrics["sparse_selection_plan"] = build_probe_sparse_selection_plan(
+                request,
+                selector_name="autogaze",
+                reason="LLaVA-OneVision AutoGaze-on path requires video pooling and visual token packing probes before pruning can be applied.",
+            ).to_dict()
+            metrics["metric_status"] = {
+                "value": "probe_required",
+                "reason": "AutoGaze-on LLaVA-OneVision integration requires a video pooling and visual token packing probe",
+            }
+            return MllmRunResult(
+                text=None,
+                prompt=request.prompt,
+                video=request.video,
+                image=request.image,
+                adapter=self.name,
+                status="probe_required",
+                metrics=metrics,
+            )
+        return self._run_llava_onevision_generate(request)
+
+    def _run_llava_onevision_autogaze_prune_generate(self, request: MllmRunRequest) -> MllmRunResult:
+        try:
+            from transformers import AutoModelForImageTextToText, AutoProcessor
+        except ModuleNotFoundError as exc:
+            raise RuntimeError("transformers is required for LLaVA-OneVision visual pruning execution") from exc
+
+        model_kwargs: dict[str, Any] = {
+            "device_map": request.device_map,
+            "trust_remote_code": request.trust_remote_code,
+        }
+        if request.dtype != "auto":
+            model_kwargs["dtype"] = request.dtype
+        if request.attn_implementation:
+            model_kwargs["attn_implementation"] = request.attn_implementation
+
+        metrics = build_metric_skeleton(request)
+        metrics["feature_packing_probe"] = build_feature_packing_probe(self.name, request)
+        total_start = time.perf_counter()
+        start = time.perf_counter()
+        model = AutoModelForImageTextToText.from_pretrained(request.model_path, **model_kwargs)
+        metrics["latency_ms"]["model_load"] = _elapsed_ms(start)
+        start = time.perf_counter()
+        processor = AutoProcessor.from_pretrained(request.model_path, trust_remote_code=request.trust_remote_code)
+        metrics["latency_ms"]["processor_load"] = _elapsed_ms(start)
+        messages = self.build_messages(request)
+        start = time.perf_counter()
+        inputs = build_llava_onevision_inputs(processor, messages, request)
+        metrics["latency_ms"]["input_build"] = _elapsed_ms(start)
+        _record_input_token_metrics(metrics, inputs)
+        model_device = getattr(model, "device", None)
+        if model_device is not None and hasattr(inputs, "to"):
+            inputs = inputs.to(model_device)
+
+        try:
+            start = time.perf_counter()
+            video_features = llava_onevision_video_features(model, dict(inputs))
+            visual_count = int(video_features.shape[1] if len(video_features.shape) == 3 else video_features.shape[0])
+            keep_indices, selection_metadata = resolve_ratio_or_plan_keep_indices(
+                request,
+                visual_count=visual_count,
+                selection_name="llava_onevision",
+                keep_last=True,
+            )
+            pruned_inputs = build_llava_onevision_pruned_visual_inputs(model, inputs, video_features, keep_indices)
+            metrics["latency_ms"]["vision_encoder"] = _elapsed_ms(start)
+        except Exception as exc:
+            metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
+            metrics["llava_onevision_prune_generate"] = {
+                "enabled": True,
+                "status": "failed_before_generate",
+                "reason": str(exc),
+            }
+            metrics["metric_status"] = {
+                "value": "failed_llava_onevision_prune_generate",
+                "reason": str(exc),
+            }
+            _record_cuda_memory(metrics)
+            return MllmRunResult(
+                text=None,
+                prompt=request.prompt,
+                video=request.video,
+                image=request.image,
+                adapter=self.name,
+                status="failed_llava_onevision_prune_generate",
+                metrics=metrics,
+            )
+
+        prune_metadata = pruned_inputs.pop("llava_onevision_prune_generate_metadata")
+        input_ids_for_decode = pruned_inputs.pop("input_ids_for_decode", None)
+        metrics["llava_onevision_prune_generate"] = {
+            "enabled": True,
+            "status": "inputs_embeds_prepared",
+            **prune_metadata,
+            **selection_metadata,
+        }
+        metrics["tokens"]["visual_tokens_before_prune"] = prune_metadata["visual_tokens_before_prune"]
+        metrics["tokens"]["visual_tokens_after_prune"] = prune_metadata["visual_tokens_after_prune"]
+        if prune_metadata["visual_tokens_after_prune"]:
+            metrics["tokens"]["visual_token_reduction_ratio"] = (
+                prune_metadata["visual_tokens_before_prune"] / prune_metadata["visual_tokens_after_prune"]
+            )
+        attention_mask = pruned_inputs.get("attention_mask")
+        if attention_mask is not None and hasattr(attention_mask, "shape"):
+            metrics["tokens"]["llm_context_tokens"] = int(attention_mask.shape[-1])
+
+        start = time.perf_counter()
+        try:
+            language_model = getattr(model, "language_model", None)
+            if language_model is None:
+                raise ValueError("LLaVA-OneVision model does not expose language_model for inputs_embeds generation")
+            generated_ids = language_model.generate(**pruned_inputs, max_new_tokens=request.max_new_tokens)
+        except Exception as exc:
+            metrics["latency_ms"]["generate"] = _elapsed_ms(start)
+            metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
+            metrics["llava_onevision_prune_generate"]["status"] = "failed_during_generate"
+            metrics["llava_onevision_prune_generate"]["reason"] = str(exc)
+            metrics["metric_status"] = {
+                "value": "failed_llava_onevision_prune_generate",
+                "reason": str(exc),
+            }
+            _record_cuda_memory(metrics)
+            return MllmRunResult(
+                text=None,
+                prompt=request.prompt,
+                video=request.video,
+                image=request.image,
+                adapter=self.name,
+                status="failed_llava_onevision_prune_generate",
+                metrics=metrics,
+            )
+
+        metrics["latency_ms"]["generate"] = _elapsed_ms(start)
+        if input_ids_for_decode is not None:
+            prompt_len = int(input_ids_for_decode.shape[-1])
+            try:
+                generated_ids = generated_ids[:, prompt_len:]
+            except Exception:
+                pass
+        text = processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+        metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
+        metrics["metric_status"] = {
+            "value": "executed_llava_onevision_prune_generate",
+            "reason": (
+                "LLaVA-OneVision video features were computed, pruned after the projector/pooling stage, "
+                "and packed into language-model inputs_embeds."
+            ),
+        }
+        _record_cuda_memory(metrics)
+        return MllmRunResult(
+            text=text,
+            prompt=request.prompt,
+            video=request.video,
+            image=request.image,
+            adapter=self.name,
+            status="executed",
+            metrics=metrics,
+        )
+
+    def _run_llava_onevision_generate(self, request: MllmRunRequest) -> MllmRunResult:
         try:
             from transformers import AutoModelForImageTextToText, AutoProcessor
         except ModuleNotFoundError as exc:
@@ -1436,12 +1647,191 @@ def _build_qwen_grid_inputs(processor: Any, messages: list[dict[str, Any]], requ
     )
 
 
+def build_llava_onevision_inputs(processor: Any, messages: list[dict[str, Any]], request: MllmRunRequest) -> Any:
+    prompt = processor.apply_chat_template(messages, add_generation_prompt=True)
+    processor_kwargs: dict[str, Any] = {"text": prompt, "return_tensors": "pt"}
+    if request.video:
+        processor_kwargs["videos"] = request.video
+    if request.image:
+        processor_kwargs["images"] = request.image
+    return processor(**processor_kwargs)
+
+
 def _qwen_video_debug_context(request: MllmRunRequest) -> str:
     return (
         f"video={request.video!r}, nframes={request.qwen_video_nframes!r}, fps={request.qwen_video_fps!r}, "
         f"max_pixels={request.qwen_video_max_pixels!r}, min_pixels={request.qwen_video_min_pixels!r}, "
         f"runner_resize={qwen_runner_resize_summary(request)!r}, thumbnail={qwen_thumbnail_summary(request)!r}"
     )
+
+
+def llava_onevision_video_features(model: Any, values: dict[str, Any]) -> Any:
+    pixel_values_videos = values.get("pixel_values_videos")
+    if pixel_values_videos is None:
+        raise ValueError("LLaVA-OneVision prune-generate requires pixel_values_videos")
+    config = getattr(model, "config", None)
+    vision_feature_layer = getattr(config, "vision_feature_layer", None)
+    vision_feature_select_strategy = getattr(config, "vision_feature_select_strategy", None)
+    getter = getattr(model, "get_video_features", None)
+    if getter is None and getattr(model, "model", None) is not None:
+        getter = getattr(model.model, "get_video_features", None)
+    if getter is None:
+        raise ValueError("LLaVA-OneVision model does not expose get_video_features")
+    features = getter(
+        pixel_values_videos,
+        vision_feature_layer=vision_feature_layer,
+        vision_feature_select_strategy=vision_feature_select_strategy,
+    )
+    if len(features.shape) != 3:
+        raise ValueError(f"Expected LLaVA-OneVision video features as [batch, tokens, hidden], got {list(features.shape)}")
+    newline = llava_onevision_image_newline(model)
+    if newline is not None:
+        newline = newline[None, None, :].repeat(features.shape[0], 1, 1).to(
+            device=features.device,
+            dtype=features.dtype,
+        )
+        features = __import__("torch").cat((features, newline), dim=1)
+    return features
+
+
+def build_llava_onevision_pruned_visual_inputs(
+    model: Any,
+    inputs: Any,
+    video_features: Any,
+    keep_indices: list[int],
+) -> dict[str, Any]:
+    try:
+        import torch
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("torch is required for LLaVA-OneVision visual pruning") from exc
+
+    values = dict(inputs)
+    input_ids = values.get("input_ids")
+    if input_ids is None or not hasattr(input_ids, "shape"):
+        raise ValueError("LLaVA-OneVision prune-generate requires input_ids in processor outputs")
+    if len(input_ids.shape) != 2 or int(input_ids.shape[0]) != 1:
+        raise ValueError("LLaVA-OneVision prune-generate currently supports a single prompt/video batch")
+
+    if len(video_features.shape) == 3:
+        if int(video_features.shape[0]) != 1:
+            raise ValueError("LLaVA-OneVision prune-generate currently supports one video feature batch")
+        video_features = video_features[0]
+    if len(video_features.shape) != 2:
+        raise ValueError(f"Expected 2D LLaVA-OneVision video features, got shape={list(video_features.shape)}")
+
+    video_token_id = llava_onevision_video_token_id(model)
+    embeddings = llava_onevision_input_embeddings(model)(input_ids)
+    visual_count = int(video_features.shape[0])
+    keep = [index for index in dict.fromkeys(int(item) for item in keep_indices) if 0 <= index < visual_count]
+    if not keep and visual_count > 0:
+        keep = [visual_count - 1]
+    placeholder_positions = (input_ids[0] == video_token_id).nonzero(as_tuple=False).flatten()
+    if int(placeholder_positions.numel()) < visual_count:
+        raise ValueError(
+            "LLaVA-OneVision input has fewer video token placeholders than video features "
+            f"({int(placeholder_positions.numel())} < {visual_count})"
+        )
+
+    visual_positions = placeholder_positions[:visual_count]
+    keep_positions = visual_positions[torch.tensor(keep, device=visual_positions.device, dtype=torch.long)]
+    keep_position_set = {int(item) for item in keep_positions.detach().cpu().tolist()}
+    sequence_keep_mask = torch.ones(input_ids.shape[-1], dtype=torch.bool, device=input_ids.device)
+    for position in visual_positions.detach().cpu().tolist():
+        if int(position) not in keep_position_set:
+            sequence_keep_mask[int(position)] = False
+
+    pruned_embeddings = embeddings[:, sequence_keep_mask, :].clone()
+    kept_features = video_features[torch.tensor(keep, device=video_features.device, dtype=torch.long)]
+    kept_features = kept_features.to(device=pruned_embeddings.device, dtype=pruned_embeddings.dtype)
+    new_positions: list[int] = []
+    for original_position in keep_positions.detach().cpu().tolist():
+        new_positions.append(int(sequence_keep_mask[: int(original_position) + 1].sum().item()) - 1)
+    for row, new_position in enumerate(new_positions):
+        pruned_embeddings[0, new_position, :] = kept_features[row]
+
+    pruned: dict[str, Any] = {
+        "inputs_embeds": pruned_embeddings,
+        "input_ids_for_decode": input_ids[:, sequence_keep_mask],
+        "llava_onevision_prune_generate_metadata": {
+            "video_token_id": video_token_id,
+            "visual_tokens_before_prune": visual_count,
+            "visual_tokens_after_prune": len(keep),
+            "dropped_visual_placeholders": visual_count - len(keep),
+            "kept_visual_indices": keep,
+            "kept_visual_placeholder_positions": [int(item) for item in keep_positions.detach().cpu().tolist()],
+            "llm_context_tokens_after_prune": int(sequence_keep_mask.sum().item()),
+        },
+    }
+    if "attention_mask" in values:
+        pruned["attention_mask"] = values["attention_mask"][:, sequence_keep_mask]
+    return pruned
+
+
+def resolve_ratio_or_plan_keep_indices(
+    request: MllmRunRequest,
+    *,
+    visual_count: int,
+    selection_name: str,
+    keep_last: bool = False,
+) -> tuple[list[int], dict[str, Any]]:
+    count = max(0, int(visual_count))
+    source = "gazing_ratio_uniform"
+    ratio = request.gazing_ratio
+    plan_payload = None
+    if request.sparse_selection_plan_path:
+        try:
+            with Path(request.sparse_selection_plan_path).open("r", encoding="utf-8") as handle:
+                plan_payload = json.load(handle)
+            accounting = plan_payload.get("token_accounting") or {}
+            raw = accounting.get("raw_patch_tokens")
+            selected = accounting.get("selected_patch_tokens")
+            if raw and selected:
+                ratio = max(0.0, min(1.0, float(selected) / float(raw)))
+                source = "sparse_selection_plan_ratio_uniform"
+        except Exception as exc:
+            plan_payload = {"load_error": str(exc)}
+            source = "gazing_ratio_uniform_after_sparse_plan_load_failed"
+    keep = select_qwen_visual_keep_indices(count, ratio)
+    if keep_last and count > 0:
+        keep = [int(index) for index in dict.fromkeys(keep + [count - 1]) if 0 <= int(index) < count]
+    return keep, {
+        "selection_source": source,
+        "selection_name": selection_name,
+        "sparse_selection_plan_path": request.sparse_selection_plan_path,
+        "sparse_selection_plan_loaded": isinstance(plan_payload, dict) and "load_error" not in plan_payload
+        if plan_payload is not None
+        else False,
+        "visual_tokens_before_selection": count,
+        "visual_tokens_after_selection": len(keep),
+        "keep_last_visual_token": keep_last,
+    }
+
+
+def llava_onevision_video_token_id(model: Any) -> int:
+    for target in (getattr(model, "config", None), getattr(getattr(model, "model", None), "config", None)):
+        for attr in ("video_token_id", "video_token_index"):
+            value = getattr(target, attr, None)
+            if value is not None:
+                return int(value)
+    raise ValueError("LLaVA-OneVision model config does not expose video_token_id")
+
+
+def llava_onevision_input_embeddings(model: Any) -> Any:
+    for target in (model, getattr(model, "model", None), getattr(model, "language_model", None)):
+        getter = getattr(target, "get_input_embeddings", None)
+        if getter is not None:
+            embeddings = getter()
+            if embeddings is not None:
+                return embeddings
+    raise ValueError("LLaVA-OneVision model does not expose get_input_embeddings")
+
+
+def llava_onevision_image_newline(model: Any) -> Any:
+    for target in (model, getattr(model, "model", None)):
+        value = getattr(target, "image_newline", None)
+        if value is not None:
+            return value
+    return None
 
 
 def build_qwen_pruned_visual_inputs(model: Any, inputs: Any, keep_indices: list[int]) -> dict[str, Any]:
@@ -2317,6 +2707,128 @@ def build_metric_skeleton(request: MllmRunRequest) -> dict[str, Any]:
     }
 
 
+def build_probe_sparse_selection_plan(
+    request: MllmRunRequest,
+    *,
+    selector_name: str,
+    reason: str,
+) -> SparseSelectionPlan:
+    budget = build_mllm_processing_budget_summary(request)
+    dense_budget = budget.get("single_scale_dense_vision_budget", {})
+    raw_patch_tokens = dense_budget.get("estimated_total_patch_tokens")
+    if raw_patch_tokens is not None:
+        raw_patch_tokens = int(raw_patch_tokens)
+    selected_patch_tokens = _estimate_selected_tokens(raw_patch_tokens, request.gazing_ratio) if raw_patch_tokens else None
+    frame_count = max(0, int(request.num_video_frames or 0))
+    return SparseSelectionPlan.placeholder(
+        selector_name=selector_name,
+        source_path=request.video or request.image,
+        raw_patch_tokens=raw_patch_tokens,
+        selected_patch_tokens=selected_patch_tokens,
+        frame_indices=list(range(frame_count)),
+        reason=reason,
+    )
+
+
+def run_external_dense_with_autogaze_sidecar(
+    *,
+    adapter_name: str,
+    request: MllmRunRequest,
+    command: list[str],
+    feature_probe: dict[str, Any],
+    sparse_plan_reason: str,
+    success_reason: str,
+    missing_dependency_reason: str,
+) -> MllmRunResult:
+    metrics = build_metric_skeleton(request)
+    metrics["feature_packing_probe"] = feature_probe
+    metrics["sparse_selection_plan"] = build_probe_sparse_selection_plan(
+        request,
+        selector_name="autogaze",
+        reason=sparse_plan_reason,
+    ).to_dict()
+    metrics["autogaze_attachment"] = {
+        "mode": "dense_generation_with_autogaze_sidecar",
+        "selector_executed": bool(request.sparse_selection_plan_path),
+        "sparse_selection_plan_path": request.sparse_selection_plan_path,
+        "visual_pruning_applied": False,
+        "vision_encoder_latency_reduced": False,
+        "mllm_context_reduced": False,
+        "reason": sparse_plan_reason,
+    }
+    metrics["external_cli"] = {
+        "command": command,
+        "stdout_tail": None,
+        "stderr_tail": None,
+        "returncode": None,
+    }
+    if not _command_available(command[0]):
+        metrics["metric_status"] = {
+            "value": "failed_missing_dependency",
+            "reason": missing_dependency_reason,
+        }
+        return MllmRunResult(
+            text=None,
+            prompt=request.prompt,
+            video=request.video,
+            image=request.image,
+            adapter=adapter_name,
+            status="failed_missing_dependency",
+            metrics=metrics,
+        )
+
+    total_start = time.perf_counter()
+    try:
+        completed = subprocess.run(command, check=False, capture_output=True, text=True)
+    except OSError as exc:
+        metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
+        metrics["metric_status"] = {"value": "failed", "reason": str(exc)}
+        return MllmRunResult(
+            text=None,
+            prompt=request.prompt,
+            video=request.video,
+            image=request.image,
+            adapter=adapter_name,
+            status="failed",
+            metrics=metrics,
+        )
+
+    metrics["latency_ms"]["generate"] = _elapsed_ms(total_start)
+    metrics["latency_ms"]["total"] = metrics["latency_ms"]["generate"]
+    metrics["external_cli"]["returncode"] = int(completed.returncode)
+    metrics["external_cli"]["stdout_tail"] = _tail_lines(completed.stdout)
+    metrics["external_cli"]["stderr_tail"] = _tail_lines(completed.stderr)
+    _record_cuda_memory(metrics)
+    text = extract_assistant_text(completed.stdout)
+    if completed.returncode != 0:
+        metrics["metric_status"] = {
+            "value": "failed",
+            "reason": "external dense generation command returned a non-zero exit code",
+        }
+        return MllmRunResult(
+            text=text,
+            prompt=request.prompt,
+            video=request.video,
+            image=request.image,
+            adapter=adapter_name,
+            status="failed",
+            metrics=metrics,
+        )
+    metrics["metric_status"] = {
+        "value": "executed_dense_with_autogaze_sidecar",
+        "reason": success_reason,
+    }
+    return MllmRunResult(
+        text=text,
+        prompt=request.prompt,
+        video=request.video,
+        image=request.image,
+        adapter=adapter_name,
+        status="executed_dense_with_autogaze_sidecar",
+        metrics=metrics,
+    )
+
+
 def _estimate_qwen_visual_tokens(request: MllmRunRequest) -> int:
     frames = qwen_main_video_frame_count(request) + qwen_thumbnail_count(request)
     tiles = max(int(request.max_tiles_video), 1)
@@ -2415,20 +2927,14 @@ def build_mllm_processing_budget_summary(request: MllmRunRequest) -> dict[str, A
         },
         "model_processing_unit": {
             "name": "qwen_video_grid_thw" if request.model_family.startswith("qwen") else "adapter_specific_visual_tokens",
-            "description": (
-                "Qwen processor builds pixel_values_videos and video_grid_thw; exact patch/token counts are filled "
-                "from processor outputs at runtime when available."
-            ),
+            "description": _processing_unit_description(request),
         },
         "tiling": {
             "max_tiles_video": request.max_tiles_video,
             "spatial_chunks_per_frame_limit": request.qwen_vit_max_spatial_chunks,
             "qwen_vit_mode": request.qwen_vit_mode,
             "chunk_frames": request.qwen_vit_chunk_frames,
-            "note": (
-                "For Qwen, spatial chunks split the processor grid for memory/latency measurement; they do not "
-                "duplicate the video frames like NVILA spatial tiling."
-            ),
+            "note": _tiling_budget_note(request),
         },
         "thumbnail": {
             "enabled": thumbnail_frames > 0,
@@ -2449,6 +2955,42 @@ def build_mllm_processing_budget_summary(request: MllmRunRequest) -> dict[str, A
             else "adapter_specific",
         },
     }
+
+
+def _processing_unit_description(request: MllmRunRequest) -> str:
+    if request.model_family.startswith("qwen"):
+        return (
+            "Qwen processor builds pixel_values_videos and video_grid_thw; exact patch/token counts are filled "
+            "from processor outputs at runtime when available."
+        )
+    if request.model_family in {"nvila-video-plugin", "longvila"}:
+        return (
+            "VILA-family plugin modes use the external VILA CLI for dense generation. Exact visual token counts "
+            "require remote-code feature packing instrumentation; the dense SigLIP-style budget is reference-only."
+        )
+    if request.model_family == "llava-onevision":
+        return (
+            "LLaVA-OneVision plugin modes use processor pixel_values_videos and post-encoder video features. "
+            "Prune-generate records visual feature counts after the projector/pooling boundary."
+        )
+    if request.model_family == "internvl3":
+        return (
+            "InternVL3 plugin modes use dynamic tiles and num_patches_list style packing. Exact pruning requires "
+            "a model-specific dynamic tile hook; sidecar mode only records selector metrics."
+        )
+    return "Adapter-specific visual token counts are filled from runtime outputs when available."
+
+
+def _tiling_budget_note(request: MllmRunRequest) -> str:
+    if request.model_family.startswith("qwen"):
+        return (
+            "For Qwen, spatial chunks split the processor grid for memory/latency measurement; they do not "
+            "duplicate the video frames like NVILA spatial tiling."
+        )
+    return (
+        "For non-Qwen plugin modes, max_tiles_video is passed to the adapter or used as a reference budget. "
+        "Whether it maps to native tiling depends on the model-specific processor/helper."
+    )
 
 
 def _safe_qwen_video_metadata(video: str | None) -> dict[str, Any] | None:
@@ -2585,6 +3127,28 @@ def build_feature_packing_probe(adapter_name: str, request: MllmRunRequest) -> d
                 "vision feature token count",
                 "packed visual token count",
                 "LLM prefill context token count",
+            ],
+            autogaze_applicability="plugin_on_off_experiment",
+        )
+    if adapter_name == "llava-onevision":
+        return _planned_probe(
+            adapter_name=adapter_name,
+            request=request,
+            family_group="llava_onevision",
+            required_inputs=["pixel_values_videos", "image_sizes", "input_ids"],
+            post_encoder_hook="after video/image pooling and before language model visual token packing",
+            pre_encoder_sparse_hook="before vision tower; requires patch-to-pooled-token mapping probe",
+            required_runtime_checks=[
+                "capture processor video tensor and image_sizes contract",
+                "capture video pooling stride and selected frame packing",
+                "capture projected visual feature shape",
+                "capture language visual token insertion boundary before LLM prefill",
+            ],
+            token_accounting_targets=[
+                "processor visual patch token count",
+                "pooled vision token count",
+                "projected MLLM visual token count",
+                "LLM total context token count",
             ],
             autogaze_applicability="plugin_on_off_experiment",
         )

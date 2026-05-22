@@ -280,6 +280,85 @@ def test_build_mode_runner_args_for_qwen_vit_comparison_modes():
     assert "--enable-qwen-prune-generate" in sparse_args
 
 
+def test_build_mode_runner_args_for_llava_and_internvl_autogaze_probe_modes():
+    row = {
+        "video_path": "clip.mp4",
+        "question": "Question? A. one B. two C. three D. four",
+        "answer": "A",
+    }
+    common = {
+        "row": row,
+        "video_path": Path("/data/clip.mp4"),
+        "output_json": Path("/tmp/run.json"),
+        "models": {
+            "llava-onevision": "weight/LLaVA-OneVision",
+            "internvl3": "weight/InternVL3",
+        },
+        "external_mllm_command": "vila-infer",
+        "num_video_frames": 64,
+        "num_video_frames_thumbnail": 8,
+        "max_tiles_video": 4,
+        "max_new_tokens": 8,
+        "qwen_thumbnail_mode": "append-video",
+        "video_resize_longest_edge": 448,
+    }
+
+    llava_off = build_mode_runner_args(mode="llava-onevision-off", **common)
+    llava_probe = build_mode_runner_args(mode="llava-onevision-autogaze-probe", **common)
+    internvl_off = build_mode_runner_args(mode="internvl3-off", **common)
+    internvl_probe = build_mode_runner_args(mode="internvl3-autogaze-probe", **common)
+
+    assert llava_off[llava_off.index("--model-family") + 1] == "llava-onevision"
+    assert llava_off[llava_off.index("--token-selector-adapter") + 1] == "keep-all"
+    assert llava_off[llava_off.index("--autogaze-integration-level") + 1] == "none"
+    assert llava_probe[llava_probe.index("--model-family") + 1] == "llava-onevision"
+    assert llava_probe[llava_probe.index("--token-selector-adapter") + 1] == "autogaze"
+    assert llava_probe[llava_probe.index("--autogaze-integration-level") + 1] == "post_encoder_token_prune"
+    assert internvl_probe[internvl_probe.index("--model-family") + 1] == "internvl3"
+    assert internvl_probe[internvl_probe.index("--token-selector-adapter") + 1] == "autogaze"
+    assert internvl_probe[internvl_probe.index("--autogaze-integration-level") + 1] == "post_encoder_token_prune"
+    assert internvl_off[internvl_off.index("--num-video-frames-thumbnail") + 1] == "8"
+    assert internvl_off[internvl_off.index("--video-resize-longest-edge") + 1] == "448"
+    assert llava_probe[llava_probe.index("--num-video-frames-thumbnail") + 1] == "8"
+    assert llava_probe[llava_probe.index("--video-resize-longest-edge") + 1] == "448"
+
+
+def test_build_mode_runner_args_for_executable_autogaze_expansion_modes():
+    row = {
+        "video_path": "clip.mp4",
+        "question": "Question? A. one B. two C. three D. four",
+        "answer": "A",
+    }
+    common = {
+        "row": row,
+        "video_path": Path("/data/clip.mp4"),
+        "output_json": Path("/tmp/run.json"),
+        "models": {
+            "nvila-video": "weight/NVILA-8B-Video",
+            "longvila": "weight/LongVILA",
+            "llava-onevision": "weight/LLaVA-OneVision",
+            "internvl3": "weight/InternVL3",
+        },
+        "external_mllm_command": "vila-infer",
+        "num_video_frames": 64,
+        "max_tiles_video": 4,
+        "max_new_tokens": 8,
+    }
+
+    for mode in [
+        "nvila-video-autogaze-sidecar-generate",
+        "longvila-autogaze-sidecar-generate",
+        "llava-onevision-autogaze-prune-generate",
+        "internvl3-autogaze-sidecar-generate",
+    ]:
+        args = build_mode_runner_args(mode=mode, **common)
+        assert "--run-autogaze-selector" in args
+        assert "--autogaze-generate-only" in args
+        assert "--enable-visual-prune-generate" in args
+        assert args[args.index("--token-selector-adapter") + 1] == "autogaze"
+        assert args[args.index("--autogaze-integration-level") + 1] == "post_encoder_token_prune"
+
+
 def test_flatten_key_metrics_includes_qwen_vit_comparison_fields():
     flattened = _flatten_key_metrics(
         {
@@ -309,6 +388,56 @@ def test_flatten_key_metrics_includes_qwen_vit_comparison_fields():
     assert flattened["qwen_vit_raw_patch_tokens_before_vit"] == 4000
     assert flattened["qwen_vit_executed_chunk_count"] == 3
     assert flattened["qwen_vit_spatial_tiles"] == 4
+
+
+def test_flatten_key_metrics_includes_common_selector_vit_memory_and_failure_fields():
+    flattened = _flatten_key_metrics(
+        {
+            "latency_ms": {
+                "total": 120.0,
+                "generate": 45.0,
+                "qwen_vit_prepare": 30.0,
+                "selector": 12.0,
+                "vision_encoder": 28.0,
+            },
+            "memory_bytes": {"peak_cuda_allocated": 1024, "peak_cuda_reserved": 2048},
+            "tokens": {
+                "visual_tokens_before_prune": 1000,
+                "visual_tokens_after_prune": 125,
+                "visual_token_reduction_ratio": 8.0,
+                "llm_context_tokens": 256,
+            },
+            "sparse_selection_plan": {
+                "token_accounting": {
+                    "raw_patch_tokens": 4000,
+                    "selected_patch_tokens": 400,
+                    "reduction_ratio": 10.0,
+                },
+                "encoder_mapping": {"encoder_patch_indices": [1, 2, 3]},
+                "mllm_mapping": {"visual_feature_indices": [1, 3]},
+            },
+            "autogaze_attachment": {
+                "mode": "dense_generation_with_autogaze_sidecar",
+                "visual_pruning_applied": False,
+                "vision_encoder_latency_reduced": False,
+                "mllm_context_reduced": False,
+            },
+            "failure": {"kind": "oom", "stage": "vision_encoder"},
+        }
+    )
+
+    assert flattened["selector_ms"] == 12.0
+    assert flattened["vision_encoder_ms"] == 28.0
+    assert flattened["raw_patch_tokens"] == 4000
+    assert flattened["selected_patch_tokens"] == 400
+    assert flattened["patch_token_reduction_ratio"] == 10.0
+    assert flattened["encoder_input_tokens"] == 3
+    assert flattened["llm_visual_tokens"] == 125
+    assert flattened["failure_stage"] == "vision_encoder"
+    assert flattened["autogaze_attachment_mode"] == "dense_generation_with_autogaze_sidecar"
+    assert flattened["visual_pruning_applied"] is False
+    assert flattened["vision_encoder_latency_reduced"] is False
+    assert flattened["mllm_context_reduced"] is False
 
 
 def test_plugin_hlvid_summary_surfaces_processing_budget_by_mode():

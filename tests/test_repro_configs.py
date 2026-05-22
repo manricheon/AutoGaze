@@ -163,11 +163,16 @@ def test_plugin_hlvid_limit3_config_defines_comparison_modes():
 
     assert config.plugin_hlvid_benchmark.args.limit == 3
     assert "nvila-video-off" in config.plugin_hlvid_benchmark.args.modes
+    assert "nvila-video-autogaze-sidecar-generate" in config.plugin_hlvid_benchmark.args.modes
     assert "longvila-off" in config.plugin_hlvid_benchmark.args.modes
+    assert "longvila-autogaze-sidecar-generate" in config.plugin_hlvid_benchmark.args.modes
     assert "internvl3-off" in config.plugin_hlvid_benchmark.args.modes
-    assert "qwen3-vl-pixelprune-pre-vit" in config.plugin_hlvid_benchmark.args.modes
-    assert "qwen3-vl-autogaze-probe" in config.plugin_hlvid_benchmark.args.modes
-    assert "qwen3-vl-autogaze-prune-generate" in config.plugin_hlvid_benchmark.args.modes
+    assert "internvl3-autogaze-sidecar-generate" in config.plugin_hlvid_benchmark.args.modes
+    assert "llava-onevision-off" in config.plugin_hlvid_benchmark.args.modes
+    assert "llava-onevision-autogaze-prune-generate" in config.plugin_hlvid_benchmark.args.modes
+    assert "qwen_full_vit" in config.plugin_hlvid_benchmark.args.modes
+    assert "qwen_chunked_vit" in config.plugin_hlvid_benchmark.args.modes
+    assert "qwen_chunked_vit_autogaze_sparse" in config.plugin_hlvid_benchmark.args.modes
     assert (root / "scripts" / "download_qwen_model.py").is_file()
 
 

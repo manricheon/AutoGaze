@@ -21,9 +21,9 @@
 | stream-profile/H100 preflight | 준비됨 | `repro.nvila_runner`, `repro.hlvid_batch_benchmark` |
 | Markdown/chart report | 준비됨 | `python -m repro.markdown_report` |
 | aggregate trend report | 준비됨 | `python -m repro.aggregate_reports` |
-| plugin 확장 실험 | PoC/probe | `python -m repro.flexible_runner`, `python -m repro.plugin_hlvid_benchmark` |
+| plugin 확장 실험 | PoC/sidecar/prune | `python -m repro.flexible_runner`, `python -m repro.plugin_hlvid_benchmark` |
 
-기본 HLVid benchmark와 plugin HLVid benchmark는 다릅니다. NVILA-HD keep-all/autogaze, paper baseline, H100 preflight는 `scripts/run_hlvid_folder_benchmark.py`를 우선 사용하세요. `repro.plugin_hlvid_benchmark`는 Qwen/LongVILA/NVILA-Video 등 token selector / ViT / MLLM 확장 실험용입니다.
+기본 HLVid benchmark와 plugin HLVid benchmark는 다릅니다. NVILA-HD keep-all/autogaze, paper baseline, H100 preflight는 `scripts/run_hlvid_folder_benchmark.py`를 우선 사용하세요. `repro.plugin_hlvid_benchmark`는 Qwen/LLaVA/LongVILA/NVILA-Video/InternVL 등 token selector / ViT / MLLM 확장 실험용입니다.
 
 ## 환경 세팅
 
@@ -183,6 +183,24 @@ Qwen/LongVILA/NVILA-Video 등 다른 token selector / ViT / MLLM 조합을 HLVid
 | `qwen_full_vit` | Qwen native/full ViT 경로 |
 | `qwen_chunked_vit` | Qwen ViT를 temporal/spatial chunk로 나눠 실행하되 AutoGaze off |
 | `qwen_chunked_vit_autogaze_sparse` | AutoGaze selected token만 Qwen ViT/MLLM context에 통과시키는 실험 경로 |
+
+확장 sidecar/prune mode까지 같은 HLVid row에서 보려면 `configs/repro/plugin_hlvid_limit3.yaml`의 mode 세트를 사용합니다.
+
+| 그룹 | modes | 해석 |
+| --- | --- | --- |
+| Qwen comparison | `qwen_full_vit`, `qwen_chunked_vit`, `qwen_chunked_vit_autogaze_sparse` | AutoGaze sparse가 Qwen ViT/LLM visual token을 실제로 줄이는지 확인 |
+| VILA-family | `nvila-video-off`, `nvila-video-autogaze-sidecar-generate`, `longvila-off`, `longvila-autogaze-sidecar-generate` | off 실행과 dense generation + AutoGaze selector sidecar를 분리 |
+| Other MLLM | `llava-onevision-off`, `llava-onevision-autogaze-prune-generate`, `internvl3-off`, `internvl3-autogaze-sidecar-generate` | LLaVA는 post-encoder prune-generate 실험, InternVL3는 dense generation + selector sidecar |
+
+상태 해석은 다음처럼 분리합니다.
+
+| status | 의미 |
+| --- | --- |
+| `executed` | 해당 mode의 generation 실행 성공. Qwen sparse/LLaVA prune mode라면 token 감소 metric을 함께 확인 |
+| `executed_dense_with_autogaze_sidecar` | dense generation은 성공했고 AutoGaze selector metric도 기록했지만, visual pruning은 모델 내부에 적용하지 않음 |
+| `probe_required` / `probe_collected` | selector 요청을 무시하지 않았지만 실제 pruning 적용 전 mapping/probe 단계 |
+| `failed_missing_dependency` | 외부 CLI, `qwen_vl_utils`, model dependency 등이 없음 |
+| `oom` | CUDA OOM. `failure.stage`로 processor/AutoGaze/ViT/LLM 위치 확인 |
 
 ## 6. Stream Profile과 H100 Preflight
 

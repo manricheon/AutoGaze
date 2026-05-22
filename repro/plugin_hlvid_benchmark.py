@@ -17,8 +17,23 @@ DEFAULT_MODELS = {
     "nvila-video": "weight/NVILA-8B-Video",
     "longvila": "weight/LongVILA",
     "internvl3": "weight/InternVL3",
+    "llava-onevision": "weight/LLaVA-OneVision",
     "qwen3-vl": "weight/Qwen3-VL-8B-Instruct",
 }
+
+DEFAULT_PLUGIN_HLVID_MODES = [
+    "qwen_full_vit",
+    "qwen_chunked_vit",
+    "qwen_chunked_vit_autogaze_sparse",
+    "nvila-video-off",
+    "nvila-video-autogaze-sidecar-generate",
+    "longvila-off",
+    "longvila-autogaze-sidecar-generate",
+    "llava-onevision-off",
+    "llava-onevision-autogaze-prune-generate",
+    "internvl3-off",
+    "internvl3-autogaze-sidecar-generate",
+]
 
 
 def resolve_hlvid_video_path(video_root: str | Path, row_video_path: str) -> Path:
@@ -82,8 +97,8 @@ def build_mode_runner_args(
             video_resize_width=video_resize_width,
             video_resize_height=video_resize_height,
         )
-    if mode == "nvila-video-autogaze-probe":
-        return _base_args(
+    if mode in {"nvila-video-autogaze-probe", "nvila-video-autogaze-sidecar-generate"}:
+        args = _base_args(
             model_family="nvila-video-plugin",
             model_path=models.get("nvila-video", DEFAULT_MODELS["nvila-video"]),
             token_selector="autogaze",
@@ -108,6 +123,9 @@ def build_mode_runner_args(
             video_resize_width=video_resize_width,
             video_resize_height=video_resize_height,
         )
+        if mode == "nvila-video-autogaze-sidecar-generate":
+            args.extend(["--run-autogaze-selector", "--autogaze-generate-only", "--enable-visual-prune-generate"])
+        return args
     if mode == "longvila-off":
         return _base_args(
             model_family="longvila",
@@ -134,8 +152,8 @@ def build_mode_runner_args(
             video_resize_width=video_resize_width,
             video_resize_height=video_resize_height,
         )
-    if mode == "longvila-autogaze-probe":
-        return _base_args(
+    if mode in {"longvila-autogaze-probe", "longvila-autogaze-sidecar-generate"}:
+        args = _base_args(
             model_family="longvila",
             model_path=models.get("longvila", DEFAULT_MODELS["longvila"]),
             token_selector="autogaze",
@@ -160,6 +178,9 @@ def build_mode_runner_args(
             video_resize_width=video_resize_width,
             video_resize_height=video_resize_height,
         )
+        if mode == "longvila-autogaze-sidecar-generate":
+            args.extend(["--run-autogaze-selector", "--autogaze-generate-only", "--enable-visual-prune-generate"])
+        return args
     if mode == "internvl3-off":
         return _base_args(
             model_family="internvl3",
@@ -180,7 +201,95 @@ def build_mode_runner_args(
             qwen_video_fps=qwen_video_fps,
             qwen_video_max_pixels=qwen_video_max_pixels,
             qwen_video_min_pixels=qwen_video_min_pixels,
+            qwen_thumbnail_mode=qwen_thumbnail_mode,
+            video_resize_shortest_edge=video_resize_shortest_edge,
+            video_resize_longest_edge=video_resize_longest_edge,
+            video_resize_width=video_resize_width,
+            video_resize_height=video_resize_height,
         )
+    if mode in {"internvl3-autogaze-probe", "internvl3-autogaze-sidecar-generate"}:
+        args = _base_args(
+            model_family="internvl3",
+            model_path=models.get("internvl3", DEFAULT_MODELS["internvl3"]),
+            token_selector="autogaze",
+            vision_adapter="internvl-dynamic-vision",
+            mllm_adapter="internvl3",
+            integration_level="post_encoder_token_prune",
+            row=row,
+            video_path=video_path,
+            output_json=output_json,
+            external_mllm_command=external_mllm_command,
+            num_video_frames=num_video_frames,
+            num_video_frames_thumbnail=num_video_frames_thumbnail,
+            max_tiles_video=max_tiles_video,
+            max_new_tokens=max_new_tokens,
+            qwen_video_nframes=qwen_video_nframes,
+            qwen_video_fps=qwen_video_fps,
+            qwen_video_max_pixels=qwen_video_max_pixels,
+            qwen_video_min_pixels=qwen_video_min_pixels,
+            video_resize_shortest_edge=video_resize_shortest_edge,
+            video_resize_longest_edge=video_resize_longest_edge,
+            video_resize_width=video_resize_width,
+            video_resize_height=video_resize_height,
+        )
+        if mode == "internvl3-autogaze-sidecar-generate":
+            args.extend(["--run-autogaze-selector", "--autogaze-generate-only", "--enable-visual-prune-generate"])
+        return args
+    if mode == "llava-onevision-off":
+        return _base_args(
+            model_family="llava-onevision",
+            model_path=models.get("llava-onevision", DEFAULT_MODELS["llava-onevision"]),
+            token_selector="keep-all",
+            vision_adapter="llava-onevision-siglip",
+            mllm_adapter="llava-onevision",
+            integration_level="none",
+            row=row,
+            video_path=video_path,
+            output_json=output_json,
+            external_mllm_command=external_mllm_command,
+            num_video_frames=num_video_frames,
+            num_video_frames_thumbnail=num_video_frames_thumbnail,
+            max_tiles_video=max_tiles_video,
+            max_new_tokens=max_new_tokens,
+            qwen_video_nframes=qwen_video_nframes,
+            qwen_video_fps=qwen_video_fps,
+            qwen_video_max_pixels=qwen_video_max_pixels,
+            qwen_video_min_pixels=qwen_video_min_pixels,
+            qwen_thumbnail_mode=qwen_thumbnail_mode,
+            video_resize_shortest_edge=video_resize_shortest_edge,
+            video_resize_longest_edge=video_resize_longest_edge,
+            video_resize_width=video_resize_width,
+            video_resize_height=video_resize_height,
+        )
+    if mode in {"llava-onevision-autogaze-probe", "llava-onevision-autogaze-prune-generate"}:
+        args = _base_args(
+            model_family="llava-onevision",
+            model_path=models.get("llava-onevision", DEFAULT_MODELS["llava-onevision"]),
+            token_selector="autogaze",
+            vision_adapter="llava-onevision-siglip",
+            mllm_adapter="llava-onevision",
+            integration_level="post_encoder_token_prune",
+            row=row,
+            video_path=video_path,
+            output_json=output_json,
+            external_mllm_command=external_mllm_command,
+            num_video_frames=num_video_frames,
+            num_video_frames_thumbnail=num_video_frames_thumbnail,
+            max_tiles_video=max_tiles_video,
+            max_new_tokens=max_new_tokens,
+            qwen_video_nframes=qwen_video_nframes,
+            qwen_video_fps=qwen_video_fps,
+            qwen_video_max_pixels=qwen_video_max_pixels,
+            qwen_video_min_pixels=qwen_video_min_pixels,
+            qwen_thumbnail_mode=qwen_thumbnail_mode,
+            video_resize_shortest_edge=video_resize_shortest_edge,
+            video_resize_longest_edge=video_resize_longest_edge,
+            video_resize_width=video_resize_width,
+            video_resize_height=video_resize_height,
+        )
+        if mode == "llava-onevision-autogaze-prune-generate":
+            args.extend(["--run-autogaze-selector", "--autogaze-generate-only", "--enable-visual-prune-generate"])
+        return args
     if mode == "qwen3-vl-off":
         return _base_args(
             model_family="qwen3-vl",
@@ -413,6 +522,9 @@ def run_plugin_hlvid_benchmark(
                 "processing_budget_summary": metrics.get("processing_budget_summary"),
             }
             prediction.update(_flatten_key_metrics(metrics))
+            prediction.update(_flatten_direct_selector_metrics(payload.get("direct_autogaze_selector")))
+            if prediction.get("failure") and not prediction.get("failure_stage"):
+                prediction["failure_stage"] = prediction["failure"].get("stage")
             predictions.append(prediction)
 
     summary = _summarize_by_mode(predictions)
@@ -523,6 +635,13 @@ def build_markdown_report(
             "",
             "- `nvila-video-off` and `longvila-off` use the official VILA CLI adapter.",
             "- `nvila-video-autogaze-probe` and `longvila-autogaze-probe` record AutoGaze-on feature packing probes.",
+            "- `nvila-video-autogaze-sidecar-generate` and `longvila-autogaze-sidecar-generate` execute dense VILA-family generation while recording direct AutoGaze selector sidecar metrics; visual pruning is not applied inside the external CLI.",
+            "- `llava-onevision-off` runs the dense LLaVA-OneVision adapter when dependencies and weights are available.",
+            "- `llava-onevision-autogaze-probe` records the video pooling and visual token packing probe instead of silently falling back to dense generation.",
+            "- `llava-onevision-autogaze-prune-generate` computes LLaVA-OneVision video features, prunes visual placeholders after projector/pooling, and calls the language model with pruned inputs_embeds.",
+            "- `internvl3-off` runs the InternVL3 helper path when dependencies and weights are available.",
+            "- `internvl3-autogaze-probe` records dynamic tile and `num_patches_list` mapping requirements.",
+            "- `internvl3-autogaze-sidecar-generate` executes dense InternVL3 generation while recording direct AutoGaze selector sidecar metrics; dynamic tile pruning is not applied yet.",
             "- `qwen3-vl-pixelprune-pre-vit` applies PixelPrune before Qwen model load and then runs the native Qwen path.",
             "- `qwen3-vl-autogaze-poc` records a Qwen AutoGaze post-encoder attachment PoC until visual token packing is wired.",
             "- `qwen3-vl-autogaze-prune-generate` explicitly enables the experimental Qwen post-encoder prune + generate path.",
@@ -709,7 +828,13 @@ def _base_args(
 def _prediction_status(generation_status: str | None) -> str:
     if generation_status == "oom":
         return "oom"
-    if generation_status in {"executed", "probe_required", "probe_collected", "poc_ready"}:
+    if generation_status in {
+        "executed",
+        "executed_dense_with_autogaze_sidecar",
+        "probe_required",
+        "probe_collected",
+        "poc_ready",
+    }:
         return "ok"
     return "failed"
 
@@ -719,11 +844,21 @@ def _flatten_key_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     memory = metrics.get("memory_bytes", {})
     tokens = metrics.get("tokens", {})
     qwen_vit = metrics.get("qwen_vit", {})
+    sparse_plan = metrics.get("sparse_selection_plan") or {}
+    autogaze_attachment = metrics.get("autogaze_attachment") or {}
+    token_accounting = sparse_plan.get("token_accounting") or {}
+    encoder_mapping = sparse_plan.get("encoder_mapping") or {}
+    mllm_mapping = sparse_plan.get("mllm_mapping") or {}
+    failure = metrics.get("failure") or {}
     spatial_chunking = qwen_vit.get("spatial_chunking") or {}
     tile_grid = spatial_chunking.get("tile_grid") or {}
+    encoder_indices = encoder_mapping.get("encoder_patch_indices")
+    visual_indices = mllm_mapping.get("visual_feature_indices")
     return {
         "total_ms": latency.get("total"),
         "generate_ms": latency.get("generate"),
+        "selector_ms": first_present(latency.get("selector"), latency.get("autogaze"), latency.get("autogaze_total")),
+        "vision_encoder_ms": first_present(latency.get("vision_encoder"), latency.get("qwen_vit_prepare")),
         "qwen_vit_prepare_ms": latency.get("qwen_vit_prepare"),
         "llm_peak_memory_bytes": memory.get("peak_cuda_allocated"),
         "peak_memory_bytes": memory.get("peak_cuda_reserved"),
@@ -736,6 +871,36 @@ def _flatten_key_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "visual_tokens_after_prune": tokens.get("visual_tokens_after_prune"),
         "visual_token_reduction_ratio": tokens.get("visual_token_reduction_ratio"),
         "llm_context_tokens": tokens.get("llm_context_tokens"),
+        "raw_patch_tokens": token_accounting.get("raw_patch_tokens"),
+        "selected_patch_tokens": token_accounting.get("selected_patch_tokens"),
+        "patch_token_reduction_ratio": token_accounting.get("reduction_ratio"),
+        "encoder_input_tokens": len(encoder_indices) if isinstance(encoder_indices, list) else None,
+        "llm_visual_tokens": first_present(
+            tokens.get("visual_tokens_after_prune"),
+            len(visual_indices) if isinstance(visual_indices, list) else None,
+        ),
+        "failure_kind": failure.get("kind"),
+        "failure_stage": failure.get("stage"),
+        "autogaze_attachment_mode": autogaze_attachment.get("mode"),
+        "visual_pruning_applied": autogaze_attachment.get("visual_pruning_applied"),
+        "vision_encoder_latency_reduced": autogaze_attachment.get("vision_encoder_latency_reduced"),
+        "mllm_context_reduced": autogaze_attachment.get("mllm_context_reduced"),
+    }
+
+
+def _flatten_direct_selector_metrics(selector_payload: Any) -> dict[str, Any]:
+    if not isinstance(selector_payload, dict) or selector_payload.get("status") in {None, "not_requested"}:
+        return {}
+    latency = selector_payload.get("latency_ms") or {}
+    tokens = selector_payload.get("tokens") or {}
+    memory = selector_payload.get("memory_bytes") or {}
+    return {
+        "selector_status": selector_payload.get("status"),
+        "selector_ms": latency.get("total"),
+        "selector_raw_patch_tokens": tokens.get("raw_patch_tokens"),
+        "selector_selected_patch_tokens": tokens.get("selected_patch_tokens"),
+        "selector_patch_token_reduction_ratio": tokens.get("reduction_ratio"),
+        "selector_peak_memory_bytes": memory.get("tile_tensor_peak"),
     }
 
 
@@ -829,6 +994,20 @@ def _next_action_for_mode(mode: str, rows: list[dict[str, Any]]) -> str:
         if statuses.get("probe_collected"):
             return "instrument_vila_remote_code_feature_packing"
         return "run_vila_feature_packing_probe"
+    if mode in {"llava-onevision-autogaze-probe", "internvl3-autogaze-probe"}:
+        return "instrument_model_specific_visual_token_packing"
+    if mode in {"nvila-video-autogaze-sidecar-generate", "longvila-autogaze-sidecar-generate"}:
+        if statuses.get("executed_dense_with_autogaze_sidecar"):
+            return "implement_vila_remote_code_visual_pruning_hook"
+        return "inspect_vila_sidecar_generation_failure"
+    if mode == "internvl3-autogaze-sidecar-generate":
+        if statuses.get("executed_dense_with_autogaze_sidecar"):
+            return "implement_internvl_dynamic_tile_pruning_hook"
+        return "inspect_internvl_sidecar_generation_failure"
+    if mode == "llava-onevision-autogaze-prune-generate":
+        if statuses.get("executed"):
+            return "score_llava_pruned_generation"
+        return "inspect_llava_prune_generate_failure"
     if mode == "qwen3-vl-autogaze-prune-generate":
         if statuses.get("executed"):
             return "score_qwen_pruned_generation"
@@ -859,7 +1038,7 @@ def main() -> None:
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--video-root", required=True)
     parser.add_argument("--output-dir", default="outputs/autogaze_repro/plugin_hlvid_limit3")
-    parser.add_argument("--modes", default="nvila-video-off,longvila-off,internvl3-off,qwen3-vl-off")
+    parser.add_argument("--modes", default=",".join(DEFAULT_PLUGIN_HLVID_MODES))
     parser.add_argument("--model", action="append", help="Override model path as adapter=path, e.g. nvila-video=weight/NVILA")
     parser.add_argument("--external-mllm-command", default="vila-infer")
     parser.add_argument("--limit", type=int, default=3)

@@ -88,17 +88,17 @@ class AutoGazeSelectorPlan:
             selector_input.gazing_ratio,
         )
         return TokenSelectorOutput(
-            selected_positions="planned_autogaze_positions",
+            selected_positions=None,
             selected_mask_by_scale=None,
             raw_patch_tokens=selector_input.raw_patch_tokens,
             selected_patch_tokens=selected_patch_tokens,
             reduction_ratio=_safe_ratio(selector_input.raw_patch_tokens, selected_patch_tokens),
             latency_ms=0.0,
             peak_memory_bytes=None,
-            status="planned",
+            status="probe_required",
             metric_status={
-                "value": "planned",
-                "reason": "AutoGaze model execution is wired in a later adapter step.",
+                "value": "probe_required",
+                "reason": "AutoGaze selector has not emitted concrete patch coordinates.",
             },
             sparse_selection_plan=SparseSelectionPlan.placeholder(
                 selector_name="autogaze",
@@ -106,7 +106,7 @@ class AutoGazeSelectorPlan:
                 raw_patch_tokens=selector_input.raw_patch_tokens,
                 selected_patch_tokens=selected_patch_tokens,
                 frame_indices=selector_input.frame_indices,
-                reason="AutoGaze standalone selector has not emitted concrete patch coordinates yet.",
+                reason="AutoGaze selector has not emitted concrete patch coordinates.",
             ),
         )
 

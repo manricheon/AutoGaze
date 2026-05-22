@@ -1,8 +1,8 @@
 description: >
   HLVid limit-3 plugin comparison wrapper for extensibility checks. This runs
-  native/off modes where available, a Qwen3-VL PixelPrune pre-ViT execution
-  mode, an AutoGaze-on Qwen attachment probe, and an explicit experimental
-  Qwen post-encoder prune-generate mode.
+  grouped Qwen comparison modes, VILA-family off/AutoGaze-sidecar modes,
+  LLaVA-OneVision off/post-encoder-prune mode, and InternVL3 off/AutoGaze-sidecar
+  modes on the same HLVid rows.
 
 plugin_hlvid_benchmark:
   module: repro.plugin_hlvid_benchmark
@@ -13,20 +13,31 @@ plugin_hlvid_benchmark:
     limit: 3
     modes:
       - nvila-video-off
+      - nvila-video-autogaze-sidecar-generate
       - longvila-off
+      - longvila-autogaze-sidecar-generate
       - internvl3-off
-      - qwen3-vl-off
-      - qwen3-vl-pixelprune-pre-vit
-      - qwen3-vl-autogaze-probe
-      - qwen3-vl-autogaze-prune-generate
+      - internvl3-autogaze-sidecar-generate
+      - llava-onevision-off
+      - llava-onevision-autogaze-prune-generate
+      - qwen_full_vit
+      - qwen_chunked_vit
+      - qwen_chunked_vit_autogaze_sparse
     external_mllm_command: vila-infer
-    num_video_frames: 256
-    max_tiles_video: 8
+    num_video_frames: 32
+    num_video_frames_thumbnail: 8
+    qwen_video_nframes: 32
+    qwen_thumbnail_mode: append-video
+    qwen_vit_chunk_frames: 16
+    qwen_vit_max_spatial_chunks: 4
+    video_resize_longest_edge: 448
+    max_tiles_video: 4
     max_new_tokens: 8
     models:
       nvila-video: weight/NVILA-8B-Video
       longvila: weight/LongVILA
       internvl3: weight/InternVL3
+      llava-onevision: weight/LLaVA-OneVision
       qwen3-vl: weight/Qwen3-VL-8B-Instruct
 
 outputs:

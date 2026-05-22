@@ -54,12 +54,12 @@ video
 | NVILA-HD + AutoGaze | 안정 | 기준 재현, HLVid, latency/token/memory profile |
 | NVILA-HD keep-all | 안정 | AutoGaze off ablation, OOM 비교 |
 | NVILA-8B-Video paper baseline | 준비 | 논문 table baseline 후보, AutoGaze not applicable |
-| NVILA-Video plugin | probe 중심 | 별도 model family에 selector를 붙이는 실험 준비 |
-| LongVILA plugin | probe 중심 | 긴 video MLLM 확장성 검토 |
-| Qwen3-VL plugin | PoC | `full_vit`, `chunked_vit`, `chunked_vit_autogaze_sparse` 비교 |
+| NVILA-Video plugin | off/sidecar | 별도 VILA family model에 selector를 붙이는 실험 준비. sidecar mode는 dense generation과 AutoGaze selector metric을 같이 기록 |
+| LongVILA plugin | off/sidecar | 긴 video MLLM 확장성 검토. sidecar mode는 아직 LongVILA 내부 token pruning을 적용하지 않음 |
+| Qwen3-VL plugin | 구현/검증 대상 | `full_vit`, `chunked_vit`, `chunked_vit_autogaze_sparse` 비교. sparse mode는 direct AutoGaze selector plan을 사용 |
 | Qwen2/2.5-VL | adapter/probe | processor/video packing 차이 검토 필요 |
-| LLaVA-OneVision | adapter/probe | SigLIP 계열 vision path 연결 검토 |
-| InternVL3 | adapter/probe | dynamic tiling과 selector 결합 검토 |
+| LLaVA-OneVision | off/prune 실험 | AutoGaze on 요청 시 dense fallback을 막고, 선택 시 post-encoder visual token prune-generate를 시도 |
+| InternVL3 | off/sidecar | dynamic tiling과 `num_patches_list` mapping probe 중심. sidecar mode는 dense generation과 selector metric을 같이 기록 |
 
 ## Integration Level
 
@@ -71,7 +71,26 @@ video
 | `pre_encoder_sparse` | 선택 patch만 ViT에 넣도록 repack | ViT와 LLM 모두 감소 가능, 모델별 position/grid 처리 필요 |
 | `native_processor` | 모델 processor 내부 기능에 selector 연결 | 안정적이나 모델별 커스텀 필요 |
 
-현재 목표는 `pre_encoder_sparse`를 Qwen 계열에서 먼저 검증하고, 이후 LongVILA/NVILA-Video로 확장하는 것입니다.
+현재 목표는 `pre_encoder_sparse`를 Qwen 계열에서 먼저 검증하고, 이후 LongVILA/NVILA-Video/LLaVA/InternVL로 확장하는 것입니다. 상태 표기는 세 단계로 나눕니다.
+
+| 상태 | 의미 |
+| --- | --- |
+| actual prune/sparse | encoder 입력 token 또는 LLM visual token을 실제로 줄인 경로 |
+| sidecar generate | dense model generation은 그대로 실행하고 AutoGaze selector 결과/latency/token만 sidecar로 함께 기록한 경로 |
+| probe_required | 모델별 visual packing hook이 아직 없어 pruning을 적용하지 않고 필요한 mapping 정보만 기록하는 경로 |
+
+Qwen `qwen_chunked_vit_autogaze_sparse`는 actual sparse 검증 대상입니다. LLaVA-OneVision `llava-onevision-autogaze-prune-generate`는 post-encoder visual token prune-generate 실험 경로입니다. VILA-family와 InternVL3 sidecar mode는 selector를 무시하지 않지만 아직 모델 내부 compute gain을 주장하지 않습니다.
+
+## Plugin HLVid Mode 그룹
+
+| 그룹 | modes | 의미 |
+| --- | --- | --- |
+| Qwen comparison | `qwen_full_vit`, `qwen_chunked_vit`, `qwen_chunked_vit_autogaze_sparse` | 같은 비디오/질문에서 full ViT, chunked ViT, AutoGaze sparse ViT를 비교 |
+| VILA-family | `nvila-video-off`, `nvila-video-autogaze-sidecar-generate`, `longvila-off`, `longvila-autogaze-sidecar-generate` | off는 external VILA CLI 경로, sidecar는 dense generation + AutoGaze selector metric 기록 |
+| Other MLLM | `llava-onevision-off`, `llava-onevision-autogaze-prune-generate`, `internvl3-off`, `internvl3-autogaze-sidecar-generate` | LLaVA는 post-encoder prune generate 실험, InternVL3는 sidecar generate |
+
+`probe_required`는 AutoGaze selector 요청을 무시하지 않았다는 뜻입니다. 아직 실제 pruning 적용 성공은 아니므로 report에서 `executed`와 분리해서 봐야 합니다.
+`executed_dense_with_autogaze_sidecar`는 모델 답변 생성은 수행했지만 visual pruning은 적용하지 않았다는 뜻입니다. `visual_pruning_applied=false`, `vision_encoder_latency_reduced=false`, `mllm_context_reduced=false`를 같이 확인하세요.
 
 ## Plugin HLVid 실행 예
 
@@ -93,6 +112,28 @@ video
 
 이 경로는 확장성 검증용입니다. NVILA-HD 논문 재현 결과와 섞어 부르지 않습니다.
 
+VILA/LLaVA/InternVL 확장 mode까지 같은 입력 row에서 같이 보려면 기본 config를 사용합니다.
+
+```bash
+.venv/bin/python -m repro.plugin_hlvid_benchmark \
+  --manifest /data/HLVid/manifest.json \
+  --video-root /data/HLVid/videos \
+  --limit 3 \
+  --modes nvila-video-off,nvila-video-autogaze-sidecar-generate,longvila-off,longvila-autogaze-sidecar-generate,llava-onevision-off,llava-onevision-autogaze-prune-generate,internvl3-off,internvl3-autogaze-sidecar-generate,qwen_full_vit,qwen_chunked_vit,qwen_chunked_vit_autogaze_sparse \
+  --model nvila-video=weight/NVILA-8B-Video \
+  --model longvila=weight/LongVILA \
+  --model llava-onevision=weight/LLaVA-OneVision \
+  --model internvl3=weight/InternVL3 \
+  --model qwen3-vl=weight/Qwen3-VL-8B-Instruct \
+  --num-video-frames 32 \
+  --num-video-frames-thumbnail 8 \
+  --qwen-video-nframes 32 \
+  --qwen-thumbnail-mode append-video \
+  --video-resize-longest-edge 448 \
+  --max-tiles-video 4 \
+  --output-dir outputs/autogaze_repro/plugin_hlvid_limit3
+```
+
 ## 리포트 요구사항
 
 Plugin runner도 기본 runner와 같은 형태의 핵심 필드를 남깁니다.
@@ -110,6 +151,7 @@ Plugin runner도 기본 runner와 같은 형태의 핵심 필드를 남깁니다
 
 1. Qwen `chunked_vit_autogaze_sparse`가 실제 ViT 입력 token 수를 줄이는지 CUDA smoke로 확인.
 2. Qwen MRoPE/grid metadata가 sparse patch repack 이후에도 답변 품질을 망가뜨리지 않는지 확인.
-3. LongVILA/NVILA-Video에서 processor의 video packing 구조를 읽어 adapter metadata를 고정.
-4. HLVid 외 VideoQA task adapter를 `video_path`, `question`, `answer`, `choices` schema로 일반화.
-5. Plugin benchmark 결과를 `markdown_report`와 `aggregate_reports`에서 기본 benchmark와 같은 표/그래프로 읽을 수 있게 유지.
+3. LLaVA-OneVision post-encoder prune-generate가 실제 checkpoint별 remote/API에서 통과하는지 CUDA smoke로 확인.
+4. LongVILA/NVILA-Video/InternVL에서 sidecar 이후 실제 remote-code visual pruning hook을 어디에 넣을지 확정.
+5. probe/sidecar mode에서 `SparseSelectionPlan -> encoder mapping -> MLLM visual token mapping`이 실제 좌표 단위로 이어지는지 모델별 CUDA smoke로 확인.
+6. HLVid 외 VideoQA task adapter를 `video_path`, `question`, `answer`, `choices` schema로 일반화.

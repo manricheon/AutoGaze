@@ -82,6 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pixelprune-threshold", type=float, default=0.0)
     parser.add_argument("--pixelprune-verbose", action="store_true")
     parser.add_argument("--enable-qwen-prune-generate", action="store_true")
+    parser.add_argument("--enable-visual-prune-generate", action="store_true")
     parser.add_argument("--sparse-selection-plan-json")
     parser.add_argument("--run-autogaze-selector", action="store_true")
     parser.add_argument("--autogaze-selector-output-json")
@@ -292,7 +293,7 @@ def build_four_step_execution_plan(spec: ExperimentSpec) -> dict[str, dict[str, 
         "autogaze_standalone_selector": {
             "goal": "run AutoGaze as an external token selector on the same sampled frames",
             "integration_level": "planned_plugin",
-            "status": "ready_for_selector_adapter" if spec.token_selector_kind == "autogaze" else "planned",
+            "status": "probe_required" if spec.token_selector_kind == "autogaze" else "planned",
             "measures": ["autogaze_latency", "selected_patch_tokens", "patch_reduction_ratio"],
         },
         "post_encoder_token_prune": {
@@ -353,7 +354,10 @@ def run_single(args: argparse.Namespace) -> dict[str, Any]:
     payload["post_encoder_prune_runtime"] = build_post_encoder_prune_runtime_plan(
         payload["experiment_spec"]["integration_level"],
         payload["four_step_execution_plan"]["post_encoder_token_prune"]["hook"],
-        enabled=bool(getattr(args, "enable_qwen_prune_generate", False)),
+        enabled=bool(
+            getattr(args, "enable_visual_prune_generate", False)
+            or getattr(args, "enable_qwen_prune_generate", False)
+        ),
     )
     if getattr(args, "dry_run", False):
         payload["implementation_status"] = "dry_run"
@@ -442,8 +446,11 @@ def build_post_encoder_prune_runtime_plan(integration_level: str, hook: str, *, 
             "status": "experimental_prune_generate_enabled",
             "hook": hook,
             "runtime_behavior": (
-                "Qwen-family adapters attempt get_video_features, reduce visual placeholders, "
-                "and call generate with pruned inputs_embeds."
+                "Supported adapters attempt model-specific visual feature/token reduction before generation. "
+                "Qwen modes include pre-ViT sparse and post-encoder prune paths; LLaVA-OneVision supports "
+                "an experimental post-encoder inputs_embeds prune path; VILA-family and InternVL3 currently "
+                "use dense generation with an AutoGaze selector sidecar until their remote-code packing hooks "
+                "are exposed."
             ),
         }
     return {
@@ -475,6 +482,10 @@ def build_mllm_run_request(args: argparse.Namespace) -> MllmRunRequest:
         max_tiles_video=args.max_tiles_video,
         external_mllm_command=args.external_mllm_command,
         enable_qwen_prune_generate=args.enable_qwen_prune_generate,
+        enable_visual_prune_generate=bool(
+            getattr(args, "enable_visual_prune_generate", False)
+            or getattr(args, "enable_qwen_prune_generate", False)
+        ),
         sparse_selection_plan_path=args.sparse_selection_plan_json,
         qwen_video_nframes=args.qwen_video_nframes,
         qwen_video_fps=args.qwen_video_fps,
@@ -540,7 +551,13 @@ def _token_selector_status(spec: ExperimentSpec) -> MetricStatus:
     if spec.token_selector_kind == "keep-all":
         return MetricStatus(value="native_off", reason="keeps all visual tokens for on/off comparison")
     if spec.token_selector_kind == "autogaze":
-        return MetricStatus(value="planned", reason=f"integration_level={spec.integration_level}")
+        return MetricStatus(
+            value="probe_required",
+            reason=(
+                "AutoGaze requires a concrete SparseSelectionPlan from direct selector execution before "
+                f"integration_level={spec.integration_level} can be considered applied"
+            ),
+        )
     return MetricStatus(value="planned", reason="external mask adapter contract only")
 
 
