@@ -160,7 +160,9 @@ REPEAT_SUMMARY_FIELDS = (
     "gazing_info_total_ms",
     "autogaze_forward_ms",
     "autogaze_model_forward_ms",
+    "selector_input_build_ms",
     "vision_encoder_ms",
+    "vision_input_build_ms",
     "siglip_vision_ms",
     "mm_projector_ms",
     "llm_forward_ms",
@@ -835,6 +837,43 @@ def _subtract_if_present(total: Any, part: Any) -> float | None:
     return difference
 
 
+def _selector_input_build_ms(metrics: dict[str, Any]) -> float | None:
+    explicit = _first_metric(metrics, "selector_input_build_ms", "selector_input_ms")
+    if explicit is not None:
+        try:
+            return float(explicit)
+        except (TypeError, ValueError):
+            return None
+    autogaze_total_ms = _first_metric(metrics, "autogaze_total_ms", "gazing_info_total_ms", "autogaze_ms")
+    autogaze_forward_ms = _first_metric(metrics, "autogaze_model_forward_ms", "autogaze_forward_ms")
+    if autogaze_forward_ms is None:
+        return None
+    return _subtract_if_present(autogaze_total_ms, autogaze_forward_ms)
+
+
+def _vision_input_build_ms(metrics: dict[str, Any]) -> float | None:
+    explicit = _first_metric(metrics, "vision_input_build_ms", "vision_input_ms", "siglip_tensorize_ms")
+    if explicit is not None:
+        try:
+            return float(explicit)
+        except (TypeError, ValueError):
+            return None
+    substage_total = 0.0
+    has_substage = False
+    for field in ("siglip_vision_ms", "mm_projector_ms"):
+        value = _first_metric(metrics, field)
+        if value is None:
+            continue
+        try:
+            substage_total += float(value)
+        except (TypeError, ValueError):
+            return None
+        has_substage = True
+    if not has_substage:
+        return None
+    return _subtract_if_present(_first_metric(metrics, "vision_encoder_ms"), substage_total)
+
+
 def build_latency_accounting(metrics: dict[str, Any]) -> dict[str, Any]:
     total_ms = metrics.get("total_ms")
     preprocess_ms = metrics.get("video_preprocess_ms")
@@ -856,6 +895,8 @@ def build_latency_accounting(metrics: dict[str, Any]) -> dict[str, Any]:
             video_decode_read_ms,
         )
     autogaze_forward_ms = _first_metric(metrics, "autogaze_model_forward_ms", "autogaze_forward_ms")
+    selector_input_build_ms = _selector_input_build_ms(metrics)
+    vision_input_build_ms = _vision_input_build_ms(metrics)
     generation_decode_estimated_ms = _first_metric(
         metrics,
         "generation_decode_after_ttft_estimated_ms",
@@ -871,6 +912,8 @@ def build_latency_accounting(metrics: dict[str, Any]) -> dict[str, Any]:
         "video_decode_read_ms": video_decode_read_ms,
         "preprocess_rest_without_decode_autogaze_ms": preprocess_rest_without_decode_autogaze_ms,
         "autogaze_total_ms": autogaze_total_ms,
+        "selector_input_build_ms": selector_input_build_ms,
+        "vision_input_build_ms": vision_input_build_ms,
     }
 
     return {
@@ -954,6 +997,12 @@ def build_latency_accounting(metrics: dict[str, Any]) -> dict[str, Any]:
                 "included_in": "autogaze_total_ms",
                 "add_to_total_ms": False,
             },
+            "selector_input_build_ms": {
+                "value": selector_input_build_ms,
+                "included_in": "autogaze_total_ms",
+                "add_to_total_ms": False,
+                "measurement": "derived: autogaze_total_ms - autogaze_model_forward_ms",
+            },
         },
         "nested_generate_breakdown_ms": {
             "vision_encoder_ms": {
@@ -970,6 +1019,12 @@ def build_latency_accounting(metrics: dict[str, Any]) -> dict[str, Any]:
                 "value": metrics.get("mm_projector_ms"),
                 "included_in": "vision_encoder_ms",
                 "add_to_total_ms": False,
+            },
+            "vision_input_build_ms": {
+                "value": vision_input_build_ms,
+                "included_in": "vision_encoder_ms",
+                "add_to_total_ms": False,
+                "measurement": "derived: vision_encoder_ms - siglip_vision_ms - mm_projector_ms",
             },
             "llm_forward_ms": {
                 "value": metrics.get("llm_forward_ms"),
@@ -995,7 +1050,9 @@ def build_latency_accounting(metrics: dict[str, Any]) -> dict[str, Any]:
             "gazing_info_total_ms",
             "autogaze_forward_ms",
             "autogaze_model_forward_ms",
+            "selector_input_build_ms",
             "vision_encoder_ms",
+            "vision_input_build_ms",
             "siglip_vision_ms",
             "mm_projector_ms",
             "llm_forward_ms",
@@ -1454,6 +1511,26 @@ def build_single_summary(payload: dict[str, Any]) -> dict[str, Any]:
     autogaze_model_forward_median = summary_metric(payload, "autogaze_model_forward_ms")
     if autogaze_model_forward_median is None:
         autogaze_model_forward_median = summary_metric(payload, "autogaze_forward_ms")
+    selector_input_build_median = summary_metric(payload, "selector_input_build_ms")
+    if selector_input_build_median is None:
+        selector_input_build_median = _selector_input_build_ms(
+            {
+                "autogaze_total_ms": autogaze_total_median,
+                "autogaze_model_forward_ms": autogaze_model_forward_median,
+            }
+        )
+    vision_encoder_median = summary_metric(payload, "vision_encoder_ms")
+    siglip_vision_median = summary_metric(payload, "siglip_vision_ms")
+    mm_projector_median = summary_metric(payload, "mm_projector_ms")
+    vision_input_build_median = summary_metric(payload, "vision_input_build_ms")
+    if vision_input_build_median is None:
+        vision_input_build_median = _vision_input_build_ms(
+            {
+                "vision_encoder_ms": vision_encoder_median,
+                "siglip_vision_ms": siglip_vision_median,
+                "mm_projector_ms": mm_projector_median,
+            }
+        )
     generation_decode_after_ttft_estimated_median = summary_metric(
         payload,
         "generation_decode_after_ttft_estimated_ms",
@@ -1471,7 +1548,9 @@ def build_single_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "autogaze_total_median": autogaze_total_median,
         "gazing_info_total_median": gazing_info_total_median,
         "autogaze_model_forward_median": autogaze_model_forward_median,
-        "vit_encoder_median": summary_metric(payload, "siglip_vision_ms"),
+        "selector_input_build_median": selector_input_build_median,
+        "vision_input_build_median": vision_input_build_median,
+        "vit_encoder_median": siglip_vision_median,
         "llm_median": summary_metric(payload, "llm_forward_ms"),
     }
     latency_accounting = build_latency_accounting(
@@ -1488,9 +1567,11 @@ def build_single_summary(payload: dict[str, Any]) -> dict[str, Any]:
             "video_tiling_ms": summary_metric(payload, "video_tiling_ms"),
             "gazing_info_total_ms": gazing_info_total_median,
             "autogaze_model_forward_ms": autogaze_model_forward_median,
-            "vision_encoder_ms": summary_metric(payload, "vision_encoder_ms"),
-            "siglip_vision_ms": summary_metric(payload, "siglip_vision_ms"),
-            "mm_projector_ms": summary_metric(payload, "mm_projector_ms"),
+            "selector_input_build_ms": selector_input_build_median,
+            "vision_encoder_ms": vision_encoder_median,
+            "vision_input_build_ms": vision_input_build_median,
+            "siglip_vision_ms": siglip_vision_median,
+            "mm_projector_ms": mm_projector_median,
             "llm_forward_ms": summary_metric(payload, "llm_forward_ms"),
             "generation_decode_after_ttft_estimated_ms": generation_decode_after_ttft_estimated_median,
         }
@@ -1573,6 +1654,8 @@ def build_single_summary(payload: dict[str, Any]) -> dict[str, Any]:
                 "preprocess_total=legacy inclusive video_preprocess_ms, autogaze=autogaze_total_ms, "
                 "gazing_info_total=gazing_info_total_ms, "
                 "autogaze_model_forward=autogaze_model_forward_ms, "
+                "selector_input_build=derived residual inside AutoGaze, "
+                "vision_input_build=derived residual inside vision_encoder_ms, "
                 "vit_encoder=siglip_vision_ms, llm=llm_forward_ms. "
                 "The primary additive formula is preprocess_without_autogaze + autogaze_total + generate."
             ),
@@ -1598,8 +1681,11 @@ def build_single_summary(payload: dict[str, Any]) -> dict[str, Any]:
             "autogaze_forward_median": summary_metric(payload, "autogaze_forward_ms"),
             "gazing_info_total_median": gazing_info_total_median,
             "autogaze_model_forward_median": autogaze_model_forward_median,
-            "siglip_vision_median": summary_metric(payload, "siglip_vision_ms"),
-            "mm_projector_median": summary_metric(payload, "mm_projector_ms"),
+            "selector_input_build_median": selector_input_build_median,
+            "vision_encoder_median": vision_encoder_median,
+            "vision_input_build_median": vision_input_build_median,
+            "siglip_vision_median": siglip_vision_median,
+            "mm_projector_median": mm_projector_median,
             "llm_forward_median": summary_metric(payload, "llm_forward_ms"),
         },
         "memory_bytes": {
@@ -5039,9 +5125,22 @@ def generate_one(
         video_decode_read_ms,
     )
     autogaze_model_forward_ms = stage_total(processor_timings, "autogaze_forward_batched")
+    selector_input_build_ms = _selector_input_build_ms(
+        {
+            "autogaze_total_ms": autogaze_total_ms,
+            "autogaze_model_forward_ms": autogaze_model_forward_ms,
+        }
+    )
     vision_encoder_ms = stage_total(generate_timings, "vision_encode_total")
     siglip_vision_ms = stage_total(generate_timings, "siglip_vision_tower")
     mm_projector_ms = stage_total(generate_timings, "mm_projector")
+    vision_input_build_ms = _vision_input_build_ms(
+        {
+            "vision_encoder_ms": vision_encoder_ms,
+            "siglip_vision_ms": siglip_vision_ms,
+            "mm_projector_ms": mm_projector_ms,
+        }
+    )
     llm_forward_ms = stage_total(generate_timings, "llm_forward")
     latency_accounting = build_latency_accounting(
         {
@@ -5059,7 +5158,9 @@ def generate_one(
             "video_tiling_ms": video_tiling_ms,
             "gazing_info_total_ms": gazing_info_total_ms,
             "autogaze_model_forward_ms": autogaze_model_forward_ms,
+            "selector_input_build_ms": selector_input_build_ms,
             "vision_encoder_ms": vision_encoder_ms,
+            "vision_input_build_ms": vision_input_build_ms,
             "siglip_vision_ms": siglip_vision_ms,
             "mm_projector_ms": mm_projector_ms,
             "llm_forward_ms": llm_forward_ms,
@@ -5100,6 +5201,7 @@ def generate_one(
         "gazing_info_total_ms": gazing_info_total_ms,
         "autogaze_forward_ms": autogaze_model_forward_ms,
         "autogaze_model_forward_ms": autogaze_model_forward_ms,
+        "selector_input_build_ms": selector_input_build_ms,
         "processor_peak_memory_bytes": processor_peak_memory_bytes,
         "ttft_ms": ttft_ms,
         "ttft_peak_memory_bytes": ttft_peak_memory_bytes,
@@ -5115,6 +5217,7 @@ def generate_one(
             "generate": generate_timings,
         },
         "vision_encoder_ms": vision_encoder_ms,
+        "vision_input_build_ms": vision_input_build_ms,
         "siglip_vision_ms": siglip_vision_ms,
         "mm_projector_ms": mm_projector_ms,
         "llm_forward_ms": llm_forward_ms,

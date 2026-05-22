@@ -276,19 +276,25 @@ def test_score_predictions_includes_latency_memory_token_and_compute_summaries()
         "preprocess_total_ms": 17.0,
         "autogaze_ms": 12.0,
         "autogaze_total_ms": 12.0,
+        "selector_input_build_ms": 2.5,
+        "vision_input_build_ms": None,
         "vit_encoder_ms": 30.0,
+        "vision_encoder_ms": None,
         "llm_ms": 24.0,
     }
     assert summary["readable_performance_summary"]["key_metrics_median"] == {
-            "latency_ms": {
-                "total_ms": 80.0,
-                "video_decode_read_ms": 8.0,
-                "preprocess_rest_without_decode_autogaze_ms": 0.0,
-                "preprocess_without_autogaze_ms": 5.0,
+        "latency_ms": {
+            "total_ms": 80.0,
+            "video_decode_read_ms": 8.0,
+            "preprocess_rest_without_decode_autogaze_ms": 0.0,
+            "preprocess_without_autogaze_ms": 5.0,
             "preprocess_total_ms": 17.0,
             "autogaze_ms": 12.0,
             "autogaze_total_ms": 12.0,
+            "selector_input_build_ms": 2.5,
+            "vision_input_build_ms": None,
             "vit_encoder_ms": 30.0,
+            "vision_encoder_ms": None,
             "llm_ms": 24.0,
         },
         "tokens": {

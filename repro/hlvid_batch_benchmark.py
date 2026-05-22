@@ -92,7 +92,9 @@ LATENCY_FIELDS = (
     "gazing_info_total_ms",
     "autogaze_forward_ms",
     "autogaze_model_forward_ms",
+    "selector_input_build_ms",
     "vision_encoder_ms",
+    "vision_input_build_ms",
     "siglip_vision_ms",
     "mm_projector_ms",
     "llm_forward_ms",
@@ -150,7 +152,10 @@ MODULE_LATENCY_FIELDS = (
     ("preprocess_total_ms", "video_preprocess_ms"),
     ("autogaze_ms", "autogaze_ms"),
     ("autogaze_total_ms", "autogaze_total_ms"),
+    ("selector_input_build_ms", "selector_input_build_ms"),
+    ("vision_input_build_ms", "vision_input_build_ms"),
     ("vit_encoder_ms", "siglip_vision_ms"),
+    ("vision_encoder_ms", "vision_encoder_ms"),
     ("llm_ms", "llm_forward_ms"),
 )
 KEY_MEMORY_FIELDS = (
@@ -208,10 +213,55 @@ def _metric(row: dict[str, Any], dotted_path: str) -> Any:
     return value
 
 
+def _first_metric(row: dict[str, Any], *fields: str) -> Any:
+    for field in fields:
+        value = _metric(row, field)
+        if value is not None:
+            return value
+    return None
+
+
+def _derived_latency_metric(row: dict[str, Any], field: str) -> Any:
+    value = _metric(row, field)
+    if value is not None:
+        return value
+    if field == "selector_input_build_ms":
+        autogaze_total = _first_metric(row, "autogaze_total_ms", "gazing_info_total_ms", "autogaze_ms")
+        autogaze_forward = _first_metric(row, "autogaze_model_forward_ms", "autogaze_forward_ms")
+        if autogaze_total is None or autogaze_forward is None:
+            return None
+        try:
+            return max(float(autogaze_total) - float(autogaze_forward), 0.0)
+        except (TypeError, ValueError):
+            return None
+    if field == "vision_input_build_ms":
+        vision_encoder = _metric(row, "vision_encoder_ms")
+        if vision_encoder is None:
+            return None
+        substage_total = 0.0
+        has_substage = False
+        for child_field in ("siglip_vision_ms", "mm_projector_ms"):
+            child_value = _metric(row, child_field)
+            if child_value is None:
+                continue
+            try:
+                substage_total += float(child_value)
+            except (TypeError, ValueError):
+                return None
+            has_substage = True
+        if not has_substage:
+            return None
+        try:
+            return max(float(vision_encoder) - substage_total, 0.0)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 def _numeric_values(rows: list[dict[str, Any]], field: str) -> list[float]:
     values: list[float] = []
     for row in rows:
-        value = _metric(row, field)
+        value = _derived_latency_metric(row, field)
         if value is None and field == "video_decode_read_ms":
             value = _metric(row, "video_decode_ms")
         if value is None:
@@ -251,7 +301,10 @@ def _median_ratio(
 
 
 def _median_value(rows: list[dict[str, Any]], field: str) -> float | None:
-    return compute_stats(_numeric_values(rows, field))["median"]
+    values = _numeric_values(rows, field)
+    if not values:
+        return None
+    return compute_stats(values)["median"]
 
 
 def _percent_reduction(before: float | None, after: float | None) -> float | None:

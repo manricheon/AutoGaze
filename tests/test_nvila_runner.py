@@ -166,6 +166,33 @@ def test_build_latency_accounting_separates_additive_total_from_nested_breakdown
     assert "video_decode_ms" in accounting["do_not_sum_with_total_ms"]
 
 
+def test_build_latency_accounting_derives_selector_and_vision_input_residuals_from_measured_stages():
+    accounting = build_latency_accounting(
+        {
+            "autogaze_total_ms": 12.0,
+            "autogaze_model_forward_ms": 8.0,
+            "vision_encoder_ms": 25.0,
+            "siglip_vision_ms": 18.0,
+            "mm_projector_ms": 3.0,
+        }
+    )
+
+    assert accounting["nested_preprocess_breakdown_ms"]["selector_input_build_ms"] == {
+        "value": 4.0,
+        "included_in": "autogaze_total_ms",
+        "add_to_total_ms": False,
+        "measurement": "derived: autogaze_total_ms - autogaze_model_forward_ms",
+    }
+    assert accounting["nested_generate_breakdown_ms"]["vision_input_build_ms"] == {
+        "value": 4.0,
+        "included_in": "vision_encoder_ms",
+        "add_to_total_ms": False,
+        "measurement": "derived: vision_encoder_ms - siglip_vision_ms - mm_projector_ms",
+    }
+    assert "selector_input_build_ms" in accounting["do_not_sum_with_total_ms"]
+    assert "vision_input_build_ms" in accounting["do_not_sum_with_total_ms"]
+
+
 class DummyVisionConfig:
     def __init__(self, scales, patch_size=14):
         self.scales = scales
@@ -997,6 +1024,8 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
         "autogaze_total_median": 12.0,
         "gazing_info_total_median": 12.0,
         "autogaze_model_forward_median": 10.0,
+        "selector_input_build_median": 2.0,
+        "vision_input_build_median": None,
         "vit_encoder_median": 18.0,
         "llm_median": 45.0,
         "field_note": (
@@ -1005,6 +1034,8 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
             "preprocess_total=legacy inclusive video_preprocess_ms, autogaze=autogaze_total_ms, "
             "gazing_info_total=gazing_info_total_ms, "
             "autogaze_model_forward=autogaze_model_forward_ms, "
+            "selector_input_build=derived residual inside AutoGaze, "
+            "vision_input_build=derived residual inside vision_encoder_ms, "
             "vit_encoder=siglip_vision_ms, llm=llm_forward_ms. "
             "The primary additive formula is preprocess_without_autogaze + autogaze_total + generate."
         ),
@@ -1036,6 +1067,8 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
             "autogaze_total_median": 12.0,
             "gazing_info_total_median": 12.0,
             "autogaze_model_forward_median": 10.0,
+            "selector_input_build_median": 2.0,
+            "vision_input_build_median": None,
             "vit_encoder_median": 18.0,
             "llm_median": 45.0,
         },

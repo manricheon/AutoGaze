@@ -143,7 +143,7 @@ def test_render_single_markdown_report_includes_pipeline_and_key_metrics(tmp_pat
     assert "## Key Metrics" in markdown
     assert "## Latency Views" in markdown
     assert "### Wall-clock Stage View" in markdown
-    assert "| current | 700 | 300 | 1,200 | - | 100 | 800 | 1,200 | 200 | 4,000 | 500 | 9,000 |" in markdown
+    assert "| current | 700 | 300 | 1,200 | - | 100 | 800 | - | 1,200 | 200 | 4,000 | 500 | 9,000 |" in markdown
     assert "### Pipeline Attribution View" in markdown
     assert "| current | 700 | 1,500 | 900 | 1,400 | 4,000 | 500 | 9,000 |" in markdown
     assert "encoder_patch_tokens_before_keep_all_or_raw" in markdown
@@ -246,8 +246,8 @@ def test_key_metrics_summary_uses_readable_labels_and_no_ag_preprocess():
     markdown = render_markdown_report(payload, source_path="single.json")
 
     assert "## Key Comparison" in markdown
-    assert "| Total ms | Decode/read ms | Prep rest ms | AutoGaze ms | ViT ms | LLM ms |" in markdown
-    assert "| 9,000 | 700 | 1,500 | 800 | 1,200 | 4,000 |" in markdown
+    assert "| Total ms | Decode/read ms | Prep rest ms | Selector input ms | AutoGaze ms | Vision input ms | ViT ms | LLM ms |" in markdown
+    assert "| 9,000 | 700 | 1,500 | - | 800 | - | 1,200 | 4,000 |" in markdown
     assert "### Latency" in markdown
     assert "### Tokens" in markdown
     assert "### Memory" in markdown
@@ -273,8 +273,8 @@ def test_key_comparison_does_not_use_inclusive_preprocess_as_no_ag_preprocess():
 
     markdown = render_markdown_report(payload, source_path="single.json")
 
-    assert "| Total ms | Decode/read ms | Prep rest ms | AutoGaze ms | ViT ms | LLM ms |" in markdown
-    assert "| 9,000 | - | - | 800 | 1,200 | 4,000 |" in markdown
+    assert "| Total ms | Decode/read ms | Prep rest ms | Selector input ms | AutoGaze ms | Vision input ms | ViT ms | LLM ms |" in markdown
+    assert "| 9,000 | - | - | - | 800 | - | 1,200 | 4,000 |" in markdown
     assert "| 9,000 | 3,000 | 800 | 1,200 | 4,000 |" not in markdown
 
 
@@ -341,9 +341,9 @@ def test_key_comparison_fills_patch_counts_from_readable_processing_budget():
 
     markdown = render_markdown_report(payload, source_path="hlvid_gain.json")
 
-    assert "| Mode | Total ms | Decode/read ms | Prep rest ms | AutoGaze ms | ViT ms | LLM ms | Full patch | Selected patch | Patch x | LLM visual | Peak GiB |" in markdown
-    assert "| keep_all | 10,000 | - | - | - | - | - | 900 | 900 | 1 | 100 | - |" in markdown
-    assert "| autogaze | 7,000 | - | - | - | - | - | 900 | 300 | 3 | 40 | - |" in markdown
+    assert "| Mode | Total ms | Decode/read ms | Prep rest ms | Selector input ms | AutoGaze ms | Vision input ms | ViT ms | LLM ms | Full patch | Selected patch | Patch x | LLM visual | Peak GiB |" in markdown
+    assert "| keep_all | 10,000 | - | - | - | - | - | - | - | 900 | 900 | 1 | 100 | - |" in markdown
+    assert "| autogaze | 7,000 | - | - | - | - | - | - | - | 900 | 300 | 3 | 40 | - |" in markdown
 
 
 def test_frame_patch_tokenization_uses_readable_processing_budget_when_token_metrics_are_empty():
@@ -464,7 +464,7 @@ def test_latency_views_merge_detail_fields_for_stage_and_model_side_views():
     markdown = render_markdown_report(payload, source_path="hlvid_gain.json")
 
     assert "### Wall-clock Stage View" in markdown
-    assert "| autogaze | 300 | 100 | 600 | 250 | 50 | 800 | 500 | 80 | 2,870 |" in markdown
+    assert "| autogaze | 300 | 100 | 600 | 250 | 50 | 800 | - | 500 | 80 | 2,870 |" in markdown
     assert "### Model-side Latency View" in markdown
     assert "excludes video decode/read and measured frame resize" in markdown
     assert "| autogaze | 850 | 850 | 580 | 2,870 |" in markdown

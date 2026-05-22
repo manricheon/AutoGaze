@@ -554,7 +554,7 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
     assert report["readable_summary"]["stage_timings_ms_median"][
         "processor_autogaze_forward_batched_total_ms"
     ] == {
-        "keep_all": 0.0,
+        "keep_all": None,
         "autogaze": 10.0,
         "speedup_ratio_keep_all_over_autogaze": None,
         "reduction_percent_of_keep_all": None,
@@ -783,13 +783,13 @@ def test_build_gain_report_marks_keep_all_as_missing_when_skipped():
     }
     assert report["readable_summary"]["run_counts"]["keep_all_rows"] == 0
     assert report["readable_summary"]["latency_ms_median"]["total_ms"] == {
-        "keep_all": 0.0,
+        "keep_all": None,
         "autogaze": 60.0,
         "speedup_ratio_keep_all_over_autogaze": None,
         "reduction_percent_of_keep_all": None,
     }
     assert report["readable_summary"]["memory_bytes_median"]["llm_peak_memory_bytes"] == {
-        "keep_all": 0.0,
+        "keep_all": None,
         "autogaze": 500.0,
         "reduction_ratio_keep_all_over_autogaze": None,
         "reduction_percent_of_keep_all": None,

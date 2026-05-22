@@ -27,6 +27,7 @@ STAGE_COLORS = {
     "Selector input": "#ffd43b",
     "AutoGaze": "#f59f00",
     "AutoGaze pipeline": "#f59f00",
+    "Vision input": "#8ce99a",
     "ViT": "#2f9e44",
     "Projector": "#69db7c",
     "Vision pipeline": "#2f9e44",
@@ -427,7 +428,13 @@ def latency_stage_bars(metrics: dict[str, Any]) -> list[ChartBar]:
         tile_tensor = _tile_tensor_prep_latency(latency, mode)
         prep_rest = _prep_rest_residual_latency(latency, mode)
         selector_input = _selector_input_latency(latency, mode)
-        use_fallback_prep_rest = frame_resize is None and explicit_tile_tensor is None and selector_input is None
+        vision_input = _vision_input_latency(latency, mode)
+        use_fallback_prep_rest = (
+            frame_resize is None
+            and explicit_tile_tensor is None
+            and selector_input is None
+            and vision_input is None
+        )
         raw_segments = [
             _positive_segment("Decode/read", _decode_read_latency(latency, mode)),
             _positive_segment("Frame resize", frame_resize),
@@ -435,6 +442,7 @@ def latency_stage_bars(metrics: dict[str, Any]) -> list[ChartBar]:
             _positive_segment("Prep rest", prep_rest),
             _positive_segment("Selector input", selector_input),
             _positive_segment("AutoGaze", _autogaze_latency(latency, mode)),
+            _positive_segment("Vision input", vision_input),
             _positive_segment("ViT", _vit_latency(latency, mode)),
             _positive_segment("Projector", _projector_latency(latency, mode)),
             _positive_segment("LLM", _llm_latency(latency, mode)),
