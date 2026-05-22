@@ -239,6 +239,8 @@ def test_flexible_runner_supports_qwen3_vl_family_and_four_step_plan():
     ]
     assert payload["four_step_execution_plan"]["post_encoder_token_prune"]["status"] == "candidate_next"
     assert payload["four_step_execution_plan"]["pre_encoder_sparse"]["status"] == "pixelprune_reference_available"
+    assert payload["pre_vit_sparse_contract"]["model_family"] == "qwen3-vl"
+    assert payload["pre_vit_sparse_contract"]["status"] == "implemented_pending_cuda"
     assert payload["adapter_plan"]["pre_encoder_prune"]["adapter"] == "pixelprune"
     assert payload["adapter_plan"]["pre_encoder_prune"]["status"]["value"] == "candidate"
 
@@ -778,10 +780,12 @@ def test_flexible_runner_supports_llava_onevision_and_internvl_status():
     assert llava_payload["model_capabilities"]["family_group"] == "llava_onevision"
     assert llava_payload["model_capabilities"]["video_token_policy"] == "pooled_196_tokens_per_frame"
     assert llava_payload["mllm_status_matrix"]["llava-onevision"]["pre_encoder_sparse_status"] == "hard"
+    assert llava_payload["pre_vit_sparse_contract"]["recommended_first_pre_vit_unit"] == "frame_or_tile"
     assert internvl_payload["model_capabilities"]["family_group"] == "internvl"
     assert internvl_payload["adapter_plan"]["mllm"]["status"]["value"] == "external_cli_ready"
     assert internvl_payload["mllm_status_matrix"]["internvl3"]["native_off_status"] == "external_cli_ready"
     assert internvl_payload["mllm_status_matrix"]["internvl3"]["pre_encoder_sparse_status"] == "probe_required"
+    assert internvl_payload["pre_vit_sparse_contract"]["status"] == "dynamic_tile_probe_required"
 
 
 def test_flexible_runner_supports_qwen3_vl_moe_family():

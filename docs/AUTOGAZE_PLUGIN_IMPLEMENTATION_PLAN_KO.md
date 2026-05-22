@@ -81,6 +81,56 @@ video
 
 Qwen2.5/Qwen3의 `*_chunked_vit_autogaze_sparse`는 actual sparse 검증 대상입니다. LLaVA-OneVision `llava-onevision-autogaze-actual`는 post-encoder visual token prune-generate 실험 경로입니다. VILA-family의 `*-autogaze-actual` entry는 현재 external CLI dense generation에 AutoGaze selector sidecar metric을 붙인 단계라서 아직 모델 내부 compute gain을 주장하지 않습니다. InternVL3 sidecar mode도 selector를 무시하지 않지만 pruning은 적용하지 않습니다.
 
+## Pre-ViT Sparse 적용 우선순위
+
+`pre_encoder_sparse`는 AutoGaze 또는 다른 token selector가 고른 patch/tile/frame만 ViT에 넣는 경로입니다. 따라서 성공하면 ViT encoder latency/memory와 MLLM visual context가 동시에 줄어듭니다. 현재 공통 계약은 `repro.plugins.pre_vit_sparse`에 있으며, `repro.flexible_runner` inspect 결과의 `pre_vit_sparse_contract`와 `pre_vit_sparse_model_matrix`에 노출됩니다.
+
+| 우선순위 | 모델/계열 | 상태 | 난이도 | 먼저 확인할 hook |
+| --- | --- | --- | --- | --- |
+| 1 | Qwen2.5-VL | `implemented_pending_cuda` | low | `pixel_values_videos`, `video_grid_thw`, `spatial_merge_size` |
+| 2 | Qwen3-VL | `implemented_pending_cuda` | low | `pixel_values_videos`, `video_grid_thw`, `spatial_merge_size` |
+| 3 | NVILA-Video plugin | `in_process_probe_required` | medium_high | processor output, `vision_tower.forward`, `mm_projector` |
+| 4 | LongVILA | `in_process_probe_required` | medium_high | processor output, `vision_tower.forward`, `mm_projector` |
+| 5 | InternVL3 | `dynamic_tile_probe_required` | medium | dynamic tile order, `num_patches_list` |
+| 6 | LLaVA-OneVision | `candidate_design_required` | high | frame/tile before SigLIP pooling |
+
+Qwen은 이미 `SparseSelectionPlan -> Qwen visual index -> chunked ViT sparse feature -> MLLM visual placeholder` 흐름을 코드에 둔 상태라 CUDA smoke가 다음 검증입니다. VILA-family는 external CLI만으로는 pre-ViT hook을 주입하기 어렵기 때문에, `repro.vila_feature_probe`의 `pre_vit_sparse_probe`가 요구 hook과 위치 정렬 위험을 먼저 기록합니다. InternVL3는 `repro.internvl_dynamic_tile_probe`가 `num_patches_list`와 dynamic tile 정책을 정리합니다. LLaVA-OneVision은 patch-level보다 frame/tile-level pre-ViT candidate를 먼저 검토합니다.
+
+### Probe command 예시
+
+```bash
+.venv/bin/python -m repro.vila_feature_probe \
+  --model-path weight/LongVILA \
+  --model-family longvila \
+  --video /data/HLVid/videos/example.mp4 \
+  --num-video-frames 128 \
+  --max-tiles-video 4 \
+  --output-json outputs/autogaze_repro/longvila_pre_vit_probe.json
+```
+
+```bash
+.venv/bin/python -m repro.internvl_dynamic_tile_probe \
+  --model-path weight/InternVL3 \
+  --model-family internvl3 \
+  --video /data/HLVid/videos/example.mp4 \
+  --num-video-frames 32 \
+  --max-tiles-video 8 \
+  --output-json outputs/autogaze_repro/internvl3_dynamic_tile_probe.json
+```
+
+```bash
+.venv/bin/python -m repro.flexible_runner \
+  --mode inspect \
+  --model-family llava-onevision \
+  --model-path weight/LLaVA-OneVision \
+  --token-selector-adapter autogaze \
+  --vision-encoder-adapter llava-onevision-siglip \
+  --mllm-adapter llava-onevision \
+  --autogaze-integration-level pre_encoder_sparse \
+  --pre-encoder-prune-adapter autogaze-sparse \
+  --output-json outputs/autogaze_repro/llava_pre_vit_candidate.json
+```
+
 ## Plugin HLVid Mode 그룹
 
 | 그룹 | modes | 의미 |

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from repro.common import write_json
+from repro.plugins.pre_vit_sparse import build_pre_vit_sparse_contract
 
 
 FEATURE_PACKING_KEYWORDS = (
@@ -57,16 +58,27 @@ def run_vila_feature_probe(
             "status": "config_missing",
             "config_path": str(config_path),
             "config_summary": None,
+            "pre_vit_sparse_probe": build_vila_pre_vit_sparse_probe(
+                model_family=model_family,
+                config_summary=None,
+                config_missing=True,
+            ),
             "reason": "model config.json was not found; runtime feature packing probe still required",
         }
 
     with config_path.open("r", encoding="utf-8") as handle:
         config = json.load(handle)
+    config_summary = summarize_vila_config(config)
     return {
         **payload,
         "status": "static_probe_collected",
         "config_path": str(config_path),
-        "config_summary": summarize_vila_config(config),
+        "config_summary": config_summary,
+        "pre_vit_sparse_probe": build_vila_pre_vit_sparse_probe(
+            model_family=model_family,
+            config_summary=config_summary,
+            config_missing=False,
+        ),
     }
 
 
@@ -83,6 +95,43 @@ def summarize_vila_config(config: dict[str, Any]) -> dict[str, Any]:
         "feature_packing_related_values": {
             key: _json_scalar_or_shape(config.get(key)) for key in related_keys
         },
+    }
+
+
+def build_vila_pre_vit_sparse_probe(
+    *,
+    model_family: str,
+    config_summary: dict[str, Any] | None,
+    config_missing: bool,
+) -> dict[str, Any]:
+    contract = build_pre_vit_sparse_contract(model_family)
+    if config_missing:
+        return {
+            "status": "config_missing",
+            "integration_level": "pre_encoder_sparse",
+            "required_hooks": contract["required_hooks"],
+            "external_cli_limitation": True,
+            "reason": "config.json missing; in-process probe still required",
+        }
+    return {
+        "status": "in_process_probe_required",
+        "integration_level": "pre_encoder_sparse",
+        "family_group": contract["family_group"],
+        "first_prunable_boundary": "before_vision_tower_forward",
+        "required_hooks": contract["required_hooks"],
+        "feature_packing_related_keys": (config_summary or {}).get("feature_packing_related_keys") or [],
+        "external_cli_limitation": True,
+        "position_alignment": {
+            "status": "must_preserve_or_rebuild",
+            "fields": ["frame_order", "tile_id", "patch_row", "patch_col", "scale_id"],
+        },
+        "candidate_sparse_units": ["frame", "tile", "patch"],
+        "next_actions": [
+            "load model in-process instead of external CLI",
+            "capture processor output pixel tensor and frame/tile metadata",
+            "capture vision tower input/output shape",
+            "map SparseSelectionPlan patch coordinates to vision tower token order",
+        ],
     }
 
 

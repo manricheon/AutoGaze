@@ -10,6 +10,7 @@ from repro.plugin_api import ExperimentSpec, MetricStatus
 from repro.plugins.autogaze_sparse_selector import runtime_config_from_args, run_direct_autogaze_selector
 from repro.plugins.mllm_adapters import MllmRunRequest, resolve_mllm_adapter
 from repro.plugins.pixelprune_adapter import PixelPruneConfig, apply_pixelprune_if_available, pixelprune_model_key
+from repro.plugins.pre_vit_sparse import build_pre_vit_sparse_contract, pre_vit_sparse_model_matrix
 
 
 MODEL_FAMILY_CHOICES = (
@@ -162,6 +163,8 @@ def build_inspect_payload(args: argparse.Namespace) -> dict[str, Any]:
         "experiment_spec": spec.to_dict(),
         "model_capabilities": build_model_capabilities(spec),
         "mllm_status_matrix": build_mllm_status_matrix(),
+        "pre_vit_sparse_contract": build_pre_vit_sparse_contract(spec.model_family),
+        "pre_vit_sparse_model_matrix": pre_vit_sparse_model_matrix(),
         "four_step_execution_plan": build_four_step_execution_plan(spec),
         "adapter_plan": build_adapter_plan(spec),
         "note": (

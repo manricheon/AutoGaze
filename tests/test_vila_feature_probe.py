@@ -42,3 +42,44 @@ def test_vila_feature_probe_collects_static_config_contract(tmp_path):
     ]
     assert probe["runtime_probe_required"] is True
     assert probe["next_action"] == "instrument_vila_remote_code_feature_packing"
+    assert probe["pre_vit_sparse_probe"]["status"] == "in_process_probe_required"
+    assert probe["pre_vit_sparse_probe"]["integration_level"] == "pre_encoder_sparse"
+    assert probe["pre_vit_sparse_probe"]["first_prunable_boundary"] == "before_vision_tower_forward"
+    assert "vision_tower.forward input tensor" in probe["pre_vit_sparse_probe"]["required_hooks"]
+    assert probe["pre_vit_sparse_probe"]["external_cli_limitation"] is True
+
+
+def test_vila_feature_probe_reports_patch_position_alignment_risks(tmp_path):
+    model_dir = tmp_path / "LongVILA"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "llava",
+                "architectures": ["LongVILAForCausalLM"],
+                "vision_tower": "siglip-so400m-patch14-384",
+                "mm_projector_type": "mlp2x_gelu",
+                "image_aspect_ratio": "anyres",
+            }
+        )
+    )
+
+    probe = run_vila_feature_probe(
+        model_path=str(model_dir),
+        model_family="longvila",
+        video="inputs/long.mp4",
+        prompt="What happens?",
+        num_video_frames=128,
+        max_tiles_video=4,
+    )
+
+    assert probe["pre_vit_sparse_probe"]["position_alignment"] == {
+        "status": "must_preserve_or_rebuild",
+        "fields": ["frame_order", "tile_id", "patch_row", "patch_col", "scale_id"],
+    }
+    assert probe["pre_vit_sparse_probe"]["next_actions"] == [
+        "load model in-process instead of external CLI",
+        "capture processor output pixel tensor and frame/tile metadata",
+        "capture vision tower input/output shape",
+        "map SparseSelectionPlan patch coordinates to vision tower token order",
+    ]

@@ -36,6 +36,8 @@ AutoGaze를 실제 비디오 MLLM 파이프라인에 붙였을 때 다음을 재
 | 기본/Plugin HLVid benchmark | `python scripts/run_hlvid_folder_benchmark.py` | 기본 3모드 keep-all/single-scale dense/autogaze 비교, paper baseline 비교, H100 preflight, `--plugin-suite qwen|vila|llava|expand-smoke` 확장 실험 라우팅 |
 | Plugin HLVid 내부 경로 | `python -m repro.plugin_hlvid_benchmark` | Qwen2.5/Qwen3/LongVILA/NVILA-Video/LLaVA 등 확장 실험을 직접 호출할 때 |
 | Plugin single/inspect | `python -m repro.flexible_runner` | token selector / ViT / MLLM 조합을 명시해 실험 |
+| VILA pre-ViT probe | `python -m repro.vila_feature_probe` | NVILA-Video/LongVILA를 external CLI가 아닌 in-process hook으로 옮기기 전 필요한 tensor/position boundary 기록 |
+| InternVL dynamic tile probe | `python -m repro.internvl_dynamic_tile_probe` | InternVL3의 dynamic tile order, `num_patches_list`, thumbnail 정책 기록 |
 | Streaming profile | `python -m repro.nvila_runner --mode stream-profile` | LLM 없이 decode/tile/AutoGaze/SigLIP 구간 profile |
 | Streaming sweep | `python -m repro.stream_profile_sweep` | 여러 stream config 후보를 비교 |
 | Markdown report | `python -m repro.markdown_report` | 단일/benchmark JSON을 표와 SVG chart가 있는 Markdown으로 변환 |
@@ -74,6 +76,16 @@ AutoGaze를 실제 비디오 MLLM 파이프라인에 붙였을 때 다음을 재
 | `vit_encoder` | NVILA SigLIP, Qwen grid ViT/chunked ViT | V-JEPA2, InternVL dynamic tile, Qwen pre-ViT sparse hook 안정화 |
 | `mllm` | NVILA-HD, VILA CLI 계열, Qwen, LLaVA-OneVision, InternVL3 adapter | visual token packing과 position/grid metadata를 모델별로 명확히 기록 |
 | benchmark task | HLVid/VideoQA schema | multiple-choice VideoQA 이후 caption/action task adapter 확장 |
+
+## Pre-ViT Sparse 확장 우선순위
+
+| 순서 | 모델/계열 | 현재 상태 | 의미 |
+| --- | --- | --- | --- |
+| 1 | Qwen2.5-VL / Qwen3-VL | `implemented_pending_cuda` | `video_grid_thw` 기반 pre-ViT sparse 경로가 코드에 있고 CUDA smoke가 다음 단계 |
+| 2 | NVILA-Video / LongVILA | `in_process_probe_required` | external CLI sidecar를 넘어 processor/vision tower/projector hook을 직접 잡아야 함 |
+| 3 | InternVL3 | `dynamic_tile_probe_required` | dynamic tile과 `num_patches_list`를 먼저 맞춘 뒤 tile-level prune부터 시도 |
+| 4 | LLaVA-OneVision | `candidate_design_required` | pooled video token 구조라 frame/tile-level pre-ViT를 먼저 검토 |
+| 5 | Generic SigLIP/V-JEPA2 | `vit_only_adapter_required` | MLLM 연결 전에 ViT 단독 sparse benchmark로 시작 |
 
 ## 추천 실행 순서
 
