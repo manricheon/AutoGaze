@@ -46,10 +46,10 @@ Use this template when collecting H100/CUDA results for leader-facing comparison
 
 ## 3. Single Inference Smoke
 
-| Mode | Status | Answer | Total ms | Preprocess ms | AutoGaze ms | ViT ms | LLM/generate ms | TTFT ms | Peak GiB |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| keep-all |  |  |  |  | n/a |  |  |  |  |
-| AutoGaze |  |  |  |  |  |  |  |  |  |
+| Mode | Status | Answer | Total ms | Decode/read ms | Prep rest ms | Selector input ms | AutoGaze ms | Vision input ms | ViT ms | LLM/generate ms | TTFT ms | Peak GiB |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| keep-all |  |  |  |  |  | n/a | n/a |  |  |  |  |  |
+| AutoGaze |  |  |  |  |  |  |  |  |  |  |  |  |
 
 Notes:
 
@@ -161,3 +161,10 @@ The main OOM risk appears at __.
 - Evidence for memory gain or OOM avoidance:
 - Accuracy risk:
 - Next experiment:
+
+Latency note:
+
+- Primary formula: `total_ms = video_preprocess_without_autogaze_ms + autogaze_total_ms + generate_ms`
+- `Selector input ms = autogaze_total_ms - autogaze_model_forward_ms` when both timers are present.
+- `Vision input ms = vision_encoder_ms - siglip_vision_ms - mm_projector_ms` when child timers are present.
+- Do not add `video_preprocess_ms` to the primary total; it is the legacy inclusive preprocess field.

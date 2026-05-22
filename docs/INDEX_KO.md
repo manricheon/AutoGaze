@@ -87,7 +87,7 @@ AutoGaze를 실제 비디오 MLLM 파이프라인에 붙였을 때 다음을 재
 
 | 영역 | 핵심 필드 |
 | --- | --- |
-| Latency | `total_ms`, `video_preprocess_without_autogaze_ms`, `autogaze_total_ms`, `vision_encoder_ms`, `llm_forward_ms`, `generate_ms` |
+| Latency | `total_ms`, `video_decode_read_ms`, `preprocess_rest_without_decode_autogaze_ms`, `selector_input_build_ms`, `autogaze_total_ms`, `vision_input_build_ms`, `siglip_vision_ms`, `llm_forward_ms`, `generate_ms` |
 | Token/Patch | full/off 예상 patch, AutoGaze selected patch, encoder input patch, LLM visual token |
 | Memory | processor/autogaze/ViT/LLM/overall peak memory |
 | Benchmark | `accuracy_total`, `accuracy_scored`, `failed`, `parse_failed`, `oom`, `skipped` |

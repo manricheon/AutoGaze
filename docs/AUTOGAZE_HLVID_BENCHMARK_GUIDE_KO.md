@@ -163,8 +163,10 @@ OOM은 accuracy와 별도로 봐야 합니다. H100에서 keep-all이 OOM이고 
 | 영역 | 비교 기준 |
 | --- | --- |
 | token/patch | full/off 예상 patch vs AutoGaze selected patch vs encoder input token vs LLM visual token |
-| latency | preprocess, AutoGaze, ViT/vision encoder, LLM/generate, total |
+| latency | Decode/read, Prep rest, Selector input, AutoGaze, Vision input, ViT/vision encoder, LLM/generate, total |
 | memory | processor/autogaze/ViT/LLM/overall peak |
 | benchmark | 정답 여부, failure category, OOM stage |
 
 AutoGaze on만 돌렸더라도 full/off 예상 patch budget은 summary에 남아야 합니다. 이 값이 있어야 keep-all을 실제로 못 돌린 OOM config에서도 token reduction 근거를 유지할 수 있습니다.
+
+HLVid gain report에서는 `readable_summary.key_metrics_median.latency_ms`를 먼저 보고, 더 세부적인 확인은 `readable_summary.latency_ms_detail_median`을 봅니다. `selector_input_build_ms`는 AutoGaze 전체에서 모델 forward만 뺀 residual이고, `vision_input_build_ms`는 vision wrapper에서 SigLIP/projector를 뺀 residual입니다. 둘 다 실제 측정 timer의 차이로 계산되며, total latency에 별도로 더하지 않습니다.

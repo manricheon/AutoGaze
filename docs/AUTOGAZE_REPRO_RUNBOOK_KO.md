@@ -70,6 +70,16 @@ Qwen3-VL 실험은 `qwen-vl-utils`가 필요합니다. 기본 requirements에 �
 
 같은 입력에서 AutoGaze off/keep-all을 보려면 `--gazing-mode keep-all`만 바꿉니다. 상대 latency를 비교할 때는 같은 frame 수, thumbnail 수, resize, max tiles, dtype, batch size를 유지하세요.
 
+실행 후 `nvila_single_summary.json` 또는 Markdown report의 `Key Comparison`에서 먼저 확인할 값은 다음입니다.
+
+```text
+Latency: Total / Decode-read / Prep rest / Selector input / AutoGaze / Vision input / ViT / LLM
+Token:   Full patch / Selected patch / Patch x / LLM visual token
+Memory:  processor peak / TTFT peak / LLM peak / overall peak
+```
+
+`Selector input`은 `autogaze_total_ms - autogaze_model_forward_ms`로 계산한 AutoGaze 내부 residual이고, `Vision input`은 `vision_encoder_ms - siglip_vision_ms - mm_projector_ms`로 계산한 vision path residual입니다. 둘 다 실제 측정된 부모/자식 timer에서 나온 값이며, 별도 독립 timer가 아닐 때는 residual로 해석합니다.
+
 ## 2. 선택 프레임/AutoGaze Overlay 시각화
 
 AutoGaze가 어떤 프레임과 패치를 남겼는지 확인하려면 visualization 옵션을 켭니다.
@@ -257,9 +267,9 @@ OOM이 난 실행도 가능한 경우 `failure.kind=oom`, `failure.stage`와 함
 | 영역 | 먼저 볼 필드 |
 | --- | --- |
 | 전체 시간 | `total_ms`, `latency_accounting.additive_total_ms` |
-| 전처리 | `video_decode_read_ms`, `preprocess_rest_without_decode_autogaze_ms`, `video_preprocess_without_autogaze_ms`, `video_decode_ms`, `video_tiling_ms` |
-| AutoGaze | `autogaze_total_ms`, `autogaze_forward_ms`, `autogaze_model_forward_ms` |
-| Vision encoder | `vision_encoder_ms`, `siglip_vision_ms`, Qwen의 `qwen_vit_prepare_ms` |
+| 전처리 | `video_decode_read_ms`, `preprocess_rest_without_decode_autogaze_ms`, `video_preprocess_without_autogaze_ms`, `video_decode_ms`, `video_frame_resize_ms`, `video_tiling_ms` |
+| AutoGaze | `autogaze_total_ms`, `selector_input_build_ms`, `autogaze_forward_ms`, `autogaze_model_forward_ms` |
+| Vision encoder | `vision_encoder_ms`, `vision_input_build_ms`, `siglip_vision_ms`, `mm_projector_ms`, Qwen의 `qwen_vit_prepare_ms` |
 | LLM | `generate_ms`, `llm_forward_ms`, `ttft_ms` |
 | patch/token 감소 | full/off patch, AutoGaze selected patch, encoder input patch, LLM visual token |
 | memory | processor/autogaze/vision/LLM/overall peak |
@@ -272,7 +282,7 @@ Primary latency 공식은 다음입니다.
 total_ms = video_preprocess_without_autogaze_ms + autogaze_total_ms + generate_ms
 ```
 
-메인 비교 표에서는 `video_preprocess_without_autogaze_ms`를 다시 `Decode/read ms`와 `Prep rest ms`로 나눠 봅니다. 같은 비디오와 같은 sampling이면 decode/read는 on/off 공통 비용에 가깝기 때문에, AutoGaze의 실제 이득은 `Prep rest + AutoGaze + ViT + LLM` 쪽에서 더 잘 보입니다.
+메인 비교 표에서는 `video_preprocess_without_autogaze_ms`를 다시 `Decode/read ms`와 `Prep rest ms`로 나눠 봅니다. 같은 비디오와 같은 sampling이면 decode/read는 on/off 공통 비용에 가깝기 때문에, AutoGaze의 실제 이득은 `Prep rest + Selector input + AutoGaze + Vision input + ViT + LLM` 쪽에서 더 잘 보입니다.
 
 `video_preprocess_ms`는 AutoGaze를 포함한 legacy inclusive field라 primary total에 다시 더하지 않습니다.
 
