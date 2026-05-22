@@ -276,6 +276,41 @@ def test_key_comparison_does_not_use_inclusive_preprocess_as_no_ag_preprocess():
     assert "| 9,000 | 3,000 | 800 | 1,200 | 4,000 |" not in markdown
 
 
+def test_markdown_report_includes_decode_read_stage_breakdown():
+    payload = {
+        "readable_summary": {
+            "decode_read_stage_timings_ms_median": {
+                "processor_video_container_open_total_ms": {
+                    "keep_all": 10,
+                    "autogaze": 11,
+                    "speedup_ratio_keep_all_over_autogaze": 10 / 11,
+                    "reduction_percent_of_keep_all": -10,
+                },
+                "processor_video_keyframe_index_scan_total_ms": {
+                    "keep_all": 100,
+                    "autogaze": 110,
+                    "speedup_ratio_keep_all_over_autogaze": 100 / 110,
+                    "reduction_percent_of_keep_all": -10,
+                },
+                "processor_video_frame_resize_total_ms": {
+                    "keep_all": 20,
+                    "autogaze": 22,
+                    "speedup_ratio_keep_all_over_autogaze": 20 / 22,
+                    "reduction_percent_of_keep_all": -10,
+                },
+            },
+            "decode_read_stage_note": "diagnostic note",
+        }
+    }
+
+    markdown = render_markdown_report(payload, source_path="hlvid_gain.json")
+
+    assert "## Decode/read Stage Breakdown" in markdown
+    assert "diagnostic note" in markdown
+    assert "| processor_video_keyframe_index_scan_total_ms | 100 | 110 |" in markdown
+    assert "| processor_video_frame_resize_total_ms | 20 | 22 |" in markdown
+
+
 def test_key_comparison_fills_patch_counts_from_readable_processing_budget():
     payload = {
         "readable_summary": {

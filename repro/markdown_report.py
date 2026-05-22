@@ -1276,6 +1276,51 @@ def render_module_details(payload: dict[str, Any]) -> str:
     return "## Module Detail Metrics\n\n" + markdown_table(["Metric", "Value", "Count"], rows)
 
 
+def render_decode_read_stage_details(payload: dict[str, Any]) -> str:
+    detail = get_path(payload, "readable_performance_summary.decode_read_stage_timings_ms_median")
+    if detail is None:
+        detail = get_path(payload, "readable_summary.decode_read_stage_timings_ms_median")
+    if not isinstance(detail, dict) or not detail:
+        return ""
+
+    note = first_present(
+        get_path(payload, "readable_performance_summary.decode_read_stage_note"),
+        get_path(payload, "readable_summary.decode_read_stage_note"),
+    )
+    sections = ["## Decode/read Stage Breakdown"]
+    if note:
+        sections.append(str(note))
+
+    if any(is_mode_comparison_metric(value) for value in detail.values()):
+        rows = []
+        for name, value in detail.items():
+            if is_mode_comparison_metric(value):
+                rows.append(
+                    [
+                        name,
+                        value.get("keep_all"),
+                        value.get("autogaze"),
+                        first_present(
+                            value.get("speedup_ratio_keep_all_over_autogaze"),
+                            value.get("reduction_ratio_keep_all_over_autogaze"),
+                        ),
+                        value.get("reduction_percent_of_keep_all"),
+                    ]
+                )
+            else:
+                rows.append([name, value, None, None, None])
+        sections.append(
+            markdown_table(
+                ["Metric", "Keep-all", "AutoGaze", "Speedup", "Reduction %"],
+                rows,
+            )
+        )
+    else:
+        rows = [[name, value] for name, value in detail.items()]
+        sections.append(markdown_table(["Metric", "Value"], rows))
+    return "\n\n".join(sections)
+
+
 def render_input_tokenization(payload: dict[str, Any], metrics: dict[str, Any]) -> str:
     tokens = as_mapping(metrics.get("tokens"))
     stream_tokens = as_mapping(get_path(payload, "stream_plan.tokens", {}))
@@ -1631,6 +1676,7 @@ def render_markdown_report(
         render_benchmark_score(payload),
         render_correctness_comparison(payload),
         render_benchmark_samples(payload),
+        render_decode_read_stage_details(payload),
         render_module_details(payload),
         render_raw_metric_appendix(metrics),
     ]

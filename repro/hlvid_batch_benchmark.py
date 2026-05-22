@@ -10,6 +10,7 @@ from typing import Any
 
 from repro.common import compute_stats, write_csv, write_json
 from repro.hlvid import (
+    DECODE_READ_STAGE_TIMING_FIELDS,
     PROCESSING_BUDGET_SUMMARY_FIELDS,
     latency_accounting_summary,
     read_jsonl,
@@ -347,6 +348,15 @@ def build_readable_summary(
         )
         for label, field in READABLE_STAGE_TIMING_FIELDS
     }
+    decode_read_stage_timing_detail = {
+        label: _comparison_summary(
+            keep_all_rows,
+            autogaze_rows,
+            field,
+            ratio_key="speedup_ratio_keep_all_over_autogaze",
+        )
+        for label, field in DECODE_READ_STAGE_TIMING_FIELDS
+    }
     latency = {
         label: _comparison_summary(
             keep_all_rows,
@@ -458,6 +468,7 @@ def build_readable_summary(
         "latency_ms_median": latency,
         "latency_ms_detail_median": latency_detail,
         "stage_timings_ms_median": stage_timing_detail,
+        "decode_read_stage_timings_ms_median": decode_read_stage_timing_detail,
         "key_metrics_median": {
             "latency_ms": latency,
             "tokens": tokens,
@@ -469,6 +480,12 @@ def build_readable_summary(
             "processor_autogaze_forward_batched_total_ms is the summed _run_autogaze_batched time "
             "within each row; processor_autogaze_forward_batched_count is the number of wrapped calls "
             "observed for that row."
+        ),
+        "decode_read_stage_note": (
+            "video_decode_read_ms is the sum of container_open, keyframe_index_scan, seek, decode_seek/decode_scan, "
+            "and frame_to_pil when fine-grained runner timing is available. video_frame_resize and "
+            "runner_video_prepare_total are shown here for diagnosis but are not part of video_decode_read_ms. "
+            "processor_video_decode_sampling_total_ms indicates the older broad processor _load_video_frames wrapper path."
         ),
         "latency_accounting": latency_accounting_summary(),
         "latency_field_note": (

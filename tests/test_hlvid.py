@@ -193,6 +193,12 @@ def test_score_predictions_includes_latency_memory_token_and_compute_summaries()
             },
             "stage_timings_ms": {
                 "processor": {
+                    "video_container_open": {"total_ms": 1.0, "count": 1, "mean_ms": 1.0},
+                    "video_keyframe_index_scan": {"total_ms": 2.0, "count": 1, "mean_ms": 2.0},
+                    "video_seek": {"total_ms": 0.5, "count": 1, "mean_ms": 0.5},
+                    "video_decode_seek": {"total_ms": 3.0, "count": 1, "mean_ms": 3.0},
+                    "video_frame_to_pil": {"total_ms": 1.5, "count": 128, "mean_ms": 1.5 / 128.0},
+                    "video_frame_resize": {"total_ms": 4.0, "count": 128, "mean_ms": 4.0 / 128.0},
                     "autogaze_forward_batched": {"total_ms": 11.0, "count": 3, "mean_ms": 11.0 / 3.0},
                     "autogaze_total": {"total_ms": 14.0, "count": 1, "mean_ms": 14.0},
                 }
@@ -237,6 +243,12 @@ def test_score_predictions_includes_latency_memory_token_and_compute_summaries()
             },
             "stage_timings_ms": {
                 "processor": {
+                    "video_container_open": {"total_ms": 0.5, "count": 1, "mean_ms": 0.5},
+                    "video_keyframe_index_scan": {"total_ms": 1.0, "count": 1, "mean_ms": 1.0},
+                    "video_seek": {"total_ms": 0.25, "count": 1, "mean_ms": 0.25},
+                    "video_decode_seek": {"total_ms": 2.0, "count": 1, "mean_ms": 2.0},
+                    "video_frame_to_pil": {"total_ms": 1.0, "count": 96, "mean_ms": 1.0 / 96.0},
+                    "video_frame_resize": {"total_ms": 3.0, "count": 96, "mean_ms": 3.0 / 96.0},
                     "autogaze_forward_batched": {"total_ms": 8.0, "count": 2, "mean_ms": 4.0},
                     "autogaze_total": {"total_ms": 10.0, "count": 1, "mean_ms": 10.0},
                 }
@@ -322,6 +334,17 @@ def test_score_predictions_includes_latency_memory_token_and_compute_summaries()
         "processor_autogaze_forward_batched_mean_ms": ((11.0 / 3.0) + 4.0) / 2.0,
         "processor_autogaze_total_total_ms": 12.0,
         "processor_autogaze_total_count": 1.0,
+    }
+    assert summary["readable_performance_summary"]["decode_read_stage_timings_ms_median"] == {
+        "processor_video_container_open_total_ms": 0.75,
+        "processor_video_keyframe_index_scan_total_ms": 1.5,
+        "processor_video_seek_total_ms": 0.375,
+        "processor_video_decode_seek_total_ms": 2.5,
+        "processor_video_decode_scan_total_ms": 0.0,
+        "processor_video_frame_to_pil_total_ms": 1.25,
+        "processor_video_decode_sampling_total_ms": 0.0,
+        "processor_video_frame_resize_total_ms": 3.5,
+        "processor_runner_video_prepare_total_ms": 0.0,
     }
     assert summary["readable_performance_summary"]["tokens_median"]["llm_visual_tokens_after_actual"] == 35.0
 

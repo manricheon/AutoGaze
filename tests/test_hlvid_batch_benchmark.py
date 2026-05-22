@@ -347,6 +347,17 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
             "ttft_peak_memory_bytes": 1500,
             "llm_peak_memory_bytes": 1000,
             "peak_memory_bytes": 2500,
+            "stage_timings_ms": {
+                "processor": {
+                    "video_container_open": {"total_ms": 2.0, "count": 1, "mean_ms": 2.0},
+                    "video_keyframe_index_scan": {"total_ms": 4.0, "count": 1, "mean_ms": 4.0},
+                    "video_seek": {"total_ms": 1.0, "count": 1, "mean_ms": 1.0},
+                    "video_decode_seek": {"total_ms": 8.0, "count": 1, "mean_ms": 8.0},
+                    "video_frame_to_pil": {"total_ms": 3.0, "count": 128, "mean_ms": 3.0 / 128.0},
+                    "video_frame_resize": {"total_ms": 5.0, "count": 128, "mean_ms": 5.0 / 128.0},
+                    "runner_video_prepare_total": {"total_ms": 23.0, "count": 1, "mean_ms": 23.0},
+                }
+            },
             "token_metrics": {
                 "llm_actual_visual_tokens": 100,
                 "llm_keep_all_visual_tokens_estimated": 100,
@@ -420,6 +431,13 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
             },
             "stage_timings_ms": {
                 "processor": {
+                    "video_container_open": {"total_ms": 2.5, "count": 1, "mean_ms": 2.5},
+                    "video_keyframe_index_scan": {"total_ms": 4.5, "count": 1, "mean_ms": 4.5},
+                    "video_seek": {"total_ms": 1.5, "count": 1, "mean_ms": 1.5},
+                    "video_decode_seek": {"total_ms": 8.5, "count": 1, "mean_ms": 8.5},
+                    "video_frame_to_pil": {"total_ms": 3.5, "count": 128, "mean_ms": 3.5 / 128.0},
+                    "video_frame_resize": {"total_ms": 5.5, "count": 128, "mean_ms": 5.5 / 128.0},
+                    "runner_video_prepare_total": {"total_ms": 25.5, "count": 1, "mean_ms": 25.5},
                     "autogaze_forward_batched": {"total_ms": 10.0, "count": 2, "mean_ms": 5.0},
                     "autogaze_total": {"total_ms": 12.0, "count": 1, "mean_ms": 12.0},
                 }
@@ -544,6 +562,20 @@ def test_build_gain_report_compares_accuracy_latency_tokens_and_memory():
     assert report["readable_summary"]["stage_timings_ms_median"][
         "processor_autogaze_forward_batched_count"
     ]["autogaze"] == 2.0
+    assert report["readable_summary"]["decode_read_stage_timings_ms_median"][
+        "processor_video_keyframe_index_scan_total_ms"
+    ] == {
+        "keep_all": 4.0,
+        "autogaze": 4.5,
+        "speedup_ratio_keep_all_over_autogaze": 4.0 / 4.5,
+        "reduction_percent_of_keep_all": (4.0 - 4.5) / 4.0 * 100,
+    }
+    assert report["readable_summary"]["decode_read_stage_timings_ms_median"][
+        "processor_video_decode_seek_total_ms"
+    ]["autogaze"] == 8.5
+    assert report["readable_summary"]["decode_read_stage_timings_ms_median"][
+        "processor_video_frame_resize_total_ms"
+    ]["keep_all"] == 5.0
     assert report["readable_summary"]["key_metrics_median"]["latency_ms"]["total_ms"] == {
         "keep_all": 100.0,
         "autogaze": 60.0,

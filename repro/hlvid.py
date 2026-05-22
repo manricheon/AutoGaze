@@ -83,6 +83,44 @@ READABLE_STAGE_TIMING_FIELDS = (
         "stage_timings_ms.processor.autogaze_total.count",
     ),
 )
+DECODE_READ_STAGE_TIMING_FIELDS = (
+    (
+        "processor_video_container_open_total_ms",
+        "stage_timings_ms.processor.video_container_open.total_ms",
+    ),
+    (
+        "processor_video_keyframe_index_scan_total_ms",
+        "stage_timings_ms.processor.video_keyframe_index_scan.total_ms",
+    ),
+    (
+        "processor_video_seek_total_ms",
+        "stage_timings_ms.processor.video_seek.total_ms",
+    ),
+    (
+        "processor_video_decode_seek_total_ms",
+        "stage_timings_ms.processor.video_decode_seek.total_ms",
+    ),
+    (
+        "processor_video_decode_scan_total_ms",
+        "stage_timings_ms.processor.video_decode_scan.total_ms",
+    ),
+    (
+        "processor_video_frame_to_pil_total_ms",
+        "stage_timings_ms.processor.video_frame_to_pil.total_ms",
+    ),
+    (
+        "processor_video_decode_sampling_total_ms",
+        "stage_timings_ms.processor.video_decode_sampling.total_ms",
+    ),
+    (
+        "processor_video_frame_resize_total_ms",
+        "stage_timings_ms.processor.video_frame_resize.total_ms",
+    ),
+    (
+        "processor_runner_video_prepare_total_ms",
+        "stage_timings_ms.processor.runner_video_prepare_total.total_ms",
+    ),
+)
 MODULE_LATENCY_FIELDS = (
     ("total_ms", "total_ms"),
     ("video_decode_read_ms", "video_decode_read_ms"),
@@ -615,6 +653,7 @@ def summarize_prediction_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     latency = stats_by_field(rows, LATENCY_FIELDS)
     stage_timings = stats_by_labeled_field(rows, STAGE_TIMING_FIELDS)
     readable_stage_timings = stats_by_labeled_field(rows, READABLE_STAGE_TIMING_FIELDS)
+    decode_read_stage_timings = stats_by_labeled_field(rows, DECODE_READ_STAGE_TIMING_FIELDS)
     memory = stats_by_field(rows, MEMORY_FIELDS)
     tokens = stats_by_field(rows, TOKEN_FIELDS)
     compute = stats_by_field(rows, COMPUTE_FIELDS)
@@ -641,6 +680,17 @@ def summarize_prediction_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "stage_timings_ms_median": {
                 field: readable_stage_timings[field]["median"] for field, _ in READABLE_STAGE_TIMING_FIELDS
             },
+            "decode_read_stage_timings_ms_median": {
+                field: decode_read_stage_timings[field]["median"]
+                for field, _ in DECODE_READ_STAGE_TIMING_FIELDS
+            },
+            "decode_read_stage_note": (
+                "video_decode_read_ms is the sum of container_open, keyframe_index_scan, seek, "
+                "decode_seek/decode_scan, and frame_to_pil when fine-grained runner timing is available. "
+                "video_frame_resize and runner_video_prepare_total are shown here for diagnosis but are not part "
+                "of video_decode_read_ms. processor_video_decode_sampling_total_ms indicates the older broad "
+                "processor _load_video_frames wrapper path."
+            ),
             "stage_timings_note": (
                 "Nested stage_timings_ms are aggregated from per-row prediction JSONL. "
                 "processor_autogaze_forward_batched_total_ms is the summed _run_autogaze_batched time "
