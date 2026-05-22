@@ -18,9 +18,9 @@ Root `README.md`, `QUICK_START.md`, `TRAIN.md`, `INTEGRATION.md`, `LICENSE`, and
 | Streaming/profile/H100 preflight | ready | `repro.nvila_runner`, `repro.hlvid_batch_benchmark` |
 | Markdown/chart report | ready | `python -m repro.markdown_report` |
 | Aggregate trend report | ready | `python -m repro.aggregate_reports` |
-| Plugin experiments | PoC/probe | `repro.flexible_runner`, `repro.plugin_hlvid_benchmark` |
+| Plugin experiments | PoC/probe | `run_hlvid_folder_benchmark.py --plugin-suite qwen`, `repro.flexible_runner` |
 
-Basic HLVid benchmark and plugin HLVid benchmark are intentionally separate. Use the basic wrapper for NVILA-HD keep-all/autogaze, paper baseline, and H100 preflight. Use plugin benchmark only for Qwen/LongVILA/NVILA-Video extension experiments.
+Use `scripts/run_hlvid_folder_benchmark.py` as the main HLVid entry point. Without plugin options it runs the NVILA-HD benchmark path. With `--plugin-suite qwen`, it routes to the Qwen plugin benchmark path. Call `repro.plugin_hlvid_benchmark` directly only when debugging plugin internals.
 
 ## Setup
 
@@ -137,15 +137,15 @@ Paper references:
 
 ## 5. Plugin HLVid Benchmark
 
-Use this path for extension experiments only.
+Use the same HLVid wrapper with `--plugin-suite qwen` for Qwen extension experiments. The wrapper routes this to the plugin benchmark internally, so the common HLVid command shape stays consistent.
 
 ```bash
-.venv/bin/python -m repro.plugin_hlvid_benchmark \
-  --manifest /data/HLVid/manifest.json \
+.venv/bin/python scripts/run_hlvid_folder_benchmark.py \
+  --dataset-dir /data/HLVid \
   --video-root /data/HLVid/videos \
   --output-dir outputs/autogaze_repro/plugin_hlvid_qwen_limit3 \
-  --modes qwen_full_vit,qwen_chunked_vit,qwen_chunked_vit_autogaze_sparse \
-  --model qwen3-vl=weight/Qwen3-VL-8B-Instruct \
+  --plugin-suite qwen \
+  --plugin-model qwen3-vl=weight/Qwen3-VL-8B-Instruct \
   --limit 3 \
   --num-video-frames 32 \
   --num-video-frames-thumbnail 8 \
@@ -156,6 +156,8 @@ Use this path for extension experiments only.
   --video-resize-longest-edge 448 \
   --max-new-tokens 8
 ```
+
+`--plugin-suite qwen` defaults to `qwen_full_vit,qwen_chunked_vit,qwen_chunked_vit_autogaze_sparse`. Use `--plugin-suite custom --plugin-modes ...` for narrower comparisons.
 
 ## 6. Stream Profile / H100 Preflight
 

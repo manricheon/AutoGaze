@@ -6,12 +6,12 @@
 
 | 경로 | 엔트리포인트 | 목적 |
 | --- | --- | --- |
-| 기본 wrapper | `python scripts/run_hlvid_folder_benchmark.py` | NVILA-HD keep-all/autogaze 비교, paper baseline, H100 preflight |
+| 통합 wrapper | `python scripts/run_hlvid_folder_benchmark.py` | NVILA-HD keep-all/autogaze 비교, paper baseline, H100 preflight, Qwen plugin suite 라우팅 |
 | batch module | `python -m repro.hlvid_batch_benchmark` | wrapper와 같은 동작을 module 형태로 직접 실행 |
 | direct runner | `python -m repro.nvila_runner --mode hlvid` | 한 가지 `gazing-mode`만 직접 디버깅 |
-| plugin benchmark | `python -m repro.plugin_hlvid_benchmark` | Qwen/LongVILA/NVILA-Video 등 확장 실험 |
+| plugin benchmark | `python -m repro.plugin_hlvid_benchmark` | Qwen/LongVILA/NVILA-Video 등 확장 실험의 내부/고급 경로 |
 
-리더 설득용 NVILA-HD 결과는 기본 wrapper를 우선 사용합니다. Plugin benchmark는 “다른 MLLM에도 AutoGaze 방식의 selector를 붙일 수 있는가”를 검증하는 별도 경로입니다.
+리더 설득용 NVILA-HD 결과와 Qwen 확장 smoke 모두 `scripts/run_hlvid_folder_benchmark.py`를 우선 사용합니다. Plugin benchmark는 “다른 MLLM에도 AutoGaze 방식의 selector를 붙일 수 있는가”를 검증하는 내부 경로이며, wrapper의 `--plugin-suite`가 이 경로로 라우팅합니다.
 
 ## 데이터 폴더 규칙
 
@@ -137,15 +137,15 @@ HD keep-all은 useful ablation이지만 paper baseline으로 부르지 않습니
 
 ## Plugin HLVid benchmark
 
-Qwen/LongVILA/NVILA-Video 등 확장 조합을 같은 manifest row로 비교할 때만 사용합니다.
+Qwen/LongVILA/NVILA-Video 등 확장 조합을 같은 manifest row로 비교할 때 사용합니다. Qwen은 이제 기본 wrapper에서 `--plugin-suite qwen`으로 바로 실행할 수 있습니다.
 
 ```bash
-.venv/bin/python -m repro.plugin_hlvid_benchmark \
-  --manifest /data/HLVid/manifest.json \
+.venv/bin/python scripts/run_hlvid_folder_benchmark.py \
+  --dataset-dir /data/HLVid \
   --video-root /data/HLVid/videos \
   --output-dir outputs/autogaze_repro/plugin_hlvid_qwen_limit3 \
-  --modes qwen_full_vit,qwen_chunked_vit,qwen_chunked_vit_autogaze_sparse \
-  --model qwen3-vl=weight/Qwen3-VL-8B-Instruct \
+  --plugin-suite qwen \
+  --plugin-model qwen3-vl=weight/Qwen3-VL-8B-Instruct \
   --limit 3 \
   --num-video-frames 32 \
   --num-video-frames-thumbnail 8 \
@@ -155,6 +155,37 @@ Qwen/LongVILA/NVILA-Video 등 확장 조합을 같은 manifest row로 비교할 
   --qwen-thumbnail-mode append-video \
   --video-resize-longest-edge 448 \
   --max-new-tokens 8
+```
+
+`--plugin-suite qwen`은 기본적으로 다음 세 모드를 같은 HLVid row에서 실행합니다.
+
+```text
+qwen_full_vit
+qwen_chunked_vit
+qwen_chunked_vit_autogaze_sparse
+```
+
+세부 mode를 직접 지정하려면 `--plugin-modes`를 사용합니다.
+
+```bash
+.venv/bin/python scripts/run_hlvid_folder_benchmark.py \
+  --dataset-dir /data/HLVid \
+  --plugin-suite custom \
+  --plugin-modes qwen_full_vit,qwen_chunked_vit \
+  --plugin-model qwen3-vl=weight/Qwen3-VL-8B-Instruct \
+  --limit 3
+```
+
+내부 runner를 직접 호출해야 할 때만 아래 형태를 사용합니다.
+
+```bash
+.venv/bin/python -m repro.plugin_hlvid_benchmark \
+  --manifest /data/HLVid/manifest.json \
+  --video-root /data/HLVid/videos \
+  --output-dir outputs/autogaze_repro/plugin_hlvid_qwen_limit3 \
+  --modes qwen_full_vit,qwen_chunked_vit,qwen_chunked_vit_autogaze_sparse \
+  --model qwen3-vl=weight/Qwen3-VL-8B-Instruct \
+  --limit 3
 ```
 
 ## 주요 산출물

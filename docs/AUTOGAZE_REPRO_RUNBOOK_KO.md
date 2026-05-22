@@ -21,9 +21,9 @@
 | stream-profile/H100 preflight | 준비됨 | `repro.nvila_runner`, `repro.hlvid_batch_benchmark` |
 | Markdown/chart report | 준비됨 | `python -m repro.markdown_report` |
 | aggregate trend report | 준비됨 | `python -m repro.aggregate_reports` |
-| plugin 확장 실험 | PoC/probe | `python -m repro.flexible_runner`, `python -m repro.plugin_hlvid_benchmark` |
+| plugin 확장 실험 | PoC/probe | `run_hlvid_folder_benchmark.py --plugin-suite qwen`, `python -m repro.flexible_runner` |
 
-기본 HLVid benchmark와 plugin HLVid benchmark는 다릅니다. NVILA-HD keep-all/autogaze, paper baseline, H100 preflight는 `scripts/run_hlvid_folder_benchmark.py`를 우선 사용하세요. `repro.plugin_hlvid_benchmark`는 Qwen/LongVILA/NVILA-Video 등 token selector / ViT / MLLM 확장 실험용입니다.
+HLVid 실행은 `scripts/run_hlvid_folder_benchmark.py`를 우선 사용하세요. 옵션을 주지 않으면 NVILA-HD keep-all/single-scale/autogaze 기본 경로로 가고, `--plugin-suite qwen`을 주면 Qwen/Plugin HLVid 경로로 라우팅됩니다. `repro.plugin_hlvid_benchmark`는 내부/고급 호출용으로 남겨둡니다.
 
 ## 환경 세팅
 
@@ -184,15 +184,15 @@ AutoGaze 논문 표의 baseline은 HD keep-all이 아니라 `NVILA-8B-Video` 별
 
 ## 5. Plugin 확장 Benchmark
 
-Qwen/LongVILA/NVILA-Video 등 다른 token selector / ViT / MLLM 조합을 HLVid row로 비교할 때만 plugin benchmark를 사용합니다.
+Qwen/LongVILA/NVILA-Video 등 다른 token selector / ViT / MLLM 조합을 HLVid row로 비교할 때는 같은 wrapper에 `--plugin-suite`를 붙입니다. Qwen 검증은 이 명령부터 시작하세요.
 
 ```bash
-.venv/bin/python -m repro.plugin_hlvid_benchmark \
-  --manifest /path/to/HLVid/manifest.json \
+.venv/bin/python scripts/run_hlvid_folder_benchmark.py \
+  --dataset-dir /path/to/HLVid \
   --video-root /path/to/HLVid/videos \
   --output-dir outputs/autogaze_repro/plugin_hlvid_qwen_vit_limit3 \
-  --modes qwen_full_vit,qwen_chunked_vit,qwen_chunked_vit_autogaze_sparse \
-  --model qwen3-vl=weight/Qwen3-VL-8B-Instruct \
+  --plugin-suite qwen \
+  --plugin-model qwen3-vl=weight/Qwen3-VL-8B-Instruct \
   --limit 3 \
   --num-video-frames 32 \
   --num-video-frames-thumbnail 8 \
@@ -203,6 +203,8 @@ Qwen/LongVILA/NVILA-Video 등 다른 token selector / ViT / MLLM 조합을 HLVid
   --video-resize-longest-edge 448 \
   --max-new-tokens 8
 ```
+
+`--plugin-suite qwen`은 `qwen_full_vit`, `qwen_chunked_vit`, `qwen_chunked_vit_autogaze_sparse` 세 모드를 기본으로 실행합니다. Qwen frame 수를 따로 주지 않으면 `--qwen-video-nframes`는 `--num-video-frames`와 같게 맞춰집니다. 더 좁은 비교를 원하면 `--plugin-suite custom --plugin-modes qwen_full_vit,qwen_chunked_vit`처럼 지정합니다.
 
 세 Qwen mode의 의미는 다음과 같습니다.
 
