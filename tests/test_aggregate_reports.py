@@ -57,6 +57,8 @@ def test_normalize_single_report_extracts_latency_tokens_memory_and_failure(tmp_
                 "total_ms": 1200.0,
                 "preprocess_ms": 1000.0,
                 "video_decode_read_ms": 300.0,
+                "video_prepare_total_ms": None,
+                "video_frame_resize_ms": None,
                 "preprocess_rest_ms": 700.0,
                 "autogaze_ms": None,
             "vision_encoder_ms": 700.0,

@@ -32,6 +32,8 @@ ROW_FIELDS = [
     "total_ms",
     "preprocess_ms",
     "video_decode_read_ms",
+    "video_prepare_total_ms",
+    "video_frame_resize_ms",
     "preprocess_rest_ms",
     "autogaze_ms",
     "vision_encoder_ms",
@@ -83,6 +85,8 @@ def _blank_row(path: Path, *, report_kind: str, mode: str | None, model_path: st
         "total_ms": None,
         "preprocess_ms": None,
         "video_decode_read_ms": None,
+        "video_prepare_total_ms": None,
+        "video_frame_resize_ms": None,
         "preprocess_rest_ms": None,
         "autogaze_ms": None,
         "vision_encoder_ms": None,
@@ -185,6 +189,8 @@ def _apply_metrics(row: dict[str, Any], metrics: dict[str, Any], *, mode: str | 
         ("video_decode_read_ms", "video_decode_read_median", "video_decode_ms", "video_decode_median"),
         mode,
     )
+    row["video_prepare_total_ms"] = _metric(latency, ("video_prepare_total_ms",), mode)
+    row["video_frame_resize_ms"] = _metric(latency, ("video_frame_resize_ms",), mode)
     row["preprocess_rest_ms"] = _metric(
         latency,
         ("preprocess_rest_without_decode_autogaze_ms", "preprocess_rest_without_decode_autogaze_median"),
