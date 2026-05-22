@@ -6,7 +6,13 @@ import os
 from pathlib import Path
 from typing import Any
 
-from repro.report_charts import ChartArtifact, build_standard_report_charts
+from repro.report_charts import (
+    ChartArtifact,
+    ChartBar,
+    build_standard_report_charts,
+    latency_attribution_bars,
+    latency_stage_bars,
+)
 
 
 PIPELINE_ASCII = """Video file(s)
@@ -31,6 +37,10 @@ DISPLAY_LABELS = {
     "video_decode_median": "Decode/read ms",
     "video_prepare_total_ms": "Runner video prep ms",
     "video_frame_resize_ms": "Frame resize ms",
+    "video_tiling_ms": "Tile/tensor prep ms",
+    "selector_input_build_ms": "Selector input ms",
+    "autogaze_model_forward_ms": "AutoGaze forward ms",
+    "mm_projector_ms": "Projector ms",
     "preprocess_rest_without_decode_autogaze_ms": "Prep rest ms",
     "preprocess_rest_without_decode_autogaze_median": "Prep rest ms",
     "preprocess_without_autogaze_ms": "Preprocess(no AG) ms",
@@ -274,6 +284,9 @@ def key_metrics_from_stream_profile(payload: dict[str, Any]) -> dict[str, Any]:
             "video_frame_to_pil",
         )
     )
+    video_tiling = sum_present(("spatial_tile_build", "thumbnail_resize", "thumbnail_tensorize"))
+    selector_input = stage_total("tile_autogaze_tensorize")
+    selector_forward = stage_total("tile_autogaze_forward")
     preprocess_rest = nonnegative_difference(preprocess_total, video_decode_read)
     vit_total = stage_total("siglip_gazed_forward") or stage_total("siglip_keep_all_forward")
     tokens = as_mapping(get_path(payload, "stream_plan.tokens", {}))
@@ -284,6 +297,10 @@ def key_metrics_from_stream_profile(payload: dict[str, Any]) -> dict[str, Any]:
             "total_ms": preprocess_total + autogaze_total + (vit_total or 0.0),
             "video_decode_read_ms": video_decode_read,
             "preprocess_rest_without_decode_autogaze_ms": preprocess_rest,
+            "video_frame_resize_ms": stage_total("video_frame_resize"),
+            "video_tiling_ms": video_tiling,
+            "selector_input_build_ms": selector_input,
+            "autogaze_model_forward_ms": selector_forward,
             "preprocess_without_autogaze_ms": preprocess_total,
             "preprocess_total_ms": preprocess_total,
             "autogaze_ms": autogaze_total,
@@ -345,11 +362,15 @@ def key_metrics(payload: dict[str, Any]) -> dict[str, Any]:
             ),
             "video_prepare_total_ms": result.get("video_prepare_total_ms"),
             "video_frame_resize_ms": result.get("video_frame_resize_ms"),
+            "video_tiling_ms": result.get("video_tiling_ms"),
+            "selector_input_build_ms": result.get("selector_input_build_ms"),
+            "autogaze_model_forward_ms": result.get("autogaze_model_forward_ms"),
             "preprocess_without_autogaze_ms": result.get("video_preprocess_without_autogaze_ms"),
             "preprocess_total_ms": result.get("video_preprocess_ms"),
             "autogaze_ms": result.get("autogaze_ms"),
             "autogaze_total_ms": result.get("autogaze_total_ms"),
             "vit_encoder_ms": result.get("siglip_vision_ms"),
+            "mm_projector_ms": result.get("mm_projector_ms"),
             "llm_ms": result.get("llm_forward_ms"),
         },
         "tokens": {
@@ -691,6 +712,64 @@ def render_key_comparison_section(metrics: dict[str, Any]) -> str:
         "Prep rest excludes both video decode/read and AutoGaze time."
     )
     return "## Key Comparison\n\n" + note + "\n\n" + markdown_table(headers, rows)
+
+
+def render_latency_view_table(bars: list[ChartBar], segment_names: list[str]) -> str:
+    rows: list[list[Any]] = []
+    for bar in bars:
+        values = {segment.name: segment.value for segment in bar.segments}
+        total = sum(float(segment.value) for segment in bar.segments)
+        rows.append([bar.label] + [values.get(name) for name in segment_names] + [total])
+    return markdown_table(["Mode"] + segment_names + ["Total"], rows)
+
+
+def render_latency_views_section(metrics: dict[str, Any]) -> str:
+    stage_bars = latency_stage_bars(metrics)
+    attribution_bars = latency_attribution_bars(metrics)
+    if not stage_bars and not attribution_bars:
+        return ""
+    sections = [
+        "## Latency Views",
+        (
+            "Wall-clock view shows the measured execution order. Attribution view groups input-build costs with the "
+            "module they support when that split is available; otherwise unresolved preprocessing stays in pre-model prep."
+        ),
+    ]
+    if stage_bars:
+        sections.append(
+            "### Wall-clock Stage View\n\n"
+            + render_latency_view_table(
+                stage_bars,
+                [
+                    "Decode/read",
+                    "Frame resize",
+                    "Tile/tensor prep",
+                    "Prep rest",
+                    "Selector input",
+                    "AutoGaze",
+                    "ViT",
+                    "Projector",
+                    "LLM",
+                    "Other",
+                ],
+            )
+        )
+    if attribution_bars:
+        sections.append(
+            "### Pipeline Attribution View\n\n"
+            + render_latency_view_table(
+                attribution_bars,
+                [
+                    "Video I/O",
+                    "Pre-model prep",
+                    "AutoGaze pipeline",
+                    "Vision pipeline",
+                    "MLLM pipeline",
+                    "Other",
+                ],
+            )
+        )
+    return "\n\n".join(sections)
 
 
 def render_simple_metric_table(metrics: dict[str, Any], *, memory: bool = False) -> str:
@@ -1541,6 +1620,7 @@ def render_markdown_report(
         render_video_and_experiment_info(payload, source_path),
         render_pipeline_section(payload),
         render_key_comparison_section(metrics),
+        render_latency_views_section(metrics),
         render_input_tokenization(payload, metrics),
         render_processing_budget_summary(payload),
         render_autogaze_token_patch_flow(payload, metrics),

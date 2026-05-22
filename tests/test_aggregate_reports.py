@@ -59,9 +59,12 @@ def test_normalize_single_report_extracts_latency_tokens_memory_and_failure(tmp_
                 "video_decode_read_ms": 300.0,
                 "video_prepare_total_ms": None,
                 "video_frame_resize_ms": None,
+                "video_tiling_ms": None,
+                "selector_input_build_ms": None,
                 "preprocess_rest_ms": 700.0,
                 "autogaze_ms": None,
             "vision_encoder_ms": 700.0,
+            "mm_projector_ms": None,
             "llm_ms": None,
             "single_scale_dense_patch_tokens": None,
             "full_or_raw_patch_tokens": 1000.0,
@@ -90,7 +93,17 @@ def test_aggregate_report_roots_writes_markdown_csv_json_and_svg(tmp_path):
         json.dumps(
             {
                 "key_metrics_summary": {
-                    "latency_ms": {"total_median": 9000, "autogaze_total_median": 800},
+                    "latency_ms": {
+                        "total_median": 9000,
+                        "video_decode_read_ms": 700,
+                        "video_frame_resize_ms": 300,
+                        "video_tiling_ms": 1200,
+                        "selector_input_build_ms": 100,
+                        "autogaze_total_median": 800,
+                        "vit_encoder_median": 1200,
+                        "mm_projector_ms": 200,
+                        "llm_median": 4000,
+                    },
                     "tokens": {
                         "single_scale_dense_siglip_reference_patch_tokens": 800,
                         "hd_multiscale_keep_all_patch_tokens": 900,
@@ -117,12 +130,14 @@ def test_aggregate_report_roots_writes_markdown_csv_json_and_svg(tmp_path):
     assert artifacts["json"].is_file()
     assert artifacts["markdown"].is_file()
     assert (out / "assets" / "latency_by_config.svg").is_file()
+    assert (out / "assets" / "latency_attribution_by_config.svg").is_file()
     assert (out / "assets" / "token_reduction_by_config.svg").is_file()
     assert (out / "assets" / "memory_peak_by_config.svg").is_file()
     assert (out / "assets" / "status_by_config.svg").is_file()
     markdown = artifacts["markdown"].read_text()
     assert "# AutoGaze Experiment Trend Report" in markdown
     assert "Latency By Config" in markdown
+    assert "Latency Attribution By Config" in markdown
     with artifacts["csv"].open() as f:
         rows = list(csv.DictReader(f))
     assert rows[0]["processor_input_resolution"] == "1280x720"

@@ -34,9 +34,12 @@ ROW_FIELDS = [
     "video_decode_read_ms",
     "video_prepare_total_ms",
     "video_frame_resize_ms",
+    "video_tiling_ms",
+    "selector_input_build_ms",
     "preprocess_rest_ms",
     "autogaze_ms",
     "vision_encoder_ms",
+    "mm_projector_ms",
     "llm_ms",
     "single_scale_dense_patch_tokens",
     "full_or_raw_patch_tokens",
@@ -87,9 +90,12 @@ def _blank_row(path: Path, *, report_kind: str, mode: str | None, model_path: st
         "video_decode_read_ms": None,
         "video_prepare_total_ms": None,
         "video_frame_resize_ms": None,
+        "video_tiling_ms": None,
+        "selector_input_build_ms": None,
         "preprocess_rest_ms": None,
         "autogaze_ms": None,
         "vision_encoder_ms": None,
+        "mm_projector_ms": None,
         "llm_ms": None,
         "single_scale_dense_patch_tokens": None,
         "full_or_raw_patch_tokens": None,
@@ -191,6 +197,12 @@ def _apply_metrics(row: dict[str, Any], metrics: dict[str, Any], *, mode: str | 
     )
     row["video_prepare_total_ms"] = _metric(latency, ("video_prepare_total_ms",), mode)
     row["video_frame_resize_ms"] = _metric(latency, ("video_frame_resize_ms",), mode)
+    row["video_tiling_ms"] = _metric(latency, ("video_tiling_ms", "tile_tensor_prep_ms"), mode)
+    row["selector_input_build_ms"] = _metric(
+        latency,
+        ("selector_input_build_ms", "selector_input_ms", "autogaze_tensorize_ms", "tile_autogaze_tensorize_ms"),
+        mode,
+    )
     row["preprocess_rest_ms"] = _metric(
         latency,
         ("preprocess_rest_without_decode_autogaze_ms", "preprocess_rest_without_decode_autogaze_median"),
@@ -208,6 +220,7 @@ def _apply_metrics(row: dict[str, Any], metrics: dict[str, Any], *, mode: str | 
         ("vit_encoder_ms", "vision_encoder_ms", "vit_encoder_median", "qwen_vit_prepare", "qwen_vit_prepare_ms"),
         mode,
     )
+    row["mm_projector_ms"] = _metric(latency, ("mm_projector_ms", "projector_ms"), mode)
     row["llm_ms"] = _metric(latency, ("llm_ms", "llm_median", "generate", "generate_ms"), mode)
     row["single_scale_dense_patch_tokens"] = _metric(
         tokens,
@@ -428,21 +441,34 @@ def _write_trend_charts(rows: list[dict[str, Any]], assets: Path) -> dict[str, P
     charts: dict[str, Path] = {}
     labels = [_row_label(row, index) for index, row in enumerate(rows)]
     latency_bars: list[ChartBar] = []
+    attribution_bars: list[ChartBar] = []
     for label, row in zip(labels, rows):
         segments = [
             ChartSegment("Decode/read", value)
             for value in [numeric_or_none(row.get("video_decode_read_ms"))]
             if value is not None and value > 0
         ]
+        frame_resize = numeric_or_none(row.get("video_frame_resize_ms"))
+        if frame_resize is not None and frame_resize > 0:
+            segments.append(ChartSegment("Frame resize", frame_resize))
+        tile_tensor = numeric_or_none(row.get("video_tiling_ms"))
+        if tile_tensor is not None and tile_tensor > 0:
+            segments.append(ChartSegment("Tile/tensor prep", tile_tensor))
         prep_rest = numeric_or_none(row.get("preprocess_rest_ms"))
-        if prep_rest is not None and prep_rest > 0:
+        if prep_rest is not None and prep_rest > 0 and frame_resize is None and tile_tensor is None:
             segments.append(ChartSegment("Prep rest", prep_rest))
+        selector_input = numeric_or_none(row.get("selector_input_build_ms"))
+        if selector_input is not None and selector_input > 0:
+            segments.append(ChartSegment("Selector input", selector_input))
         autogaze = numeric_or_none(row.get("autogaze_ms"))
         if autogaze is not None and autogaze > 0:
             segments.append(ChartSegment("AutoGaze", autogaze))
         vision = numeric_or_none(row.get("vision_encoder_ms"))
         if vision is not None and vision > 0:
             segments.append(ChartSegment("ViT", vision))
+        projector = numeric_or_none(row.get("mm_projector_ms"))
+        if projector is not None and projector > 0:
+            segments.append(ChartSegment("Projector", projector))
         llm = numeric_or_none(row.get("llm_ms"))
         if llm is not None and llm > 0:
             segments.append(ChartSegment("LLM", llm))
@@ -454,10 +480,41 @@ def _write_trend_charts(rows: list[dict[str, Any]], assets: Path) -> dict[str, P
             segments.append(ChartSegment("total_ms", total))
         if segments:
             latency_bars.append(ChartBar(label, segments))
+
+        attribution_segments: list[ChartSegment] = []
+        decode = numeric_or_none(row.get("video_decode_read_ms"))
+        if decode is not None and decode > 0:
+            attribution_segments.append(ChartSegment("Video I/O", decode))
+        pre_model_parts = [value for value in (frame_resize, tile_tensor) if value is not None and value > 0]
+        if not pre_model_parts and prep_rest is not None and prep_rest > 0:
+            pre_model_parts = [prep_rest]
+        if pre_model_parts:
+            attribution_segments.append(ChartSegment("Pre-model prep", sum(pre_model_parts)))
+        autogaze_parts = [value for value in (selector_input, autogaze) if value is not None and value > 0]
+        if autogaze_parts:
+            attribution_segments.append(ChartSegment("AutoGaze pipeline", sum(autogaze_parts)))
+        vision_parts = [value for value in (vision, projector) if value is not None and value > 0]
+        if vision_parts:
+            attribution_segments.append(ChartSegment("Vision pipeline", sum(vision_parts)))
+        if llm is not None and llm > 0:
+            attribution_segments.append(ChartSegment("MLLM pipeline", llm))
+        known_attribution = sum(segment.value for segment in attribution_segments)
+        if total is not None and total > known_attribution:
+            attribution_segments.append(ChartSegment("Other", total - known_attribution))
+        if not attribution_segments and total is not None:
+            attribution_segments.append(ChartSegment("total_ms", total))
+        if attribution_segments:
+            attribution_bars.append(ChartBar(label, attribution_segments))
     charts["latency"] = write_bar_chart(
         assets / "latency_by_config.svg",
         title="Latency By Config",
         bars=latency_bars,
+        unit="ms",
+    ).path
+    charts["latency_attribution"] = write_bar_chart(
+        assets / "latency_attribution_by_config.svg",
+        title="Latency Attribution By Config",
+        bars=attribution_bars,
         unit="ms",
     ).path
     reduction_bars = [
@@ -512,6 +569,7 @@ def _render_markdown(rows: list[dict[str, Any]], charts: dict[str, Path], output
     lines.extend(["## Charts", ""])
     for title, key in (
         ("Latency By Config", "latency"),
+        ("Latency Attribution By Config", "latency_attribution"),
         ("Token Reduction By Config", "token_reduction"),
         ("Memory Peak By Config", "memory"),
         ("Status Counts", "status"),
@@ -527,9 +585,13 @@ def _render_markdown(rows: list[dict[str, Any]], charts: dict[str, Path], output
         ("processor_input_resolution", "Input res"),
         ("total_ms", "Total ms"),
         ("video_decode_read_ms", "Decode/read ms"),
+        ("video_frame_resize_ms", "Frame resize ms"),
+        ("video_tiling_ms", "Tile/tensor ms"),
+        ("selector_input_build_ms", "Selector input ms"),
         ("preprocess_rest_ms", "Prep rest ms"),
         ("autogaze_ms", "AutoGaze ms"),
         ("vision_encoder_ms", "ViT ms"),
+        ("mm_projector_ms", "Projector ms"),
         ("llm_ms", "LLM ms"),
         ("full_or_raw_patch_tokens", "Full patch"),
         ("autogaze_selected_patch_tokens", "Selected patch"),
