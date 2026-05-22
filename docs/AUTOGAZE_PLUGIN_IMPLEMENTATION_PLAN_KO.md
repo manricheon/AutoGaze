@@ -203,6 +203,20 @@ Plugin runner도 기본 runner와 같은 형태의 핵심 필드를 남깁니다
 
 HLVid 이후의 task 확장은 `repro.video_task_benchmark`에서 시작합니다. 이 runner는 `flexible_runner --mode single`을 row별로 호출하고, caption/action별 schema와 scoring만 분리합니다.
 
+CUDA 머신에서 사용할 HF dataset과 model weight는 `scripts/prepare_video_task_assets.py`로 준비합니다. 이 스크립트는 실제 benchmark를 실행하지 않고, HF `snapshot_download`로 local dataset/model directory를 맞춰 주는 역할입니다.
+
+```bash
+.venv/bin/python scripts/prepare_video_task_assets.py \
+  --dry-run \
+  --local-root /data/video_tasks \
+  --weight-root /models/weight \
+  --dataset caption_set=ORG_OR_USER/CAPTION_DATASET \
+  --dataset action_set=ORG_OR_USER/ACTION_DATASET \
+  --model-preset qwen-compare
+```
+
+기본 모델 preset은 `qwen-video-task`이며 `Qwen/Qwen3-VL-8B-Instruct`와 `nvidia/AutoGaze`를 `weight/` 아래로 받는 계획을 만듭니다. Qwen2.5/Qwen3 비교는 `--model-preset qwen-compare`, 여러 MLLM smoke 자산은 `--model-preset expand-smoke`를 사용합니다. dataset은 repo와 manifest 구조가 실험마다 달라서 preset 대신 `--dataset name=org/repo[@revision]`을 명시합니다.
+
 | task_type | required fields | scoring |
 | --- | --- | --- |
 | `captioning` | `video_path`, `caption` 또는 `references` | 기본 `not_scored`; reference overlap hint만 기록 |

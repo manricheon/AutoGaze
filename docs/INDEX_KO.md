@@ -36,6 +36,7 @@ AutoGaze를 실제 비디오 MLLM 파이프라인에 붙였을 때 다음을 재
 | 기본/Plugin HLVid benchmark | `python scripts/run_hlvid_folder_benchmark.py` | 기본 3모드 keep-all/single-scale dense/autogaze 비교, paper baseline 비교, H100 preflight, `--plugin-suite qwen|vila|llava|expand-smoke` 확장 실험 라우팅 |
 | Plugin HLVid 내부 경로 | `python -m repro.plugin_hlvid_benchmark` | Qwen2.5/Qwen3/LongVILA/NVILA-Video/LLaVA 등 확장 실험을 직접 호출할 때 |
 | Caption/Action benchmark | `python -m repro.video_task_benchmark` | HLVid 외 captioning/action classification manifest를 plugin runner로 실행 |
+| Caption/Action 자산 준비 | `python scripts/prepare_video_task_assets.py` | CUDA 머신에서 HF dataset snapshot과 모델 weight를 local dir로 다운로드 |
 | Plugin single/inspect | `python -m repro.flexible_runner` | token selector / ViT / MLLM 조합을 명시해 실험 |
 | VILA pre-ViT probe | `python -m repro.vila_feature_probe` | NVILA-Video/LongVILA를 external CLI가 아닌 in-process hook으로 옮기기 전 필요한 tensor/position boundary 기록 |
 | InternVL dynamic tile probe | `python -m repro.internvl_dynamic_tile_probe` | InternVL3의 dynamic tile order, `num_patches_list`, thumbnail 정책 기록 |
@@ -81,6 +82,29 @@ AutoGaze를 실제 비디오 MLLM 파이프라인에 붙였을 때 다음을 재
 ## HLVid 외 Caption/Action Benchmark
 
 HLVid 이후 task 확장은 `repro.video_task_benchmark`를 사용합니다. 이 경로는 `flexible_runner`를 row별로 호출하므로 Qwen/LongVILA/LLaVA 등 plugin mode와 같은 latency/token/memory/failure logging 구조를 재사용합니다.
+
+CUDA 머신에서 dataset/model weight를 먼저 받을 때는 HF snapshot 기반 준비 스크립트를 사용합니다. dataset preset은 일부러 비워 두었고, 실제 사용할 HF dataset repo를 `--dataset name=org/repo[@revision]` 형태로 넘깁니다.
+
+```bash
+.venv/bin/python scripts/prepare_video_task_assets.py \
+  --dry-run \
+  --local-root /data/video_tasks \
+  --weight-root /models/weight \
+  --dataset caption_set=ORG_OR_USER/CAPTION_DATASET \
+  --dataset action_set=ORG_OR_USER/ACTION_DATASET \
+  --model-preset qwen-compare
+```
+
+```bash
+.venv/bin/python scripts/prepare_video_task_assets.py \
+  --local-root /data/video_tasks \
+  --weight-root /models/weight \
+  --dataset caption_set=ORG_OR_USER/CAPTION_DATASET \
+  --dataset action_set=ORG_OR_USER/ACTION_DATASET \
+  --model-preset qwen-compare
+```
+
+모델 preset은 `qwen-video-task`(Qwen3-VL + AutoGaze), `qwen-compare`(Qwen2.5-VL + Qwen3-VL + AutoGaze), `expand-smoke`(Qwen/NVILA/LLaVA/InternVL 계열 smoke용)를 지원합니다. 대용량 모델은 CUDA 머신의 디스크/네트워크 정책에 맞춰 `--include`, `--exclude`, `--max-workers`로 조절하세요.
 
 ```bash
 .venv/bin/python -m repro.video_task_benchmark \
