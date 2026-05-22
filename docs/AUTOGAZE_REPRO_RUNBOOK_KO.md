@@ -240,6 +240,44 @@ Qwen suite mode의 의미는 다음과 같습니다.
 
 `--plugin-suite vila`는 `nvila-video-off`, `nvila-video-autogaze-actual`, `longvila-off`, `longvila-autogaze-actual`를 실행합니다. 단, 현재 VILA-family actual entry는 external CLI dense generation에 AutoGaze selector sidecar metric을 붙인 단계라서 ViT/LLM token pruning 성공으로 해석하면 안 됩니다. `--plugin-suite llava`는 LLaVA-OneVision off와 post-encoder visual-token prune generate 경로를 비교합니다.
 
+### Caption/Action Benchmark
+
+HLVid가 아닌 caption/action task는 `repro.video_task_benchmark`를 사용합니다. 이 경로는 같은 plugin mode를 row별 `flexible_runner --mode single`로 실행하고, task별 scoring만 분리합니다.
+
+```bash
+.venv/bin/python -m repro.video_task_benchmark \
+  --task-type captioning \
+  --manifest /path/to/caption_manifest.jsonl \
+  --video-root /path/to/videos \
+  --output-dir outputs/autogaze_repro/video_task_caption_qwen_limit3 \
+  --modes qwen3_full_vit,qwen3_chunked_vit,qwen3_chunked_vit_autogaze_sparse \
+  --model qwen3-vl=weight/Qwen3-VL-8B-Instruct \
+  --limit 3 \
+  --num-video-frames 32 \
+  --qwen-video-nframes 32 \
+  --video-resize-longest-edge 448 \
+  --max-tiles-video 4 \
+  --max-new-tokens 32
+```
+
+```bash
+.venv/bin/python -m repro.video_task_benchmark \
+  --task-type action_classification \
+  --manifest /path/to/action_manifest.jsonl \
+  --video-root /path/to/videos \
+  --output-dir outputs/autogaze_repro/video_task_action_qwen_limit3 \
+  --modes qwen3_full_vit,qwen3_chunked_vit,qwen3_chunked_vit_autogaze_sparse \
+  --model qwen3-vl=weight/Qwen3-VL-8B-Instruct \
+  --limit 3 \
+  --num-video-frames 32 \
+  --qwen-video-nframes 32 \
+  --video-resize-longest-edge 448 \
+  --max-tiles-video 4 \
+  --max-new-tokens 8
+```
+
+Caption은 `video_path`와 `caption` 또는 `references`가 필요하고 기본 점수는 `not_scored`입니다. Action은 `video_path`와 `label` 또는 `answer`가 필요하며 exact label/choice parsing으로 accuracy를 계산합니다.
+
 ## 6. Stream Profile과 H100 Preflight
 
 긴 4K 비디오에서 LLM을 로드하기 전에 decode/tile/AutoGaze/SigLIP 구간을 확인하려면 stream-profile을 사용합니다.

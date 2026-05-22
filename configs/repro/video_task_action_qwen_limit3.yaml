@@ -1,0 +1,43 @@
+description: >
+  Action classification smoke benchmark for the plugin runner. Action rows are
+  scored with exact label or multiple-choice letter parsing.
+
+video_task_benchmark:
+  module: repro.video_task_benchmark
+  args:
+    task_type: action_classification
+    manifest: /path/to/action_manifest.jsonl
+    video_root: /path/to/videos
+    output_dir: outputs/autogaze_repro/video_task_action_qwen_limit3
+    limit: 3
+    modes:
+      - qwen3_full_vit
+      - qwen3_chunked_vit
+      - qwen3_chunked_vit_autogaze_sparse
+    models:
+      qwen3-vl: weight/Qwen3-VL-8B-Instruct
+    num_video_frames: 32
+    qwen_video_nframes: 32
+    video_resize_longest_edge: 448
+    max_tiles_video: 4
+    qwen_vit_chunk_frames: 16
+    qwen_vit_max_spatial_chunks: 4
+    max_new_tokens: 8
+
+manifest_schema:
+  required:
+    - video_path
+    - label or answer
+  optional:
+    - sample_id
+    - prompt or question
+    - choices
+    - category
+    - source
+    - duration
+
+outputs:
+  predictions: outputs/autogaze_repro/video_task_action_qwen_limit3/action_classification_predictions.jsonl
+  scored: outputs/autogaze_repro/video_task_action_qwen_limit3/action_classification_scored.jsonl
+  summary: outputs/autogaze_repro/video_task_action_qwen_limit3/action_classification_summary.json
+  markdown: outputs/autogaze_repro/video_task_action_qwen_limit3/action_classification_report.md

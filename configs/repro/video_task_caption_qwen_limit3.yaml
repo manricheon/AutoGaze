@@ -1,0 +1,43 @@
+description: >
+  Captioning smoke benchmark for the plugin runner. Caption outputs are stored
+  with references and overlap hints, but the default score is not_scored until
+  an external judge or caption metric is added.
+
+video_task_benchmark:
+  module: repro.video_task_benchmark
+  args:
+    task_type: captioning
+    manifest: /path/to/caption_manifest.jsonl
+    video_root: /path/to/videos
+    output_dir: outputs/autogaze_repro/video_task_caption_qwen_limit3
+    limit: 3
+    modes:
+      - qwen3_full_vit
+      - qwen3_chunked_vit
+      - qwen3_chunked_vit_autogaze_sparse
+    models:
+      qwen3-vl: weight/Qwen3-VL-8B-Instruct
+    num_video_frames: 32
+    qwen_video_nframes: 32
+    video_resize_longest_edge: 448
+    max_tiles_video: 4
+    qwen_vit_chunk_frames: 16
+    qwen_vit_max_spatial_chunks: 4
+    max_new_tokens: 32
+
+manifest_schema:
+  required:
+    - video_path
+    - caption or references
+  optional:
+    - sample_id
+    - prompt
+    - category
+    - source
+    - duration
+
+outputs:
+  predictions: outputs/autogaze_repro/video_task_caption_qwen_limit3/captioning_predictions.jsonl
+  scored: outputs/autogaze_repro/video_task_caption_qwen_limit3/captioning_scored.jsonl
+  summary: outputs/autogaze_repro/video_task_caption_qwen_limit3/captioning_summary.json
+  markdown: outputs/autogaze_repro/video_task_caption_qwen_limit3/captioning_report.md

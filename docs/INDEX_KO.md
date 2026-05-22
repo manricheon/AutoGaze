@@ -35,6 +35,7 @@ AutoGaze를 실제 비디오 MLLM 파이프라인에 붙였을 때 다음을 재
 | Direct HLVid 실행 | `python -m repro.nvila_runner --mode hlvid` | 한 가지 `gazing-mode`로 HLVid manifest를 직접 실행 |
 | 기본/Plugin HLVid benchmark | `python scripts/run_hlvid_folder_benchmark.py` | 기본 3모드 keep-all/single-scale dense/autogaze 비교, paper baseline 비교, H100 preflight, `--plugin-suite qwen|vila|llava|expand-smoke` 확장 실험 라우팅 |
 | Plugin HLVid 내부 경로 | `python -m repro.plugin_hlvid_benchmark` | Qwen2.5/Qwen3/LongVILA/NVILA-Video/LLaVA 등 확장 실험을 직접 호출할 때 |
+| Caption/Action benchmark | `python -m repro.video_task_benchmark` | HLVid 외 captioning/action classification manifest를 plugin runner로 실행 |
 | Plugin single/inspect | `python -m repro.flexible_runner` | token selector / ViT / MLLM 조합을 명시해 실험 |
 | VILA pre-ViT probe | `python -m repro.vila_feature_probe` | NVILA-Video/LongVILA를 external CLI가 아닌 in-process hook으로 옮기기 전 필요한 tensor/position boundary 기록 |
 | InternVL dynamic tile probe | `python -m repro.internvl_dynamic_tile_probe` | InternVL3의 dynamic tile order, `num_patches_list`, thumbnail 정책 기록 |
@@ -75,7 +76,45 @@ AutoGaze를 실제 비디오 MLLM 파이프라인에 붙였을 때 다음을 재
 | `token_selector` | keep-all, AutoGaze, PixelPrune reference, external mask 계약 | SparseGazePlan 표준화, selector별 token/latency/memory 비교 |
 | `vit_encoder` | NVILA SigLIP, Qwen grid ViT/chunked ViT | V-JEPA2, InternVL dynamic tile, Qwen pre-ViT sparse hook 안정화 |
 | `mllm` | NVILA-HD, VILA CLI 계열, Qwen, LLaVA-OneVision, InternVL3 adapter | visual token packing과 position/grid metadata를 모델별로 명확히 기록 |
-| benchmark task | HLVid/VideoQA schema | multiple-choice VideoQA 이후 caption/action task adapter 확장 |
+| benchmark task | HLVid/VideoQA, captioning, action classification schema | caption은 reference 보존 + overlap hint, action은 exact/choice scoring |
+
+## HLVid 외 Caption/Action Benchmark
+
+HLVid 이후 task 확장은 `repro.video_task_benchmark`를 사용합니다. 이 경로는 `flexible_runner`를 row별로 호출하므로 Qwen/LongVILA/LLaVA 등 plugin mode와 같은 latency/token/memory/failure logging 구조를 재사용합니다.
+
+```bash
+.venv/bin/python -m repro.video_task_benchmark \
+  --task-type captioning \
+  --manifest /path/to/caption_manifest.jsonl \
+  --video-root /path/to/videos \
+  --output-dir outputs/autogaze_repro/video_task_caption_qwen_limit3 \
+  --modes qwen3_full_vit,qwen3_chunked_vit,qwen3_chunked_vit_autogaze_sparse \
+  --model qwen3-vl=weight/Qwen3-VL-8B-Instruct \
+  --limit 3 \
+  --num-video-frames 32 \
+  --qwen-video-nframes 32 \
+  --video-resize-longest-edge 448 \
+  --max-tiles-video 4 \
+  --max-new-tokens 32
+```
+
+```bash
+.venv/bin/python -m repro.video_task_benchmark \
+  --task-type action_classification \
+  --manifest /path/to/action_manifest.jsonl \
+  --video-root /path/to/videos \
+  --output-dir outputs/autogaze_repro/video_task_action_qwen_limit3 \
+  --modes qwen3_full_vit,qwen3_chunked_vit,qwen3_chunked_vit_autogaze_sparse \
+  --model qwen3-vl=weight/Qwen3-VL-8B-Instruct \
+  --limit 3 \
+  --num-video-frames 32 \
+  --qwen-video-nframes 32 \
+  --video-resize-longest-edge 448 \
+  --max-tiles-video 4 \
+  --max-new-tokens 8
+```
+
+Caption manifest는 `video_path`와 `caption` 또는 `references`가 필요합니다. Caption 점수는 기본 `not_scored`이고, reference overlap hint만 별도 기록합니다. Action manifest는 `video_path`와 `label` 또는 `answer`가 필요하며, `choices`가 있으면 multiple-choice letter parsing을 같이 사용합니다.
 
 ## Pre-ViT Sparse 확장 우선순위
 

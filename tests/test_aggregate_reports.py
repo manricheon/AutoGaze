@@ -229,6 +229,42 @@ def test_normalize_hlvid_gain_report_includes_single_scale_dense_mode(tmp_path):
     assert single_scale["token_reduction_ratio"] == 1.0
 
 
+def test_normalize_video_task_summary_reports_task_kind_and_scores(tmp_path):
+    report = tmp_path / "action_classification_summary.json"
+    report.write_text(
+        json.dumps(
+            {
+                "task_type": "action_classification",
+                "modes": {
+                    "qwen3_full_vit": {
+                        "total": 2,
+                        "correct": 1,
+                        "failed": 0,
+                        "parse_failed": 0,
+                        "accuracy_total": 0.5,
+                        "accuracy_scored": 0.5,
+                        "latency_ms": {"median": 123.0},
+                        "peak_memory_bytes": {"median": 4096.0},
+                        "visual_tokens_before_prune": {"median": 100.0},
+                        "visual_tokens_after_prune": {"median": 40.0},
+                        "status_counts": {"executed": 2},
+                    }
+                },
+            }
+        )
+    )
+
+    rows = normalize_report_file(report)
+
+    assert rows[0]["report_kind"] == "video_task_summary"
+    assert rows[0]["mode"] == "qwen3_full_vit"
+    assert rows[0]["accuracy_total"] == 0.5
+    assert rows[0]["total_ms"] == 123.0
+    assert rows[0]["full_or_raw_patch_tokens"] == 100.0
+    assert rows[0]["autogaze_selected_patch_tokens"] == 40.0
+    assert rows[0]["peak_memory_bytes"] == 4096.0
+
+
 def test_aggregate_report_roots_accepts_sort_mode(tmp_path):
     root = tmp_path / "runs"
     root.mkdir()

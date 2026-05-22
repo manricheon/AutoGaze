@@ -73,6 +73,8 @@ def load_json(path: str | Path) -> dict[str, Any]:
 def normalize_report_file(path: str | Path) -> list[dict[str, Any]]:
     source = Path(path)
     payload = load_json(source)
+    if payload.get("task_type") in {"captioning", "action_classification"} and isinstance(payload.get("modes"), dict):
+        return [_normalize_video_task_mode(source, mode, summary) for mode, summary in payload["modes"].items()]
     if "modes" in payload and isinstance(payload.get("modes"), dict):
         return [_normalize_plugin_mode(source, mode, summary) for mode, summary in payload["modes"].items()]
     if "readable_summary" in payload and any(mode in payload for mode in HLVID_MODE_ORDER):
@@ -183,6 +185,27 @@ def _normalize_plugin_mode(path: Path, mode: str, summary: dict[str, Any]) -> di
     row["parse_failed"] = numeric_or_none(summary.get("parse_failed"))
     budget = as_mapping(get_path(summary, "processing_budget_summary.mode_median"))
     _apply_flat_budget(row, budget)
+    return row
+
+
+def _normalize_video_task_mode(path: Path, mode: str, summary: dict[str, Any]) -> dict[str, Any]:
+    row = _blank_row(path, report_kind="video_task_summary", mode=mode, model_path=None)
+    status_counts = as_mapping(summary.get("status_counts"))
+    row["status"] = "oom" if status_counts.get("oom") else "ok"
+    row["oom"] = bool(status_counts.get("oom"))
+    row["accuracy_total"] = numeric_or_none(summary.get("accuracy_total"))
+    row["accuracy_scored"] = numeric_or_none(summary.get("accuracy_scored"))
+    row["failed"] = numeric_or_none(summary.get("failed"))
+    row["parse_failed"] = numeric_or_none(summary.get("parse_failed"))
+    row["total_ms"] = numeric_or_none(get_path(summary, "latency_ms.median"))
+    row["generate_ms"] = numeric_or_none(get_path(summary, "generate_ms.median"))
+    row["peak_memory_bytes"] = numeric_or_none(get_path(summary, "peak_memory_bytes.median"))
+    before = numeric_or_none(get_path(summary, "visual_tokens_before_prune.median"))
+    after = numeric_or_none(get_path(summary, "visual_tokens_after_prune.median"))
+    row["full_or_raw_patch_tokens"] = before
+    row["autogaze_selected_patch_tokens"] = after
+    row["llm_visual_tokens"] = after
+    row["token_reduction_ratio"] = before / after if before is not None and after not in {None, 0} else None
     return row
 
 

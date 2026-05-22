@@ -45,7 +45,7 @@ video
 | `TokenSelectorAdapter` | 입력 frame/tile/patch 수, 선택 patch 수, scale별 선택 수, 적용 불가 사유 |
 | `VisionEncoderAdapter` | 입력 grid, patch size, position encoding 처리, encoder 입력 token 수, latency/memory |
 | `MllmAdapter` | visual token 수, prompt token 수, prefill/generate 경계, answer text, failure stage |
-| `TaskAdapter` | `video_path`, `question`, `answer`, `choices`, scoring result |
+| `TaskAdapter` | VideoQA `video_path/question/answer/choices`, caption `references`, action `label/choices`, scoring result |
 
 ## 현재 지원 상태
 
@@ -199,6 +199,17 @@ Plugin runner도 기본 runner와 같은 형태의 핵심 필드를 남깁니다
 | memory | selector peak, vision peak, LLM peak, overall peak |
 | benchmark | accuracy, failed, oom, parse_failed, skipped |
 
+## Caption/Action Benchmark Adapter
+
+HLVid 이후의 task 확장은 `repro.video_task_benchmark`에서 시작합니다. 이 runner는 `flexible_runner --mode single`을 row별로 호출하고, caption/action별 schema와 scoring만 분리합니다.
+
+| task_type | required fields | scoring |
+| --- | --- | --- |
+| `captioning` | `video_path`, `caption` 또는 `references` | 기본 `not_scored`; reference overlap hint만 기록 |
+| `action_classification` | `video_path`, `label` 또는 `answer` | exact label match + multiple-choice letter parsing |
+
+출력은 task별 `*_predictions.jsonl`, `*_scored.jsonl`, `*_summary.json`, `*_report.md`입니다. CUDA 검증 전에는 `configs/repro/video_task_caption_qwen_limit3.yaml`과 `configs/repro/video_task_action_qwen_limit3.yaml`을 smoke config로 사용합니다.
+
 ## 남은 구현/검증
 
 1. Qwen `chunked_vit_autogaze_sparse`가 실제 ViT 입력 token 수를 줄이는지 CUDA smoke로 확인.
@@ -206,4 +217,4 @@ Plugin runner도 기본 runner와 같은 형태의 핵심 필드를 남깁니다
 3. LLaVA-OneVision post-encoder prune-generate가 실제 checkpoint별 remote/API에서 통과하는지 CUDA smoke로 확인.
 4. LongVILA/NVILA-Video/InternVL에서 sidecar 이후 실제 remote-code visual pruning hook을 어디에 넣을지 확정.
 5. probe/sidecar mode에서 `SparseSelectionPlan -> encoder mapping -> MLLM visual token mapping`이 실제 좌표 단위로 이어지는지 모델별 CUDA smoke로 확인.
-6. HLVid 외 VideoQA task adapter를 `video_path`, `question`, `answer`, `choices` schema로 일반화.
+6. Caption/action benchmark를 실제 CUDA model output으로 검증하고, 이후 새 VideoQA 데이터셋을 같은 task adapter 규격으로 추가.
