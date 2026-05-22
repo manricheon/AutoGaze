@@ -205,6 +205,42 @@ def test_write_markdown_report_adds_chart_assets_by_default(tmp_path):
     assert (assets / "memory_peaks.svg").is_file()
 
 
+def test_key_metrics_summary_uses_readable_labels_and_no_ag_preprocess():
+    payload = {
+        "key_metrics_summary": {
+            "latency_ms": {
+                "total_median": 9000,
+                "preprocess_without_autogaze_median": 2200,
+                "preprocess_total_median": 3000,
+                "autogaze_total_median": 800,
+                "vit_encoder_median": 1200,
+                "llm_median": 4000,
+            },
+            "tokens": {
+                "encoder_patch_tokens_before_keep_all_or_raw": 1085440,
+                "encoder_patch_tokens_after_autogaze": 250000,
+                "encoder_token_reduction_ratio": 4.34,
+                "llm_visual_tokens_after_actual": 36000,
+            },
+            "memory_bytes": {
+                "overall_peak_median": 4_000_000_000,
+            },
+        }
+    }
+
+    markdown = render_markdown_report(payload, source_path="single.json")
+
+    assert "## Key Comparison" in markdown
+    assert "| Total ms | Pre(no AG) ms | AutoGaze ms | ViT ms | LLM ms |" in markdown
+    assert "| 9,000 | 2,200 | 800 | 1,200 | 4,000 |" in markdown
+    assert "### Latency" in markdown
+    assert "### Tokens" in markdown
+    assert "### Memory" in markdown
+    assert "Pre(no AG)" in markdown
+    assert "encoder_patch_tokens_before_keep_all_or_raw" not in markdown.split("## Raw Metric Appendix")[0]
+    assert "preprocess_total_median" not in markdown.split("## Raw Metric Appendix")[0]
+
+
 def test_render_benchmark_markdown_report_includes_scores_and_comparison_tables():
     payload = {
         "dataset": {

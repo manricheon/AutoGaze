@@ -59,7 +59,7 @@ plugin_qwen_32f_t8_448_sparse
 
 리더에게 보여줄 첫 표는 아래 구조가 좋습니다.
 
-| 모드 | status | accuracy | total ms | preprocess ms | AutoGaze ms | ViT ms | LLM ms | peak GiB | full patch | selected patch | LLM visual token |
+| 모드 | status | accuracy | total ms | Pre(no AG) ms | AutoGaze ms | ViT ms | LLM ms | peak GiB | full patch | selected patch | LLM visual token |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | keep-all |  |  |  |  | n/a |  |  |  |  |  |  |
 | AutoGaze |  |  |  |  |  |  |  |  |  |  |  |
@@ -83,7 +83,23 @@ total_ms = video_preprocess_without_autogaze_ms + autogaze_total_ms + generate_m
 | `generate_ms` | visual embedding, projector, LLM prefill/decode를 포함한 generation 호출 |
 | `ttft_ms` | 별도 1-token generation으로 잰 time-to-first-token. total에는 보통 별도 포함 |
 
-summary에는 너무 세부적인 field보다 `preprocess / AutoGaze / ViT / LLM / total` 5개 축을 먼저 보여주는 것이 좋습니다.
+summary에는 너무 세부적인 field보다 `Pre(no AG) / AutoGaze / ViT / LLM / total` 5개 축을 먼저 보여주는 것이 좋습니다. `video_preprocess_ms`처럼 AutoGaze가 포함된 legacy inclusive field는 appendix에서만 확인하고, 메인 비교/차트에는 쓰지 않습니다.
+
+## 표시명과 정렬
+
+Markdown과 SVG chart는 raw JSON field 대신 짧은 표시명을 우선 사용합니다.
+
+| 표시명 | 의미 |
+| --- | --- |
+| `Pre(no AG)` | AutoGaze를 제외한 decode/sample/resize/tile/tensorize |
+| `AutoGaze` | selector 입력 준비와 selector 실행 |
+| `ViT` | SigLIP/ViT vision encoder |
+| `LLM` | generate/prefill/decode 구간 |
+| `Full patch` | selector 적용 전 patch/token 분모 |
+| `Selected patch` | AutoGaze/token selector 이후 남은 patch/token |
+| `Patch x` | `Full patch / Selected patch` |
+
+Aggregate report의 기본 정렬은 `comparison`입니다. 같은 config 안에서 keep-all/off baseline을 먼저, AutoGaze/token selector를 다음, probe/sidecar/OOM을 뒤로 배치합니다. 필요하면 `--sort latency|token-reduction|memory|accuracy|status`로 바꿀 수 있습니다.
 
 ## Token/Patch 해석
 
@@ -152,7 +168,7 @@ OOM이 나도 가능한 경우 다음 값을 남깁니다.
 
 | chart | 목적 |
 | --- | --- |
-| stacked latency bar | preprocess/AutoGaze/ViT/LLM 중 어디가 병목인지 표시 |
+| stacked latency bar | Pre(no AG)/AutoGaze/ViT/LLM 중 어디가 병목인지 표시. 같은 stage는 항상 같은 색상 |
 | token reduction bar | full patch 대비 selected patch, LLM visual token 감소 표시 |
 | memory peak bar | config별 peak GiB 비교 |
 | status chart | success/OOM/parse_failed/skipped 분포 |

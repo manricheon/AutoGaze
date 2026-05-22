@@ -16,7 +16,7 @@ from repro.markdown_report import (
     key_metrics,
     processing_budget_summary,
 )
-from repro.report_charts import ChartBar, ChartSegment, numeric_or_none, write_bar_chart
+from repro.report_charts import ChartBar, ChartSegment, numeric_or_none, shorten_label, write_bar_chart
 
 
 ROW_FIELDS = [
@@ -323,7 +323,7 @@ def _apply_flat_budget(row: dict[str, Any], budget: dict[str, Any]) -> None:
     row["llm_visual_tokens"] = numeric_or_none(budget.get("llm_visual_budget.actual_visual_tokens"))
 
 
-def aggregate_report_roots(input_roots: list[str | Path], output_dir: str | Path) -> dict[str, Path]:
+def aggregate_report_roots(input_roots: list[str | Path], output_dir: str | Path, *, sort: str = "comparison") -> dict[str, Path]:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
@@ -335,7 +335,7 @@ def aggregate_report_roots(input_roots: list[str | Path], output_dir: str | Path
                 rows.extend(normalize_report_file(path))
             except (json.JSONDecodeError, OSError):
                 continue
-    rows = [{field: row.get(field) for field in ROW_FIELDS} for row in rows]
+    rows = sort_rows([{field: row.get(field) for field in ROW_FIELDS} for row in rows], sort=sort)
     csv_path = output / "aggregate_rows.csv"
     json_path = output / "aggregate_summary.json"
     md_path = output / "aggregate_report.md"
@@ -345,6 +345,61 @@ def aggregate_report_roots(input_roots: list[str | Path], output_dir: str | Path
     write_json(json_path, {"row_count": len(rows), "rows": rows, "charts": {name: str(path) for name, path in charts.items()}})
     md_path.write_text(_render_markdown(rows, charts, output), encoding="utf-8")
     return {"csv": csv_path, "json": json_path, "markdown": md_path, **charts}
+
+
+def sort_rows(rows: list[dict[str, Any]], *, sort: str = "comparison") -> list[dict[str, Any]]:
+    def number(row: dict[str, Any], field: str, default: float = float("inf")) -> float:
+        value = numeric_or_none(row.get(field))
+        return default if value is None else value
+
+    if sort == "latency":
+        return sorted(rows, key=lambda row: (_status_rank(row), number(row, "total_ms"), _comparison_key(row)))
+    if sort == "token-reduction":
+        return sorted(rows, key=lambda row: (_status_rank(row), -number(row, "token_reduction_ratio", 0.0), _comparison_key(row)))
+    if sort == "memory":
+        return sorted(rows, key=lambda row: (_status_rank(row), number(row, "peak_memory_bytes"), _comparison_key(row)))
+    if sort == "accuracy":
+        return sorted(rows, key=lambda row: (_status_rank(row), -number(row, "accuracy_scored", 0.0), _comparison_key(row)))
+    if sort == "status":
+        return sorted(rows, key=lambda row: (_status_rank(row), str(row.get("status") or ""), _comparison_key(row)))
+    return sorted(rows, key=lambda row: (_status_rank(row), _config_group_key(row), _selector_rank(row), _comparison_key(row)))
+
+
+def _status_rank(row: dict[str, Any]) -> int:
+    status = str(row.get("status") or "").lower()
+    if row.get("oom") or status == "oom":
+        return 9
+    if status.startswith("failed"):
+        return 8
+    if "probe" in status or "sidecar" in status:
+        return 6
+    return 0
+
+
+def _selector_rank(row: dict[str, Any]) -> int:
+    mode = str(row.get("mode") or "").lower().replace("_", "-")
+    gazing_mode = str(row.get("gazing_mode") or "").lower()
+    if mode in {"keep-all", "keepall", "off", "baseline"} or "keep-all" in mode or gazing_mode == "keep-all":
+        return 0
+    if mode == "autogaze" or "autogaze" in mode:
+        return 1
+    if "probe" in mode or "sidecar" in mode:
+        return 3
+    return 2
+
+
+def _config_group_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        row.get("model_path") or "",
+        row.get("frames") or "",
+        row.get("thumbnail_frames") or "",
+        row.get("processor_input_resolution") or "",
+        row.get("max_tiles_video") or "",
+    )
+
+
+def _comparison_key(row: dict[str, Any]) -> tuple[str, str]:
+    return (str(row.get("mode") or ""), str(row.get("source_path") or ""))
 
 
 def _write_trend_charts(rows: list[dict[str, Any]], assets: Path) -> dict[str, Path]:
@@ -405,7 +460,7 @@ def _row_label(row: dict[str, Any], index: int) -> str:
         parts.append(f"{int(float(frames))}f")
     if resolution:
         parts.append(str(resolution))
-    return "/".join(parts) if parts else f"run_{index}"
+    return shorten_label("/".join(parts) if parts else f"run_{index}", max_chars=34)
 
 
 def _render_markdown(rows: list[dict[str, Any]], charts: dict[str, Path], output_dir: Path) -> str:
@@ -420,26 +475,27 @@ def _render_markdown(rows: list[dict[str, Any]], charts: dict[str, Path], output
         path = charts[key].relative_to(output_dir)
         lines.extend([f"### {title}", "", f"![{title}]({path})", ""])
     lines.extend(["## Summary Rows", ""])
-    headers = [
-        "mode",
-        "status",
-        "oom_stage",
-        "frames",
-        "processor_input_resolution",
-        "total_ms",
-        "autogaze_ms",
-        "vision_encoder_ms",
-        "llm_ms",
-        "full_or_raw_patch_tokens",
-        "autogaze_selected_patch_tokens",
-        "token_reduction_ratio",
-        "peak_memory_bytes",
-        "accuracy_total",
+    columns = [
+        ("mode", "Mode"),
+        ("status", "Status"),
+        ("oom_stage", "OOM stage"),
+        ("frames", "Frames"),
+        ("processor_input_resolution", "Input res"),
+        ("total_ms", "Total ms"),
+        ("preprocess_ms", "Pre(no AG) ms"),
+        ("autogaze_ms", "AutoGaze ms"),
+        ("vision_encoder_ms", "ViT ms"),
+        ("llm_ms", "LLM ms"),
+        ("full_or_raw_patch_tokens", "Full patch"),
+        ("autogaze_selected_patch_tokens", "Selected patch"),
+        ("token_reduction_ratio", "Patch x"),
+        ("peak_memory_bytes", "Peak bytes"),
+        ("accuracy_total", "Accuracy"),
     ]
-    lines.append("| " + " | ".join(headers) + " |")
-    lines.append("| " + " | ".join("---" for _ in headers) + " |")
+    lines.append("| " + " | ".join(label for _, label in columns) + " |")
+    lines.append("| " + " | ".join("---" for _ in columns) + " |")
     for row in rows[:200]:
-        lines.append("| " + " | ".join(_cell(row.get(header)) for header in headers) + " |")
+        lines.append("| " + " | ".join(_cell(row.get(field)) for field, _ in columns) + " |")
     return "\n".join(lines) + "\n"
 
 
@@ -453,12 +509,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Aggregate AutoGaze/NVILA experiment JSON reports into trends.")
     parser.add_argument("--input-root", action="append", required=True)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument(
+        "--sort",
+        choices=("comparison", "latency", "token-reduction", "memory", "accuracy", "status"),
+        default="comparison",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    artifacts = aggregate_report_roots(args.input_root, args.output_dir)
+    artifacts = aggregate_report_roots(args.input_root, args.output_dir, sort=args.sort)
     print(json.dumps({key: str(value) for key, value in artifacts.items()}, indent=2, sort_keys=True))
 
 
