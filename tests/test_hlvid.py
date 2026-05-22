@@ -280,7 +280,10 @@ def test_score_predictions_includes_latency_memory_token_and_compute_summaries()
         "vision_input_build_ms": None,
         "vit_encoder_ms": 30.0,
         "vision_encoder_ms": None,
+        "mm_projector_ms": None,
+        "generate_ms": 70.0,
         "llm_ms": 24.0,
+        "llm_forward_ms": 24.0,
     }
     assert summary["readable_performance_summary"]["key_metrics_median"] == {
         "latency_ms": {
@@ -295,7 +298,10 @@ def test_score_predictions_includes_latency_memory_token_and_compute_summaries()
             "vision_input_build_ms": None,
             "vit_encoder_ms": 30.0,
             "vision_encoder_ms": None,
+            "mm_projector_ms": None,
+            "generate_ms": 70.0,
             "llm_ms": 24.0,
+            "llm_forward_ms": 24.0,
         },
         "tokens": {
             "video_sampled_frames": 112.0,

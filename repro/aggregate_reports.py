@@ -40,6 +40,10 @@ ROW_FIELDS = [
     "autogaze_ms",
     "vision_encoder_ms",
     "mm_projector_ms",
+    "generate_ms",
+    "llm_generation_ms",
+    "llm_forward_ms",
+    "generation_rest_ms",
     "llm_ms",
     "single_scale_dense_patch_tokens",
     "full_or_raw_patch_tokens",
@@ -96,6 +100,10 @@ def _blank_row(path: Path, *, report_kind: str, mode: str | None, model_path: st
         "autogaze_ms": None,
         "vision_encoder_ms": None,
         "mm_projector_ms": None,
+        "generate_ms": None,
+        "llm_generation_ms": None,
+        "llm_forward_ms": None,
+        "generation_rest_ms": None,
         "llm_ms": None,
         "single_scale_dense_patch_tokens": None,
         "full_or_raw_patch_tokens": None,
@@ -114,6 +122,12 @@ def _blank_row(path: Path, *, report_kind: str, mode: str | None, model_path: st
         "max_tiles_video": None,
         "gazing_mode": None,
     }
+
+
+def _sum_present(*values: Any) -> float | None:
+    numbers = [numeric_or_none(value) for value in values]
+    present = [value for value in numbers if value is not None]
+    return sum(present) if present else None
 
 
 def _normalize_single(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
@@ -221,7 +235,24 @@ def _apply_metrics(row: dict[str, Any], metrics: dict[str, Any], *, mode: str | 
         mode,
     )
     row["mm_projector_ms"] = _metric(latency, ("mm_projector_ms", "projector_ms"), mode)
-    row["llm_ms"] = _metric(latency, ("llm_ms", "llm_median", "generate", "generate_ms"), mode)
+    row["generate_ms"] = _metric(latency, ("generate_ms", "generate_median", "generate"), mode)
+    row["llm_forward_ms"] = _metric(latency, ("llm_ms", "llm_median", "llm_forward_ms"), mode)
+    row["generation_rest_ms"] = _metric(latency, ("generation_rest_ms", "generate_rest_ms"), mode)
+    if row["generation_rest_ms"] is None:
+        vision_parent = _metric(latency, ("vision_encoder_ms", "vision_encoder_median"), mode)
+        vision_for_generate = vision_parent
+        if vision_for_generate is None:
+            vision_for_generate = _sum_present(
+                _metric(latency, ("vision_input_build_ms", "vision_input_build_median"), mode),
+                row["vision_encoder_ms"],
+                row["mm_projector_ms"],
+            )
+        child_total = _sum_present(vision_for_generate, row["llm_forward_ms"])
+        row["generation_rest_ms"] = nonnegative_difference(row["generate_ms"], child_total)
+    row["llm_generation_ms"] = _metric(latency, ("llm_generation_ms", "llm_generation_median"), mode)
+    if row["llm_generation_ms"] is None:
+        row["llm_generation_ms"] = _sum_present(row["llm_forward_ms"], row["generation_rest_ms"])
+    row["llm_ms"] = row["llm_forward_ms"]
     row["single_scale_dense_patch_tokens"] = _metric(
         tokens,
         ("single_scale_dense_siglip_reference_patch_tokens",),
@@ -469,9 +500,12 @@ def _write_trend_charts(rows: list[dict[str, Any]], assets: Path) -> dict[str, P
         projector = numeric_or_none(row.get("mm_projector_ms"))
         if projector is not None and projector > 0:
             segments.append(ChartSegment("Projector", projector))
-        llm = numeric_or_none(row.get("llm_ms"))
+        llm = numeric_or_none(row.get("llm_forward_ms") or row.get("llm_ms"))
         if llm is not None and llm > 0:
-            segments.append(ChartSegment("LLM", llm))
+            segments.append(ChartSegment("LLM forward", llm))
+        generate_rest = numeric_or_none(row.get("generation_rest_ms"))
+        if generate_rest is not None and generate_rest > 0:
+            segments.append(ChartSegment("Generate rest", generate_rest))
         total = numeric_or_none(row.get("total_ms"))
         known = sum(segment.value for segment in segments)
         if total is not None and total > known:
@@ -496,8 +530,11 @@ def _write_trend_charts(rows: list[dict[str, Any]], assets: Path) -> dict[str, P
         vision_parts = [value for value in (vision, projector) if value is not None and value > 0]
         if vision_parts:
             attribution_segments.append(ChartSegment("Vision pipeline", sum(vision_parts)))
-        if llm is not None and llm > 0:
-            attribution_segments.append(ChartSegment("MLLM pipeline", llm))
+        llm_generation = numeric_or_none(row.get("llm_generation_ms"))
+        if llm_generation is None:
+            llm_generation = _sum_present(llm, generate_rest)
+        if llm_generation is not None and llm_generation > 0:
+            attribution_segments.append(ChartSegment("LLM generation", llm_generation))
         known_attribution = sum(segment.value for segment in attribution_segments)
         if total is not None and total > known_attribution:
             attribution_segments.append(ChartSegment("Other", total - known_attribution))
@@ -592,7 +629,10 @@ def _render_markdown(rows: list[dict[str, Any]], charts: dict[str, Path], output
         ("autogaze_ms", "AutoGaze ms"),
         ("vision_encoder_ms", "ViT ms"),
         ("mm_projector_ms", "Projector ms"),
-        ("llm_ms", "LLM ms"),
+        ("generate_ms", "Generate total ms"),
+        ("llm_generation_ms", "LLM generation ms"),
+        ("llm_forward_ms", "LLM forward ms"),
+        ("generation_rest_ms", "Generate rest ms"),
         ("full_or_raw_patch_tokens", "Full patch"),
         ("autogaze_selected_patch_tokens", "Selected patch"),
         ("token_reduction_ratio", "Patch x"),

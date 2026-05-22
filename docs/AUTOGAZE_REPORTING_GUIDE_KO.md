@@ -59,11 +59,11 @@ plugin_qwen_32f_t8_448_sparse
 
 리더에게 보여줄 첫 표는 아래 구조가 좋습니다.
 
-| 모드 | status | accuracy | total ms | Decode/read ms | Prep rest ms | Selector input ms | AutoGaze ms | Vision input ms | ViT ms | LLM ms | peak GiB | full patch | selected patch | LLM visual token |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| keep-all |  |  |  |  |  | n/a | n/a |  |  |  |  |  |  |  |
-| AutoGaze |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
-| paper baseline |  |  |  |  |  | n/a | n/a |  |  |  |  |  | n/a |  |
+| 모드 | status | accuracy | total ms | Decode/read ms | Prep rest ms | Selector input ms | AutoGaze ms | Vision input ms | ViT ms | Projector ms | Generate total ms | LLM forward ms | Generate rest ms | peak GiB | full patch | selected patch | LLM visual token |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| keep-all |  |  |  |  |  | n/a | n/a |  |  |  |  |  |  |  |  |  |  |
+| AutoGaze |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| paper baseline |  |  |  |  |  | n/a | n/a |  |  |  |  |  |  |  |  | n/a |  |
 
 AutoGaze off/keep-all이 OOM이면 latency는 비어 있을 수 있습니다. 그래도 full patch/LLM visual token 예상치와 failure stage를 남기는 것이 중요합니다.
 
@@ -86,10 +86,13 @@ total_ms = video_preprocess_without_autogaze_ms + autogaze_total_ms + generate_m
 | `vision_input_build_ms` | `vision_encoder_ms - siglip_vision_ms - mm_projector_ms` residual. vision feature packing/reorder 비용 |
 | `siglip_vision_ms` | SigLIP/ViT vision tower forward-only |
 | `vision_encoder_ms` | SigLIP/ViT + feature packing/reorder + projector hook을 포함한 vision path wrapper |
-| `generate_ms` | visual embedding, projector, LLM prefill/decode를 포함한 generation 호출 |
+| `generate_ms` | preprocessing 이후 전체 `model.generate` 호출. vision path, projector, LLM forward/decode loop와 generation overhead 포함 |
+| `llm_generation_ms` | `llm_forward_ms + generation_rest_ms`. vision을 제외한 LLM generation 실전 비용 |
+| `llm_forward_ms` | `generate_ms` 안에서 누적된 LLM forward child timer. 전체 generate와 같지 않음 |
+| `generation_rest_ms` | `generate_ms - vision_encoder_ms - llm_forward_ms` 기반 residual. child timer 밖의 generation/decode orchestration 비용 |
 | `ttft_ms` | 별도 1-token generation으로 잰 time-to-first-token. total에는 보통 별도 포함 |
 
-summary에는 너무 세부적인 field보다 `Decode/read / Prep rest / Selector input / AutoGaze / Vision input / ViT / LLM / total` 축을 먼저 보여주는 것이 좋습니다. `video_preprocess_ms`처럼 AutoGaze가 포함된 legacy inclusive field는 appendix에서만 확인하고, 메인 비교/차트에는 쓰지 않습니다.
+summary에는 너무 세부적인 field보다 `Decode/read / Prep rest / Selector input / AutoGaze / Vision input / ViT / Projector / Generate total / LLM generation / LLM forward / Generate rest / total` 축을 먼저 보여주는 것이 좋습니다. `video_preprocess_ms`처럼 AutoGaze가 포함된 legacy inclusive field는 appendix에서만 확인하고, 메인 비교/차트에는 쓰지 않습니다.
 
 ## 표시명과 정렬
 
@@ -103,7 +106,10 @@ Markdown과 SVG chart는 raw JSON field 대신 짧은 표시명을 우선 사용
 | `AutoGaze` | selector 전체 stage. `Selector input + AutoGaze forward` 관계로 해석 |
 | `Vision input` | vision wrapper에서 SigLIP/projector를 뺀 feature packing/reorder residual |
 | `ViT` | SigLIP/ViT vision encoder |
-| `LLM` | generate/prefill/decode 구간 |
+| `Generate total` | 전체 `model.generate` 부모 stage |
+| `LLM generation` | `LLM forward + Generate rest`. vision path를 제외한 LLM generation 부담 |
+| `LLM forward` | generate 안에서 누적한 LLM forward child stage |
+| `Generate rest` | generate 부모 stage에서 측정된 vision/LLM child를 뺀 residual |
 | `Full patch` | selector 적용 전 patch/token 분모 |
 | `Selected patch` | AutoGaze/token selector 이후 남은 patch/token |
 | `Patch x` | `Full patch / Selected patch` |

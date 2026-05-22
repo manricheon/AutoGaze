@@ -59,10 +59,17 @@ DISPLAY_LABELS = {
     "vit_encoder_median": "ViT ms",
     "qwen_vit_prepare_ms": "ViT ms",
     "qwen_vit_prepare": "ViT ms",
-    "llm_ms": "LLM ms",
-    "llm_median": "LLM ms",
-    "generate": "LLM ms",
-    "generate_ms": "LLM ms",
+    "llm_ms": "LLM forward ms",
+    "llm_median": "LLM forward ms",
+    "llm_forward_ms": "LLM forward ms",
+    "llm_generation_ms": "LLM generation ms",
+    "llm_generation_median": "LLM generation ms",
+    "generate": "Generate total ms",
+    "generate_ms": "Generate total ms",
+    "generate_median": "Generate total ms",
+    "generation_rest_ms": "Generate rest ms",
+    "generate_rest_ms": "Generate rest ms",
+    "generation_rest_median": "Generate rest ms",
     "encoder_patch_tokens_before_keep_all_or_raw": "Full patch",
     "vit_encoder_input_patch_tokens_before_autogaze": "ViT before",
     "raw_vit_patch_tokens_before_selector": "Full patch",
@@ -105,7 +112,11 @@ SUMMARY_LATENCY_SPECS = [
     ("AutoGaze ms", ("autogaze_total_ms", "autogaze_ms", "autogaze_total_median", "autogaze_median", "gazing_info_total_ms")),
     ("Vision input ms", ("vision_input_build_ms", "vision_input_build_median")),
     ("ViT ms", ("vit_encoder_ms", "vision_encoder_ms", "vit_encoder_median", "qwen_vit_prepare", "qwen_vit_prepare_ms")),
-    ("LLM ms", ("llm_ms", "llm_median", "generate", "generate_ms")),
+    ("Projector ms", ("mm_projector_ms", "projector_ms")),
+    ("Generate total ms", ("generate_ms", "generate_median", "generate")),
+    ("LLM generation ms", ("llm_generation_ms", "llm_generation_median")),
+    ("LLM forward ms", ("llm_ms", "llm_median", "llm_forward_ms")),
+    ("Generate rest ms", ("generation_rest_ms", "generate_rest_ms", "generation_rest_median")),
 ]
 
 SUMMARY_TOKEN_SPECS = [
@@ -378,9 +389,12 @@ def key_metrics(payload: dict[str, Any]) -> dict[str, Any]:
             "preprocess_total_ms": result.get("video_preprocess_ms"),
             "autogaze_ms": result.get("autogaze_ms"),
             "autogaze_total_ms": result.get("autogaze_total_ms"),
+            "generate_ms": result.get("generate_ms"),
+            "vision_encoder_ms": result.get("vision_encoder_ms"),
             "vit_encoder_ms": result.get("siglip_vision_ms"),
             "mm_projector_ms": result.get("mm_projector_ms"),
             "llm_ms": result.get("llm_forward_ms"),
+            "llm_forward_ms": result.get("llm_forward_ms"),
         },
         "tokens": {
             "video_sampled_frames": token_metrics.get("video_sampled_frames"),
@@ -445,6 +459,46 @@ def comparison_modes(group: dict[str, Any]) -> tuple[str, ...]:
     return tuple(ordered)
 
 
+def sum_numeric_present(*values: Any) -> float | None:
+    numbers = [numeric_or_none(value) for value in values]
+    present = [value for value in numbers if value is not None]
+    return sum(present) if present else None
+
+
+def vision_pipeline_for_generate(latency: dict[str, Any], mode: str | None = None) -> float | None:
+    parent = metric_from_aliases(latency, ("vision_encoder_ms", "vision_encoder_median"), mode)
+    if parent is not None:
+        return numeric_or_none(parent)
+    return sum_numeric_present(
+        metric_from_aliases(latency, ("vision_input_build_ms", "vision_input_build_median", "vision_input_ms"), mode),
+        metric_from_aliases(latency, ("vit_encoder_ms", "vit_encoder_median", "siglip_vision_ms"), mode),
+        metric_from_aliases(latency, ("mm_projector_ms", "projector_ms"), mode),
+    )
+
+
+def generation_rest_latency(latency: dict[str, Any], mode: str | None = None) -> float | None:
+    generate = numeric_or_none(metric_from_aliases(latency, ("generate_ms", "generate_median", "generate"), mode))
+    if generate is None:
+        return None
+    child_total = sum_numeric_present(
+        vision_pipeline_for_generate(latency, mode),
+        metric_from_aliases(latency, ("llm_ms", "llm_median", "llm_forward_ms"), mode),
+    )
+    if child_total is None:
+        return None
+    return max(generate - child_total, 0.0)
+
+
+def llm_generation_latency(latency: dict[str, Any], mode: str | None = None) -> float | None:
+    explicit = numeric_or_none(metric_from_aliases(latency, ("llm_generation_ms", "llm_generation_median"), mode))
+    if explicit is not None:
+        return explicit
+    return sum_numeric_present(
+        metric_from_aliases(latency, ("llm_ms", "llm_median", "llm_forward_ms"), mode),
+        metric_from_aliases(latency, ("generation_rest_ms", "generate_rest_ms", "generation_rest_median"), mode),
+    )
+
+
 def add_latency_decomposition_metrics(latency: dict[str, Any]) -> dict[str, Any]:
     enriched = dict(latency)
     decode_aliases = ("video_decode_read_ms", "video_decode_read_median", "video_decode_ms", "video_decode_median")
@@ -453,6 +507,8 @@ def add_latency_decomposition_metrics(latency: dict[str, Any]) -> dict[str, Any]
         "preprocess_rest_without_decode_autogaze_ms",
         "preprocess_rest_without_decode_autogaze_median",
     )
+    generation_rest_aliases = ("generation_rest_ms", "generate_rest_ms", "generation_rest_median")
+    llm_generation_aliases = ("llm_generation_ms", "llm_generation_median")
     modes = comparison_modes(enriched)
     if modes:
         if "video_decode_read_ms" not in enriched:
@@ -469,6 +525,14 @@ def add_latency_decomposition_metrics(latency: dict[str, Any]) -> dict[str, Any]
             }
             if any(value is not None for value in rest_by_mode.values()):
                 enriched["preprocess_rest_without_decode_autogaze_ms"] = rest_by_mode
+        if all(metric_from_aliases(enriched, generation_rest_aliases, mode) is None for mode in modes):
+            generation_rest_by_mode = {mode: generation_rest_latency(enriched, mode) for mode in modes}
+            if any(value is not None for value in generation_rest_by_mode.values()):
+                enriched["generation_rest_ms"] = generation_rest_by_mode
+        if all(metric_from_aliases(enriched, llm_generation_aliases, mode) is None for mode in modes):
+            llm_generation_by_mode = {mode: llm_generation_latency(enriched, mode) for mode in modes}
+            if any(value is not None for value in llm_generation_by_mode.values()):
+                enriched["llm_generation_ms"] = llm_generation_by_mode
         return enriched
 
     if "video_decode_read_ms" not in enriched:
@@ -482,6 +546,14 @@ def add_latency_decomposition_metrics(latency: dict[str, Any]) -> dict[str, Any]
         )
         if rest_value is not None:
             enriched["preprocess_rest_without_decode_autogaze_ms"] = rest_value
+    if metric_from_aliases(enriched, generation_rest_aliases) is None:
+        generation_rest = generation_rest_latency(enriched)
+        if generation_rest is not None:
+            enriched["generation_rest_ms"] = generation_rest
+    if metric_from_aliases(enriched, llm_generation_aliases) is None:
+        llm_generation = llm_generation_latency(enriched)
+        if llm_generation is not None:
+            enriched["llm_generation_ms"] = llm_generation
     return enriched
 
 
@@ -786,8 +858,10 @@ def render_latency_views_section(metrics: dict[str, Any]) -> str:
             "Wall-clock view shows the measured execution order. Attribution view groups input-build costs with the "
             "module they support when that split is available; otherwise unresolved preprocessing stays in pre-model prep. "
             "Model-side view excludes video decode/read and measured frame resize so model-specific prep, selector, "
-            "vision, and LLM costs can be compared more fairly. If frame resize was not split by the runner, it may "
-            "remain inside model input prep."
+            "vision, and LLM/generation costs can be compared more fairly. Generate total is the parent "
+            "`model.generate` timer; LLM forward is the accumulated child forward timer, and Generate rest is the "
+            "non-negative residual after measured vision and LLM-forward child timers. If frame resize was not split "
+            "by the runner, it may remain inside model input prep."
         ),
     ]
     if stage_bars:
@@ -805,7 +879,8 @@ def render_latency_views_section(metrics: dict[str, Any]) -> str:
                     "Vision input",
                     "ViT",
                     "Projector",
-                    "LLM",
+                    "LLM forward",
+                    "Generate rest",
                     "Other",
                 ],
             )
@@ -820,7 +895,7 @@ def render_latency_views_section(metrics: dict[str, Any]) -> str:
                     "Pre-model prep",
                     "AutoGaze pipeline",
                     "Vision pipeline",
-                    "MLLM pipeline",
+                    "LLM generation",
                     "Other",
                 ],
             )
@@ -835,7 +910,7 @@ def render_latency_views_section(metrics: dict[str, Any]) -> str:
                     "Model input prep",
                     "Selector+AutoGaze",
                     "Vision+projector",
-                    "LLM",
+                    "LLM generation",
                     "Other",
                 ],
             )
@@ -1314,6 +1389,12 @@ def render_module_details(payload: dict[str, Any]) -> str:
         detail = payload.get("stage_timings_ms")
     if not isinstance(detail, dict):
         return ""
+    detail = add_latency_decomposition_metrics(dict(detail))
+    note = (
+        "`generate_ms` is the full `model.generate` wall time after preprocessing. "
+        "`llm_forward_ms` is only the accumulated LLM forward child timer inside generation. "
+        "`generation_rest_ms` is the measured residual after vision and LLM-forward child timers when enough fields exist."
+    )
 
     if any(is_mode_comparison_metric(value) for value in detail.values()):
         rows = []
@@ -1333,7 +1414,7 @@ def render_module_details(payload: dict[str, Any]) -> str:
                 )
             else:
                 rows.append([name, value, None, None, None])
-        return "## Module Detail Metrics\n\n" + markdown_table(
+        return "## Module Detail Metrics\n\n" + note + "\n\n" + markdown_table(
             ["Metric", "Keep-all", "AutoGaze", "Speedup", "Reduction %"],
             rows,
         )
@@ -1344,7 +1425,7 @@ def render_module_details(payload: dict[str, Any]) -> str:
             rows.append([name, value.get("total_ms") or value.get("median") or value.get("autogaze"), value.get("count")])
         else:
             rows.append([name, value, "-"])
-    return "## Module Detail Metrics\n\n" + markdown_table(["Metric", "Value", "Count"], rows)
+    return "## Module Detail Metrics\n\n" + note + "\n\n" + markdown_table(["Metric", "Value", "Count"], rows)
 
 
 def render_decode_read_stage_details(payload: dict[str, Any]) -> str:
@@ -1417,6 +1498,14 @@ def render_input_tokenization(payload: dict[str, Any], metrics: dict[str, Any]) 
                         return keep_all_value
                     return {"keep_all": keep_all_value, "autogaze": autogaze_value}
                 return keep_all_value if keep_all_value is not None else autogaze_value
+        return None
+
+    def readable_budget_mode_metric(*fields: str) -> Any:
+        for field in fields:
+            keep_all_value = get_budget_value(keep_all_budget, field)
+            autogaze_value = get_budget_value(autogaze_budget, field)
+            if keep_all_value is not None or autogaze_value is not None:
+                return {"keep_all": keep_all_value, "autogaze": autogaze_value}
         return None
 
     single_video = as_mapping(single_budget.get("video"))
@@ -1514,13 +1603,22 @@ def render_input_tokenization(payload: dict[str, Any], metrics: dict[str, Any]) 
         else ratio_before_over_after(full_patch, selected_patch),
     )
     llm_before = first_present(
-        token_metric("llm_visual_tokens_before_keep_all_estimated", "llm_visual_tokens_keep_all_estimated_from_budget"),
-        readable_budget_metric("llm_visual_budget.keep_all_visual_tokens_estimated"),
+        token_metric(
+            "llm_visual_tokens_before_autogaze",
+            "llm_visual_tokens_before_keep_all_estimated",
+            "llm_visual_tokens_keep_all_estimated_from_budget",
+        ),
+        readable_budget_mode_metric("llm_visual_budget.keep_all_visual_tokens_estimated"),
         single_llm_budget.get("keep_all_visual_tokens_estimated"),
     )
     llm_after = first_present(
-        token_metric("llm_visual_tokens_actual_from_budget", "llm_visual_tokens_after_actual", "llm_context_tokens"),
-        readable_budget_metric("llm_visual_budget.actual_visual_tokens"),
+        token_metric(
+            "llm_visual_tokens_after_autogaze",
+            "llm_visual_tokens_actual_from_budget",
+            "llm_visual_tokens_after_actual",
+            "llm_context_tokens",
+        ),
+        readable_budget_mode_metric("llm_visual_budget.actual_visual_tokens"),
         single_llm_budget.get("actual_visual_tokens"),
     )
     llm_reduction = first_present(

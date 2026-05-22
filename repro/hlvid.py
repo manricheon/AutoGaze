@@ -134,7 +134,10 @@ MODULE_LATENCY_FIELDS = (
     ("vision_input_build_ms", "vision_input_build_ms"),
     ("vit_encoder_ms", "siglip_vision_ms"),
     ("vision_encoder_ms", "vision_encoder_ms"),
+    ("mm_projector_ms", "mm_projector_ms"),
+    ("generate_ms", "generate_ms"),
     ("llm_ms", "llm_forward_ms"),
+    ("llm_forward_ms", "llm_forward_ms"),
 )
 KEY_TOKEN_FIELDS = (
     ("video_sampled_frames", "token_metrics.video_sampled_frames"),
@@ -768,7 +771,8 @@ def summarize_prediction_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 "preprocess_rest_without_decode_autogaze is the remaining non-AutoGaze processor work, "
                 "preprocess_without_autogaze=video_preprocess_without_autogaze_ms, "
                 "preprocess_total=legacy inclusive video_preprocess_ms, autogaze=autogaze_total_ms, "
-                "vit_encoder=siglip_vision_ms, llm=llm_forward_ms. "
+                "vit_encoder=siglip_vision_ms, projector=mm_projector_ms, "
+                "generate=generate_ms, llm_forward=llm_forward_ms. "
                 "The primary additive formula separates preprocess_without_autogaze, autogaze_total, and generate. "
                 "Use latency_accounting.additive_formula for the only additive total formula, "
                 "and use latency_ms_detail_median or top-level latency_ms for finer breakdowns."
