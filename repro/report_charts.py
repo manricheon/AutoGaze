@@ -27,17 +27,35 @@ STAGE_COLORS = {
     "Selector input": "#ffd43b",
     "AutoGaze": "#f59f00",
     "AutoGaze pipeline": "#f59f00",
+    "Vision input": "#8ce99a",
     "ViT": "#2f9e44",
     "Projector": "#69db7c",
     "Vision pipeline": "#2f9e44",
+    "Model input prep": "#15aabf",
+    "Selector+AutoGaze": "#f59f00",
+    "Vision+projector": "#2f9e44",
     "LLM": "#7048e8",
+    "LLM generation": "#7048e8",
+    "LLM forward": "#7048e8",
+    "Generate rest": "#9775fa",
     "MLLM pipeline": "#7048e8",
     "Other": "#adb5bd",
     "Full patch": "#5b8def",
     "Selected patch": "#f59f00",
+    "ViT before": "#5b8def",
+    "ViT after": "#f59f00",
+    "LLM before": "#9775fa",
+    "LLM after": "#7048e8",
     "LLM visual": "#7048e8",
     "Peak": "#495057",
     "Overall": "#495057",
+}
+
+COMPARISON_MODE_ORDER = ("keep_all", "single_scale_dense", "autogaze")
+CHART_MODE_LABELS = {
+    "keep_all": "keep_all",
+    "single_scale_dense": "single-scale",
+    "autogaze": "autogaze",
 }
 
 
@@ -80,6 +98,10 @@ def shorten_label(value: str, *, max_chars: int = 32) -> str:
     left = max(1, keep // 2)
     right = max(1, keep - left)
     return f"{text[:left]}...{text[-right:]}"
+
+
+def chart_label(value: str) -> str:
+    return CHART_MODE_LABELS.get(str(value), str(value))
 
 
 def numeric_or_none(value: Any) -> float | None:
@@ -163,7 +185,9 @@ def write_bar_chart(
     for row_index, bar in enumerate(clean_bars):
         y = top + row_index * row_height
         total = sum(max(float(segment.value), 0.0) for segment in bar.segments)
-        svg.append(f'<text class="label" x="16" y="{y + 20}">{html.escape(shorten_label(bar.label))}</text>')
+        svg.append(
+            f'<text class="label" x="16" y="{y + 20}">{html.escape(shorten_label(chart_label(bar.label)))}</text>'
+        )
         svg.append(f'<rect x="{label_width}" y="{y + 6}" width="{bar_width}" height="22" fill="#f1f3f5"/>')
         x = label_width
         for segment in bar.segments:
@@ -227,6 +251,16 @@ def build_standard_report_charts(
                 unit="ms",
             )
         )
+    model_side = latency_model_side_bars(metrics)
+    if model_side:
+        artifacts.append(
+            write_bar_chart(
+                output / "latency_model_side.svg",
+                title="Model-side Latency (excludes video I/O + resize)",
+                bars=model_side,
+                unit="ms",
+            )
+        )
     tokens = _token_bars(metrics)
     if tokens:
         artifacts.append(
@@ -285,11 +319,20 @@ def _positive_segment(name: str, value: float | None) -> ChartSegment | None:
 
 
 def _has_mode_comparison(group: dict[str, Any]) -> bool:
-    return any(isinstance(value, dict) and ("keep_all" in value or "autogaze" in value) for value in group.values())
+    return any(isinstance(value, dict) and any(mode in value for mode in COMPARISON_MODE_ORDER) for value in group.values())
 
 
 def _latency_modes(latency: dict[str, Any]) -> tuple[str | None, ...]:
-    return ("keep_all", "autogaze") if _has_mode_comparison(latency) else (None,)
+    if not _has_mode_comparison(latency):
+        return (None,)
+    modes = {
+        mode
+        for value in latency.values()
+        if isinstance(value, dict)
+        for mode in COMPARISON_MODE_ORDER
+        if mode in value
+    }
+    return tuple(mode for mode in COMPARISON_MODE_ORDER if mode in modes)
 
 
 def _total_latency(latency: dict[str, Any], mode: str | None = None) -> float | None:
@@ -332,7 +375,14 @@ def _autogaze_latency(latency: dict[str, Any], mode: str | None = None) -> float
 def _vit_latency(latency: dict[str, Any], mode: str | None = None) -> float | None:
     return _metric(
         latency,
-        ("vit_encoder_ms", "vision_encoder_ms", "vit_encoder_median", "qwen_vit_prepare", "qwen_vit_prepare_ms"),
+        (
+            "vit_encoder_ms",
+            "vision_encoder_ms",
+            "siglip_vision_ms",
+            "vit_encoder_median",
+            "qwen_vit_prepare",
+            "qwen_vit_prepare_ms",
+        ),
         mode,
     )
 
@@ -345,8 +395,43 @@ def _projector_latency(latency: dict[str, Any], mode: str | None = None) -> floa
     return _metric(latency, ("mm_projector_ms", "projector_ms"), mode)
 
 
-def _llm_latency(latency: dict[str, Any], mode: str | None = None) -> float | None:
-    return _metric(latency, ("llm_ms", "llm_median", "llm_forward_ms", "generate", "generate_ms"), mode)
+def _generate_total_latency(latency: dict[str, Any], mode: str | None = None) -> float | None:
+    return _metric(latency, ("generate_ms", "generate_median", "generate"), mode)
+
+
+def _llm_forward_latency(latency: dict[str, Any], mode: str | None = None) -> float | None:
+    return _metric(latency, ("llm_ms", "llm_median", "llm_forward_ms"), mode)
+
+
+def _vision_pipeline_latency(latency: dict[str, Any], mode: str | None = None) -> float | None:
+    parent = _metric(latency, ("vision_encoder_ms", "vision_encoder_median"), mode)
+    if parent is not None:
+        return parent
+    return _metric_sum(
+        _vision_input_latency(latency, mode),
+        _vit_latency(latency, mode),
+        _projector_latency(latency, mode),
+    )
+
+
+def _generate_rest_latency(latency: dict[str, Any], mode: str | None = None) -> float | None:
+    explicit = _metric(latency, ("generation_rest_ms", "generate_rest_ms", "generation_rest_median"), mode)
+    if explicit is not None:
+        return explicit
+    generate = _generate_total_latency(latency, mode)
+    if generate is None:
+        return None
+    child_total = _metric_sum(_vision_pipeline_latency(latency, mode), _llm_forward_latency(latency, mode))
+    if child_total is None:
+        return None
+    return max(generate - child_total, 0.0)
+
+
+def _llm_generation_latency(latency: dict[str, Any], mode: str | None = None) -> float | None:
+    explicit = _metric(latency, ("llm_generation_ms", "llm_generation_median"), mode)
+    if explicit is not None:
+        return explicit
+    return _metric_sum(_llm_forward_latency(latency, mode), _generate_rest_latency(latency, mode))
 
 
 def _tile_tensor_prep_latency(latency: dict[str, Any], mode: str | None = None) -> float | None:
@@ -362,6 +447,28 @@ def _tile_tensor_prep_latency(latency: dict[str, Any], mode: str | None = None) 
     return max(prep_rest - frame_resize - selector_input - vision_input, 0.0)
 
 
+def _prep_rest_residual_latency(latency: dict[str, Any], mode: str | None = None) -> float | None:
+    prep_rest = _prep_rest_metric(latency, mode)
+    if prep_rest is None:
+        return None
+    frame_resize = _frame_resize_latency(latency, mode)
+    selector_input = _selector_input_latency(latency, mode)
+    vision_input = _vision_input_latency(latency, mode)
+    tile_tensor = _explicit_tile_tensor_prep_latency(latency, mode)
+    if tile_tensor is None and any(value is not None for value in (frame_resize, selector_input, vision_input)):
+        tile_tensor = _tile_tensor_prep_latency(latency, mode)
+    explicit_components = [
+        frame_resize,
+        tile_tensor,
+        selector_input,
+        vision_input,
+    ]
+    present_components = [value for value in explicit_components if value is not None]
+    if not present_components:
+        return prep_rest
+    return max(prep_rest - sum(present_components), 0.0)
+
+
 def _explicit_tile_tensor_prep_latency(latency: dict[str, Any], mode: str | None = None) -> float | None:
     return _metric(
         latency,
@@ -372,6 +479,31 @@ def _explicit_tile_tensor_prep_latency(latency: dict[str, Any], mode: str | None
             "spatial_tile_build_ms",
         ),
         mode,
+    )
+
+
+def _pre_model_prep_latency(
+    latency: dict[str, Any],
+    mode: str | None = None,
+    *,
+    include_frame_resize: bool,
+) -> float | None:
+    frame_resize = _frame_resize_latency(latency, mode)
+    explicit_tile_tensor = _explicit_tile_tensor_prep_latency(latency, mode)
+    tile_tensor = _tile_tensor_prep_latency(latency, mode)
+    prep_rest = _prep_rest_residual_latency(latency, mode)
+    selector_input = _selector_input_latency(latency, mode)
+    vision_input = _vision_input_latency(latency, mode)
+    use_fallback_prep_rest = (
+        frame_resize is None
+        and explicit_tile_tensor is None
+        and selector_input is None
+        and vision_input is None
+    )
+    return _metric_sum(
+        frame_resize if include_frame_resize else None,
+        None if use_fallback_prep_rest else tile_tensor,
+        prep_rest,
     )
 
 
@@ -386,19 +518,27 @@ def latency_stage_bars(metrics: dict[str, Any]) -> list[ChartBar]:
         frame_resize = _frame_resize_latency(latency, mode)
         explicit_tile_tensor = _explicit_tile_tensor_prep_latency(latency, mode)
         tile_tensor = _tile_tensor_prep_latency(latency, mode)
-        prep_rest = _prep_rest_metric(latency, mode)
+        prep_rest = _prep_rest_residual_latency(latency, mode)
         selector_input = _selector_input_latency(latency, mode)
-        use_fallback_prep_rest = frame_resize is None and explicit_tile_tensor is None and selector_input is None
+        vision_input = _vision_input_latency(latency, mode)
+        use_fallback_prep_rest = (
+            frame_resize is None
+            and explicit_tile_tensor is None
+            and selector_input is None
+            and vision_input is None
+        )
         raw_segments = [
             _positive_segment("Decode/read", _decode_read_latency(latency, mode)),
             _positive_segment("Frame resize", frame_resize),
             _positive_segment("Tile/tensor prep", None if use_fallback_prep_rest else tile_tensor),
-            _positive_segment("Prep rest", prep_rest if use_fallback_prep_rest else None),
+            _positive_segment("Prep rest", prep_rest),
             _positive_segment("Selector input", selector_input),
             _positive_segment("AutoGaze", _autogaze_latency(latency, mode)),
+            _positive_segment("Vision input", vision_input),
             _positive_segment("ViT", _vit_latency(latency, mode)),
             _positive_segment("Projector", _projector_latency(latency, mode)),
-            _positive_segment("LLM", _llm_latency(latency, mode)),
+            _positive_segment("LLM forward", _llm_forward_latency(latency, mode)),
+            _positive_segment("Generate rest", _generate_rest_latency(latency, mode)),
         ]
         chart_segments = [segment for segment in raw_segments if segment is not None]
         known = sum(segment.value for segment in chart_segments)
@@ -419,10 +559,7 @@ def latency_attribution_bars(metrics: dict[str, Any]) -> list[ChartBar]:
     for mode in _latency_modes(latency):
         label = mode or "current"
         total = _total_latency(latency, mode)
-        pre_model_prep = _metric_sum(
-            _frame_resize_latency(latency, mode),
-            _tile_tensor_prep_latency(latency, mode),
-        )
+        pre_model_prep = _pre_model_prep_latency(latency, mode, include_frame_resize=True)
         autogaze_pipeline = _metric_sum(
             _selector_input_latency(latency, mode),
             _autogaze_latency(latency, mode),
@@ -437,7 +574,7 @@ def latency_attribution_bars(metrics: dict[str, Any]) -> list[ChartBar]:
             _positive_segment("Pre-model prep", pre_model_prep),
             _positive_segment("AutoGaze pipeline", autogaze_pipeline),
             _positive_segment("Vision pipeline", vision_pipeline),
-            _positive_segment("MLLM pipeline", _llm_latency(latency, mode)),
+            _positive_segment("LLM generation", _llm_generation_latency(latency, mode)),
         ]
         chart_segments = [segment for segment in raw_segments if segment is not None]
         known = sum(segment.value for segment in chart_segments)
@@ -445,6 +582,35 @@ def latency_attribution_bars(metrics: dict[str, Any]) -> list[ChartBar]:
             chart_segments.append(ChartSegment("Other", total - known))
         if not chart_segments and total is not None:
             chart_segments.append(ChartSegment("total", total))
+        if chart_segments:
+            bars.append(ChartBar(str(label), chart_segments))
+    return bars
+
+
+def latency_model_side_bars(metrics: dict[str, Any]) -> list[ChartBar]:
+    latency = _group(metrics, "latency_ms")
+    if not latency:
+        return []
+    bars: list[ChartBar] = []
+    for mode in _latency_modes(latency):
+        label = mode or "current"
+        model_input_prep = _pre_model_prep_latency(latency, mode, include_frame_resize=False)
+        selector_autogaze = _metric_sum(
+            _selector_input_latency(latency, mode),
+            _autogaze_latency(latency, mode),
+        )
+        vision_projector = _metric_sum(
+            _vision_input_latency(latency, mode),
+            _vit_latency(latency, mode),
+            _projector_latency(latency, mode),
+        )
+        raw_segments = [
+            _positive_segment("Model input prep", model_input_prep),
+            _positive_segment("Selector+AutoGaze", selector_autogaze),
+            _positive_segment("Vision+projector", vision_projector),
+            _positive_segment("LLM generation", _llm_generation_latency(latency, mode)),
+        ]
+        chart_segments = [segment for segment in raw_segments if segment is not None]
         if chart_segments:
             bars.append(ChartBar(str(label), chart_segments))
     return bars
@@ -467,8 +633,9 @@ def _token_bars(metrics: dict[str, Any]) -> list[ChartBar]:
             ),
         ),
         (
-            "Full patch",
+            "ViT before",
             (
+                "vit_encoder_input_patch_tokens_before_autogaze",
                 "hd_multiscale_keep_all_patch_tokens",
                 "raw_vit_patch_tokens_before_selector",
                 "encoder_patch_tokens_before_keep_all_or_raw",
@@ -476,8 +643,9 @@ def _token_bars(metrics: dict[str, Any]) -> list[ChartBar]:
             ),
         ),
         (
-            "Selected patch",
+            "ViT after",
             (
+                "vit_encoder_input_patch_tokens_after_autogaze",
                 "autogaze_selected_total_patch_tokens",
                 "encoder_input_patch_tokens_after_autogaze",
                 "encoder_patch_tokens_after_autogaze",
@@ -485,8 +653,17 @@ def _token_bars(metrics: dict[str, Any]) -> list[ChartBar]:
             ),
         ),
         (
-            "LLM visual",
+            "LLM before",
             (
+                "llm_visual_tokens_before_autogaze",
+                "llm_visual_tokens_keep_all_estimated_from_budget",
+                "llm_visual_tokens_before_keep_all_estimated",
+            ),
+        ),
+        (
+            "LLM after",
+            (
+                "llm_visual_tokens_after_autogaze",
                 "llm_visual_tokens_actual_from_budget",
                 "llm_visual_tokens_after_actual",
                 "llm_context_tokens",

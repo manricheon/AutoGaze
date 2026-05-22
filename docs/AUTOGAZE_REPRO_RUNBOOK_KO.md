@@ -21,9 +21,9 @@
 | stream-profile/H100 preflight | 준비됨 | `repro.nvila_runner`, `repro.hlvid_batch_benchmark` |
 | Markdown/chart report | 준비됨 | `python -m repro.markdown_report` |
 | aggregate trend report | 준비됨 | `python -m repro.aggregate_reports` |
-| plugin 확장 실험 | PoC/sidecar/prune | `python -m repro.flexible_runner`, `python -m repro.plugin_hlvid_benchmark` |
+| plugin 확장 실험 | PoC/probe | `run_hlvid_folder_benchmark.py --plugin-suite qwen`, `python -m repro.flexible_runner` |
 
-기본 HLVid benchmark와 plugin HLVid benchmark는 다릅니다. NVILA-HD keep-all/autogaze, paper baseline, H100 preflight는 `scripts/run_hlvid_folder_benchmark.py`를 우선 사용하세요. `repro.plugin_hlvid_benchmark`는 Qwen/LLaVA/LongVILA/NVILA-Video/InternVL 등 token selector / ViT / MLLM 확장 실험용입니다.
+HLVid 실행은 `scripts/run_hlvid_folder_benchmark.py`를 우선 사용하세요. 옵션을 주지 않으면 NVILA-HD keep-all/single-scale/autogaze 기본 경로로 가고, `--plugin-suite qwen`을 주면 Qwen/Plugin HLVid 경로로 라우팅됩니다. `repro.plugin_hlvid_benchmark`는 내부/고급 호출용으로 남겨둡니다.
 
 ## 환경 세팅
 
@@ -68,7 +68,23 @@ Qwen3-VL 실험은 `qwen-vl-utils`가 필요합니다. 기본 requirements에 �
   --output-json outputs/autogaze_repro/nvila_single.json
 ```
 
-같은 입력에서 AutoGaze off/keep-all을 보려면 `--gazing-mode keep-all`만 바꿉니다. 상대 latency를 비교할 때는 같은 frame 수, thumbnail 수, resize, max tiles, dtype, batch size를 유지하세요.
+같은 입력에서 AutoGaze off/keep-all을 보려면 `--gazing-mode keep-all`만 바꿉니다. 392px single-scale dense keep-all은 `--gazing-mode keep-all-single`을 사용합니다. 이 alias는 내부적으로 `keep-all + --autogaze-target-scales 392 + --autogaze-target-patch-size 14`로 정규화됩니다. 상대 latency를 비교할 때는 같은 frame 수, thumbnail 수, resize, max tiles, dtype, batch size를 유지하세요.
+
+| single mode | 의미 |
+| --- | --- |
+| `--gazing-mode autogaze` | AutoGaze selector on |
+| `--gazing-mode keep-all` | NVILA-HD multiscale keep-all |
+| `--gazing-mode keep-all-single` | 392px single-scale dense keep-all |
+
+실행 후 `nvila_single_summary.json` 또는 Markdown report의 `Key Metrics`에서 먼저 확인할 값은 다음입니다.
+
+```text
+Mode Snapshot:  Keep-all / Single-scale / AutoGaze 원값 나란히 보기
+Pairwise Gains: AutoGaze vs keep-all, AutoGaze vs single-scale 두 기준만 speedup/reduction 계산
+Token Boundary: Candidate/off patch -> encoder input patch -> LLM visual token
+```
+
+`Mode Snapshot`에는 ratio를 넣지 않습니다. ratio는 분모가 `keep-all`인지 `single-scale dense`인지에 따라 의미가 달라지므로 `Pairwise Gains`에서만 봅니다. `Selector input`은 상세 latency view나 raw appendix에서 확인할 수 있으며, 메인 요약에서는 AutoGaze total과 ViT/LLM 경계 값을 우선 봅니다.
 
 ## 2. 선택 프레임/AutoGaze Overlay 시각화
 
@@ -110,12 +126,14 @@ AutoGaze가 어떤 프레임과 패치를 남겼는지 확인하려면 visualiza
   --continue-on-error
 ```
 
-기본 wrapper는 keep-all과 AutoGaze를 같은 설정으로 각각 실행한 뒤 gain report를 만듭니다. 핵심 산출물은 다음과 같습니다.
+기본 wrapper는 HD multiscale keep-all, 392px single-scale dense keep-all, AutoGaze를 같은 설정으로 각각 실행한 뒤 gain report를 만듭니다. 핵심 산출물은 다음과 같습니다.
 
 ```text
 hlvid_keep_all_predictions.jsonl
+hlvid_single_scale_dense_predictions.jsonl
 hlvid_autogaze_predictions.jsonl
 hlvid_keep_all_summary.json
+hlvid_single_scale_dense_summary.json
 hlvid_autogaze_summary.json
 hlvid_autogaze_gain_report.json
 hlvid_autogaze_gain_report.csv
@@ -135,6 +153,16 @@ hlvid_autogaze_gain_report.csv
   --summary outputs/autogaze_repro/hlvid_autogaze_summary.json \
   --scored-predictions outputs/autogaze_repro/hlvid_autogaze_scored.jsonl
 ```
+
+필요한 모드만 빼려면 skip 옵션을 사용합니다.
+
+```bash
+  --skip-keep-all              # HD multiscale keep-all 제외
+  --skip-single-scale-dense    # 392px single-scale dense 제외
+  --skip-autogaze              # AutoGaze 제외
+```
+
+`--single-scale-dense`는 이전 명령과의 호환을 위해 남아 있지만 이제 기본값이 on입니다. single-scale dense scale을 바꾸고 싶을 때만 `--single-scale-dense-scales 392`처럼 값을 지정하세요. `hlvid_single_scale_dense_*` 파일과 gain report의 `single_scale_dense_comparison`에서 AutoGaze 대비 latency/token 차이를 확인합니다.
 
 ## 4. Paper Baseline 비교
 
@@ -156,15 +184,15 @@ AutoGaze 논문 표의 baseline은 HD keep-all이 아니라 `NVILA-8B-Video` 별
 
 ## 5. Plugin 확장 Benchmark
 
-Qwen/LongVILA/NVILA-Video 등 다른 token selector / ViT / MLLM 조합을 HLVid row로 비교할 때만 plugin benchmark를 사용합니다.
+Qwen/LongVILA/NVILA-Video 등 다른 token selector / ViT / MLLM 조합을 HLVid row로 비교할 때는 같은 wrapper에 `--plugin-suite`를 붙입니다. Qwen 검증은 이 명령부터 시작하세요.
 
 ```bash
-.venv/bin/python -m repro.plugin_hlvid_benchmark \
-  --manifest /path/to/HLVid/manifest.json \
+.venv/bin/python scripts/run_hlvid_folder_benchmark.py \
+  --dataset-dir /path/to/HLVid \
   --video-root /path/to/HLVid/videos \
   --output-dir outputs/autogaze_repro/plugin_hlvid_qwen_vit_limit3 \
-  --modes qwen_full_vit,qwen_chunked_vit,qwen_chunked_vit_autogaze_sparse \
-  --model qwen3-vl=weight/Qwen3-VL-8B-Instruct \
+  --plugin-suite qwen \
+  --plugin-model qwen3-vl=weight/Qwen3-VL-8B-Instruct \
   --limit 3 \
   --num-video-frames 32 \
   --num-video-frames-thumbnail 8 \
@@ -176,6 +204,8 @@ Qwen/LongVILA/NVILA-Video 등 다른 token selector / ViT / MLLM 조합을 HLVid
   --max-new-tokens 8
 ```
 
+`--plugin-suite qwen`은 `qwen_full_vit`, `qwen_chunked_vit`, `qwen_chunked_vit_autogaze_sparse` 세 모드를 기본으로 실행합니다. Qwen frame 수를 따로 주지 않으면 `--qwen-video-nframes`는 `--num-video-frames`와 같게 맞춰집니다. 더 좁은 비교를 원하면 `--plugin-suite custom --plugin-modes qwen_full_vit,qwen_chunked_vit`처럼 지정합니다.
+
 세 Qwen mode의 의미는 다음과 같습니다.
 
 | mode | 의미 |
@@ -183,24 +213,6 @@ Qwen/LongVILA/NVILA-Video 등 다른 token selector / ViT / MLLM 조합을 HLVid
 | `qwen_full_vit` | Qwen native/full ViT 경로 |
 | `qwen_chunked_vit` | Qwen ViT를 temporal/spatial chunk로 나눠 실행하되 AutoGaze off |
 | `qwen_chunked_vit_autogaze_sparse` | AutoGaze selected token만 Qwen ViT/MLLM context에 통과시키는 실험 경로 |
-
-확장 sidecar/prune mode까지 같은 HLVid row에서 보려면 `configs/repro/plugin_hlvid_limit3.yaml`의 mode 세트를 사용합니다.
-
-| 그룹 | modes | 해석 |
-| --- | --- | --- |
-| Qwen comparison | `qwen_full_vit`, `qwen_chunked_vit`, `qwen_chunked_vit_autogaze_sparse` | AutoGaze sparse가 Qwen ViT/LLM visual token을 실제로 줄이는지 확인 |
-| VILA-family | `nvila-video-off`, `nvila-video-autogaze-sidecar-generate`, `longvila-off`, `longvila-autogaze-sidecar-generate` | off 실행과 dense generation + AutoGaze selector sidecar를 분리 |
-| Other MLLM | `llava-onevision-off`, `llava-onevision-autogaze-prune-generate`, `internvl3-off`, `internvl3-autogaze-sidecar-generate` | LLaVA는 post-encoder prune-generate 실험, InternVL3는 dense generation + selector sidecar |
-
-상태 해석은 다음처럼 분리합니다.
-
-| status | 의미 |
-| --- | --- |
-| `executed` | 해당 mode의 generation 실행 성공. Qwen sparse/LLaVA prune mode라면 token 감소 metric을 함께 확인 |
-| `executed_dense_with_autogaze_sidecar` | dense generation은 성공했고 AutoGaze selector metric도 기록했지만, visual pruning은 모델 내부에 적용하지 않음 |
-| `probe_required` / `probe_collected` | selector 요청을 무시하지 않았지만 실제 pruning 적용 전 mapping/probe 단계 |
-| `failed_missing_dependency` | 외부 CLI, `qwen_vl_utils`, model dependency 등이 없음 |
-| `oom` | CUDA OOM. `failure.stage`로 processor/AutoGaze/ViT/LLM 위치 확인 |
 
 ## 6. Stream Profile과 H100 Preflight
 
@@ -244,6 +256,10 @@ HLVid 폴더 전체의 metadata 기반 H100 risk를 보려면 기본 benchmark w
   --output-md outputs/autogaze_repro/hlvid_batch_limit3/hlvid_autogaze_gain_report.md
 ```
 
+HLVid gain report를 변환하면 `Key Metrics`, `Benchmark Score`, latency chart, token/patch 표가 `keep_all -> single_scale_dense -> autogaze` 순서로 정렬됩니다. `single_scale_dense`는 392px single-scale dense keep-all ablation이고, SVG chart에서는 `single-scale`로 짧게 표시됩니다. 메인 speedup/reduction은 `Pairwise Gains`의 `AutoGaze vs keep-all`, `AutoGaze vs single-scale` 두 줄만 기준으로 해석합니다. `video_preprocess_ms` 같은 legacy inclusive 값과 긴 raw alias는 `Raw Metric Appendix`에서만 디버깅용으로 봅니다.
+
+정답 비교도 같은 관점으로 읽습니다. top-level correctness count는 기존 호환용 `keep_all vs autogaze`이고, 3모드 비교는 Markdown의 `Pairwise Correctness Summary`에서 `keep_all vs single_scale_dense`, `single_scale_dense vs autogaze`, `keep_all vs autogaze`를 각각 확인하세요.
+
 chart가 필요 없으면 `--no-charts`를 붙입니다.
 
 ## 8. Aggregate Trend Report
@@ -268,17 +284,17 @@ assets/memory_peak_by_config.svg
 assets/status_by_config.svg
 ```
 
-OOM이 난 실행도 가능한 경우 `failure.kind=oom`, `failure.stage`와 함께 row로 남고, aggregate report의 status chart에 반영됩니다.
+OOM이 난 실행도 가능한 경우 `failure.kind=oom`, `failure.stage`와 함께 row로 남고, aggregate report의 status chart에 반영됩니다. HLVid direct runner는 model load/row inference failure를 기록하고, 기본 wrapper는 subprocess가 137 등으로 죽어도 partial JSONL/summary를 생성합니다. 단, OS가 프로세스를 즉시 kill한 경우 child 내부 stack trace는 남지 않을 수 있으므로 wrapper의 `failure.stage=subprocess`를 기준으로 보세요.
 
 ## 결과 해석 Quick Guide
 
 | 영역 | 먼저 볼 필드 |
 | --- | --- |
 | 전체 시간 | `total_ms`, `latency_accounting.additive_total_ms` |
-| 전처리 | `video_decode_read_ms`, `preprocess_rest_without_decode_autogaze_ms`, `video_preprocess_without_autogaze_ms`, `video_decode_ms`, `video_tiling_ms` |
-| AutoGaze | `autogaze_total_ms`, `autogaze_forward_ms`, `autogaze_model_forward_ms` |
-| Vision encoder | `vision_encoder_ms`, `siglip_vision_ms`, Qwen의 `qwen_vit_prepare_ms` |
-| LLM | `generate_ms`, `llm_forward_ms`, `ttft_ms` |
+| 전처리 | `video_decode_read_ms`, `preprocess_rest_without_decode_autogaze_ms`, `video_preprocess_without_autogaze_ms`, `video_decode_ms`, `video_frame_resize_ms`, `video_tiling_ms` |
+| AutoGaze | `autogaze_total_ms`, `selector_input_build_ms`, `autogaze_forward_ms`, `autogaze_model_forward_ms` |
+| Vision encoder | `vision_encoder_ms`, `vision_input_build_ms`, `siglip_vision_ms`, `mm_projector_ms`, Qwen의 `qwen_vit_prepare_ms` |
+| LLM/generation | `generate_ms`, `llm_generation_ms`, `llm_forward_ms`, `generation_rest_ms`, `ttft_ms` |
 | patch/token 감소 | full/off patch, AutoGaze selected patch, encoder input patch, LLM visual token |
 | memory | processor/autogaze/vision/LLM/overall peak |
 | benchmark | `accuracy_total`, `accuracy_scored`, `failed`, `parse_failed`, `oom`, `skipped` |
@@ -290,9 +306,11 @@ Primary latency 공식은 다음입니다.
 total_ms = video_preprocess_without_autogaze_ms + autogaze_total_ms + generate_ms
 ```
 
-메인 비교 표에서는 `video_preprocess_without_autogaze_ms`를 다시 `Decode/read ms`와 `Prep rest ms`로 나눠 봅니다. 같은 비디오와 같은 sampling이면 decode/read는 on/off 공통 비용에 가깝기 때문에, AutoGaze의 실제 이득은 `Prep rest + AutoGaze + ViT + LLM` 쪽에서 더 잘 보입니다.
+메인 비교 표에서는 `video_preprocess_without_autogaze_ms`를 다시 `Decode/read ms`와 `Prep rest ms`로 나눠 봅니다. 같은 비디오와 같은 sampling이면 decode/read는 on/off 공통 비용에 가깝기 때문에, AutoGaze의 실제 이득은 `Prep rest + Selector input + AutoGaze + Vision input + ViT + LLM` 쪽에서 더 잘 보입니다.
 
 `video_preprocess_ms`는 AutoGaze를 포함한 legacy inclusive field라 primary total에 다시 더하지 않습니다.
+
+`generate_ms`는 LLM forward-only가 아니라 preprocessing 이후 전체 `model.generate` 부모 stage입니다. 리포트에서는 `LLM generation ms = llm_forward_ms + generation_rest_ms`를 vision path 제외 LLM generation 부담으로, `LLM forward ms`를 `llm_forward_ms` child timer로, `Generate rest ms`를 `generate_ms`에서 vision/LLM child timer를 뺀 residual로 분리해 보여줍니다.
 
 ## 추천 Config
 

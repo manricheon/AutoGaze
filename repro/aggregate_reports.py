@@ -18,6 +18,8 @@ from repro.markdown_report import (
 )
 from repro.report_charts import ChartBar, ChartSegment, nonnegative_difference, numeric_or_none, shorten_label, write_bar_chart
 
+HLVID_MODE_ORDER = ("keep_all", "single_scale_dense", "autogaze")
+
 
 ROW_FIELDS = [
     "source_path",
@@ -40,6 +42,10 @@ ROW_FIELDS = [
     "autogaze_ms",
     "vision_encoder_ms",
     "mm_projector_ms",
+    "generate_ms",
+    "llm_generation_ms",
+    "llm_forward_ms",
+    "generation_rest_ms",
     "llm_ms",
     "single_scale_dense_patch_tokens",
     "full_or_raw_patch_tokens",
@@ -69,8 +75,8 @@ def normalize_report_file(path: str | Path) -> list[dict[str, Any]]:
     payload = load_json(source)
     if "modes" in payload and isinstance(payload.get("modes"), dict):
         return [_normalize_plugin_mode(source, mode, summary) for mode, summary in payload["modes"].items()]
-    if "readable_summary" in payload and ("keep_all" in payload or "autogaze" in payload):
-        return [_normalize_hlvid_mode(source, payload, mode) for mode in ("keep_all", "autogaze")]
+    if "readable_summary" in payload and any(mode in payload for mode in HLVID_MODE_ORDER):
+        return [_normalize_hlvid_mode(source, payload, mode) for mode in HLVID_MODE_ORDER if mode in payload]
     return [_normalize_single(source, payload)]
 
 
@@ -96,6 +102,10 @@ def _blank_row(path: Path, *, report_kind: str, mode: str | None, model_path: st
         "autogaze_ms": None,
         "vision_encoder_ms": None,
         "mm_projector_ms": None,
+        "generate_ms": None,
+        "llm_generation_ms": None,
+        "llm_forward_ms": None,
+        "generation_rest_ms": None,
         "llm_ms": None,
         "single_scale_dense_patch_tokens": None,
         "full_or_raw_patch_tokens": None,
@@ -114,6 +124,12 @@ def _blank_row(path: Path, *, report_kind: str, mode: str | None, model_path: st
         "max_tiles_video": None,
         "gazing_mode": None,
     }
+
+
+def _sum_present(*values: Any) -> float | None:
+    numbers = [numeric_or_none(value) for value in values]
+    present = [value for value in numbers if value is not None]
+    return sum(present) if present else None
 
 
 def _normalize_single(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
@@ -144,7 +160,8 @@ def _normalize_single(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
 
 def _normalize_hlvid_mode(path: Path, payload: dict[str, Any], mode: str) -> dict[str, Any]:
     row = _blank_row(path, report_kind="hlvid_benchmark", mode=mode, model_path=payload.get("model_path"))
-    row["status"] = "ok"
+    mode_status = get_path(payload, f"readable_summary.mode_status.{mode}")
+    row["status"] = "skipped" if mode_status == "skipped_or_missing" else "ok"
     accuracy = as_mapping(get_path(payload, f"{mode}.accuracy", {}))
     row["accuracy_total"] = numeric_or_none(accuracy.get("accuracy_total"))
     row["accuracy_scored"] = numeric_or_none(accuracy.get("accuracy_scored"))
@@ -217,11 +234,35 @@ def _apply_metrics(row: dict[str, Any], metrics: dict[str, Any], *, mode: str | 
     )
     row["vision_encoder_ms"] = _metric(
         latency,
-        ("vit_encoder_ms", "vision_encoder_ms", "vit_encoder_median", "qwen_vit_prepare", "qwen_vit_prepare_ms"),
+        (
+            "vit_encoder_ms",
+            "vision_encoder_ms",
+            "siglip_vision_ms",
+            "vit_encoder_median",
+            "qwen_vit_prepare",
+            "qwen_vit_prepare_ms",
+        ),
         mode,
     )
     row["mm_projector_ms"] = _metric(latency, ("mm_projector_ms", "projector_ms"), mode)
-    row["llm_ms"] = _metric(latency, ("llm_ms", "llm_median", "generate", "generate_ms"), mode)
+    row["generate_ms"] = _metric(latency, ("generate_ms", "generate_median", "generate"), mode)
+    row["llm_forward_ms"] = _metric(latency, ("llm_ms", "llm_median", "llm_forward_ms"), mode)
+    row["generation_rest_ms"] = _metric(latency, ("generation_rest_ms", "generate_rest_ms"), mode)
+    if row["generation_rest_ms"] is None:
+        vision_parent = _metric(latency, ("vision_encoder_ms", "vision_encoder_median"), mode)
+        vision_for_generate = vision_parent
+        if vision_for_generate is None:
+            vision_for_generate = _sum_present(
+                _metric(latency, ("vision_input_build_ms", "vision_input_build_median"), mode),
+                row["vision_encoder_ms"],
+                row["mm_projector_ms"],
+            )
+        child_total = _sum_present(vision_for_generate, row["llm_forward_ms"])
+        row["generation_rest_ms"] = nonnegative_difference(row["generate_ms"], child_total)
+    row["llm_generation_ms"] = _metric(latency, ("llm_generation_ms", "llm_generation_median"), mode)
+    if row["llm_generation_ms"] is None:
+        row["llm_generation_ms"] = _sum_present(row["llm_forward_ms"], row["generation_rest_ms"])
+    row["llm_ms"] = row["llm_forward_ms"]
     row["single_scale_dense_patch_tokens"] = _metric(
         tokens,
         ("single_scale_dense_siglip_reference_patch_tokens",),
@@ -231,6 +272,8 @@ def _apply_metrics(row: dict[str, Any], metrics: dict[str, Any], *, mode: str | 
         tokens,
         (
             "hd_multiscale_keep_all_patch_tokens",
+            "vit_encoder_input_patch_tokens_before_autogaze",
+            "single_scale_dense_siglip_reference_patch_tokens",
             "raw_vit_patch_tokens_before_selector",
             "encoder_patch_tokens_before_keep_all_or_raw",
             "visual_tokens_before_prune",
@@ -241,6 +284,7 @@ def _apply_metrics(row: dict[str, Any], metrics: dict[str, Any], *, mode: str | 
         tokens,
         (
             "autogaze_selected_total_patch_tokens",
+            "vit_encoder_input_patch_tokens_after_autogaze",
             "encoder_input_patch_tokens_after_autogaze",
             "encoder_patch_tokens_after_autogaze",
             "visual_tokens_after_prune",
@@ -416,11 +460,13 @@ def _selector_rank(row: dict[str, Any]) -> int:
     gazing_mode = str(row.get("gazing_mode") or "").lower()
     if mode in {"keep-all", "keepall", "off", "baseline"} or "keep-all" in mode or gazing_mode == "keep-all":
         return 0
-    if mode == "autogaze" or "autogaze" in mode:
+    if mode in {"single-scale-dense", "keep-all-single", "single-scale"} or "single-scale" in mode:
         return 1
+    if mode == "autogaze" or "autogaze" in mode:
+        return 2
     if "probe" in mode or "sidecar" in mode:
-        return 3
-    return 2
+        return 4
+    return 3
 
 
 def _config_group_key(row: dict[str, Any]) -> tuple[Any, ...]:
@@ -469,9 +515,12 @@ def _write_trend_charts(rows: list[dict[str, Any]], assets: Path) -> dict[str, P
         projector = numeric_or_none(row.get("mm_projector_ms"))
         if projector is not None and projector > 0:
             segments.append(ChartSegment("Projector", projector))
-        llm = numeric_or_none(row.get("llm_ms"))
+        llm = numeric_or_none(row.get("llm_forward_ms") or row.get("llm_ms"))
         if llm is not None and llm > 0:
-            segments.append(ChartSegment("LLM", llm))
+            segments.append(ChartSegment("LLM forward", llm))
+        generate_rest = numeric_or_none(row.get("generation_rest_ms"))
+        if generate_rest is not None and generate_rest > 0:
+            segments.append(ChartSegment("Generate rest", generate_rest))
         total = numeric_or_none(row.get("total_ms"))
         known = sum(segment.value for segment in segments)
         if total is not None and total > known:
@@ -496,8 +545,11 @@ def _write_trend_charts(rows: list[dict[str, Any]], assets: Path) -> dict[str, P
         vision_parts = [value for value in (vision, projector) if value is not None and value > 0]
         if vision_parts:
             attribution_segments.append(ChartSegment("Vision pipeline", sum(vision_parts)))
-        if llm is not None and llm > 0:
-            attribution_segments.append(ChartSegment("MLLM pipeline", llm))
+        llm_generation = numeric_or_none(row.get("llm_generation_ms"))
+        if llm_generation is None:
+            llm_generation = _sum_present(llm, generate_rest)
+        if llm_generation is not None and llm_generation > 0:
+            attribution_segments.append(ChartSegment("LLM generation", llm_generation))
         known_attribution = sum(segment.value for segment in attribution_segments)
         if total is not None and total > known_attribution:
             attribution_segments.append(ChartSegment("Other", total - known_attribution))
@@ -554,9 +606,10 @@ def _write_trend_charts(rows: list[dict[str, Any]], assets: Path) -> dict[str, P
 
 def _row_label(row: dict[str, Any], index: int) -> str:
     mode = row.get("mode") or "run"
+    mode_label = {"single_scale_dense": "single-scale"}.get(str(mode), str(mode))
     frames = row.get("frames")
     resolution = row.get("processor_input_resolution")
-    parts = [str(mode)]
+    parts = [mode_label]
     if frames is not None:
         parts.append(f"{int(float(frames))}f")
     if resolution:
@@ -592,7 +645,10 @@ def _render_markdown(rows: list[dict[str, Any]], charts: dict[str, Path], output
         ("autogaze_ms", "AutoGaze ms"),
         ("vision_encoder_ms", "ViT ms"),
         ("mm_projector_ms", "Projector ms"),
-        ("llm_ms", "LLM ms"),
+        ("generate_ms", "Generate total ms"),
+        ("llm_generation_ms", "LLM generation ms"),
+        ("llm_forward_ms", "LLM forward ms"),
+        ("generation_rest_ms", "Generate rest ms"),
         ("full_or_raw_patch_tokens", "Full patch"),
         ("autogaze_selected_patch_tokens", "Selected patch"),
         ("token_reduction_ratio", "Patch x"),

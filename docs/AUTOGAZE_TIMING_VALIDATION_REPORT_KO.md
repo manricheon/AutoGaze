@@ -34,17 +34,24 @@ total_ms
   + generate_ms
 ```
 
-| 항목 | 포함 | 미포함 |
+| 항목 | 포함 | 미포함 / 주의 |
 | --- | --- | --- |
-| `video_decode_sampling_ms` | 비디오 metadata/seek/decode/sample | AutoGaze forward, LLM generate |
-| `video_tiling_tensorize_ms` | resize, tile, tensor 변환 | 모델 forward |
-| `video_preprocess_without_autogaze_ms` | decode + resize/tile/tensorize | AutoGaze, generate |
-| `autogaze_forward_batched_ms` | AutoGaze 모델 forward/generate batch 실행 합 | 비디오 decode, ViT, LLM |
+| `video_decode_read_ms` | 비디오 metadata/keyframe scan/seek/decode/frame 변환 | AutoGaze forward, LLM generate |
+| `video_frame_resize_ms` | runner-side frame resize가 켜진 경우의 resize | resize를 processor가 수행하면 `Prep rest`에 남을 수 있음 |
+| `video_tiling_ms` | NVILA processor의 tile 생성, thumbnail 처리, tensor 변환 | 모델 forward |
+| `preprocess_rest_without_decode_autogaze_ms` | `video_preprocess_without_autogaze_ms - video_decode_read_ms` | decode/read와 AutoGaze를 뺀 processor residual |
+| `video_preprocess_without_autogaze_ms` | decode + resize/tile/tensorize. AutoGaze 제외 | `autogaze_total_ms`, `generate_ms` |
+| `autogaze_model_forward_ms` | AutoGaze 모델 forward batch 실행 합 | 입력 준비/선택 정리, 비디오 decode, ViT, LLM |
+| `selector_input_build_ms` | `autogaze_total_ms - autogaze_model_forward_ms` residual | 독립 wrapper가 아니라 실제 측정된 부모/자식 timer 차이 |
 | `autogaze_total_ms` | AutoGaze 입력 준비 + 모델 실행 + 선택 결과 정리 | LLM generate |
-| `vision_encoder_ms` | SigLIP/ViT encoder | AutoGaze, LLM |
+| `siglip_vision_ms` | SigLIP/ViT vision tower forward-only | projector, LLM |
+| `mm_projector_ms` | visual feature -> LLM hidden projection | SigLIP forward, LLM |
+| `vision_input_build_ms` | `vision_encoder_ms - siglip_vision_ms - mm_projector_ms` residual | 독립 wrapper가 아니라 feature packing/reorder residual |
+| `vision_encoder_ms` | vision path wrapper 전체 | AutoGaze, LLM forward |
+| `llm_forward_ms` | LLM forward 호출 누적 | video preprocess, AutoGaze |
 | `generate_ms` | MLLM generate/prefill 포함 모델 호출 | preprocess, AutoGaze |
 
-하위 항목은 항상 상위 항목의 완전한 합과 일치하지 않을 수 있습니다. 경계 바깥의 Python overhead, synchronization, processor 내부 bookkeeping이 있을 수 있기 때문입니다. 그래서 report에는 상위 3분할과 핵심 하위 timing을 같이 남깁니다.
+하위 항목은 항상 상위 항목의 완전한 합과 일치하지 않을 수 있습니다. 경계 바깥의 Python overhead, synchronization, processor 내부 bookkeeping이 있을 수 있기 때문입니다. 그래서 report에는 상위 3분할과 핵심 하위 timing을 같이 남깁니다. `selector_input_build_ms`와 `vision_input_build_ms`는 실제 측정된 parent timer에서 child timer를 뺀 residual이며, 이 둘은 total에 다시 더하지 않습니다.
 
 ## AutoGaze latency에 영향을 주는 옵션
 
@@ -111,9 +118,11 @@ Markdown 변환:
 
 | 질문 | 봐야 할 값 |
 | --- | --- |
-| AutoGaze 모델만 얼마 걸렸나 | `autogaze_forward_batched_ms` |
+| AutoGaze 모델만 얼마 걸렸나 | `autogaze_model_forward_ms` 또는 stage timing의 `processor.autogaze_forward_batched.total_ms` |
 | AutoGaze 전체 비용은 얼마인가 | `autogaze_total_ms` |
+| AutoGaze 입력/후처리 비용은 얼마인가 | `selector_input_build_ms` |
 | 전처리와 중복인가 | `video_preprocess_without_autogaze_ms`와 분리해서 확인 |
-| ViT 이득이 있나 | `vision_encoder_ms`, encoder input token 수 |
+| ViT 이득이 있나 | `siglip_vision_ms`, `vision_encoder_ms`, encoder input token 수 |
+| vision feature packing 비용이 있나 | `vision_input_build_ms` |
 | LLM 이득이 있나 | `generate_ms`, visual token 수, TTFT |
 | 선택이 실제로 줄었나 | full/off patch 대비 selected patch ratio |

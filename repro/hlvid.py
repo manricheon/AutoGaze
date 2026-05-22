@@ -32,7 +32,9 @@ LATENCY_FIELDS = (
     "gazing_info_total_ms",
     "autogaze_forward_ms",
     "autogaze_model_forward_ms",
+    "selector_input_build_ms",
     "vision_encoder_ms",
+    "vision_input_build_ms",
     "siglip_vision_ms",
     "mm_projector_ms",
     "llm_forward_ms",
@@ -83,6 +85,44 @@ READABLE_STAGE_TIMING_FIELDS = (
         "stage_timings_ms.processor.autogaze_total.count",
     ),
 )
+DECODE_READ_STAGE_TIMING_FIELDS = (
+    (
+        "processor_video_container_open_total_ms",
+        "stage_timings_ms.processor.video_container_open.total_ms",
+    ),
+    (
+        "processor_video_keyframe_index_scan_total_ms",
+        "stage_timings_ms.processor.video_keyframe_index_scan.total_ms",
+    ),
+    (
+        "processor_video_seek_total_ms",
+        "stage_timings_ms.processor.video_seek.total_ms",
+    ),
+    (
+        "processor_video_decode_seek_total_ms",
+        "stage_timings_ms.processor.video_decode_seek.total_ms",
+    ),
+    (
+        "processor_video_decode_scan_total_ms",
+        "stage_timings_ms.processor.video_decode_scan.total_ms",
+    ),
+    (
+        "processor_video_frame_to_pil_total_ms",
+        "stage_timings_ms.processor.video_frame_to_pil.total_ms",
+    ),
+    (
+        "processor_video_decode_sampling_total_ms",
+        "stage_timings_ms.processor.video_decode_sampling.total_ms",
+    ),
+    (
+        "processor_video_frame_resize_total_ms",
+        "stage_timings_ms.processor.video_frame_resize.total_ms",
+    ),
+    (
+        "processor_runner_video_prepare_total_ms",
+        "stage_timings_ms.processor.runner_video_prepare_total.total_ms",
+    ),
+)
 MODULE_LATENCY_FIELDS = (
     ("total_ms", "total_ms"),
     ("video_decode_read_ms", "video_decode_read_ms"),
@@ -90,8 +130,14 @@ MODULE_LATENCY_FIELDS = (
     ("preprocess_total_ms", "video_preprocess_ms"),
     ("autogaze_ms", "autogaze_ms"),
     ("autogaze_total_ms", "autogaze_total_ms"),
+    ("selector_input_build_ms", "selector_input_build_ms"),
+    ("vision_input_build_ms", "vision_input_build_ms"),
     ("vit_encoder_ms", "siglip_vision_ms"),
+    ("vision_encoder_ms", "vision_encoder_ms"),
+    ("mm_projector_ms", "mm_projector_ms"),
+    ("generate_ms", "generate_ms"),
     ("llm_ms", "llm_forward_ms"),
+    ("llm_forward_ms", "llm_forward_ms"),
 )
 KEY_TOKEN_FIELDS = (
     ("video_sampled_frames", "token_metrics.video_sampled_frames"),
@@ -322,10 +368,47 @@ def metric_value(row: dict[str, Any], dotted_path: str) -> Any:
     return value
 
 
+def derived_latency_value(row: dict[str, Any], field: str) -> Any:
+    value = metric_value(row, field)
+    if value is not None:
+        return value
+    if field == "selector_input_build_ms":
+        autogaze_total = first_metric_value(row, "autogaze_total_ms", "gazing_info_total_ms", "autogaze_ms")
+        autogaze_forward = first_metric_value(row, "autogaze_model_forward_ms", "autogaze_forward_ms")
+        if autogaze_total is None or autogaze_forward is None:
+            return None
+        try:
+            return max(float(autogaze_total) - float(autogaze_forward), 0.0)
+        except (TypeError, ValueError):
+            return None
+    if field == "vision_input_build_ms":
+        vision_encoder = metric_value(row, "vision_encoder_ms")
+        if vision_encoder is None:
+            return None
+        substage_total = 0.0
+        has_substage = False
+        for child_field in ("siglip_vision_ms", "mm_projector_ms"):
+            child_value = metric_value(row, child_field)
+            if child_value is None:
+                continue
+            try:
+                substage_total += float(child_value)
+            except (TypeError, ValueError):
+                return None
+            has_substage = True
+        if not has_substage:
+            return None
+        try:
+            return max(float(vision_encoder) - substage_total, 0.0)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 def numeric_values(rows: list[dict[str, Any]], field: str) -> list[float]:
     values: list[float] = []
     for row in rows:
-        value = metric_value(row, field)
+        value = derived_latency_value(row, field)
         if value is None and field == "video_decode_read_ms":
             value = metric_value(row, "video_decode_ms")
         if value is None:
@@ -375,6 +458,8 @@ def median_from_stats(stats: dict[str, dict[str, float | int]], field: str) -> f
     field_stats = stats.get(field)
     if not field_stats:
         return None
+    if field_stats.get("count") == 0:
+        return None
     return field_stats.get("median")
 
 
@@ -401,9 +486,11 @@ LATENCY_HIERARCHY_ASCII = """total_ms = video_preprocess_without_autogaze_ms + a
 |   |-- video_tiling_ms (included; not an extra total term)
 |   `-- other processor/tokenization overhead
 |-- autogaze_total_ms
+|   |-- selector_input_build_ms (derived residual when forward timer exists)
 |   `-- autogaze_model_forward_ms / autogaze_forward_ms (model forward only)
 `-- generate_ms
     |-- vision_encoder_ms
+    |   |-- vision_input_build_ms (derived residual when child timers exist)
     |   |-- siglip_vision_ms
     |   `-- mm_projector_ms
     |-- llm_forward_ms
@@ -498,7 +585,7 @@ def latency_hierarchy_summary(metrics: dict[str, Any] | None = None) -> dict[str
                 "value_ms": autogaze_total_ms,
                 "included_in": "total_ms",
                 "aliases": ["gazing_info_total_ms", "autogaze_ms"],
-                "includes": ["autogaze_model_forward_ms"],
+                "includes": ["selector_input_build_ms", "autogaze_model_forward_ms"],
                 "description": "AutoGaze stage total: model forward plus gaze-info bookkeeping.",
             },
             "gazing_info_total_ms": {
@@ -515,6 +602,15 @@ def latency_hierarchy_summary(metrics: dict[str, Any] | None = None) -> dict[str
                 "add_to_total_ms": False,
                 "description": "AutoGaze model forward-only timing over batched tile tensors.",
             },
+            "selector_input_build_ms": {
+                "value_ms": metrics.get("selector_input_build_ms"),
+                "included_in": "autogaze_total_ms",
+                "add_to_total_ms": False,
+                "description": (
+                    "Derived residual: autogaze_total_ms minus autogaze_model_forward_ms. "
+                    "This is AutoGaze input/postprocess bookkeeping, not an independently wrapped timer."
+                ),
+            },
             "generate_ms": {
                 "value_ms": metrics.get("generate_ms"),
                 "includes": [
@@ -527,9 +623,18 @@ def latency_hierarchy_summary(metrics: dict[str, Any] | None = None) -> dict[str
             "vision_encoder_ms": {
                 "value_ms": metrics.get("vision_encoder_ms"),
                 "included_in": "generate_ms",
-                "includes": ["siglip_vision_ms", "mm_projector_ms"],
+                "includes": ["vision_input_build_ms", "siglip_vision_ms", "mm_projector_ms"],
                 "add_to_total_ms": False,
                 "description": "Vision path inside generate, including SigLIP and projector hooks.",
+            },
+            "vision_input_build_ms": {
+                "value_ms": metrics.get("vision_input_build_ms"),
+                "included_in": "vision_encoder_ms",
+                "add_to_total_ms": False,
+                "description": (
+                    "Derived residual: vision_encoder_ms minus measured SigLIP and projector child stages. "
+                    "This captures feature packing/reordering overhead when the child timers are present."
+                ),
             },
             "siglip_vision_ms": {
                 "value_ms": metrics.get("siglip_vision_ms"),
@@ -615,6 +720,7 @@ def summarize_prediction_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     latency = stats_by_field(rows, LATENCY_FIELDS)
     stage_timings = stats_by_labeled_field(rows, STAGE_TIMING_FIELDS)
     readable_stage_timings = stats_by_labeled_field(rows, READABLE_STAGE_TIMING_FIELDS)
+    decode_read_stage_timings = stats_by_labeled_field(rows, DECODE_READ_STAGE_TIMING_FIELDS)
     memory = stats_by_field(rows, MEMORY_FIELDS)
     tokens = stats_by_field(rows, TOKEN_FIELDS)
     compute = stats_by_field(rows, COMPUTE_FIELDS)
@@ -641,6 +747,17 @@ def summarize_prediction_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "stage_timings_ms_median": {
                 field: readable_stage_timings[field]["median"] for field, _ in READABLE_STAGE_TIMING_FIELDS
             },
+            "decode_read_stage_timings_ms_median": {
+                field: decode_read_stage_timings[field]["median"]
+                for field, _ in DECODE_READ_STAGE_TIMING_FIELDS
+            },
+            "decode_read_stage_note": (
+                "video_decode_read_ms is the sum of container_open, keyframe_index_scan, seek, "
+                "decode_seek/decode_scan, and frame_to_pil when fine-grained runner timing is available. "
+                "video_frame_resize and runner_video_prepare_total are shown here for diagnosis but are not part "
+                "of video_decode_read_ms. processor_video_decode_sampling_total_ms indicates the older broad "
+                "processor _load_video_frames wrapper path."
+            ),
             "stage_timings_note": (
                 "Nested stage_timings_ms are aggregated from per-row prediction JSONL. "
                 "processor_autogaze_forward_batched_total_ms is the summed _run_autogaze_batched time "
@@ -654,7 +771,8 @@ def summarize_prediction_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 "preprocess_rest_without_decode_autogaze is the remaining non-AutoGaze processor work, "
                 "preprocess_without_autogaze=video_preprocess_without_autogaze_ms, "
                 "preprocess_total=legacy inclusive video_preprocess_ms, autogaze=autogaze_total_ms, "
-                "vit_encoder=siglip_vision_ms, llm=llm_forward_ms. "
+                "vit_encoder=siglip_vision_ms, projector=mm_projector_ms, "
+                "generate=generate_ms, llm_forward=llm_forward_ms. "
                 "The primary additive formula separates preprocess_without_autogaze, autogaze_total, and generate. "
                 "Use latency_accounting.additive_formula for the only additive total formula, "
                 "and use latency_ms_detail_median or top-level latency_ms for finer breakdowns."

@@ -1,4 +1,5 @@
 import argparse
+import json
 from fractions import Fraction
 from pathlib import Path
 
@@ -40,6 +41,7 @@ from repro.nvila_runner import (
     PAPER_PRESET_BASELINE,
     PAPER_PRESET_HD,
     model_patches_per_frame,
+    model_patches_per_frame_by_runtime_scale,
     parse_float_sequence,
     parse_int_sequence,
     parse_args,
@@ -51,6 +53,7 @@ from repro.nvila_runner import (
     stream_pts_per_frame,
     repeat_last_stream_samples_after_eof,
     resolve_video,
+    run_hlvid,
     spatial_tile_grid,
     summarize_repeat_results,
     summarize_token_budget_rows,
@@ -164,6 +167,33 @@ def test_build_latency_accounting_separates_additive_total_from_nested_breakdown
     ]
     assert "video_preprocess_without_autogaze_ms + autogaze_total_ms + generate_ms" in hierarchy["ascii_tree"]
     assert "video_decode_ms" in accounting["do_not_sum_with_total_ms"]
+
+
+def test_build_latency_accounting_derives_selector_and_vision_input_residuals_from_measured_stages():
+    accounting = build_latency_accounting(
+        {
+            "autogaze_total_ms": 12.0,
+            "autogaze_model_forward_ms": 8.0,
+            "vision_encoder_ms": 25.0,
+            "siglip_vision_ms": 18.0,
+            "mm_projector_ms": 3.0,
+        }
+    )
+
+    assert accounting["nested_preprocess_breakdown_ms"]["selector_input_build_ms"] == {
+        "value": 4.0,
+        "included_in": "autogaze_total_ms",
+        "add_to_total_ms": False,
+        "measurement": "derived: autogaze_total_ms - autogaze_model_forward_ms",
+    }
+    assert accounting["nested_generate_breakdown_ms"]["vision_input_build_ms"] == {
+        "value": 4.0,
+        "included_in": "vision_encoder_ms",
+        "add_to_total_ms": False,
+        "measurement": "derived: vision_encoder_ms - siglip_vision_ms - mm_projector_ms",
+    }
+    assert "selector_input_build_ms" in accounting["do_not_sum_with_total_ms"]
+    assert "vision_input_build_ms" in accounting["do_not_sum_with_total_ms"]
 
 
 class DummyVisionConfig:
@@ -662,6 +692,29 @@ def test_parse_args_accepts_gazing_mode_switch():
     assert args.gazing_mode == "keep-all"
 
 
+def test_parse_args_accepts_keep_all_single_alias_for_single_scale_dense():
+    args = parse_args(["--gazing-mode", "keep-all-single"])
+
+    assert args.requested_gazing_mode == "keep-all-single"
+    assert args.gazing_mode == "keep-all"
+    assert args.gazing_mode_alias == "keep-all-single"
+    assert args.autogaze_target_scales == "392"
+    assert args.autogaze_target_patch_size == 14
+    assert args.token_selector_name == "keep_all_single_scale"
+
+
+def test_keep_all_single_alias_keeps_all_patches_on_single_runtime_scale():
+    args = parse_args(["--gazing-mode", "keep-all-single"])
+
+    kwargs = processor_kwargs(args)
+
+    assert kwargs["gazing_ratio_tile"] == 1
+    assert kwargs["task_loss_requirement_tile"] is None
+    assert kwargs["target_scales"] == [392]
+    assert kwargs["target_patch_size"] == 14
+    assert build_run_identity(args)["autogaze_applicability"] == "hd_keep_all_single_scale_ablation"
+
+
 def test_stream_profile_can_override_gazing_ratio_for_quickstart_comparison():
     args = parse_args(["--mode", "stream-profile", "--stream-gazing-ratio", "0.75"])
 
@@ -997,6 +1050,8 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
         "autogaze_total_median": 12.0,
         "gazing_info_total_median": 12.0,
         "autogaze_model_forward_median": 10.0,
+        "selector_input_build_median": 2.0,
+        "vision_input_build_median": None,
         "vit_encoder_median": 18.0,
         "llm_median": 45.0,
         "field_note": (
@@ -1005,6 +1060,8 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
             "preprocess_total=legacy inclusive video_preprocess_ms, autogaze=autogaze_total_ms, "
             "gazing_info_total=gazing_info_total_ms, "
             "autogaze_model_forward=autogaze_model_forward_ms, "
+            "selector_input_build=derived residual inside AutoGaze, "
+            "vision_input_build=derived residual inside vision_encoder_ms, "
             "vit_encoder=siglip_vision_ms, llm=llm_forward_ms. "
             "The primary additive formula is preprocess_without_autogaze + autogaze_total + generate."
         ),
@@ -1036,6 +1093,8 @@ def test_build_single_summary_extracts_report_ready_metrics_from_single_payload(
             "autogaze_total_median": 12.0,
             "gazing_info_total_median": 12.0,
             "autogaze_model_forward_median": 10.0,
+            "selector_input_build_median": 2.0,
+            "vision_input_build_median": None,
             "vit_encoder_median": 18.0,
             "llm_median": 45.0,
         },
@@ -1964,6 +2023,115 @@ def test_compute_visual_token_metrics_compares_keep_all_and_autogaze_tokens():
     assert metrics["llm_visual_token_reduction_ratio"] == 5.0
 
 
+def _write_hlvid_manifest(path: Path, rows: list[dict[str, object]]) -> None:
+    path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+
+def _read_jsonl(path: Path) -> list[dict[str, object]]:
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def _hlvid_args(tmp_path: Path, manifest: Path) -> argparse.Namespace:
+    return parse_args(
+        [
+            "--mode",
+            "hlvid",
+            "--manifest",
+            str(manifest),
+            "--hlvid-video-root",
+            str(tmp_path),
+            "--predictions",
+            str(tmp_path / "predictions.jsonl"),
+            "--summary",
+            str(tmp_path / "summary.json"),
+            "--scored-predictions",
+            str(tmp_path / "scored.jsonl"),
+            "--device",
+            "cpu",
+            "--warmup-runs",
+            "0",
+            "--continue-on-error",
+        ]
+    )
+
+
+def test_run_hlvid_records_model_load_oom_when_continue_on_error(tmp_path: Path, monkeypatch):
+    manifest = tmp_path / "manifest.jsonl"
+    _write_hlvid_manifest(
+        manifest,
+        [
+            {
+                "question_id": 1,
+                "category": "av",
+                "video_path": "clip1.mp4",
+                "question": "Q? A. a B. b C. c D. d",
+                "answer": "A",
+            },
+            {
+                "question_id": 2,
+                "category": "av",
+                "video_path": "clip2.mp4",
+                "question": "Q? A. a B. b C. c D. d",
+                "answer": "B",
+            },
+        ],
+    )
+
+    def raise_oom(_args):
+        raise RuntimeError("CUDA out of memory while loading NVILA")
+
+    monkeypatch.setattr("repro.nvila_runner.load_model_and_processor", raise_oom)
+
+    args = _hlvid_args(tmp_path, manifest)
+    run_hlvid(args)
+
+    predictions = _read_jsonl(tmp_path / "predictions.jsonl")
+    summary = json.loads((tmp_path / "summary.json").read_text())
+
+    assert len(predictions) == 2
+    assert {row["question_id"] for row in predictions} == {1, 2}
+    assert all(row["status"] == "failed" for row in predictions)
+    assert all(row["runner_status"] == "oom" for row in predictions)
+    assert all(row["failure"]["kind"] == "oom" for row in predictions)
+    assert all(row["failure"]["stage"] == "nvila_hlvid_model_load" for row in predictions)
+    assert summary["failed"] == 2
+    assert summary["failure_summary"]["oom"] == 2
+
+
+def test_run_hlvid_records_row_oom_stage_when_continue_on_error(tmp_path: Path, monkeypatch):
+    manifest = tmp_path / "manifest.jsonl"
+    _write_hlvid_manifest(
+        manifest,
+        [
+            {
+                "question_id": 1,
+                "category": "av",
+                "video_path": "clip1.mp4",
+                "question": "Q? A. a B. b C. c D. d",
+                "answer": "A",
+            }
+        ],
+    )
+
+    monkeypatch.setattr("repro.nvila_runner.load_model_and_processor", lambda _args: (object(), object()))
+
+    def raise_row_oom(*_args, **_kwargs):
+        raise RuntimeError("CUDA out of memory inside sdpa attention")
+
+    monkeypatch.setattr("repro.nvila_runner.generate_one", raise_row_oom)
+
+    args = _hlvid_args(tmp_path, manifest)
+    run_hlvid(args)
+
+    predictions = _read_jsonl(tmp_path / "predictions.jsonl")
+
+    assert len(predictions) == 1
+    assert predictions[0]["status"] == "failed"
+    assert predictions[0]["runner_status"] == "oom"
+    assert predictions[0]["failure"]["kind"] == "oom"
+    assert predictions[0]["failure"]["stage"] == "llm_prefill_or_generate"
+
+
 def test_estimate_siglip_encoder_compute_splits_attention_and_mlp_costs():
     metrics = estimate_siglip_encoder_compute(
         sequence_lengths=[4, 2],
@@ -2030,6 +2198,24 @@ def test_model_patches_per_frame_accepts_plus_separated_nvila_scales():
     patches = model_patches_per_frame(DummyModel("56+112+196+392"))
 
     assert patches == 1060
+
+
+def test_runtime_patch_budget_can_follow_explicit_single_scale_dense():
+    patches = model_patches_per_frame_by_runtime_scale(
+        DummyModel("56+112+196+392"),
+        make_args(autogaze_target_scales="392"),
+    )
+
+    assert patches == {"392": 784}
+
+
+def test_runtime_patch_budget_uses_vision_patch_size_not_autogaze_coordinate_patch_size():
+    patches = model_patches_per_frame_by_runtime_scale(
+        DummyModel("56+112+196+392"),
+        make_args(autogaze_target_scales="392", autogaze_target_patch_size=16),
+    )
+
+    assert patches == {"392": 784}
 
 
 def test_stage_profiler_records_and_resets_timing():

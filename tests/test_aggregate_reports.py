@@ -65,6 +65,10 @@ def test_normalize_single_report_extracts_latency_tokens_memory_and_failure(tmp_
                 "autogaze_ms": None,
             "vision_encoder_ms": 700.0,
             "mm_projector_ms": None,
+            "generate_ms": None,
+            "llm_generation_ms": None,
+            "llm_forward_ms": None,
+            "generation_rest_ms": None,
             "llm_ms": None,
             "single_scale_dense_patch_tokens": None,
             "full_or_raw_patch_tokens": 1000.0,
@@ -148,14 +152,81 @@ def test_sort_rows_comparison_keeps_baseline_before_autogaze_and_failures_last()
     rows = [
         {"mode": "autogaze", "status": "ok", "frames": 128, "processor_input_resolution": "720p", "total_ms": 7000},
         {"mode": "keep_all", "status": "ok", "frames": 128, "processor_input_resolution": "720p", "total_ms": 9000},
+        {
+            "mode": "single_scale_dense",
+            "status": "ok",
+            "frames": 128,
+            "processor_input_resolution": "720p",
+            "total_ms": 8000,
+        },
         {"mode": "qwen_sparse", "status": "ok", "frames": 128, "processor_input_resolution": "720p", "total_ms": 6000},
         {"mode": "keep_all", "status": "oom", "frames": 256, "processor_input_resolution": "1080p", "total_ms": None},
     ]
 
     sorted_rows = sort_rows(rows, sort="comparison")
 
-    assert [row["mode"] for row in sorted_rows] == ["keep_all", "autogaze", "qwen_sparse", "keep_all"]
+    assert [row["mode"] for row in sorted_rows] == [
+        "keep_all",
+        "single_scale_dense",
+        "autogaze",
+        "qwen_sparse",
+        "keep_all",
+    ]
     assert sorted_rows[-1]["status"] == "oom"
+
+
+def test_normalize_hlvid_gain_report_includes_single_scale_dense_mode(tmp_path):
+    report = tmp_path / "hlvid_gain_report.json"
+    report.write_text(
+        json.dumps(
+            {
+                "keep_all": {"accuracy": {"accuracy_scored": 0.4, "failed": 0, "parse_failed": 0}},
+                "single_scale_dense": {
+                    "accuracy": {"accuracy_scored": 0.6, "failed": 0, "parse_failed": 0}
+                },
+                "autogaze": {"accuracy": {"accuracy_scored": 0.8, "failed": 0, "parse_failed": 0}},
+                "readable_summary": {
+                    "key_metrics_median": {
+                        "latency_ms": {
+                            "total_ms": {
+                                "keep_all": 10000,
+                                "single_scale_dense": 8000,
+                                "autogaze": 6000,
+                            }
+                        },
+                        "tokens": {
+                            "vit_encoder_input_patch_tokens_before_autogaze": {
+                                "keep_all": 1060,
+                                "single_scale_dense": 784,
+                                "autogaze": 1060,
+                            },
+                            "vit_encoder_input_patch_tokens_after_autogaze": {
+                                "keep_all": 1060,
+                                "single_scale_dense": 784,
+                                "autogaze": 212,
+                            },
+                            "patch_reduction_ratio_full_or_raw_over_autogaze": {
+                                "keep_all": 1,
+                                "single_scale_dense": 1,
+                                "autogaze": 5,
+                            },
+                        },
+                        "memory_bytes": {},
+                    }
+                },
+            }
+        )
+    )
+
+    rows = normalize_report_file(report)
+
+    assert [row["mode"] for row in rows] == ["keep_all", "single_scale_dense", "autogaze"]
+    single_scale = rows[1]
+    assert single_scale["accuracy_scored"] == 0.6
+    assert single_scale["total_ms"] == 8000.0
+    assert single_scale["full_or_raw_patch_tokens"] == 784.0
+    assert single_scale["autogaze_selected_patch_tokens"] == 784.0
+    assert single_scale["token_reduction_ratio"] == 1.0
 
 
 def test_aggregate_report_roots_accepts_sort_mode(tmp_path):

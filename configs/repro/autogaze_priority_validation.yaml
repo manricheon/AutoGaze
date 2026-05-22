@@ -22,7 +22,7 @@ priority_tracks:
         max_tiles_video: 48
     completion_gate:
       - keep-all and AutoGaze rows are both present for the same HLVid questions
-      - summary includes preprocessing, AutoGaze, vision encoder, LLM, total latency
+      - summary includes Decode/read, Prep rest, Selector input, AutoGaze, Vision input, ViT, LLM, total latency
       - summary includes visual token and patch reduction before/after AutoGaze
       - summary includes peak memory and failure stage when OOM happens
 

@@ -8,8 +8,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from repro.common import compute_stats, write_csv, write_json
+from repro.common import compute_stats, write_csv, write_json, write_jsonl
 from repro.hlvid import (
+    DECODE_READ_STAGE_TIMING_FIELDS,
     PROCESSING_BUDGET_SUMMARY_FIELDS,
     latency_accounting_summary,
     read_jsonl,
@@ -91,7 +92,9 @@ LATENCY_FIELDS = (
     "gazing_info_total_ms",
     "autogaze_forward_ms",
     "autogaze_model_forward_ms",
+    "selector_input_build_ms",
     "vision_encoder_ms",
+    "vision_input_build_ms",
     "siglip_vision_ms",
     "mm_projector_ms",
     "llm_forward_ms",
@@ -149,8 +152,14 @@ MODULE_LATENCY_FIELDS = (
     ("preprocess_total_ms", "video_preprocess_ms"),
     ("autogaze_ms", "autogaze_ms"),
     ("autogaze_total_ms", "autogaze_total_ms"),
+    ("selector_input_build_ms", "selector_input_build_ms"),
+    ("vision_input_build_ms", "vision_input_build_ms"),
     ("vit_encoder_ms", "siglip_vision_ms"),
+    ("vision_encoder_ms", "vision_encoder_ms"),
+    ("mm_projector_ms", "mm_projector_ms"),
+    ("generate_ms", "generate_ms"),
     ("llm_ms", "llm_forward_ms"),
+    ("llm_forward_ms", "llm_forward_ms"),
 )
 KEY_MEMORY_FIELDS = (
     ("processor_peak", "processor_peak_memory_bytes"),
@@ -207,10 +216,55 @@ def _metric(row: dict[str, Any], dotted_path: str) -> Any:
     return value
 
 
+def _first_metric(row: dict[str, Any], *fields: str) -> Any:
+    for field in fields:
+        value = _metric(row, field)
+        if value is not None:
+            return value
+    return None
+
+
+def _derived_latency_metric(row: dict[str, Any], field: str) -> Any:
+    value = _metric(row, field)
+    if value is not None:
+        return value
+    if field == "selector_input_build_ms":
+        autogaze_total = _first_metric(row, "autogaze_total_ms", "gazing_info_total_ms", "autogaze_ms")
+        autogaze_forward = _first_metric(row, "autogaze_model_forward_ms", "autogaze_forward_ms")
+        if autogaze_total is None or autogaze_forward is None:
+            return None
+        try:
+            return max(float(autogaze_total) - float(autogaze_forward), 0.0)
+        except (TypeError, ValueError):
+            return None
+    if field == "vision_input_build_ms":
+        vision_encoder = _metric(row, "vision_encoder_ms")
+        if vision_encoder is None:
+            return None
+        substage_total = 0.0
+        has_substage = False
+        for child_field in ("siglip_vision_ms", "mm_projector_ms"):
+            child_value = _metric(row, child_field)
+            if child_value is None:
+                continue
+            try:
+                substage_total += float(child_value)
+            except (TypeError, ValueError):
+                return None
+            has_substage = True
+        if not has_substage:
+            return None
+        try:
+            return max(float(vision_encoder) - substage_total, 0.0)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 def _numeric_values(rows: list[dict[str, Any]], field: str) -> list[float]:
     values: list[float] = []
     for row in rows:
-        value = _metric(row, field)
+        value = _derived_latency_metric(row, field)
         if value is None and field == "video_decode_read_ms":
             value = _metric(row, "video_decode_ms")
         if value is None:
@@ -250,7 +304,10 @@ def _median_ratio(
 
 
 def _median_value(rows: list[dict[str, Any]], field: str) -> float | None:
-    return compute_stats(_numeric_values(rows, field))["median"]
+    values = _numeric_values(rows, field)
+    if not values:
+        return None
+    return compute_stats(values)["median"]
 
 
 def _percent_reduction(before: float | None, after: float | None) -> float | None:
@@ -259,21 +316,31 @@ def _percent_reduction(before: float | None, after: float | None) -> float | Non
     return 100.0 * (float(before) - float(after)) / float(before)
 
 
+def _safe_ratio(before: float | None, after: float | None) -> float | None:
+    if before is None or after in {None, 0}:
+        return None
+    return float(before) / float(after)
+
+
 def _comparison_summary(
     keep_all_rows: list[dict[str, Any]],
     autogaze_rows: list[dict[str, Any]],
     field: str,
     *,
     ratio_key: str,
+    extra_modes: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, float | None]:
     keep_all_value = _median_value(keep_all_rows, field)
     autogaze_value = _median_value(autogaze_rows, field)
-    return {
+    summary = {
         "keep_all": keep_all_value,
         "autogaze": autogaze_value,
         ratio_key: _median_ratio(keep_all_rows, autogaze_rows, field),
         "reduction_percent_of_keep_all": _percent_reduction(keep_all_value, autogaze_value),
     }
+    for mode, rows in (extra_modes or {}).items():
+        summary[mode] = _median_value(rows, field)
+    return summary
 
 
 def _difference_value(before: float | None, after: float | None) -> float | None:
@@ -285,14 +352,19 @@ def _difference_value(before: float | None, after: float | None) -> float | None
 def _add_preprocess_rest_comparison(latency: dict[str, dict[str, float | None]]) -> None:
     preprocess = latency.get("preprocess_without_autogaze_ms", {})
     decode = latency.get("video_decode_read_ms", {})
-    keep_all = _difference_value(preprocess.get("keep_all"), decode.get("keep_all"))
-    autogaze = _difference_value(preprocess.get("autogaze"), decode.get("autogaze"))
+    modes = [
+        mode
+        for mode in ("keep_all", "single_scale_dense", "autogaze")
+        if mode in preprocess or mode in decode
+    ]
+    values = {mode: _difference_value(preprocess.get(mode), decode.get(mode)) for mode in modes}
+    keep_all = values.get("keep_all")
+    autogaze = values.get("autogaze")
     speedup = None
     if autogaze not in {None, 0} and keep_all is not None:
         speedup = float(keep_all) / float(autogaze)
     latency["preprocess_rest_without_decode_autogaze_ms"] = {
-        "keep_all": keep_all,
-        "autogaze": autogaze,
+        **values,
         "speedup_ratio_keep_all_over_autogaze": speedup,
         "reduction_percent_of_keep_all": _percent_reduction(keep_all, autogaze),
     }
@@ -328,13 +400,17 @@ def build_readable_summary(
     *,
     keep_all_rows: list[dict[str, Any]],
     autogaze_rows: list[dict[str, Any]],
+    single_scale_dense_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    single_scale_dense_rows = single_scale_dense_rows or []
+    extra_modes = {"single_scale_dense": single_scale_dense_rows} if single_scale_dense_rows else None
     latency_detail = {
         field: _comparison_summary(
             keep_all_rows,
             autogaze_rows,
             field,
             ratio_key="speedup_ratio_keep_all_over_autogaze",
+            extra_modes=extra_modes,
         )
         for field in LATENCY_FIELDS
     }
@@ -344,8 +420,19 @@ def build_readable_summary(
             autogaze_rows,
             field,
             ratio_key="speedup_ratio_keep_all_over_autogaze",
+            extra_modes=extra_modes,
         )
         for label, field in READABLE_STAGE_TIMING_FIELDS
+    }
+    decode_read_stage_timing_detail = {
+        label: _comparison_summary(
+            keep_all_rows,
+            autogaze_rows,
+            field,
+            ratio_key="speedup_ratio_keep_all_over_autogaze",
+            extra_modes=extra_modes,
+        )
+        for label, field in DECODE_READ_STAGE_TIMING_FIELDS
     }
     latency = {
         label: _comparison_summary(
@@ -353,6 +440,7 @@ def build_readable_summary(
             autogaze_rows,
             field,
             ratio_key="speedup_ratio_keep_all_over_autogaze",
+            extra_modes=extra_modes,
         )
         for label, field in MODULE_LATENCY_FIELDS
     }
@@ -363,6 +451,7 @@ def build_readable_summary(
             autogaze_rows,
             field,
             ratio_key="reduction_ratio_keep_all_over_autogaze",
+            extra_modes=extra_modes,
         )
         for field in MEMORY_FIELDS
     }
@@ -372,6 +461,7 @@ def build_readable_summary(
             autogaze_rows,
             field,
             ratio_key="reduction_ratio_keep_all_over_autogaze",
+            extra_modes=extra_modes,
         )
         for label, field in KEY_MEMORY_FIELDS
     }
@@ -423,6 +513,7 @@ def build_readable_summary(
     )
     processing_budget_summary = {
         "keep_all_median": summarize_processing_budget_rows(keep_all_rows),
+        "single_scale_dense_median": summarize_processing_budget_rows(single_scale_dense_rows),
         "autogaze_median": summarize_processing_budget_rows(autogaze_rows),
         "comparison": {
             field: _comparison_summary(
@@ -442,6 +533,7 @@ def build_readable_summary(
     return {
         "mode_status": {
             "keep_all": "available" if keep_all_rows else "skipped_or_missing",
+            "single_scale_dense": "available" if single_scale_dense_rows else "skipped_or_missing",
             "autogaze": "available" if autogaze_rows else "skipped_or_missing",
             "note": (
                 "A skipped/missing mode is still shown, but cross-mode ratios are null because no baseline rows exist."
@@ -449,15 +541,18 @@ def build_readable_summary(
         },
         "run_counts": {
             "keep_all_rows": len(keep_all_rows),
+            "single_scale_dense_rows": len(single_scale_dense_rows),
             "autogaze_rows": len(autogaze_rows),
             "count_note": (
-                "Counts are prediction rows per mode. With --limit 3 and both modes enabled, "
-                "expect keep_all_rows=3 and autogaze_rows=3; warmup runs are not counted."
+                "Counts are prediction rows per mode. With --limit 3 and default modes enabled, "
+                "expect keep_all_rows=3, single_scale_dense_rows=3, and autogaze_rows=3; "
+                "warmup runs are not counted."
             ),
         },
         "latency_ms_median": latency,
         "latency_ms_detail_median": latency_detail,
         "stage_timings_ms_median": stage_timing_detail,
+        "decode_read_stage_timings_ms_median": decode_read_stage_timing_detail,
         "key_metrics_median": {
             "latency_ms": latency,
             "tokens": tokens,
@@ -470,14 +565,21 @@ def build_readable_summary(
             "within each row; processor_autogaze_forward_batched_count is the number of wrapped calls "
             "observed for that row."
         ),
+        "decode_read_stage_note": (
+            "video_decode_read_ms is the sum of container_open, keyframe_index_scan, seek, decode_seek/decode_scan, "
+            "and frame_to_pil when fine-grained runner timing is available. video_frame_resize and "
+            "runner_video_prepare_total are shown here for diagnosis but are not part of video_decode_read_ms. "
+            "processor_video_decode_sampling_total_ms indicates the older broad processor _load_video_frames wrapper path."
+        ),
         "latency_accounting": latency_accounting_summary(),
         "latency_field_note": (
             "Summary-level latency is intentionally coarse: "
             "video_decode_read separates common video read/decode cost when measured, "
             "preprocess_rest_without_decode_autogaze is the remaining non-AutoGaze processor work, "
             "preprocess_without_autogaze=video_preprocess_without_autogaze_ms, "
-            "preprocess_total=legacy inclusive video_preprocess_ms, autogaze=autogaze_total_ms, "
-            "vit_encoder=siglip_vision_ms, llm=llm_forward_ms. "
+                "preprocess_total=legacy inclusive video_preprocess_ms, autogaze=autogaze_total_ms, "
+                "vit_encoder=siglip_vision_ms, projector=mm_projector_ms, "
+                "generate=generate_ms, llm_forward=llm_forward_ms. "
             "The primary additive formula separates preprocess_without_autogaze, autogaze_total, and generate. "
             "Use latency_accounting.additive_formula for the only additive total formula, "
             "and use latency_ms_detail_median or per-mode latency_ms for finer breakdowns."
@@ -930,6 +1032,19 @@ def _copy_args_with(args: argparse.Namespace, **overrides: Any) -> argparse.Name
     return argparse.Namespace(**values)
 
 
+def single_scale_dense_args(args: argparse.Namespace) -> argparse.Namespace:
+    scales = str(getattr(args, "single_scale_dense_scales", "392") or "392")
+    token_selector_name = f"keep_all_single_scale_{scales.replace('+', '_')}"
+    return _copy_args_with(
+        args,
+        gazing_mode="keep-all-single",
+        autogaze_target_scales=scales,
+        autogaze_target_patch_size=getattr(args, "autogaze_target_patch_size", None) or 14,
+        token_selector_adapter="keep-all",
+        token_selector_name=token_selector_name,
+    )
+
+
 def paper_mode_args(args: argparse.Namespace, mode_key: str) -> argparse.Namespace:
     if mode_key == "paper_baseline_nvila_8b_video":
         config = PAPER_PRESET_CONFIGS[PAPER_PRESET_BASELINE]
@@ -1032,8 +1147,10 @@ def _first_run_identity(rows: list[dict[str, Any]]) -> dict[str, Any]:
 def _oom_count(rows: list[dict[str, Any]]) -> int:
     total = 0
     for row in rows:
-        text = f"{row.get('error', '')} {row.get('status', '')}".lower()
-        if "oom" in text or "out of memory" in text:
+        failure = row.get("failure")
+        failure_kind = failure.get("kind") if isinstance(failure, dict) else None
+        text = f"{row.get('error', '')} {row.get('status', '')} {row.get('runner_status', '')}".lower()
+        if failure_kind == "oom" or "oom" in text or "out of memory" in text:
             total += 1
     return total
 
@@ -1194,16 +1311,108 @@ def _correctness_bucket(
     return "both_wrong"
 
 
+def _pairwise_correctness_bucket(
+    left_row: dict[str, Any] | None,
+    right_row: dict[str, Any] | None,
+) -> str:
+    if left_row is None:
+        return "left_missing"
+    if right_row is None:
+        return "right_missing"
+    left_correct = bool(left_row.get("correct"))
+    right_correct = bool(right_row.get("correct"))
+    if left_correct and right_correct:
+        return "both_correct"
+    if left_correct and not right_correct:
+        return "left_only_correct"
+    if right_correct and not left_correct:
+        return "right_only_correct"
+    return "both_wrong"
+
+
 def _paired_rate(count: int, paired: int) -> float | None:
     if paired == 0:
         return None
     return count / paired
 
 
+def build_pairwise_correctness_comparison(
+    *,
+    left_mode: str,
+    left_rows: list[dict[str, Any]],
+    right_mode: str,
+    right_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    _, left_scored_rows = score_predictions(left_rows)
+    _, right_scored_rows = score_predictions(right_rows)
+    left_by_key = _index_scored_rows(left_scored_rows)
+    right_by_key = _index_scored_rows(right_scored_rows)
+    keys = sorted(set(left_by_key) | set(right_by_key), key=_sort_pair_key)
+    counts = {
+        "total_unique": len(keys),
+        "paired": 0,
+        "both_correct": 0,
+        "left_only_correct": 0,
+        "right_only_correct": 0,
+        "both_wrong": 0,
+        "left_missing": 0,
+        "right_missing": 0,
+    }
+    samples: list[dict[str, Any]] = []
+    for key in keys:
+        left_row = left_by_key.get(key)
+        right_row = right_by_key.get(key)
+        bucket = _pairwise_correctness_bucket(left_row, right_row)
+        counts[bucket] += 1
+        if left_row is not None and right_row is not None:
+            counts["paired"] += 1
+        source_row = _first_present_row(left_row, right_row)
+        if len(samples) >= CORRECTNESS_COMPARISON_SAMPLE_LIMIT:
+            continue
+        samples.append(
+            {
+                "bucket": bucket,
+                "left_mode": left_mode,
+                "right_mode": right_mode,
+                "pair_key_type": key[0],
+                "pair_key": key[1],
+                "question_id": source_row.get("question_id"),
+                "target_video": source_row.get("video_path", source_row.get("video")),
+                "question": source_row.get("question", source_row.get("prompt")),
+                "correct_answer": source_row.get("expected_answer"),
+                "ground_truth_answer": source_row.get("answer"),
+                "left_answer": left_row.get("raw_output") if left_row else None,
+                "left_parsed_answer": left_row.get("parsed_answer") if left_row else None,
+                "left_correct": left_row.get("correct") if left_row else None,
+                "left_status": left_row.get("status", "ok") if left_row else "missing",
+                "right_answer": right_row.get("raw_output") if right_row else None,
+                "right_parsed_answer": right_row.get("parsed_answer") if right_row else None,
+                "right_correct": right_row.get("correct") if right_row else None,
+                "right_status": right_row.get("status", "ok") if right_row else "missing",
+            }
+        )
+    paired = counts["paired"]
+    return {
+        "left_mode": left_mode,
+        "right_mode": right_mode,
+        "counts": counts,
+        "paired_rates": {
+            "both_correct": _paired_rate(counts["both_correct"], paired),
+            "left_only_correct": _paired_rate(counts["left_only_correct"], paired),
+            "right_only_correct": _paired_rate(counts["right_only_correct"], paired),
+            "both_wrong": _paired_rate(counts["both_wrong"], paired),
+        },
+        "samples": samples,
+        "sample_limit": CORRECTNESS_COMPARISON_SAMPLE_LIMIT,
+    }
+
+
 def build_correctness_comparison(
     keep_all_rows: list[dict[str, Any]],
     autogaze_rows: list[dict[str, Any]],
+    single_scale_dense_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    single_scale_dense_rows = single_scale_dense_rows or []
     _, keep_all_scored_rows = score_predictions(keep_all_rows)
     _, autogaze_scored_rows = score_predictions(autogaze_rows)
     keep_all_by_key = _index_scored_rows(keep_all_scored_rows)
@@ -1251,6 +1460,28 @@ def build_correctness_comparison(
             }
         )
     paired = counts["paired"]
+    pairwise: dict[str, Any] = {}
+    if keep_all_rows or single_scale_dense_rows:
+        pairwise["keep_all_vs_single_scale_dense"] = build_pairwise_correctness_comparison(
+            left_mode="keep_all",
+            left_rows=keep_all_rows,
+            right_mode="single_scale_dense",
+            right_rows=single_scale_dense_rows,
+        )
+    if single_scale_dense_rows or autogaze_rows:
+        pairwise["single_scale_dense_vs_autogaze"] = build_pairwise_correctness_comparison(
+            left_mode="single_scale_dense",
+            left_rows=single_scale_dense_rows,
+            right_mode="autogaze",
+            right_rows=autogaze_rows,
+        )
+    if keep_all_rows or autogaze_rows:
+        pairwise["keep_all_vs_autogaze"] = build_pairwise_correctness_comparison(
+            left_mode="keep_all",
+            left_rows=keep_all_rows,
+            right_mode="autogaze",
+            right_rows=autogaze_rows,
+        )
     return {
         "counts": counts,
         "paired_rates": {
@@ -1259,11 +1490,14 @@ def build_correctness_comparison(
             "autogaze_only_correct": _paired_rate(counts["autogaze_only_correct"], paired),
             "both_wrong": _paired_rate(counts["both_wrong"], paired),
         },
+        "pairwise": pairwise,
         "samples": samples,
         "sample_limit": CORRECTNESS_COMPARISON_SAMPLE_LIMIT,
         "note": (
             "Rows are paired by question_id when available, otherwise by video_path and question. "
-            "Paired rates use only rows where both keep-all and AutoGaze outputs exist."
+            "Top-level counts keep the legacy keep-all vs AutoGaze comparison. pairwise contains "
+            "keep-all vs single-scale dense, single-scale dense vs AutoGaze, and keep-all vs AutoGaze "
+            "when those mode rows exist."
         ),
     }
 
@@ -1272,15 +1506,20 @@ def build_gain_report(
     *,
     keep_all_rows: list[dict[str, Any]],
     autogaze_rows: list[dict[str, Any]],
+    single_scale_dense_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    single_scale_dense_rows = single_scale_dense_rows or []
     keep_all = summarize_run(keep_all_rows)
     autogaze = summarize_run(autogaze_rows)
+    single_scale_dense = summarize_run(single_scale_dense_rows)
     readable_summary = build_readable_summary(
         keep_all_rows=keep_all_rows,
         autogaze_rows=autogaze_rows,
+        single_scale_dense_rows=single_scale_dense_rows,
     )
     correctness_comparison = build_correctness_comparison(
         keep_all_rows=keep_all_rows,
+        single_scale_dense_rows=single_scale_dense_rows,
         autogaze_rows=autogaze_rows,
     )
     latency_speedups = {
@@ -1327,19 +1566,46 @@ def build_gain_report(
     accuracy_delta = (
         autogaze["accuracy"]["accuracy_scored"] - keep_all["accuracy"]["accuracy_scored"]
     )
+    single_scale_patch_before = _median_value(single_scale_dense_rows, "token_metrics.encoder_raw_patch_tokens")
+    autogaze_patch_after = _median_value(autogaze_rows, "token_metrics.encoder_autogaze_selected_patch_tokens")
+    single_scale_llm_before = _median_value(single_scale_dense_rows, "token_metrics.llm_actual_visual_tokens")
+    autogaze_llm_after = _median_value(autogaze_rows, "token_metrics.llm_actual_visual_tokens")
     return {
         "keep_all": keep_all,
         "autogaze": autogaze,
+        "single_scale_dense": single_scale_dense,
         "readable_summary": readable_summary,
         "correctness_comparison": correctness_comparison,
         "benchmark_samples": {
             "keep_all": keep_all["accuracy"].get("benchmark_samples", []),
             "autogaze": autogaze["accuracy"].get("benchmark_samples", []),
+            "single_scale_dense": single_scale_dense["accuracy"].get("benchmark_samples", []),
             "correctness_comparison": correctness_comparison["samples"],
+            "correctness_pairwise": correctness_comparison.get("pairwise", {}),
             "note": (
                 "Readable per-sample benchmark context copied from the scoring summaries. "
                 "Full per-row outputs are in hlvid_*_predictions.jsonl and hlvid_*_scored.jsonl."
             ),
+        },
+        "single_scale_dense_comparison": {
+            "mode_status": "available" if single_scale_dense_rows else "skipped_or_missing",
+            "comparison_note": (
+                "single_scale_dense is keep-all with an explicit target scale, usually 392, so it compares "
+                "a dense one-scale SigLIP path against AutoGaze sparse/multiscale selection. It is an ablation "
+                "reference, not the paper NVILA-8B-Video baseline."
+            ),
+            "latency_speedup_median": {
+                field: _median_ratio(single_scale_dense_rows, autogaze_rows, field)
+                for field in LATENCY_FIELDS
+            },
+            "memory_reduction_ratio_median": {
+                field: _median_ratio(single_scale_dense_rows, autogaze_rows, field)
+                for field in MEMORY_FIELDS
+            },
+            "token_reduction_median": {
+                "encoder_patch_tokens": _safe_ratio(single_scale_patch_before, autogaze_patch_after),
+                "llm_visual_tokens": _safe_ratio(single_scale_llm_before, autogaze_llm_after),
+            },
         },
         "gains": {
             "accuracy_scored_delta": accuracy_delta,
@@ -1361,6 +1627,9 @@ def flatten_metric_row(report: dict[str, Any]) -> dict[str, Any]:
     row = {
         "keep_all_accuracy_scored": report["keep_all"]["accuracy"].get("accuracy_scored"),
         "autogaze_accuracy_scored": report["autogaze"]["accuracy"].get("accuracy_scored"),
+        "single_scale_dense_accuracy_scored": report.get("single_scale_dense", {})
+        .get("accuracy", {})
+        .get("accuracy_scored"),
         "gain_accuracy_scored_delta": report["gains"].get("accuracy_scored_delta"),
     }
     for field, value in report["gains"].get("latency_speedup_median", {}).items():
@@ -1373,6 +1642,19 @@ def flatten_metric_row(report: dict[str, Any]) -> dict[str, Any]:
         row[f"gain_compute_{field}_median"] = value
     for field, value in report.get("correctness_comparison", {}).get("counts", {}).items():
         row[f"correctness_{field}"] = value
+    for pair_key, pair in report.get("correctness_comparison", {}).get("pairwise", {}).items():
+        for field, value in pair.get("counts", {}).items():
+            row[f"correctness_{pair_key}_{field}"] = value
+    for field, value in report.get("single_scale_dense_comparison", {}).get(
+        "latency_speedup_median",
+        {},
+    ).items():
+        row[f"single_scale_vs_autogaze_latency_{field}_speedup_median"] = value
+    for field, value in report.get("single_scale_dense_comparison", {}).get(
+        "token_reduction_median",
+        {},
+    ).items():
+        row[f"single_scale_vs_autogaze_token_{field}_reduction_median"] = value
     return row
 
 
@@ -1393,6 +1675,9 @@ def output_paths(output_dir: str | Path) -> dict[str, Path]:
         "keep_all_predictions": root / "hlvid_keep_all_predictions.jsonl",
         "keep_all_summary": root / "hlvid_keep_all_summary.json",
         "keep_all_scored": root / "hlvid_keep_all_scored.jsonl",
+        "single_scale_dense_predictions": root / "hlvid_single_scale_dense_predictions.jsonl",
+        "single_scale_dense_summary": root / "hlvid_single_scale_dense_summary.json",
+        "single_scale_dense_scored": root / "hlvid_single_scale_dense_scored.jsonl",
         "autogaze_predictions": root / "hlvid_autogaze_predictions.jsonl",
         "autogaze_summary": root / "hlvid_autogaze_summary.json",
         "autogaze_scored": root / "hlvid_autogaze_scored.jsonl",
@@ -1412,8 +1697,141 @@ def output_paths(output_dir: str | Path) -> dict[str, Path]:
     }
 
 
-def run_command(command: list[str]) -> None:
-    subprocess.run(command, check=True)
+def _command_option_value(command: list[str], option: str) -> str | None:
+    try:
+        index = command.index(option)
+    except ValueError:
+        return None
+    value_index = index + 1
+    if value_index >= len(command):
+        return None
+    return command[value_index]
+
+
+def _subprocess_failure(command: list[str], exc: subprocess.CalledProcessError, mode_key: str | None) -> dict[str, Any]:
+    returncode = int(exc.returncode)
+    kind = "oom" if returncode in {-9, 137} else "subprocess_failed"
+    message = f"Subprocess exited with return code {returncode}"
+    return {
+        "kind": kind,
+        "stage": "subprocess",
+        "returncode": returncode,
+        "command": command,
+        "message": message,
+    }
+
+
+def _subprocess_failure_rows(
+    *,
+    command: list[str],
+    failure: dict[str, Any],
+    mode_key: str | None,
+    existing_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    error = failure["message"]
+    manifest_value = _command_option_value(command, "--manifest")
+    limit_value = _command_option_value(command, "--limit")
+    if manifest_value is None:
+        if existing_rows:
+            return []
+        return [
+            {
+                "status": "failed",
+                "runner_status": failure["kind"],
+                "mode_key": mode_key,
+                "error": error,
+                "failure": failure,
+            }
+        ]
+
+    manifest_rows = read_manifest_file(manifest_value)
+    if limit_value is not None:
+        manifest_rows = manifest_rows[: int(limit_value)]
+    completed_ids = {
+        row.get("question_id")
+        for row in existing_rows
+        if row.get("question_id") is not None
+    }
+    pending = [row for row in manifest_rows if row.get("question_id") not in completed_ids]
+    return [
+        {
+            **row,
+            "status": "failed",
+            "runner_status": failure["kind"],
+            "mode_key": mode_key,
+            "error": error,
+            "failure": failure,
+            "raw_output": None,
+        }
+        for row in pending
+    ]
+
+
+def _failure_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    by_kind: dict[str, int] = {}
+    by_stage: dict[str, int] = {}
+    for row in rows:
+        failure = row.get("failure")
+        if not isinstance(failure, dict):
+            continue
+        kind = str(failure.get("kind") or row.get("runner_status") or "subprocess_failed")
+        stage = str(failure.get("stage") or "unknown")
+        by_kind[kind] = by_kind.get(kind, 0) + 1
+        by_stage[stage] = by_stage.get(stage, 0) + 1
+    return {"total": sum(by_kind.values()), **by_kind, "by_stage": by_stage}
+
+
+def _write_subprocess_failure_outputs(
+    *,
+    command: list[str],
+    failure: dict[str, Any],
+    predictions: str | Path,
+    summary: str | Path,
+    scored_predictions: str | Path,
+    mode_key: str | None,
+) -> None:
+    existing_rows = read_prediction_rows(predictions)
+    new_rows = _subprocess_failure_rows(
+        command=command,
+        failure=failure,
+        mode_key=mode_key,
+        existing_rows=existing_rows,
+    )
+    rows = existing_rows + new_rows
+    write_jsonl(predictions, rows)
+    summary_payload, scored = score_predictions(rows)
+    summary_payload["subprocess_failure"] = failure
+    summary_payload["failure_summary"] = _failure_summary(rows)
+    write_json(summary, summary_payload)
+    write_jsonl(scored_predictions, scored)
+
+
+def run_command(
+    command: list[str],
+    *,
+    continue_on_error: bool = False,
+    predictions: str | Path | None = None,
+    summary: str | Path | None = None,
+    scored_predictions: str | Path | None = None,
+    mode_key: str | None = None,
+) -> dict[str, Any] | None:
+    try:
+        subprocess.run(command, check=True)
+        return None
+    except subprocess.CalledProcessError as exc:
+        if not continue_on_error:
+            raise
+        failure = _subprocess_failure(command, exc, mode_key)
+        if predictions is not None and summary is not None and scored_predictions is not None:
+            _write_subprocess_failure_outputs(
+                command=command,
+                failure=failure,
+                predictions=predictions,
+                summary=summary,
+                scored_predictions=scored_predictions,
+                mode_key=mode_key,
+            )
+        return failure
 
 
 def _run_paper_mode(
@@ -1436,7 +1854,12 @@ def _run_paper_mode(
             predictions=predictions,
             summary=summary,
             scored_predictions=scored_predictions,
-        )
+        ),
+        continue_on_error=bool(getattr(args, "continue_on_error", False)),
+        predictions=predictions,
+        summary=summary,
+        scored_predictions=scored_predictions,
+        mode_key=mode_key,
     )
 
 
@@ -1543,7 +1966,30 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 predictions=paths["keep_all_predictions"],
                 summary=paths["keep_all_summary"],
                 scored_predictions=paths["keep_all_scored"],
-            )
+            ),
+            continue_on_error=bool(getattr(args, "continue_on_error", False)),
+            predictions=paths["keep_all_predictions"],
+            summary=paths["keep_all_summary"],
+            scored_predictions=paths["keep_all_scored"],
+            mode_key="keep_all",
+        )
+    if not args.report_only and getattr(args, "single_scale_dense", True):
+        single_scale_args = single_scale_dense_args(args)
+        run_command(
+            build_runner_command(
+                single_scale_args,
+                gazing_mode=single_scale_args.gazing_mode,
+                manifest=layout["manifest"],
+                video_root=layout["video_root"],
+                predictions=paths["single_scale_dense_predictions"],
+                summary=paths["single_scale_dense_summary"],
+                scored_predictions=paths["single_scale_dense_scored"],
+            ),
+            continue_on_error=bool(getattr(args, "continue_on_error", False)),
+            predictions=paths["single_scale_dense_predictions"],
+            summary=paths["single_scale_dense_summary"],
+            scored_predictions=paths["single_scale_dense_scored"],
+            mode_key="single_scale_dense",
         )
     if not args.report_only and not args.skip_autogaze:
         run_command(
@@ -1555,12 +2001,18 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 predictions=paths["autogaze_predictions"],
                 summary=paths["autogaze_summary"],
                 scored_predictions=paths["autogaze_scored"],
-            )
+            ),
+            continue_on_error=bool(getattr(args, "continue_on_error", False)),
+            predictions=paths["autogaze_predictions"],
+            summary=paths["autogaze_summary"],
+            scored_predictions=paths["autogaze_scored"],
+            mode_key="autogaze",
         )
 
     report = build_gain_report(
         keep_all_rows=read_prediction_rows(paths["keep_all_predictions"]),
         autogaze_rows=read_prediction_rows(paths["autogaze_predictions"]),
+        single_scale_dense_rows=read_prediction_rows(paths["single_scale_dense_predictions"]),
     )
     report["dataset"] = {
         key: [str(item) for item in value] if isinstance(value, list) else str(value)
@@ -1629,6 +2081,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--autogaze-model-resident-gib", type=float, default=0.0)
     parser.add_argument("--skip-keep-all", action="store_true")
     parser.add_argument("--skip-autogaze", action="store_true")
+    parser.add_argument(
+        "--single-scale-dense",
+        dest="single_scale_dense",
+        action="store_true",
+        default=True,
+        help=(
+            "Compatibility flag; single-scale dense is enabled by default. "
+            "Use --skip-single-scale-dense to disable it."
+        ),
+    )
+    parser.add_argument(
+        "--skip-single-scale-dense",
+        dest="single_scale_dense",
+        action="store_false",
+        help="Skip the default single-scale dense keep-all ablation.",
+    )
+    parser.add_argument("--single-scale-dense-scales", default="392")
     parser.add_argument("--paper-baseline", action="store_true")
     parser.add_argument("--paper-hd-autogaze", action="store_true")
     parser.add_argument("--paper-comparison-report", action="store_true")

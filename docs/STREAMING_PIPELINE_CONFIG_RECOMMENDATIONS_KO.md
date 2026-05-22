@@ -110,10 +110,10 @@ Sweep:
 
 | 영역 | 핵심 필드 |
 | --- | --- |
-| decode | `video_decode_sampling_ms`, sample frame count, original resolution |
-| preprocess | resize resolution, tile count/frame, tensorize time |
-| AutoGaze | candidate patch, multiscale patch, selected patch, `autogaze_total_ms` |
-| ViT | full/off expected token, encoder input token, latency, memory |
+| decode | `video_decode_read_ms`, sample frame count, original resolution |
+| preprocess | resize resolution, tile count/frame, `video_frame_resize_ms`, `video_tiling_ms`, `preprocess_rest_without_decode_autogaze_ms` |
+| AutoGaze | candidate patch, multiscale patch, selected patch, `selector_input_build_ms`, `autogaze_model_forward_ms`, `autogaze_total_ms` |
+| ViT | full/off expected token, encoder input token, `vision_input_build_ms`, `siglip_vision_ms`, latency, memory |
 | LLM | visual token, context length, TTFT, generate time, peak memory |
 | failure | `failure.kind`, `failure.stage`, OOM 여부 |
 
