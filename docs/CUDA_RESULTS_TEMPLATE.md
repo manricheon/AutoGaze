@@ -106,9 +106,18 @@ Artifacts:
 
 | Mode | Model | Token selector | ViT path | MLLM path | Status | Accuracy | Total ms | Selected patch | LLM visual token | Peak GiB |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| qwen_full_vit |  | off | full | Qwen |  |  |  | n/a |  |  |
-| qwen_chunked_vit |  | off | chunked | Qwen |  |  |  | n/a |  |  |
-| qwen_chunked_vit_autogaze_sparse |  | AutoGaze | sparse/chunked | Qwen |  |  |  |  |  |  |
+| qwen2.5_full_vit |  | off | full | Qwen2.5 |  |  |  | n/a |  |  |
+| qwen2.5_chunked_vit |  | off | chunked | Qwen2.5 |  |  |  | n/a |  |  |
+| qwen2.5_chunked_vit_autogaze_sparse |  | AutoGaze | sparse/chunked | Qwen2.5 |  |  |  |  |  |  |
+| qwen3_full_vit |  | off | full | Qwen3 |  |  |  | n/a |  |  |
+| qwen3_chunked_vit |  | off | chunked | Qwen3 |  |  |  | n/a |  |  |
+| qwen3_chunked_vit_autogaze_sparse |  | AutoGaze | sparse/chunked | Qwen3 |  |  |  |  |  |  |
+| nvila-video-off |  | off | external VILA CLI | NVILA-Video |  |  |  | n/a |  |  |
+| nvila-video-autogaze-actual |  | AutoGaze sidecar | external VILA CLI | NVILA-Video |  |  |  | sidecar only |  |  |
+| longvila-off |  | off | external VILA CLI | LongVILA |  |  |  | n/a |  |  |
+| longvila-autogaze-actual |  | AutoGaze sidecar | external VILA CLI | LongVILA |  |  |  | sidecar only |  |  |
+| llava-onevision-off |  | off | native dense | LLaVA-OneVision |  |  |  | n/a |  |  |
+| llava-onevision-autogaze-actual |  | AutoGaze | post-encoder prune | LLaVA-OneVision |  |  |  |  |  |  |
 
 Artifacts:
 

@@ -1,7 +1,7 @@
 description: >
   HLVid limit-3 plugin comparison wrapper for extensibility checks. This runs
-  grouped Qwen comparison modes, VILA-family off/AutoGaze-sidecar modes,
-  LLaVA-OneVision off/post-encoder-prune mode, and InternVL3 off/AutoGaze-sidecar
+  grouped Qwen2.5/Qwen3 comparison modes, VILA-family off/AutoGaze actual-entry modes,
+  LLaVA-OneVision off/post-encoder-prune actual mode, and InternVL3 off/AutoGaze-sidecar
   modes on the same HLVid rows.
 
 plugin_hlvid_benchmark:
@@ -13,16 +13,19 @@ plugin_hlvid_benchmark:
     limit: 3
     modes:
       - nvila-video-off
-      - nvila-video-autogaze-sidecar-generate
+      - nvila-video-autogaze-actual
       - longvila-off
-      - longvila-autogaze-sidecar-generate
+      - longvila-autogaze-actual
       - internvl3-off
       - internvl3-autogaze-sidecar-generate
       - llava-onevision-off
-      - llava-onevision-autogaze-prune-generate
-      - qwen_full_vit
-      - qwen_chunked_vit
-      - qwen_chunked_vit_autogaze_sparse
+      - llava-onevision-autogaze-actual
+      - qwen2.5_full_vit
+      - qwen2.5_chunked_vit
+      - qwen2.5_chunked_vit_autogaze_sparse
+      - qwen3_full_vit
+      - qwen3_chunked_vit
+      - qwen3_chunked_vit_autogaze_sparse
     external_mllm_command: vila-infer
     num_video_frames: 32
     num_video_frames_thumbnail: 8
@@ -38,6 +41,7 @@ plugin_hlvid_benchmark:
       longvila: weight/LongVILA
       internvl3: weight/InternVL3
       llava-onevision: weight/LLaVA-OneVision
+      qwen2.5-vl: weight/Qwen2.5-VL-7B-Instruct
       qwen3-vl: weight/Qwen3-VL-8B-Instruct
 
 outputs:

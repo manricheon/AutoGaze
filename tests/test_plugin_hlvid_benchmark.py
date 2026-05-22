@@ -280,6 +280,45 @@ def test_build_mode_runner_args_for_qwen_vit_comparison_modes():
     assert "--enable-qwen-prune-generate" in sparse_args
 
 
+def test_build_mode_runner_args_for_qwen25_and_qwen3_named_vit_modes():
+    row = {
+        "video_path": "clip.mp4",
+        "question": "Question? A. one B. two C. three D. four",
+        "answer": "A",
+    }
+    common = {
+        "row": row,
+        "video_path": Path("/data/clip.mp4"),
+        "output_json": Path("/tmp/run.json"),
+        "models": {
+            "qwen2.5-vl": "weight/Qwen2.5-VL",
+            "qwen3-vl": "weight/Qwen3-VL",
+        },
+        "external_mllm_command": "vila-infer",
+        "num_video_frames": 16,
+        "max_tiles_video": 4,
+        "max_new_tokens": 8,
+        "qwen_vit_chunk_frames": 16,
+        "qwen_vit_max_spatial_chunks": 4,
+    }
+
+    qwen25_sparse = build_mode_runner_args(mode="qwen2.5_chunked_vit_autogaze_sparse", **common)
+    qwen3_sparse = build_mode_runner_args(mode="qwen3_chunked_vit_autogaze_sparse", **common)
+    qwen25_full = build_mode_runner_args(mode="qwen2.5_full_vit", **common)
+
+    assert qwen25_sparse[qwen25_sparse.index("--model-family") + 1] == "qwen2.5-vl"
+    assert qwen25_sparse[qwen25_sparse.index("--model-path") + 1] == "weight/Qwen2.5-VL"
+    assert qwen25_sparse[qwen25_sparse.index("--vision-encoder-adapter") + 1] == "qwen2.5-vl-vision"
+    assert qwen25_sparse[qwen25_sparse.index("--mllm-adapter") + 1] == "qwen2.5-vl"
+    assert qwen25_sparse[qwen25_sparse.index("--qwen-vit-mode") + 1] == "qwen_chunked_vit_autogaze_sparse"
+    assert "--run-autogaze-selector" in qwen25_sparse
+    assert "--enable-qwen-prune-generate" in qwen25_sparse
+    assert qwen3_sparse[qwen3_sparse.index("--model-family") + 1] == "qwen3-vl"
+    assert qwen3_sparse[qwen3_sparse.index("--qwen-vit-mode") + 1] == "qwen_chunked_vit_autogaze_sparse"
+    assert qwen25_full[qwen25_full.index("--qwen-vit-mode") + 1] == "qwen_full_vit"
+    assert qwen25_full[qwen25_full.index("--token-selector-adapter") + 1] == "keep-all"
+
+
 def test_build_mode_runner_args_for_llava_and_internvl_autogaze_probe_modes():
     row = {
         "video_path": "clip.mp4",
@@ -346,9 +385,9 @@ def test_build_mode_runner_args_for_executable_autogaze_expansion_modes():
     }
 
     for mode in [
-        "nvila-video-autogaze-sidecar-generate",
-        "longvila-autogaze-sidecar-generate",
-        "llava-onevision-autogaze-prune-generate",
+        "nvila-video-autogaze-actual",
+        "longvila-autogaze-actual",
+        "llava-onevision-autogaze-actual",
         "internvl3-autogaze-sidecar-generate",
     ]:
         args = build_mode_runner_args(mode=mode, **common)

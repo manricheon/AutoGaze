@@ -16,11 +16,29 @@ from repro.plugin_hlvid_benchmark import parse_model_overrides, run_plugin_hlvid
 
 PLUGIN_SUITE_MODES = {
     "qwen": [
-        "qwen_full_vit",
-        "qwen_chunked_vit",
-        "qwen_chunked_vit_autogaze_sparse",
+        "qwen2.5_full_vit",
+        "qwen2.5_chunked_vit",
+        "qwen2.5_chunked_vit_autogaze_sparse",
+        "qwen3_full_vit",
+        "qwen3_chunked_vit",
+        "qwen3_chunked_vit_autogaze_sparse",
+    ],
+    "vila": [
+        "nvila-video-off",
+        "nvila-video-autogaze-actual",
+        "longvila-off",
+        "longvila-autogaze-actual",
+    ],
+    "llava": [
+        "llava-onevision-off",
+        "llava-onevision-autogaze-actual",
     ],
 }
+PLUGIN_SUITE_MODES["expand-smoke"] = [
+    *PLUGIN_SUITE_MODES["qwen"],
+    *PLUGIN_SUITE_MODES["vila"],
+    *PLUGIN_SUITE_MODES["llava"],
+]
 
 
 def build_plugin_router_parser(*, add_help: bool = False) -> argparse.ArgumentParser:
@@ -32,7 +50,7 @@ def build_plugin_router_parser(*, add_help: bool = False) -> argparse.ArgumentPa
     parser.add_argument("--manifest")
     parser.add_argument("--video-root")
     parser.add_argument("--output-dir")
-    parser.add_argument("--plugin-suite", choices=["qwen", "custom"])
+    parser.add_argument("--plugin-suite", choices=["qwen", "vila", "llava", "expand-smoke", "custom"])
     parser.add_argument("--plugin-modes")
     parser.add_argument(
         "--plugin-model",
@@ -101,17 +119,18 @@ def run_plugin_route(argv: list[str]) -> dict:
         )
     manifest, video_root = _resolve_plugin_layout(args)
     output_dir = args.output_dir or f"outputs/autogaze_repro/plugin_hlvid_{args.plugin_suite or 'custom'}"
+    modes = _plugin_modes(args)
     qwen_video_nframes = args.qwen_video_nframes
-    if args.plugin_suite == "qwen" and qwen_video_nframes is None:
+    if _contains_qwen_modes(modes) and qwen_video_nframes is None:
         qwen_video_nframes = args.num_video_frames
     qwen_vit_max_spatial_chunks = args.qwen_vit_max_spatial_chunks
-    if args.plugin_suite == "qwen" and qwen_vit_max_spatial_chunks is None:
+    if _contains_qwen_modes(modes) and qwen_vit_max_spatial_chunks is None:
         qwen_vit_max_spatial_chunks = args.max_tiles_video
     return run_plugin_hlvid_benchmark(
         manifest=manifest,
         video_root=video_root,
         output_dir=output_dir,
-        modes=_plugin_modes(args),
+        modes=modes,
         models=parse_model_overrides(args.plugin_model),
         external_mllm_command=args.plugin_external_mllm_command,
         limit=args.limit,
@@ -131,6 +150,10 @@ def run_plugin_route(argv: list[str]) -> dict:
         video_resize_width=args.video_resize_width,
         video_resize_height=args.video_resize_height,
     )
+
+
+def _contains_qwen_modes(modes: list[str]) -> bool:
+    return any(mode.startswith("qwen") for mode in modes)
 
 
 def main(argv: list[str] | None = None) -> None:

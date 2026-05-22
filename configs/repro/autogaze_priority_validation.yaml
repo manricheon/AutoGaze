@@ -1,7 +1,7 @@
 description: >
   Priority validation matrix before broader plugin generalization. The order is:
   NVILA-HD AutoGaze profiling, NVILA-8B-Video baseline on/off, LongVILA
-  AutoGaze PoC, Qwen3-VL AutoGaze PoC, and Qwen prune-generate smoke.
+  AutoGaze sidecar checks, Qwen2.5/Qwen3 AutoGaze sparse PoC, and LLaVA post-encoder prune smoke.
 
 priority_tracks:
   - name: nvila_hd_autogaze_profile
@@ -34,7 +34,7 @@ priority_tracks:
       module: repro.plugin_hlvid_benchmark
       modes:
         - nvila-video-off
-        - nvila-video-autogaze-probe
+        - nvila-video-autogaze-actual
       recommended_args:
         limit: 3
         num_video_frames: 256
@@ -42,7 +42,7 @@ priority_tracks:
         external_mllm_command: vila-infer
     completion_gate:
       - nvila-video-off executes through official VILA CLI
-      - nvila-video-autogaze-probe records feature packing probe_required
+      - nvila-video-autogaze-actual executes dense VILA CLI with AutoGaze sidecar metrics, or records the exact missing dependency/failure stage
       - paper baseline and plugin on/off identities are separated in report
 
   - name: longvila_autogaze_poc
@@ -53,7 +53,7 @@ priority_tracks:
       module: repro.plugin_hlvid_benchmark
       modes:
         - longvila-off
-        - longvila-autogaze-probe
+        - longvila-autogaze-actual
       recommended_args:
         limit: 3
         num_video_frames: 256
@@ -61,28 +61,55 @@ priority_tracks:
         external_mllm_command: vila-infer
     completion_gate:
       - longvila-off executes through official VILA CLI
-      - longvila-autogaze-probe records post-encoder and pre-encoder hook targets
+      - longvila-autogaze-actual executes dense VILA CLI with AutoGaze sidecar metrics, or records the exact missing dependency/failure stage
       - report records exact failure/dependency status if CLI/model is missing
 
-  - name: qwen3_vl_autogaze_poc
+  - name: qwen_grid_autogaze_poc
     objective: >
-      Run Qwen3-VL native/off and AutoGaze post-encoder attachment PoC on the same
-      input set. PixelPrune pre-ViT can be added as a reference sidecar, but it is
-      not a replacement for AutoGaze+Qwen.
+      Run Qwen2.5-VL and Qwen3-VL full, chunked, and chunked+AutoGaze sparse
+      paths on the same input set.
     runner:
       module: repro.plugin_hlvid_benchmark
       modes:
-        - qwen3-vl-off
-        - qwen3-vl-autogaze-poc
-      optional_modes:
-        - qwen3-vl-pixelprune-pre-vit
-        - qwen3-vl-autogaze-prune-generate
+        - qwen2.5_full_vit
+        - qwen2.5_chunked_vit
+        - qwen2.5_chunked_vit_autogaze_sparse
+        - qwen3_full_vit
+        - qwen3_chunked_vit
+        - qwen3_chunked_vit_autogaze_sparse
       recommended_args:
         limit: 3
-        num_video_frames: 128
-        max_tiles_video: 1
+        num_video_frames: 32
+        num_video_frames_thumbnail: 8
+        qwen_video_nframes: 32
+        qwen_thumbnail_mode: append-video
+        qwen_vit_chunk_frames: 16
+        qwen_vit_max_spatial_chunks: 4
+        video_resize_longest_edge: 448
+        max_tiles_video: 4
         max_new_tokens: 8
     completion_gate:
-      - qwen3-vl-off executes native Qwen generation
-      - qwen3-vl-autogaze-poc emits SparseSelectionPlan and token estimate
-      - qwen3-vl-autogaze-prune-generate either executes or records the exact Qwen generate incompatibility
+      - full and chunked off modes execute or record exact CUDA/dependency failure
+      - AutoGaze sparse modes create SparseSelectionPlan and reduce visual_tokens_after_prune against visual_tokens_before_prune
+      - Qwen2.5 and Qwen3 reports use the same token/latency/memory fields
+
+  - name: llava_onevision_autogaze_actual
+    objective: >
+      Run LLaVA-OneVision dense/off and AutoGaze post-encoder visual-token
+      prune-generate on the same inputs.
+    runner:
+      module: repro.plugin_hlvid_benchmark
+      modes:
+        - llava-onevision-off
+        - llava-onevision-autogaze-actual
+      recommended_args:
+        limit: 3
+        num_video_frames: 32
+        num_video_frames_thumbnail: 0
+        video_resize_longest_edge: 448
+        max_tiles_video: 4
+        max_new_tokens: 8
+    completion_gate:
+      - llava-onevision-off executes native dense generation or records the exact dependency failure
+      - llava-onevision-autogaze-actual applies post-encoder visual-token pruning or records failed_mapping/probe_required
+      - report does not claim ViT latency reduction for post-encoder pruning

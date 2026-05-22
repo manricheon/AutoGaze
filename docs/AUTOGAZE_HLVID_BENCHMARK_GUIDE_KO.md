@@ -137,7 +137,7 @@ HD keep-all은 useful ablation이지만 paper baseline으로 부르지 않습니
 
 ## Plugin HLVid benchmark
 
-Qwen/LongVILA/NVILA-Video 등 확장 조합을 같은 manifest row로 비교할 때 사용합니다. Qwen은 이제 기본 wrapper에서 `--plugin-suite qwen`으로 바로 실행할 수 있습니다.
+Qwen/LongVILA/NVILA-Video/LLaVA 등 확장 조합을 같은 manifest row로 비교할 때 사용합니다. 기본 진입점은 여전히 `scripts/run_hlvid_folder_benchmark.py`이고, `--plugin-suite`를 붙이면 내부적으로 plugin benchmark로 라우팅됩니다.
 
 ```bash
 .venv/bin/python scripts/run_hlvid_folder_benchmark.py \
@@ -145,6 +145,7 @@ Qwen/LongVILA/NVILA-Video 등 확장 조합을 같은 manifest row로 비교할 
   --video-root /data/HLVid/videos \
   --output-dir outputs/autogaze_repro/plugin_hlvid_qwen_limit3 \
   --plugin-suite qwen \
+  --plugin-model qwen2.5-vl=weight/Qwen2.5-VL-7B-Instruct \
   --plugin-model qwen3-vl=weight/Qwen3-VL-8B-Instruct \
   --limit 3 \
   --num-video-frames 32 \
@@ -157,12 +158,15 @@ Qwen/LongVILA/NVILA-Video 등 확장 조합을 같은 manifest row로 비교할 
   --max-new-tokens 8
 ```
 
-`--plugin-suite qwen`은 기본적으로 다음 세 모드를 같은 HLVid row에서 실행합니다.
+`--plugin-suite qwen`은 기본적으로 다음 여섯 모드를 같은 HLVid row에서 실행합니다.
 
 ```text
-qwen_full_vit
-qwen_chunked_vit
-qwen_chunked_vit_autogaze_sparse
+qwen2.5_full_vit
+qwen2.5_chunked_vit
+qwen2.5_chunked_vit_autogaze_sparse
+qwen3_full_vit
+qwen3_chunked_vit
+qwen3_chunked_vit_autogaze_sparse
 ```
 
 세부 mode를 직접 지정하려면 `--plugin-modes`를 사용합니다.
@@ -171,10 +175,19 @@ qwen_chunked_vit_autogaze_sparse
 .venv/bin/python scripts/run_hlvid_folder_benchmark.py \
   --dataset-dir /data/HLVid \
   --plugin-suite custom \
-  --plugin-modes qwen_full_vit,qwen_chunked_vit \
+  --plugin-modes qwen3_full_vit,qwen3_chunked_vit \
   --plugin-model qwen3-vl=weight/Qwen3-VL-8B-Instruct \
   --limit 3
 ```
+
+추가 suite는 다음처럼 나뉩니다.
+
+| suite | 기본 modes | 주의 |
+| --- | --- | --- |
+| `qwen` | Qwen2.5/Qwen3의 full, chunked, AutoGaze sparse | pre-ViT sparse 실제 적용 검증 대상 |
+| `vila` | `nvila-video-off`, `nvila-video-autogaze-actual`, `longvila-off`, `longvila-autogaze-actual` | 현재 actual entry는 dense VILA CLI + AutoGaze sidecar metric이며 pruning gain을 주장하지 않음 |
+| `llava` | `llava-onevision-off`, `llava-onevision-autogaze-actual` | post-encoder visual-token prune generate |
+| `expand-smoke` | Qwen/VILA/LLaVA smoke-safe modes 전체 | CUDA smoke와 dependency 상태 점검용 |
 
 내부 runner를 직접 호출해야 할 때만 아래 형태를 사용합니다.
 
@@ -183,7 +196,8 @@ qwen_chunked_vit_autogaze_sparse
   --manifest /data/HLVid/manifest.json \
   --video-root /data/HLVid/videos \
   --output-dir outputs/autogaze_repro/plugin_hlvid_qwen_limit3 \
-  --modes qwen_full_vit,qwen_chunked_vit,qwen_chunked_vit_autogaze_sparse \
+  --modes qwen2.5_full_vit,qwen2.5_chunked_vit,qwen2.5_chunked_vit_autogaze_sparse,qwen3_full_vit,qwen3_chunked_vit,qwen3_chunked_vit_autogaze_sparse \
+  --model qwen2.5-vl=weight/Qwen2.5-VL-7B-Instruct \
   --model qwen3-vl=weight/Qwen3-VL-8B-Instruct \
   --limit 3
 ```

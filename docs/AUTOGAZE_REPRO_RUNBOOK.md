@@ -18,9 +18,9 @@ Root `README.md`, `QUICK_START.md`, `TRAIN.md`, `INTEGRATION.md`, `LICENSE`, and
 | Streaming/profile/H100 preflight | ready | `repro.nvila_runner`, `repro.hlvid_batch_benchmark` |
 | Markdown/chart report | ready | `python -m repro.markdown_report` |
 | Aggregate trend report | ready | `python -m repro.aggregate_reports` |
-| Plugin experiments | PoC/probe | `run_hlvid_folder_benchmark.py --plugin-suite qwen`, `repro.flexible_runner` |
+| Plugin experiments | PoC/probe/partial actual | `run_hlvid_folder_benchmark.py --plugin-suite qwen|vila|llava|expand-smoke`, `repro.flexible_runner` |
 
-Use `scripts/run_hlvid_folder_benchmark.py` as the main HLVid entry point. Without plugin options it runs the NVILA-HD benchmark path. With `--plugin-suite qwen`, it routes to the Qwen plugin benchmark path. Call `repro.plugin_hlvid_benchmark` directly only when debugging plugin internals.
+Use `scripts/run_hlvid_folder_benchmark.py` as the main HLVid entry point. Without plugin options it runs the NVILA-HD benchmark path. With `--plugin-suite`, it routes to the Qwen/VILA/LLaVA plugin benchmark path. Call `repro.plugin_hlvid_benchmark` directly only when debugging plugin internals.
 
 ## Setup
 
@@ -145,6 +145,7 @@ Use the same HLVid wrapper with `--plugin-suite qwen` for Qwen extension experim
   --video-root /data/HLVid/videos \
   --output-dir outputs/autogaze_repro/plugin_hlvid_qwen_limit3 \
   --plugin-suite qwen \
+  --plugin-model qwen2.5-vl=weight/Qwen2.5-VL-7B-Instruct \
   --plugin-model qwen3-vl=weight/Qwen3-VL-8B-Instruct \
   --limit 3 \
   --num-video-frames 32 \
@@ -157,7 +158,11 @@ Use the same HLVid wrapper with `--plugin-suite qwen` for Qwen extension experim
   --max-new-tokens 8
 ```
 
-`--plugin-suite qwen` defaults to `qwen_full_vit,qwen_chunked_vit,qwen_chunked_vit_autogaze_sparse`. Use `--plugin-suite custom --plugin-modes ...` for narrower comparisons.
+`--plugin-suite qwen` defaults to Qwen2.5-VL and Qwen3-VL pairs:
+`qwen2.5_full_vit,qwen2.5_chunked_vit,qwen2.5_chunked_vit_autogaze_sparse,qwen3_full_vit,qwen3_chunked_vit,qwen3_chunked_vit_autogaze_sparse`.
+Use `--plugin-suite custom --plugin-modes ...` for narrower comparisons.
+
+Other suites are `vila`, `llava`, and `expand-smoke`. The VILA-family AutoGaze actual entries currently run dense external VILA generation with AutoGaze sidecar metrics; they do not claim ViT or LLM token pruning until an in-process VILA hook is added.
 
 ## 6. Stream Profile / H100 Preflight
 

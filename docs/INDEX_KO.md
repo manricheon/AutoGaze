@@ -33,8 +33,8 @@ AutoGaze를 실제 비디오 MLLM 파이프라인에 붙였을 때 다음을 재
 | --- | --- | --- |
 | 단일 비디오 inference | `python -m repro.nvila_runner --mode single` | NVILA-HD + AutoGaze 안정 경로. 시각화와 상세 timing/token/memory 기록 가능 |
 | Direct HLVid 실행 | `python -m repro.nvila_runner --mode hlvid` | 한 가지 `gazing-mode`로 HLVid manifest를 직접 실행 |
-| 기본/Plugin HLVid benchmark | `python scripts/run_hlvid_folder_benchmark.py` | 기본 3모드 keep-all/single-scale dense/autogaze 비교, paper baseline 비교, H100 preflight, `--plugin-suite qwen` 확장 실험 라우팅 |
-| Plugin HLVid 내부 경로 | `python -m repro.plugin_hlvid_benchmark` | Qwen/LongVILA/NVILA-Video 등 확장 실험을 직접 호출할 때 |
+| 기본/Plugin HLVid benchmark | `python scripts/run_hlvid_folder_benchmark.py` | 기본 3모드 keep-all/single-scale dense/autogaze 비교, paper baseline 비교, H100 preflight, `--plugin-suite qwen|vila|llava|expand-smoke` 확장 실험 라우팅 |
+| Plugin HLVid 내부 경로 | `python -m repro.plugin_hlvid_benchmark` | Qwen2.5/Qwen3/LongVILA/NVILA-Video/LLaVA 등 확장 실험을 직접 호출할 때 |
 | Plugin single/inspect | `python -m repro.flexible_runner` | token selector / ViT / MLLM 조합을 명시해 실험 |
 | Streaming profile | `python -m repro.nvila_runner --mode stream-profile` | LLM 없이 decode/tile/AutoGaze/SigLIP 구간 profile |
 | Streaming sweep | `python -m repro.stream_profile_sweep` | 여러 stream config 후보를 비교 |
@@ -47,9 +47,9 @@ AutoGaze를 실제 비디오 MLLM 파이프라인에 붙였을 때 다음을 재
 | --- | --- | --- |
 | 기본 HLVid benchmark | `scripts/run_hlvid_folder_benchmark.py` / `repro.hlvid_batch_benchmark` | 기본 3모드: NVILA-HD keep-all, single-scale dense, AutoGaze 비교. 논문 baseline, H100 OOM preflight |
 | Direct HLVid runner | `repro.nvila_runner --mode hlvid` | wrapper 없이 한 mode만 직접 실행하거나 debugging할 때 |
-| Plugin HLVid benchmark | `scripts/run_hlvid_folder_benchmark.py --plugin-suite qwen` / `repro.plugin_hlvid_benchmark` | Qwen, LongVILA, NVILA-Video, InternVL 등 확장 조합을 같은 HLVid row로 비교 |
+| Plugin HLVid benchmark | `scripts/run_hlvid_folder_benchmark.py --plugin-suite qwen|vila|llava|expand-smoke` / `repro.plugin_hlvid_benchmark` | Qwen, LongVILA, NVILA-Video, LLaVA, InternVL 등 확장 조합을 같은 HLVid row로 비교 |
 
-확장성 검증도 사용 관점에서는 `scripts/run_hlvid_folder_benchmark.py`를 우선 사용합니다. `--plugin-suite qwen`은 Qwen 세 모드 비교를 plugin 경로로 자동 라우팅합니다. 리더 설득용 NVILA-HD paper-facing 결과는 plugin 옵션 없이 기본 HLVid benchmark wrapper를 사용하세요.
+확장성 검증도 사용 관점에서는 `scripts/run_hlvid_folder_benchmark.py`를 우선 사용합니다. `--plugin-suite qwen`은 Qwen2.5/Qwen3의 full, chunked, AutoGaze sparse 비교를 plugin 경로로 자동 라우팅합니다. `--plugin-suite vila`, `--plugin-suite llava`, `--plugin-suite expand-smoke`는 확장 smoke와 dependency 상태 확인용입니다. 리더 설득용 NVILA-HD paper-facing 결과는 plugin 옵션 없이 기본 HLVid benchmark wrapper를 사용하세요.
 
 ## 모델/모드 지원 상태
 
@@ -58,11 +58,12 @@ AutoGaze를 실제 비디오 MLLM 파이프라인에 붙였을 때 다음을 재
 | NVILA-HD-Video | 안정 경로 | native processor 안에서 AutoGaze on/off, profiling, visualization, HLVid 가능 |
 | NVILA-8B-Video paper baseline | 준비됨 | AutoGaze not applicable. 논문 baseline 재현 후보 |
 | NVILA-HD keep-all | ablation | HD 모델에서 AutoGaze selection만 끈 비교용. paper baseline과 혼동 금지 |
-| NVILA-Video plugin | off/probe | VILA CLI/off smoke와 feature packing probe 중심 |
-| LongVILA plugin | off/probe | VILA CLI/off smoke와 AutoGaze attachment probe 중심 |
+| NVILA-Video plugin | off/sidecar generate | external VILA CLI dense generation + AutoGaze selector sidecar metric. 아직 pruning gain 주장 금지 |
+| LongVILA plugin | off/sidecar generate | external VILA CLI dense generation + AutoGaze selector sidecar metric. in-process hook 후 actual prune 예정 |
 | Qwen3-VL | PoC/실험 | full ViT, chunked ViT, chunked ViT + AutoGaze sparse 비교 |
-| Qwen2/2.5-VL | adapter 준비 | post-encoder prune/probe 후보 |
-| LLaVA-OneVision | adapter 준비 | Qwen 계열 MLLM packing reference 후보 |
+| Qwen2.5-VL | PoC/실험 | Qwen3와 같은 grid adapter로 full/chunked/AutoGaze sparse 비교 |
+| Qwen2-VL | adapter 준비 | 같은 Qwen grid family이나 CUDA smoke 전까지 별도 상태로 분리 |
+| LLaVA-OneVision | PoC/실험 | off dense와 post-encoder visual-token prune generate 비교 |
 | InternVL3 | adapter 준비 | dynamic tile/`num_patches_list` 기반 확장 후보 |
 
 ## 확장성 지도

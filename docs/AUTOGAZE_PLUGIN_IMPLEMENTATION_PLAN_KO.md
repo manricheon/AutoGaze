@@ -79,15 +79,15 @@ video
 | sidecar generate | dense model generation은 그대로 실행하고 AutoGaze selector 결과/latency/token만 sidecar로 함께 기록한 경로 |
 | probe_required | 모델별 visual packing hook이 아직 없어 pruning을 적용하지 않고 필요한 mapping 정보만 기록하는 경로 |
 
-Qwen `qwen_chunked_vit_autogaze_sparse`는 actual sparse 검증 대상입니다. LLaVA-OneVision `llava-onevision-autogaze-prune-generate`는 post-encoder visual token prune-generate 실험 경로입니다. VILA-family와 InternVL3 sidecar mode는 selector를 무시하지 않지만 아직 모델 내부 compute gain을 주장하지 않습니다.
+Qwen2.5/Qwen3의 `*_chunked_vit_autogaze_sparse`는 actual sparse 검증 대상입니다. LLaVA-OneVision `llava-onevision-autogaze-actual`는 post-encoder visual token prune-generate 실험 경로입니다. VILA-family의 `*-autogaze-actual` entry는 현재 external CLI dense generation에 AutoGaze selector sidecar metric을 붙인 단계라서 아직 모델 내부 compute gain을 주장하지 않습니다. InternVL3 sidecar mode도 selector를 무시하지 않지만 pruning은 적용하지 않습니다.
 
 ## Plugin HLVid Mode 그룹
 
 | 그룹 | modes | 의미 |
 | --- | --- | --- |
-| Qwen comparison | `qwen_full_vit`, `qwen_chunked_vit`, `qwen_chunked_vit_autogaze_sparse` | 같은 비디오/질문에서 full ViT, chunked ViT, AutoGaze sparse ViT를 비교 |
-| VILA-family | `nvila-video-off`, `nvila-video-autogaze-sidecar-generate`, `longvila-off`, `longvila-autogaze-sidecar-generate` | off는 external VILA CLI 경로, sidecar는 dense generation + AutoGaze selector metric 기록 |
-| Other MLLM | `llava-onevision-off`, `llava-onevision-autogaze-prune-generate`, `internvl3-off`, `internvl3-autogaze-sidecar-generate` | LLaVA는 post-encoder prune generate 실험, InternVL3는 sidecar generate |
+| Qwen comparison | `qwen2.5_full_vit`, `qwen2.5_chunked_vit`, `qwen2.5_chunked_vit_autogaze_sparse`, `qwen3_full_vit`, `qwen3_chunked_vit`, `qwen3_chunked_vit_autogaze_sparse` | 같은 비디오/질문에서 full ViT, chunked ViT, AutoGaze sparse ViT를 Qwen2.5/Qwen3 각각 비교 |
+| VILA-family | `nvila-video-off`, `nvila-video-autogaze-actual`, `longvila-off`, `longvila-autogaze-actual` | off는 external VILA CLI 경로, actual entry는 dense generation + AutoGaze selector metric 기록 |
+| Other MLLM | `llava-onevision-off`, `llava-onevision-autogaze-actual`, `internvl3-off`, `internvl3-autogaze-sidecar-generate` | LLaVA는 post-encoder prune generate 실험, InternVL3는 sidecar generate |
 
 `probe_required`는 AutoGaze selector 요청을 무시하지 않았다는 뜻입니다. 아직 실제 pruning 적용 성공은 아니므로 report에서 `executed`와 분리해서 봐야 합니다.
 `executed_dense_with_autogaze_sidecar`는 모델 답변 생성은 수행했지만 visual pruning은 적용하지 않았다는 뜻입니다. `visual_pruning_applied=false`, `vision_encoder_latency_reduced=false`, `mllm_context_reduced=false`를 같이 확인하세요.
@@ -99,7 +99,8 @@ Qwen `qwen_chunked_vit_autogaze_sparse`는 actual sparse 검증 대상입니다.
   --manifest /data/HLVid/manifest.json \
   --video-root /data/HLVid/videos \
   --limit 3 \
-  --modes qwen_full_vit,qwen_chunked_vit,qwen_chunked_vit_autogaze_sparse \
+  --modes qwen2.5_full_vit,qwen2.5_chunked_vit,qwen2.5_chunked_vit_autogaze_sparse,qwen3_full_vit,qwen3_chunked_vit,qwen3_chunked_vit_autogaze_sparse \
+  --model qwen2.5-vl=weights/Qwen2.5-VL-7B-Instruct \
   --model qwen3-vl=weights/Qwen3-VL-8B-Instruct \
   --video-resize-shortest-edge 720 \
   --num-video-frames 128 \
@@ -119,11 +120,12 @@ VILA/LLaVA/InternVL 확장 mode까지 같은 입력 row에서 같이 보려면 �
   --manifest /data/HLVid/manifest.json \
   --video-root /data/HLVid/videos \
   --limit 3 \
-  --modes nvila-video-off,nvila-video-autogaze-sidecar-generate,longvila-off,longvila-autogaze-sidecar-generate,llava-onevision-off,llava-onevision-autogaze-prune-generate,internvl3-off,internvl3-autogaze-sidecar-generate,qwen_full_vit,qwen_chunked_vit,qwen_chunked_vit_autogaze_sparse \
+  --modes nvila-video-off,nvila-video-autogaze-actual,longvila-off,longvila-autogaze-actual,llava-onevision-off,llava-onevision-autogaze-actual,internvl3-off,internvl3-autogaze-sidecar-generate,qwen2.5_full_vit,qwen2.5_chunked_vit,qwen2.5_chunked_vit_autogaze_sparse,qwen3_full_vit,qwen3_chunked_vit,qwen3_chunked_vit_autogaze_sparse \
   --model nvila-video=weight/NVILA-8B-Video \
   --model longvila=weight/LongVILA \
   --model llava-onevision=weight/LLaVA-OneVision \
   --model internvl3=weight/InternVL3 \
+  --model qwen2.5-vl=weight/Qwen2.5-VL-7B-Instruct \
   --model qwen3-vl=weight/Qwen3-VL-8B-Instruct \
   --num-video-frames 32 \
   --num-video-frames-thumbnail 8 \

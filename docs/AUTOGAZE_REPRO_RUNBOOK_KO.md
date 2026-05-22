@@ -21,9 +21,9 @@
 | stream-profile/H100 preflight | 준비됨 | `repro.nvila_runner`, `repro.hlvid_batch_benchmark` |
 | Markdown/chart report | 준비됨 | `python -m repro.markdown_report` |
 | aggregate trend report | 준비됨 | `python -m repro.aggregate_reports` |
-| plugin 확장 실험 | PoC/probe | `run_hlvid_folder_benchmark.py --plugin-suite qwen`, `python -m repro.flexible_runner` |
+| plugin 확장 실험 | PoC/probe/actual 일부 | `run_hlvid_folder_benchmark.py --plugin-suite qwen|vila|llava|expand-smoke`, `python -m repro.flexible_runner` |
 
-HLVid 실행은 `scripts/run_hlvid_folder_benchmark.py`를 우선 사용하세요. 옵션을 주지 않으면 NVILA-HD keep-all/single-scale/autogaze 기본 경로로 가고, `--plugin-suite qwen`을 주면 Qwen/Plugin HLVid 경로로 라우팅됩니다. `repro.plugin_hlvid_benchmark`는 내부/고급 호출용으로 남겨둡니다.
+HLVid 실행은 `scripts/run_hlvid_folder_benchmark.py`를 우선 사용하세요. 옵션을 주지 않으면 NVILA-HD keep-all/single-scale/autogaze 기본 경로로 가고, `--plugin-suite`를 주면 Qwen/VILA/LLaVA plugin HLVid 경로로 라우팅됩니다. `repro.plugin_hlvid_benchmark`는 내부/고급 호출용으로 남겨둡니다.
 
 ## 환경 세팅
 
@@ -192,6 +192,7 @@ Qwen/LongVILA/NVILA-Video 등 다른 token selector / ViT / MLLM 조합을 HLVid
   --video-root /path/to/HLVid/videos \
   --output-dir outputs/autogaze_repro/plugin_hlvid_qwen_vit_limit3 \
   --plugin-suite qwen \
+  --plugin-model qwen2.5-vl=weight/Qwen2.5-VL-7B-Instruct \
   --plugin-model qwen3-vl=weight/Qwen3-VL-8B-Instruct \
   --limit 3 \
   --num-video-frames 32 \
@@ -204,15 +205,40 @@ Qwen/LongVILA/NVILA-Video 등 다른 token selector / ViT / MLLM 조합을 HLVid
   --max-new-tokens 8
 ```
 
-`--plugin-suite qwen`은 `qwen_full_vit`, `qwen_chunked_vit`, `qwen_chunked_vit_autogaze_sparse` 세 모드를 기본으로 실행합니다. Qwen frame 수를 따로 주지 않으면 `--qwen-video-nframes`는 `--num-video-frames`와 같게 맞춰집니다. 더 좁은 비교를 원하면 `--plugin-suite custom --plugin-modes qwen_full_vit,qwen_chunked_vit`처럼 지정합니다.
+`--plugin-suite qwen`은 Qwen2.5-VL과 Qwen3-VL 각각에 대해 full ViT, chunked ViT, chunked ViT + AutoGaze sparse 세 경로를 실행합니다. Qwen frame 수를 따로 주지 않으면 `--qwen-video-nframes`는 `--num-video-frames`와 같게 맞춰집니다. 더 좁은 비교를 원하면 `--plugin-suite custom --plugin-modes qwen3_full_vit,qwen3_chunked_vit`처럼 지정합니다.
 
-세 Qwen mode의 의미는 다음과 같습니다.
+Qwen suite mode의 의미는 다음과 같습니다.
 
 | mode | 의미 |
 | --- | --- |
-| `qwen_full_vit` | Qwen native/full ViT 경로 |
-| `qwen_chunked_vit` | Qwen ViT를 temporal/spatial chunk로 나눠 실행하되 AutoGaze off |
-| `qwen_chunked_vit_autogaze_sparse` | AutoGaze selected token만 Qwen ViT/MLLM context에 통과시키는 실험 경로 |
+| `qwen2.5_full_vit`, `qwen3_full_vit` | Qwen native/full ViT 경로 |
+| `qwen2.5_chunked_vit`, `qwen3_chunked_vit` | Qwen ViT를 temporal/spatial chunk로 나눠 실행하되 AutoGaze off |
+| `qwen2.5_chunked_vit_autogaze_sparse`, `qwen3_chunked_vit_autogaze_sparse` | AutoGaze selected token만 Qwen ViT/MLLM context에 통과시키는 pre-ViT sparse 경로 |
+
+다른 suite는 다음처럼 호출합니다.
+
+```bash
+.venv/bin/python scripts/run_hlvid_folder_benchmark.py \
+  --dataset-dir /path/to/HLVid \
+  --video-root /path/to/HLVid/videos \
+  --output-dir outputs/autogaze_repro/plugin_hlvid_expand_smoke_limit3 \
+  --plugin-suite expand-smoke \
+  --plugin-model qwen2.5-vl=weight/Qwen2.5-VL-7B-Instruct \
+  --plugin-model qwen3-vl=weight/Qwen3-VL-8B-Instruct \
+  --plugin-model nvila-video=weight/NVILA-8B-Video \
+  --plugin-model longvila=weight/LongVILA \
+  --plugin-model llava-onevision=weight/LLaVA-OneVision \
+  --external-mllm-command vila-infer \
+  --limit 3 \
+  --num-video-frames 16 \
+  --num-video-frames-thumbnail 0 \
+  --video-resize-longest-edge 224 \
+  --max-tiles-video 4 \
+  --max-new-tokens 8 \
+  --continue-on-error
+```
+
+`--plugin-suite vila`는 `nvila-video-off`, `nvila-video-autogaze-actual`, `longvila-off`, `longvila-autogaze-actual`를 실행합니다. 단, 현재 VILA-family actual entry는 external CLI dense generation에 AutoGaze selector sidecar metric을 붙인 단계라서 ViT/LLM token pruning 성공으로 해석하면 안 됩니다. `--plugin-suite llava`는 LLaVA-OneVision off와 post-encoder visual-token prune generate 경로를 비교합니다.
 
 ## 6. Stream Profile과 H100 Preflight
 

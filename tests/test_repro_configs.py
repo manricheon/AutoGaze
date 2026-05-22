@@ -163,16 +163,19 @@ def test_plugin_hlvid_limit3_config_defines_comparison_modes():
 
     assert config.plugin_hlvid_benchmark.args.limit == 3
     assert "nvila-video-off" in config.plugin_hlvid_benchmark.args.modes
-    assert "nvila-video-autogaze-sidecar-generate" in config.plugin_hlvid_benchmark.args.modes
+    assert "nvila-video-autogaze-actual" in config.plugin_hlvid_benchmark.args.modes
     assert "longvila-off" in config.plugin_hlvid_benchmark.args.modes
-    assert "longvila-autogaze-sidecar-generate" in config.plugin_hlvid_benchmark.args.modes
+    assert "longvila-autogaze-actual" in config.plugin_hlvid_benchmark.args.modes
     assert "internvl3-off" in config.plugin_hlvid_benchmark.args.modes
     assert "internvl3-autogaze-sidecar-generate" in config.plugin_hlvid_benchmark.args.modes
     assert "llava-onevision-off" in config.plugin_hlvid_benchmark.args.modes
-    assert "llava-onevision-autogaze-prune-generate" in config.plugin_hlvid_benchmark.args.modes
-    assert "qwen_full_vit" in config.plugin_hlvid_benchmark.args.modes
-    assert "qwen_chunked_vit" in config.plugin_hlvid_benchmark.args.modes
-    assert "qwen_chunked_vit_autogaze_sparse" in config.plugin_hlvid_benchmark.args.modes
+    assert "llava-onevision-autogaze-actual" in config.plugin_hlvid_benchmark.args.modes
+    assert "qwen2.5_full_vit" in config.plugin_hlvid_benchmark.args.modes
+    assert "qwen2.5_chunked_vit" in config.plugin_hlvid_benchmark.args.modes
+    assert "qwen2.5_chunked_vit_autogaze_sparse" in config.plugin_hlvid_benchmark.args.modes
+    assert "qwen3_full_vit" in config.plugin_hlvid_benchmark.args.modes
+    assert "qwen3_chunked_vit" in config.plugin_hlvid_benchmark.args.modes
+    assert "qwen3_chunked_vit_autogaze_sparse" in config.plugin_hlvid_benchmark.args.modes
     assert (root / "scripts" / "download_qwen_model.py").is_file()
 
 
@@ -183,10 +186,14 @@ def test_plugin_hlvid_qwen_vit_limit3_config_defines_matched_qwen_modes():
     args = config.plugin_hlvid_benchmark.args
     assert args.limit == 3
     assert args.modes == [
-        "qwen_full_vit",
-        "qwen_chunked_vit",
-        "qwen_chunked_vit_autogaze_sparse",
+        "qwen2.5_full_vit",
+        "qwen2.5_chunked_vit",
+        "qwen2.5_chunked_vit_autogaze_sparse",
+        "qwen3_full_vit",
+        "qwen3_chunked_vit",
+        "qwen3_chunked_vit_autogaze_sparse",
     ]
+    assert args.models["qwen2.5-vl"] == "weight/Qwen2.5-VL-7B-Instruct"
     assert args.models["qwen3-vl"] == "weight/Qwen3-VL-8B-Instruct"
     assert args.num_video_frames == 32
     assert args.qwen_video_nframes == 32
@@ -197,7 +204,7 @@ def test_plugin_hlvid_qwen_vit_limit3_config_defines_matched_qwen_modes():
     assert args.qwen_vit_max_spatial_chunks == 4
 
 
-def test_autogaze_priority_validation_config_lists_four_tracks():
+def test_autogaze_priority_validation_config_lists_expand_tracks():
     root = Path(__file__).resolve().parents[1]
     config = OmegaConf.load(root / "configs" / "repro" / "autogaze_priority_validation.yaml")
 
@@ -205,12 +212,14 @@ def test_autogaze_priority_validation_config_lists_four_tracks():
         "nvila_hd_autogaze_profile",
         "nvila_video_baseline_autogaze_on_off",
         "longvila_autogaze_poc",
-        "qwen3_vl_autogaze_poc",
+        "qwen_grid_autogaze_poc",
+        "llava_onevision_autogaze_actual",
     ]
     assert config.priority_tracks[0].runner.module == "repro.hlvid_batch_benchmark"
     assert "hd_autogaze" in config.priority_tracks[0].runner.modes
     assert "nvila-video-off" in config.priority_tracks[1].runner.modes
-    assert "nvila-video-autogaze-probe" in config.priority_tracks[1].runner.modes
-    assert "longvila-autogaze-probe" in config.priority_tracks[2].runner.modes
-    assert "qwen3-vl-autogaze-poc" in config.priority_tracks[3].runner.modes
-    assert "qwen3-vl-autogaze-prune-generate" in config.priority_tracks[3].runner.optional_modes
+    assert "nvila-video-autogaze-actual" in config.priority_tracks[1].runner.modes
+    assert "longvila-autogaze-actual" in config.priority_tracks[2].runner.modes
+    assert "qwen2.5_chunked_vit_autogaze_sparse" in config.priority_tracks[3].runner.modes
+    assert "qwen3_chunked_vit_autogaze_sparse" in config.priority_tracks[3].runner.modes
+    assert "llava-onevision-autogaze-actual" in config.priority_tracks[4].runner.modes

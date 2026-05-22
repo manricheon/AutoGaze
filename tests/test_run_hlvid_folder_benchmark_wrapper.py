@@ -60,9 +60,12 @@ def test_qwen_plugin_suite_routes_through_unified_hlvid_wrapper(monkeypatch, tmp
     assert captured["video_root"] == str(dataset / "videos")
     assert captured["output_dir"] == str(tmp_path / "out")
     assert captured["modes"] == [
-        "qwen_full_vit",
-        "qwen_chunked_vit",
-        "qwen_chunked_vit_autogaze_sparse",
+        "qwen2.5_full_vit",
+        "qwen2.5_chunked_vit",
+        "qwen2.5_chunked_vit_autogaze_sparse",
+        "qwen3_full_vit",
+        "qwen3_chunked_vit",
+        "qwen3_chunked_vit_autogaze_sparse",
     ]
     assert captured["models"] == {"qwen3-vl": "/models/qwen"}
     assert captured["limit"] == 3
@@ -116,3 +119,35 @@ def test_unified_hlvid_wrapper_keeps_nvila_default_path(monkeypatch):
     wrapper.main(["--dataset-dir", "/data/hlvid", "--limit", "1"])
 
     assert called == {"nvila": True}
+
+
+def test_plugin_suite_routes_vila_llava_and_expand_smoke(monkeypatch, tmp_path):
+    dataset = tmp_path / "hlvid"
+    write_minimal_hlvid_dataset(dataset)
+    captured = []
+
+    def fake_run_plugin_hlvid_benchmark(**kwargs):
+        captured.append(kwargs)
+        return {"summary": {"ok": True}}
+
+    monkeypatch.setattr(wrapper, "run_plugin_hlvid_benchmark", fake_run_plugin_hlvid_benchmark)
+
+    wrapper.main(["--dataset-dir", str(dataset), "--plugin-suite", "vila"])
+    wrapper.main(["--dataset-dir", str(dataset), "--plugin-suite", "llava"])
+    wrapper.main(["--dataset-dir", str(dataset), "--plugin-suite", "expand-smoke"])
+
+    assert captured[0]["modes"] == [
+        "nvila-video-off",
+        "nvila-video-autogaze-actual",
+        "longvila-off",
+        "longvila-autogaze-actual",
+    ]
+    assert captured[1]["modes"] == [
+        "llava-onevision-off",
+        "llava-onevision-autogaze-actual",
+    ]
+    assert "qwen3_chunked_vit_autogaze_sparse" in captured[2]["modes"]
+    assert "longvila-autogaze-actual" in captured[2]["modes"]
+    assert "llava-onevision-autogaze-actual" in captured[2]["modes"]
+    assert captured[2]["qwen_video_nframes"] == captured[2]["num_video_frames"]
+    assert captured[2]["qwen_vit_max_spatial_chunks"] == captured[2]["max_tiles_video"]

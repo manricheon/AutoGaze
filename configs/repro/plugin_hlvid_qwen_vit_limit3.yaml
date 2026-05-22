@@ -1,9 +1,9 @@
 description: >
-  Qwen3-VL-only HLVid limit-3 comparison for the plugin runner. The three
+  Qwen2.5-VL and Qwen3-VL HLVid limit-3 comparison for the plugin runner. The
   modes keep the dataset, frame count, runner-side resize, thumbnail append,
-  and model path identical while changing only the Qwen ViT execution path:
-  native full ViT, chunked ViT keep-all, and chunked ViT with direct AutoGaze
-  sparse pre-ViT pruning.
+  and family-specific model path stable while changing only the Qwen ViT
+  execution path: native full ViT, chunked ViT keep-all, and chunked ViT with
+  direct AutoGaze sparse pre-ViT pruning.
 
 plugin_hlvid_benchmark:
   module: repro.plugin_hlvid_benchmark
@@ -13,10 +13,14 @@ plugin_hlvid_benchmark:
     output_dir: outputs/autogaze_repro/plugin_hlvid_qwen_vit_limit3
     limit: 3
     modes:
-      - qwen_full_vit
-      - qwen_chunked_vit
-      - qwen_chunked_vit_autogaze_sparse
+      - qwen2.5_full_vit
+      - qwen2.5_chunked_vit
+      - qwen2.5_chunked_vit_autogaze_sparse
+      - qwen3_full_vit
+      - qwen3_chunked_vit
+      - qwen3_chunked_vit_autogaze_sparse
     models:
+      qwen2.5-vl: weight/Qwen2.5-VL-7B-Instruct
       qwen3-vl: weight/Qwen3-VL-8B-Instruct
     num_video_frames: 32
     qwen_video_nframes: 32
@@ -34,7 +38,7 @@ outputs:
   markdown: outputs/autogaze_repro/plugin_hlvid_qwen_vit_limit3/plugin_hlvid_report.md
 
 notes:
-  - qwen_full_vit uses native Qwen video feature extraction.
-  - qwen_chunked_vit keeps all visual tokens but splits Qwen ViT work into temporal/spatial chunks.
-  - qwen_chunked_vit_autogaze_sparse runs the direct AutoGaze selector first and applies sparse pre-ViT pruning.
+  - qwen2.5_full_vit and qwen3_full_vit use native Qwen video feature extraction.
+  - qwen2.5_chunked_vit and qwen3_chunked_vit keep all visual tokens but split Qwen ViT work into temporal/spatial chunks.
+  - qwen2.5_chunked_vit_autogaze_sparse and qwen3_chunked_vit_autogaze_sparse run the direct AutoGaze selector first and apply sparse pre-ViT pruning.
   - qwen_thumbnail_mode append-video is an experiment-mode approximation, not a native Qwen thumbnail stream.
