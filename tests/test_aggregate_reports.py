@@ -21,7 +21,11 @@ def test_normalize_single_report_extracts_latency_tokens_memory_and_failure(tmp_
                 "generation": {
                     "status": "oom",
                     "metrics": {
-                        "latency_ms": {"total": 1200, "qwen_vit_prepare": 700},
+                        "latency_ms": {
+                            "total": 1200,
+                            "preprocess_total_median": 300,
+                            "qwen_vit_prepare": 700,
+                        },
                         "tokens": {
                             "visual_tokens_before_prune": 1000,
                             "visual_tokens_after_prune": 100,

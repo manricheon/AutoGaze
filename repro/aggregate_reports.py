@@ -173,7 +173,7 @@ def _apply_metrics(row: dict[str, Any], metrics: dict[str, Any], *, mode: str | 
     row["total_ms"] = _metric(latency, ("total_ms", "total", "total_median"), mode)
     row["preprocess_ms"] = _metric(
         latency,
-        ("preprocess_without_autogaze_ms", "preprocess_without_autogaze_median", "preprocess_total_ms", "preprocess_total_median"),
+        ("preprocess_without_autogaze_ms", "preprocess_without_autogaze_median"),
         mode,
     )
     row["autogaze_ms"] = _metric(
@@ -482,7 +482,7 @@ def _render_markdown(rows: list[dict[str, Any]], charts: dict[str, Path], output
         ("frames", "Frames"),
         ("processor_input_resolution", "Input res"),
         ("total_ms", "Total ms"),
-        ("preprocess_ms", "Pre(no AG) ms"),
+        ("preprocess_ms", "Preprocess(no AG) ms"),
         ("autogaze_ms", "AutoGaze ms"),
         ("vision_encoder_ms", "ViT ms"),
         ("llm_ms", "LLM ms"),

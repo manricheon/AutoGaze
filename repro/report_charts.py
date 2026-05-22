@@ -237,7 +237,7 @@ def _latency_bars(metrics: dict[str, Any]) -> list[ChartBar]:
         label = mode or "current"
         total = _metric(latency, ("total_ms", "total", "total_median"), mode)
         segments = [
-            ("Pre(no AG)", _metric(latency, ("preprocess_without_autogaze_ms", "preprocess_without_autogaze_median", "preprocess_total_ms", "preprocess_total_median"), mode)),
+            ("Pre(no AG)", _metric(latency, ("preprocess_without_autogaze_ms", "preprocess_without_autogaze_median"), mode)),
             ("AutoGaze", _metric(latency, ("autogaze_total_ms", "autogaze_ms", "autogaze_total_median", "autogaze_median", "gazing_info_total_ms"), mode)),
             ("ViT", _metric(latency, ("vit_encoder_ms", "vision_encoder_ms", "vit_encoder_median", "qwen_vit_prepare", "qwen_vit_prepare_ms"), mode)),
             ("LLM", _metric(latency, ("llm_ms", "llm_median", "generate", "generate_ms"), mode)),

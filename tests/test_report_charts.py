@@ -66,6 +66,26 @@ def test_standard_latency_chart_uses_stable_readable_stage_colors(tmp_path):
     assert "preprocess_total_ms" not in svg
 
 
+def test_standard_latency_chart_does_not_show_inclusive_preprocess_as_no_ag(tmp_path):
+    artifacts = build_standard_report_charts(
+        metrics={
+            "latency_ms": {
+                "total_median": 9000,
+                "preprocess_total_median": 3000,
+                "autogaze_total_median": 800,
+                "vit_encoder_median": 1200,
+                "llm_median": 4000,
+            }
+        },
+        output_dir=tmp_path,
+    )
+
+    latency_svg = next(artifact.path for artifact in artifacts if artifact.path.name == "latency_breakdown.svg")
+    svg = latency_svg.read_text()
+    assert "Pre(no AG)" not in svg
+    assert "AutoGaze" in svg
+
+
 def test_shorten_label_keeps_svg_labels_compact():
     label = shorten_label("qwen_chunked_vit_autogaze_sparse/128f/3840x2160", max_chars=24)
 

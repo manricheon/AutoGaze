@@ -25,8 +25,8 @@ DISPLAY_LABELS = {
     "total_ms": "Total ms",
     "total": "Total ms",
     "total_median": "Total ms",
-    "preprocess_without_autogaze_ms": "Pre(no AG) ms",
-    "preprocess_without_autogaze_median": "Pre(no AG) ms",
+    "preprocess_without_autogaze_ms": "Preprocess(no AG) ms",
+    "preprocess_without_autogaze_median": "Preprocess(no AG) ms",
     "preprocess_total_ms": "Preprocess incl. AG ms",
     "preprocess_total_median": "Preprocess incl. AG ms",
     "autogaze_total_ms": "AutoGaze ms",
@@ -75,7 +75,7 @@ DISPLAY_LABELS = {
 
 SUMMARY_LATENCY_SPECS = [
     ("Total ms", ("total_ms", "total", "total_median")),
-    ("Pre(no AG) ms", ("preprocess_without_autogaze_ms", "preprocess_without_autogaze_median", "preprocess_total_ms", "preprocess_total_median")),
+    ("Preprocess(no AG) ms", ("preprocess_without_autogaze_ms", "preprocess_without_autogaze_median")),
     ("AutoGaze ms", ("autogaze_total_ms", "autogaze_ms", "autogaze_total_median", "autogaze_median", "gazing_info_total_ms")),
     ("ViT ms", ("vit_encoder_ms", "vision_encoder_ms", "vit_encoder_median", "qwen_vit_prepare", "qwen_vit_prepare_ms")),
     ("LLM ms", ("llm_ms", "llm_median", "generate", "generate_ms")),
@@ -478,8 +478,28 @@ def add_readable_budget_token_metrics(tokens: dict[str, Any], readable_budget: d
             hd_keep_all,
             selected,
         )
+        tokens["hd_multiscale_keep_all_patch_tokens"] = {
+            "keep_all": hd_keep_all,
+            "autogaze": hd_keep_all,
+        }
+        tokens["autogaze_selected_total_patch_tokens"] = {
+            "keep_all": hd_keep_all,
+            "autogaze": selected,
+        }
+        tokens["patch_reduction_ratio_full_or_raw_over_autogaze"] = {
+            "keep_all": ratio_before_over_after(hd_keep_all, hd_keep_all),
+            "autogaze": ratio_before_over_after(hd_keep_all, selected),
+        }
     if llm_keep_all is not None or llm_actual is not None:
         tokens["llm_visual_budget_keep_all_vs_actual"] = before_after_metric(llm_keep_all, llm_actual)
+        tokens["llm_visual_tokens_actual_from_budget"] = {
+            "keep_all": llm_keep_all,
+            "autogaze": llm_actual,
+        }
+        tokens["llm_visual_token_reduction_ratio_from_budget"] = {
+            "keep_all": ratio_before_over_after(llm_keep_all, llm_keep_all),
+            "autogaze": ratio_before_over_after(llm_keep_all, llm_actual),
+        }
 
 
 def before_after_metric(before: Any, after: Any) -> dict[str, Any]:
@@ -497,6 +517,13 @@ def metric_display_label(name: str) -> str:
 
 def is_primary_raw_metric(name: str) -> bool:
     return name not in {"preprocess_total_ms", "preprocess_total_median"}
+
+
+def preprocess_without_autogaze_value(latency: dict[str, Any]) -> Any:
+    return first_present(
+        latency.get("preprocess_without_autogaze_ms"),
+        latency.get("preprocess_without_autogaze_median"),
+    )
 
 
 def value_from_aliases(group: dict[str, Any], aliases: tuple[str, ...], mode: str | None = None) -> Any:
@@ -536,7 +563,7 @@ def render_key_comparison_section(metrics: dict[str, Any]) -> str:
         return ""
     if modes != (None,):
         headers = ["Mode"] + headers
-    note = "Pre(no AG) excludes AutoGaze time. AutoGaze is shown as its own latency stage."
+    note = "Preprocess(no AG) excludes AutoGaze time. AutoGaze is shown as its own latency stage."
     return "## Key Comparison\n\n" + note + "\n\n" + markdown_table(headers, rows)
 
 
@@ -835,12 +862,7 @@ def render_step_pipeline_metrics(payload: dict[str, Any], metrics: dict[str, Any
             f"{format_value(first_present(info.get('source_frames'), get_path(payload, 'sampling.num_video_frames')))} frames; "
             f"{first_present(info.get('source_resolution'), resolution(info.get('width'), info.get('height')), '-')}",
             f"sampled={format_value(tokens.get('video_sampled_frames'))}; thumbnail={format_value(tokens.get('thumbnail_sampled_frames'))}",
-            first_present(
-                latency.get("preprocess_without_autogaze_ms"),
-                latency.get("preprocess_without_autogaze_median"),
-                latency.get("preprocess_total_ms"),
-                latency.get("preprocess_total_median"),
-            ),
+            preprocess_without_autogaze_value(latency),
             first_present(memory.get("raw_frame_buffer_peak"), memory.get("processor_peak"), memory.get("processor_peak_median")),
         ],
         [
@@ -848,12 +870,7 @@ def render_step_pipeline_metrics(payload: dict[str, Any], metrics: dict[str, Any
             "Resize / tile / thumbnail",
             info.get("processor_input_resolution") or resolution(info.get("width"), info.get("height")),
             f"spatial_tiles={format_value(info.get('spatial_tiles_per_video'))}; chunks={format_value(info.get('temporal_chunks_per_video'))}",
-            first_present(
-                latency.get("preprocess_without_autogaze_ms"),
-                latency.get("preprocess_without_autogaze_median"),
-                latency.get("preprocess_total_ms"),
-                latency.get("preprocess_total_median"),
-            ),
+            preprocess_without_autogaze_value(latency),
             memory.get("processor_peak") or memory.get("processor_peak_median"),
         ],
         [
