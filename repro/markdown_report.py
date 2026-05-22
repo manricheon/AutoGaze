@@ -18,6 +18,80 @@ PIPELINE_ASCII = """Video file(s)
   -> LLM prefill/generation
   -> Answer or benchmark score"""
 
+DISPLAY_LABELS = {
+    "latency_ms": "Latency",
+    "tokens": "Tokens",
+    "memory_bytes": "Memory",
+    "total_ms": "Total ms",
+    "total": "Total ms",
+    "total_median": "Total ms",
+    "preprocess_without_autogaze_ms": "Pre(no AG) ms",
+    "preprocess_without_autogaze_median": "Pre(no AG) ms",
+    "preprocess_total_ms": "Preprocess incl. AG ms",
+    "preprocess_total_median": "Preprocess incl. AG ms",
+    "autogaze_total_ms": "AutoGaze ms",
+    "autogaze_ms": "AutoGaze ms",
+    "autogaze_total_median": "AutoGaze ms",
+    "autogaze_median": "AutoGaze ms",
+    "gazing_info_total_ms": "AutoGaze ms",
+    "vit_encoder_ms": "ViT ms",
+    "vision_encoder_ms": "ViT ms",
+    "vit_encoder_median": "ViT ms",
+    "qwen_vit_prepare_ms": "ViT ms",
+    "qwen_vit_prepare": "ViT ms",
+    "llm_ms": "LLM ms",
+    "llm_median": "LLM ms",
+    "generate": "LLM ms",
+    "generate_ms": "LLM ms",
+    "encoder_patch_tokens_before_keep_all_or_raw": "Full patch",
+    "raw_vit_patch_tokens_before_selector": "Full patch",
+    "hd_multiscale_keep_all_patch_tokens": "Full patch",
+    "visual_tokens_before_prune": "Full patch",
+    "autogaze_selected_total_patch_tokens": "Selected patch",
+    "encoder_input_patch_tokens_after_autogaze": "Selected patch",
+    "encoder_patch_tokens_after_autogaze": "Selected patch",
+    "visual_tokens_after_prune": "Selected patch",
+    "encoder_token_reduction_ratio": "Patch x",
+    "autogaze_patch_reduction_ratio": "Patch x",
+    "patch_reduction_ratio_full_or_raw_over_autogaze": "Patch x",
+    "visual_token_reduction_ratio": "Patch x",
+    "llm_visual_tokens_after_actual": "LLM visual",
+    "llm_visual_tokens_actual_from_budget": "LLM visual",
+    "llm_context_tokens": "LLM context",
+    "llm_visual_token_reduction_ratio": "LLM visual x",
+    "llm_visual_token_reduction_ratio_from_budget": "LLM visual x",
+    "processor_peak": "Processor peak",
+    "processor_peak_median": "Processor peak",
+    "autogaze_peak": "AutoGaze peak",
+    "vision_encoder_peak": "ViT peak",
+    "siglip_gazed_hidden_peak": "ViT peak",
+    "llm_peak": "LLM peak",
+    "llm_peak_median": "LLM peak",
+    "overall_peak": "Overall peak",
+    "overall_peak_median": "Overall peak",
+    "peak_cuda_allocated": "Peak GiB",
+    "peak_cuda_reserved": "Peak GiB",
+}
+
+SUMMARY_LATENCY_SPECS = [
+    ("Total ms", ("total_ms", "total", "total_median")),
+    ("Pre(no AG) ms", ("preprocess_without_autogaze_ms", "preprocess_without_autogaze_median", "preprocess_total_ms", "preprocess_total_median")),
+    ("AutoGaze ms", ("autogaze_total_ms", "autogaze_ms", "autogaze_total_median", "autogaze_median", "gazing_info_total_ms")),
+    ("ViT ms", ("vit_encoder_ms", "vision_encoder_ms", "vit_encoder_median", "qwen_vit_prepare", "qwen_vit_prepare_ms")),
+    ("LLM ms", ("llm_ms", "llm_median", "generate", "generate_ms")),
+]
+
+SUMMARY_TOKEN_SPECS = [
+    ("Full patch", ("hd_multiscale_keep_all_patch_tokens", "raw_vit_patch_tokens_before_selector", "encoder_patch_tokens_before_keep_all_or_raw", "visual_tokens_before_prune")),
+    ("Selected patch", ("autogaze_selected_total_patch_tokens", "encoder_input_patch_tokens_after_autogaze", "encoder_patch_tokens_after_autogaze", "visual_tokens_after_prune")),
+    ("Patch x", ("patch_reduction_ratio_full_or_raw_over_autogaze", "encoder_token_reduction_ratio", "visual_token_reduction_ratio")),
+    ("LLM visual", ("llm_visual_tokens_actual_from_budget", "llm_visual_tokens_after_actual", "llm_context_tokens")),
+]
+
+SUMMARY_MEMORY_SPECS = [
+    ("Peak GiB", ("overall_peak", "overall_peak_median", "peak_cuda_allocated", "peak_cuda_reserved", "llm_peak", "llm_peak_median")),
+]
+
 
 def load_json(path: str | Path) -> dict[str, Any]:
     return json.loads(Path(path).read_text())
@@ -417,9 +491,60 @@ def before_after_metric(before: Any, after: Any) -> dict[str, Any]:
     }
 
 
+def metric_display_label(name: str) -> str:
+    return DISPLAY_LABELS.get(name, name)
+
+
+def is_primary_raw_metric(name: str) -> bool:
+    return name not in {"preprocess_total_ms", "preprocess_total_median"}
+
+
+def value_from_aliases(group: dict[str, Any], aliases: tuple[str, ...], mode: str | None = None) -> Any:
+    for alias in aliases:
+        value = group.get(alias)
+        if mode is not None and isinstance(value, dict):
+            mode_value = value.get(mode)
+            if mode_value is not None:
+                return mode_value
+        if value is not None and not isinstance(value, dict):
+            return value
+        if isinstance(value, dict) and mode is None:
+            for key in ("median", "mean", "value", "after_autogaze_actual", "after_autogaze", "autogaze"):
+                if value.get(key) is not None:
+                    return value.get(key)
+    return None
+
+
+def has_mode_comparison(group: dict[str, Any]) -> bool:
+    return any(isinstance(value, dict) and ("keep_all" in value or "autogaze" in value) for value in group.values())
+
+
+def render_key_comparison_section(metrics: dict[str, Any]) -> str:
+    latency = as_mapping(metrics.get("latency_ms"))
+    tokens = as_mapping(metrics.get("tokens"))
+    memory = as_mapping(metrics.get("memory_bytes"))
+    modes: tuple[str | None, ...] = ("keep_all", "autogaze") if has_mode_comparison(latency) else (None,)
+    rows: list[list[Any]] = []
+    headers = [label for label, _ in SUMMARY_LATENCY_SPECS + SUMMARY_TOKEN_SPECS + SUMMARY_MEMORY_SPECS]
+    for mode in modes:
+        row = [value_from_aliases(latency, aliases, mode) for _, aliases in SUMMARY_LATENCY_SPECS]
+        row.extend(value_from_aliases(tokens, aliases, mode) for _, aliases in SUMMARY_TOKEN_SPECS)
+        row.extend(value_from_aliases(memory, aliases, mode) for _, aliases in SUMMARY_MEMORY_SPECS)
+        if any(value is not None for value in row):
+            rows.append(([mode] if mode is not None else []) + row)
+    if not rows:
+        return ""
+    if modes != (None,):
+        headers = ["Mode"] + headers
+    note = "Pre(no AG) excludes AutoGaze time. AutoGaze is shown as its own latency stage."
+    return "## Key Comparison\n\n" + note + "\n\n" + markdown_table(headers, rows)
+
+
 def render_simple_metric_table(metrics: dict[str, Any], *, memory: bool = False) -> str:
     rows: list[list[Any]] = []
     for name, value in metrics.items():
+        if not is_primary_raw_metric(name):
+            continue
         rows.append([name, format_bytes(value) if memory else format_value(value)])
     return markdown_table(["Metric", "Value"], rows)
 
@@ -427,12 +552,15 @@ def render_simple_metric_table(metrics: dict[str, Any], *, memory: bool = False)
 def render_comparison_metric_table(metrics: dict[str, Any], *, memory: bool = False) -> str:
     rows: list[list[Any]] = []
     for name, value in metrics.items():
+        if not is_primary_raw_metric(name):
+            continue
+        display_name = metric_display_label(name)
         if isinstance(value, dict) and ("keep_all" in value or "autogaze" in value):
             keep_all = value.get("keep_all")
             autogaze = value.get("autogaze")
             rows.append(
                 [
-                    name,
+                    display_name,
                     format_bytes(keep_all) if memory else format_value(keep_all),
                     format_bytes(autogaze) if memory else format_value(autogaze),
                     value.get("speedup_ratio_keep_all_over_autogaze")
@@ -443,7 +571,7 @@ def render_comparison_metric_table(metrics: dict[str, Any], *, memory: bool = Fa
         elif isinstance(value, dict):
             rows.append(
                 [
-                    name,
+                    display_name,
                     first_present(
                         value.get("before_keep_all_or_raw"),
                         value.get("before_autogaze_selection"),
@@ -459,7 +587,7 @@ def render_comparison_metric_table(metrics: dict[str, Any], *, memory: bool = Fa
                 ]
             )
         else:
-            rows.append([name, value, "-", "-", "-"])
+            rows.append([display_name, value, "-", "-", "-"])
     return markdown_table(["Metric", "Before / Keep-all", "After / AutoGaze", "Ratio", "Reduction %"], rows)
 
 
@@ -469,13 +597,29 @@ def render_key_metrics_section(metrics: dict[str, Any]) -> str:
         group = as_mapping(metrics.get(group_name))
         if not group:
             continue
-        sections.append(f"### {group_name}")
+        sections.append(f"### {metric_display_label(group_name)}")
         is_memory = group_name == "memory_bytes"
         if any(isinstance(value, dict) for value in group.values()):
             sections.append(render_comparison_metric_table(group, memory=is_memory))
         else:
-            sections.append(render_simple_metric_table(group, memory=is_memory))
+            rows: list[list[Any]] = []
+            for name, value in group.items():
+                if not is_primary_raw_metric(name):
+                    continue
+                rows.append([metric_display_label(name), format_bytes(value) if is_memory else format_value(value)])
+            sections.append(markdown_table(["Metric", "Value"], rows))
     return "\n\n".join(sections)
+
+
+def render_raw_metric_appendix(metrics: dict[str, Any]) -> str:
+    rows: list[list[Any]] = []
+    for group_name in ("latency_ms", "tokens", "memory_bytes"):
+        group = as_mapping(metrics.get(group_name))
+        for name, value in group.items():
+            rows.append([group_name, name, format_bytes(value) if group_name == "memory_bytes" else format_value(value)])
+    if not rows:
+        return ""
+    return "## Raw Metric Appendix\n\n" + markdown_table(["Group", "Raw field", "Value"], rows)
 
 
 def render_charts_section(artifacts: list[ChartArtifact], *, markdown_dir: Path | None = None) -> str:
@@ -691,7 +835,12 @@ def render_step_pipeline_metrics(payload: dict[str, Any], metrics: dict[str, Any
             f"{format_value(first_present(info.get('source_frames'), get_path(payload, 'sampling.num_video_frames')))} frames; "
             f"{first_present(info.get('source_resolution'), resolution(info.get('width'), info.get('height')), '-')}",
             f"sampled={format_value(tokens.get('video_sampled_frames'))}; thumbnail={format_value(tokens.get('thumbnail_sampled_frames'))}",
-            first_present(latency.get("preprocess_total_ms"), latency.get("preprocess_total_median")),
+            first_present(
+                latency.get("preprocess_without_autogaze_ms"),
+                latency.get("preprocess_without_autogaze_median"),
+                latency.get("preprocess_total_ms"),
+                latency.get("preprocess_total_median"),
+            ),
             first_present(memory.get("raw_frame_buffer_peak"), memory.get("processor_peak"), memory.get("processor_peak_median")),
         ],
         [
@@ -699,7 +848,12 @@ def render_step_pipeline_metrics(payload: dict[str, Any], metrics: dict[str, Any
             "Resize / tile / thumbnail",
             info.get("processor_input_resolution") or resolution(info.get("width"), info.get("height")),
             f"spatial_tiles={format_value(info.get('spatial_tiles_per_video'))}; chunks={format_value(info.get('temporal_chunks_per_video'))}",
-            latency.get("preprocess_total_ms") or latency.get("preprocess_total_median"),
+            first_present(
+                latency.get("preprocess_without_autogaze_ms"),
+                latency.get("preprocess_without_autogaze_median"),
+                latency.get("preprocess_total_ms"),
+                latency.get("preprocess_total_median"),
+            ),
             memory.get("processor_peak") or memory.get("processor_peak_median"),
         ],
         [
@@ -904,14 +1058,14 @@ def render_input_tokenization(payload: dict[str, Any], metrics: dict[str, Any]) 
     tokens = as_mapping(metrics.get("tokens"))
     stream_tokens = as_mapping(get_path(payload, "stream_plan.tokens", {}))
     rows = [
-        ["video_sampled_frames", tokens.get("video_sampled_frames")],
-        ["thumbnail_sampled_frames", tokens.get("thumbnail_sampled_frames")],
-        ["encoder_patches_per_frame_multiscale", stream_tokens.get("encoder_patches_per_frame_multiscale")],
-        ["patches_per_frame_by_scale", stream_tokens.get("encoder_patches_per_frame_by_scale")],
-        ["encoder_patch_tokens_before_keep_all_or_raw", tokens.get("encoder_patch_tokens_before_keep_all_or_raw")],
-        ["encoder_patch_tokens_after_autogaze", tokens.get("encoder_patch_tokens_after_autogaze")],
-        ["llm_visual_tokens_before_keep_all_estimated", tokens.get("llm_visual_tokens_before_keep_all_estimated")],
-        ["llm_visual_tokens_after_actual", tokens.get("llm_visual_tokens_after_actual")],
+        ["Video frames", tokens.get("video_sampled_frames")],
+        ["Thumbnail frames", tokens.get("thumbnail_sampled_frames")],
+        ["Patches/frame multiscale", stream_tokens.get("encoder_patches_per_frame_multiscale")],
+        ["Patches/frame by scale", stream_tokens.get("encoder_patches_per_frame_by_scale")],
+        ["Full patch", tokens.get("encoder_patch_tokens_before_keep_all_or_raw")],
+        ["Selected patch", tokens.get("encoder_patch_tokens_after_autogaze")],
+        ["LLM visual before", tokens.get("llm_visual_tokens_before_keep_all_estimated")],
+        ["LLM visual", tokens.get("llm_visual_tokens_after_actual")],
     ]
     return "## Frame, Patch, And Tokenization Info\n\n" + markdown_table(
         ["Field", "Value"],
@@ -1243,6 +1397,7 @@ def render_markdown_report(
         f"# {title}",
         render_video_and_experiment_info(payload, source_path),
         render_pipeline_section(payload),
+        render_key_comparison_section(metrics),
         render_input_tokenization(payload, metrics),
         render_processing_budget_summary(payload),
         render_autogaze_token_patch_flow(payload, metrics),
@@ -1254,6 +1409,7 @@ def render_markdown_report(
         render_correctness_comparison(payload),
         render_benchmark_samples(payload),
         render_module_details(payload),
+        render_raw_metric_appendix(metrics),
     ]
     return "\n\n".join(section for section in sections if section).rstrip() + "\n"
 

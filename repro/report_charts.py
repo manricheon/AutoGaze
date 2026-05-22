@@ -17,6 +17,19 @@ DEFAULT_COLORS = (
     "#dd4477",
 )
 
+STAGE_COLORS = {
+    "Pre(no AG)": "#5b8def",
+    "AutoGaze": "#f59f00",
+    "ViT": "#2f9e44",
+    "LLM": "#7048e8",
+    "Other": "#adb5bd",
+    "Full patch": "#5b8def",
+    "Selected patch": "#f59f00",
+    "LLM visual": "#7048e8",
+    "Peak": "#495057",
+    "Overall": "#495057",
+}
+
 
 @dataclass(frozen=True)
 class ChartSegment:
@@ -40,6 +53,23 @@ class ChartArtifact:
 def slugify(value: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "_", value.strip().lower()).strip("_")
     return slug or "chart"
+
+
+def shorten_label(value: str, *, max_chars: int = 32) -> str:
+    text = str(value)
+    if len(text) <= max_chars:
+        return text
+    if "/" in text:
+        suffix = text.rsplit("/", 1)[-1]
+        if suffix:
+            prefix_len = max(8, min(len(text), max(14, max_chars - len(suffix) - 3)))
+            return f"{text[:prefix_len]}...{suffix}"
+    if max_chars <= 8:
+        return text[:max_chars]
+    keep = max_chars - 3
+    left = max(1, keep // 2)
+    right = max(1, keep - left)
+    return f"{text[:left]}...{text[-right:]}"
 
 
 def numeric_or_none(value: Any) -> float | None:
@@ -115,11 +145,11 @@ def write_bar_chart(
     for row_index, bar in enumerate(clean_bars):
         y = top + row_index * row_height
         total = sum(max(float(segment.value), 0.0) for segment in bar.segments)
-        svg.append(f'<text class="label" x="16" y="{y + 20}">{html.escape(bar.label)}</text>')
+        svg.append(f'<text class="label" x="16" y="{y + 20}">{html.escape(shorten_label(bar.label))}</text>')
         svg.append(f'<rect x="{label_width}" y="{y + 6}" width="{bar_width}" height="22" fill="#f1f3f5"/>')
         x = label_width
         for segment in bar.segments:
-            color = segment.color or DEFAULT_COLORS[color_index % len(DEFAULT_COLORS)]
+            color = segment.color or STAGE_COLORS.get(segment.name) or DEFAULT_COLORS[color_index % len(DEFAULT_COLORS)]
             color_index += 1
             segment_width = bar_width * max(float(segment.value), 0.0) / max_total
             svg.append(
@@ -207,15 +237,15 @@ def _latency_bars(metrics: dict[str, Any]) -> list[ChartBar]:
         label = mode or "current"
         total = _metric(latency, ("total_ms", "total", "total_median"), mode)
         segments = [
-            ("preprocess", _metric(latency, ("preprocess_without_autogaze_ms", "preprocess_without_autogaze_median", "preprocess_total_ms", "preprocess_total_median"), mode)),
-            ("autogaze", _metric(latency, ("autogaze_total_ms", "autogaze_ms", "autogaze_total_median", "autogaze_median", "gazing_info_total_ms"), mode)),
-            ("vision_encoder", _metric(latency, ("vit_encoder_ms", "vision_encoder_ms", "vit_encoder_median", "qwen_vit_prepare", "qwen_vit_prepare_ms"), mode)),
-            ("llm_generate", _metric(latency, ("llm_ms", "llm_median", "generate", "generate_ms"), mode)),
+            ("Pre(no AG)", _metric(latency, ("preprocess_without_autogaze_ms", "preprocess_without_autogaze_median", "preprocess_total_ms", "preprocess_total_median"), mode)),
+            ("AutoGaze", _metric(latency, ("autogaze_total_ms", "autogaze_ms", "autogaze_total_median", "autogaze_median", "gazing_info_total_ms"), mode)),
+            ("ViT", _metric(latency, ("vit_encoder_ms", "vision_encoder_ms", "vit_encoder_median", "qwen_vit_prepare", "qwen_vit_prepare_ms"), mode)),
+            ("LLM", _metric(latency, ("llm_ms", "llm_median", "generate", "generate_ms"), mode)),
         ]
         chart_segments = [ChartSegment(name, value) for name, value in segments if value is not None and value > 0]
         known = sum(segment.value for segment in chart_segments)
         if total is not None and total > known:
-            chart_segments.append(ChartSegment("other_or_unattributed", total - known))
+            chart_segments.append(ChartSegment("Other", total - known))
         if not chart_segments and total is not None:
             chart_segments.append(ChartSegment("total", total))
         if chart_segments:
@@ -229,14 +259,14 @@ def _token_bars(metrics: dict[str, Any]) -> list[ChartBar]:
         return []
     specs = [
         (
-            "single_scale_dense_ref",
+            "Dense ref",
             (
                 "single_scale_dense_siglip_reference_patch_tokens",
                 "single_scale_dense_vision_budget.total_patch_tokens",
             ),
         ),
         (
-            "full_or_raw_before",
+            "Full patch",
             (
                 "hd_multiscale_keep_all_patch_tokens",
                 "raw_vit_patch_tokens_before_selector",
@@ -245,7 +275,7 @@ def _token_bars(metrics: dict[str, Any]) -> list[ChartBar]:
             ),
         ),
         (
-            "autogaze_selected",
+            "Selected patch",
             (
                 "autogaze_selected_total_patch_tokens",
                 "encoder_input_patch_tokens_after_autogaze",
@@ -254,7 +284,7 @@ def _token_bars(metrics: dict[str, Any]) -> list[ChartBar]:
             ),
         ),
         (
-            "llm_visual",
+            "LLM visual",
             (
                 "llm_visual_tokens_actual_from_budget",
                 "llm_visual_tokens_after_actual",
@@ -273,8 +303,8 @@ def _token_bars(metrics: dict[str, Any]) -> list[ChartBar]:
         before = first_number(value.get("before_keep_all_estimated"), value.get("before_keep_all_or_raw"), value.get("keep_all"))
         after = first_number(value.get("after_autogaze_actual"), value.get("after_autogaze"), value.get("autogaze"))
         if before is not None and after is not None:
-            bars.append(ChartBar(f"{label}:before", [ChartSegment("before", before)]))
-            bars.append(ChartBar(f"{label}:after", [ChartSegment("after", after)]))
+            bars.append(ChartBar(f"{label}:before", [ChartSegment("Full patch", before)]))
+            bars.append(ChartBar(f"{label}:after", [ChartSegment("Selected patch", after)]))
     return bars
 
 
@@ -283,11 +313,11 @@ def _memory_bars(metrics: dict[str, Any]) -> list[ChartBar]:
     if not memory:
         return []
     specs = [
-        ("processor_peak", ("processor_peak", "processor_peak_median")),
-        ("autogaze_peak", ("autogaze_peak", "autogaze_tile_tensor_peak_per_temporal_chunk")),
-        ("vision_peak", ("siglip_gazed_hidden_peak", "vision_encoder_peak")),
-        ("llm_peak", ("llm_peak", "llm_peak_median", "peak_cuda_allocated")),
-        ("overall_peak", ("overall_peak", "overall_peak_median", "peak_cuda_reserved")),
+        ("Processor", ("processor_peak", "processor_peak_median")),
+        ("AutoGaze", ("autogaze_peak", "autogaze_tile_tensor_peak_per_temporal_chunk")),
+        ("ViT", ("siglip_gazed_hidden_peak", "vision_encoder_peak")),
+        ("LLM", ("llm_peak", "llm_peak_median", "peak_cuda_allocated")),
+        ("Overall", ("overall_peak", "overall_peak_median", "peak_cuda_reserved")),
     ]
     bars: list[ChartBar] = []
     for label, names in specs:

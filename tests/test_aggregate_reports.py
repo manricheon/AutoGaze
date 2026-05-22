@@ -1,7 +1,7 @@
 import csv
 import json
 
-from repro.aggregate_reports import aggregate_report_roots, normalize_report_file
+from repro.aggregate_reports import aggregate_report_roots, normalize_report_file, sort_rows
 
 
 def test_normalize_single_report_extracts_latency_tokens_memory_and_failure(tmp_path):
@@ -117,3 +117,41 @@ def test_aggregate_report_roots_writes_markdown_csv_json_and_svg(tmp_path):
         rows = list(csv.DictReader(f))
     assert rows[0]["processor_input_resolution"] == "1280x720"
     assert rows[0]["autogaze_selected_patch_tokens"] == "300.0"
+
+
+def test_sort_rows_comparison_keeps_baseline_before_autogaze_and_failures_last():
+    rows = [
+        {"mode": "autogaze", "status": "ok", "frames": 128, "processor_input_resolution": "720p", "total_ms": 7000},
+        {"mode": "keep_all", "status": "ok", "frames": 128, "processor_input_resolution": "720p", "total_ms": 9000},
+        {"mode": "qwen_sparse", "status": "ok", "frames": 128, "processor_input_resolution": "720p", "total_ms": 6000},
+        {"mode": "keep_all", "status": "oom", "frames": 256, "processor_input_resolution": "1080p", "total_ms": None},
+    ]
+
+    sorted_rows = sort_rows(rows, sort="comparison")
+
+    assert [row["mode"] for row in sorted_rows] == ["keep_all", "autogaze", "qwen_sparse", "keep_all"]
+    assert sorted_rows[-1]["status"] == "oom"
+
+
+def test_aggregate_report_roots_accepts_sort_mode(tmp_path):
+    root = tmp_path / "runs"
+    root.mkdir()
+    for name, mode, total in [
+        ("autogaze.json", "autogaze", 5000),
+        ("keep_all.json", "keep_all", 9000),
+    ]:
+        (root / name).write_text(
+            json.dumps(
+                {
+                    "mode": mode,
+                    "key_metrics_summary": {"latency_ms": {"total_median": total}},
+                }
+            )
+        )
+    out = tmp_path / "trend"
+
+    artifacts = aggregate_report_roots([root], out, sort="latency")
+
+    with artifacts["csv"].open() as f:
+        rows = list(csv.DictReader(f))
+    assert [row["mode"] for row in rows] == ["autogaze", "keep_all"]
