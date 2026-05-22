@@ -55,9 +55,14 @@ def test_render_single_markdown_report_includes_pipeline_and_key_metrics(tmp_pat
                 "total_median": 9000,
                 "preprocess_without_autogaze_median": 2200,
                 "preprocess_total_median": 3000,
+                "video_decode_read_ms": 700,
+                "video_frame_resize_ms": 300,
+                "video_tiling_ms": 1200,
+                "selector_input_build_ms": 100,
                 "autogaze_median": 800,
                 "autogaze_total_median": 800,
                 "vit_encoder_median": 1200,
+                "mm_projector_ms": 200,
                 "llm_median": 4000,
             },
             "tokens": {
@@ -136,6 +141,11 @@ def test_render_single_markdown_report_includes_pipeline_and_key_metrics(tmp_pat
     assert "3840x2160" in markdown
     assert "1280x720" in markdown
     assert "## Key Metrics" in markdown
+    assert "## Latency Views" in markdown
+    assert "### Wall-clock Stage View" in markdown
+    assert "| current | 700 | 300 | 1,200 | - | 100 | 800 | 1,200 | 200 | 4,000 | 500 | 9,000 |" in markdown
+    assert "### Pipeline Attribution View" in markdown
+    assert "| current | 700 | 1,500 | 900 | 1,400 | 4,000 | 500 | 9,000 |" in markdown
     assert "encoder_patch_tokens_before_keep_all_or_raw" in markdown
     assert "| single_scale_dense_siglip_reference_patch_tokens | 852,992 |" in markdown
     assert "| hd_multiscale_keep_all_patch_tokens | 1,153,280 |" in markdown
@@ -198,9 +208,11 @@ def test_write_markdown_report_adds_chart_assets_by_default(tmp_path):
     assets = output_md.parent / "report_assets"
     assert "## Charts" in markdown
     assert "Latency Breakdown" in markdown
+    assert "Latency Attribution" in markdown
     assert "Token / Patch Budget" in markdown
     assert "Memory Peaks" in markdown
     assert (assets / "latency_breakdown.svg").is_file()
+    assert (assets / "latency_attribution.svg").is_file()
     assert (assets / "token_patch_budget.svg").is_file()
     assert (assets / "memory_peaks.svg").is_file()
 
