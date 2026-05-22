@@ -1324,15 +1324,152 @@ def render_decode_read_stage_details(payload: dict[str, Any]) -> str:
 def render_input_tokenization(payload: dict[str, Any], metrics: dict[str, Any]) -> str:
     tokens = as_mapping(metrics.get("tokens"))
     stream_tokens = as_mapping(get_path(payload, "stream_plan.tokens", {}))
+
+    readable_budget = readable_processing_budget_summary(payload)
+    keep_all_budget = as_mapping(readable_budget.get("keep_all_median") or readable_budget.get("mode_median"))
+    autogaze_budget = as_mapping(readable_budget.get("autogaze_median"))
+    single_budget = processing_budget_summary(payload)
+
+    def token_metric(*aliases: str) -> Any:
+        for alias in aliases:
+            if alias in tokens and tokens.get(alias) is not None:
+                return tokens.get(alias)
+        return None
+
+    def readable_budget_metric(*fields: str) -> Any:
+        for field in fields:
+            keep_all_value = get_budget_value(keep_all_budget, field)
+            autogaze_value = get_budget_value(autogaze_budget, field)
+            if keep_all_value is not None or autogaze_value is not None:
+                if keep_all_value is not None and autogaze_value is not None:
+                    if keep_all_value == autogaze_value:
+                        return keep_all_value
+                    return {"keep_all": keep_all_value, "autogaze": autogaze_value}
+                return keep_all_value if keep_all_value is not None else autogaze_value
+        return None
+
+    single_video = as_mapping(single_budget.get("video"))
+    single_multiscale = as_mapping(single_budget.get("multiscale_patch_space"))
+    single_single_scale = as_mapping(single_budget.get("single_scale_dense_vision_budget"))
+    single_patch_budget = as_mapping(
+        single_budget.get("patch_budget_before_siglip") or single_budget.get("patch_budget_before_vit")
+    )
+    single_llm_budget = as_mapping(single_budget.get("llm_visual_budget"))
+
+    video_frames = first_present(
+        token_metric("video_sampled_frames"),
+        readable_budget_metric("video.actual_video_frames", "video.requested_video_frames"),
+        single_video.get("actual_video_frames"),
+        single_video.get("requested_video_frames"),
+        get_path(payload, "video_input_summary.actual_video_frames"),
+        get_path(payload, "video_input_summary.requested_video_frames"),
+    )
+    thumbnail_frames = first_present(
+        token_metric("thumbnail_sampled_frames"),
+        readable_budget_metric("thumbnail.actual_frames", "thumbnail.effective_frames"),
+        as_mapping(single_budget.get("thumbnail")).get("actual_frames"),
+        as_mapping(single_budget.get("thumbnail")).get("effective_frames"),
+        get_path(payload, "video_input_summary.actual_thumbnail_frames"),
+        get_path(payload, "video_input_summary.requested_thumbnail_frames"),
+    )
+    processor_resolution = first_present(
+        readable_budget_metric("video.processor_input_resolution"),
+        single_video.get("processor_input_resolution"),
+        get_path(payload, "video_input_summary.processor_input_resolution"),
+    )
+    patches_per_frame_multiscale = first_present(
+        stream_tokens.get("encoder_patches_per_frame_multiscale"),
+        readable_budget_metric("multiscale_patch_space.patch_positions_per_tile_frame"),
+        single_multiscale.get("patch_positions_per_tile_frame"),
+    )
+    patches_by_scale = first_present(
+        stream_tokens.get("encoder_patches_per_frame_by_scale"),
+        readable_budget_metric("multiscale_patch_space.patch_positions_by_scale"),
+        single_multiscale.get("patch_positions_by_scale"),
+    )
+    single_scale_reference = first_present(
+        token_metric("single_scale_dense_siglip_reference_patch_tokens"),
+        readable_budget_metric(
+            "single_scale_dense_vision_budget.total_patch_tokens",
+            "single_scale_dense_vision_budget.estimated_total_patch_tokens",
+        ),
+        single_single_scale.get("total_patch_tokens"),
+        single_single_scale.get("estimated_total_patch_tokens"),
+    )
+    full_patch = first_present(
+        token_metric(
+            "hd_multiscale_keep_all_patch_tokens",
+            "raw_vit_patch_tokens_before_selector",
+            "encoder_patch_tokens_before_keep_all_or_raw",
+            "visual_tokens_before_prune",
+        ),
+        readable_budget_metric(
+            "patch_budget_before_siglip.keep_all_total_patch_tokens",
+            "patch_budget_before_vit.actual_raw_patch_tokens_before_vit",
+            "patch_budget_before_vit.estimated_visual_tokens_before_prune",
+        ),
+        single_patch_budget.get("keep_all_total_patch_tokens"),
+        single_patch_budget.get("actual_raw_patch_tokens_before_vit"),
+        single_patch_budget.get("estimated_visual_tokens_before_prune"),
+    )
+    selected_patch = first_present(
+        token_metric(
+            "autogaze_selected_total_patch_tokens",
+            "encoder_input_patch_tokens_after_autogaze",
+            "encoder_patch_tokens_after_autogaze",
+            "visual_tokens_after_prune",
+        ),
+        readable_budget_metric(
+            "patch_budget_before_siglip.autogaze_selected_total_patch_tokens",
+            "patch_budget_before_vit.estimated_visual_tokens_after_prune",
+        ),
+        single_patch_budget.get("autogaze_selected_total_patch_tokens"),
+        single_patch_budget.get("estimated_visual_tokens_after_prune"),
+    )
+    patch_reduction = first_present(
+        token_metric(
+            "patch_reduction_ratio_full_or_raw_over_autogaze",
+            "encoder_token_reduction_ratio",
+            "visual_token_reduction_ratio",
+        ),
+        readable_budget_metric(
+            "patch_budget_before_siglip.total_patch_reduction_ratio",
+            "patch_budget_before_vit.estimated_visual_token_reduction_ratio",
+        ),
+        single_patch_budget.get("total_patch_reduction_ratio"),
+        single_patch_budget.get("estimated_visual_token_reduction_ratio"),
+        ratio_before_over_after(full_patch.get("autogaze"), selected_patch.get("autogaze"))
+        if isinstance(full_patch, dict) and isinstance(selected_patch, dict)
+        else ratio_before_over_after(full_patch, selected_patch),
+    )
+    llm_before = first_present(
+        token_metric("llm_visual_tokens_before_keep_all_estimated", "llm_visual_tokens_keep_all_estimated_from_budget"),
+        readable_budget_metric("llm_visual_budget.keep_all_visual_tokens_estimated"),
+        single_llm_budget.get("keep_all_visual_tokens_estimated"),
+    )
+    llm_after = first_present(
+        token_metric("llm_visual_tokens_actual_from_budget", "llm_visual_tokens_after_actual", "llm_context_tokens"),
+        readable_budget_metric("llm_visual_budget.actual_visual_tokens"),
+        single_llm_budget.get("actual_visual_tokens"),
+    )
+    llm_reduction = first_present(
+        token_metric("llm_visual_token_reduction_ratio_from_budget", "llm_visual_token_reduction_ratio"),
+        readable_budget_metric("llm_visual_budget.visual_token_reduction_ratio"),
+        single_llm_budget.get("visual_token_reduction_ratio"),
+    )
     rows = [
-        ["Video frames", tokens.get("video_sampled_frames")],
-        ["Thumbnail frames", tokens.get("thumbnail_sampled_frames")],
-        ["Patches/frame multiscale", stream_tokens.get("encoder_patches_per_frame_multiscale")],
-        ["Patches/frame by scale", stream_tokens.get("encoder_patches_per_frame_by_scale")],
-        ["Full patch", tokens.get("encoder_patch_tokens_before_keep_all_or_raw")],
-        ["Selected patch", tokens.get("encoder_patch_tokens_after_autogaze")],
-        ["LLM visual before", tokens.get("llm_visual_tokens_before_keep_all_estimated")],
-        ["LLM visual", tokens.get("llm_visual_tokens_after_actual")],
+        ["Video frames", video_frames],
+        ["Thumbnail frames", thumbnail_frames],
+        ["Processor input resolution", processor_resolution],
+        ["Patches/frame multiscale", patches_per_frame_multiscale],
+        ["Patches/frame by scale", patches_by_scale],
+        ["Single-scale dense reference patch", single_scale_reference],
+        ["Full patch", full_patch],
+        ["Selected patch", selected_patch],
+        ["Patch reduction ratio", patch_reduction],
+        ["LLM visual before", llm_before],
+        ["LLM visual", llm_after],
+        ["LLM visual reduction ratio", llm_reduction],
     ]
     return "## Frame, Patch, And Tokenization Info\n\n" + markdown_table(
         ["Field", "Value"],

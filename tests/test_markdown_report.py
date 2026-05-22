@@ -344,6 +344,93 @@ def test_key_comparison_fills_patch_counts_from_readable_processing_budget():
     assert "| autogaze | 7,000 | - | - | - | - | - | 900 | 300 | 3 | 40 | - |" in markdown
 
 
+def test_frame_patch_tokenization_uses_readable_processing_budget_when_token_metrics_are_empty():
+    payload = {
+        "readable_summary": {
+            "key_metrics_median": {
+                "latency_ms": {},
+                "tokens": {},
+            },
+            "processing_budget_summary": {
+                "keep_all_median": {
+                    "video.actual_video_frames": 128,
+                    "thumbnail.actual_frames": 64,
+                    "video.processor_input_resolution": "1280x720",
+                    "multiscale_patch_space.patch_positions_per_tile_frame": 1060,
+                    "multiscale_patch_space.patch_positions_by_scale": {"56": 16, "392": 784},
+                    "single_scale_dense_vision_budget.total_patch_tokens": 800,
+                    "patch_budget_before_siglip.keep_all_total_patch_tokens": 900,
+                    "patch_budget_before_siglip.autogaze_selected_total_patch_tokens": 900,
+                    "llm_visual_budget.keep_all_visual_tokens_estimated": 100,
+                    "llm_visual_budget.actual_visual_tokens": 100,
+                },
+                "autogaze_median": {
+                    "video.actual_video_frames": 128,
+                    "thumbnail.actual_frames": 64,
+                    "video.processor_input_resolution": "1280x720",
+                    "multiscale_patch_space.patch_positions_per_tile_frame": 1060,
+                    "multiscale_patch_space.patch_positions_by_scale": {"56": 16, "392": 784},
+                    "single_scale_dense_vision_budget.total_patch_tokens": 800,
+                    "patch_budget_before_siglip.keep_all_total_patch_tokens": 900,
+                    "patch_budget_before_siglip.autogaze_selected_total_patch_tokens": 300,
+                    "llm_visual_budget.keep_all_visual_tokens_estimated": 100,
+                    "llm_visual_budget.actual_visual_tokens": 40,
+                },
+            },
+        }
+    }
+
+    markdown = render_markdown_report(payload, source_path="hlvid_gain.json")
+
+    section = markdown.split("## Frame, Patch, And Tokenization Info", 1)[1].split("\n\n## ", 1)[0]
+    assert "_No data available._" not in section
+    assert "| Video frames | 128 |" in section
+    assert "| Thumbnail frames | 64 |" in section
+    assert "| Processor input resolution | 1280x720 |" in section
+    assert "| Patches/frame multiscale | 1,060 |" in section
+    assert "| Full patch | {\"autogaze\": 900, \"keep_all\": 900} |" in section
+    assert "| Selected patch | {\"autogaze\": 300, \"keep_all\": 900} |" in section
+    assert "| LLM visual | {\"autogaze\": 40, \"keep_all\": 100} |" in section
+
+
+def test_charts_use_readable_processing_budget_token_metrics(tmp_path):
+    payload = {
+        "readable_summary": {
+            "key_metrics_median": {
+                "latency_ms": {"total_ms": {"keep_all": 10000, "autogaze": 7000}},
+                "tokens": {},
+            },
+            "processing_budget_summary": {
+                "keep_all_median": {
+                    "patch_budget_before_siglip.keep_all_total_patch_tokens": 900,
+                    "patch_budget_before_siglip.autogaze_selected_total_patch_tokens": 900,
+                    "llm_visual_budget.keep_all_visual_tokens_estimated": 100,
+                    "llm_visual_budget.actual_visual_tokens": 100,
+                },
+                "autogaze_median": {
+                    "patch_budget_before_siglip.keep_all_total_patch_tokens": 900,
+                    "patch_budget_before_siglip.autogaze_selected_total_patch_tokens": 300,
+                    "llm_visual_budget.keep_all_visual_tokens_estimated": 100,
+                    "llm_visual_budget.actual_visual_tokens": 40,
+                },
+            },
+        }
+    }
+    input_json = tmp_path / "gain.json"
+    output_md = tmp_path / "gain.md"
+    input_json.write_text(json.dumps(payload))
+
+    write_markdown_report(input_json, output_md)
+
+    token_svg = (tmp_path / "gain_assets" / "token_patch_budget.svg").read_text()
+    assert "Full patch" in token_svg
+    assert "Selected patch" in token_svg
+    assert "LLM visual" in token_svg
+    assert "900 tokens" in token_svg
+    assert "300 tokens" in token_svg
+    assert "40 tokens" in token_svg
+
+
 def test_render_benchmark_markdown_report_includes_scores_and_comparison_tables():
     payload = {
         "dataset": {
