@@ -80,8 +80,12 @@ LATENCY_FIELDS = (
     "generate_ms",
     "video_preprocess_ms",
     "video_preprocess_without_autogaze_ms",
+    "video_decode_read_ms",
+    "preprocess_rest_without_decode_autogaze_ms",
     "autogaze_total_ms",
     "video_decode_ms",
+    "video_prepare_total_ms",
+    "video_frame_resize_ms",
     "video_tiling_ms",
     "autogaze_ms",
     "gazing_info_total_ms",
@@ -140,7 +144,7 @@ READABLE_STAGE_TIMING_FIELDS = (
 )
 MODULE_LATENCY_FIELDS = (
     ("total_ms", "total_ms"),
-    ("video_decode_read_ms", "video_decode_ms"),
+    ("video_decode_read_ms", "video_decode_read_ms"),
     ("preprocess_without_autogaze_ms", "video_preprocess_without_autogaze_ms"),
     ("preprocess_total_ms", "video_preprocess_ms"),
     ("autogaze_ms", "autogaze_ms"),
@@ -207,6 +211,8 @@ def _numeric_values(rows: list[dict[str, Any]], field: str) -> list[float]:
     values: list[float] = []
     for row in rows:
         value = _metric(row, field)
+        if value is None and field == "video_decode_read_ms":
+            value = _metric(row, "video_decode_ms")
         if value is None:
             continue
         try:

@@ -153,6 +153,8 @@ REPEAT_SUMMARY_FIELDS = (
     "preprocess_rest_without_decode_autogaze_ms",
     "autogaze_total_ms",
     "video_decode_ms",
+    "video_prepare_total_ms",
+    "video_frame_resize_ms",
     "video_tiling_ms",
     "autogaze_ms",
     "gazing_info_total_ms",
@@ -295,6 +297,16 @@ class ProfilePatches:
         if module is None:
             return
         self._patch_method(module, attr, stage)
+
+
+def _profile_cpu_stage(profiler: StageProfiler | None, name: str, fn):
+    if profiler is None:
+        return fn()
+    start = time.perf_counter()
+    try:
+        return fn()
+    finally:
+        profiler.add(name, (time.perf_counter() - start) * 1000.0)
 
 
 def bytes_to_gib(value: int) -> float:
@@ -904,6 +916,18 @@ def build_latency_accounting(metrics: dict[str, Any]) -> dict[str, Any]:
                 "add_to_total_ms": False,
                 "description": "Video decode/read/sample work used for common-cost comparison.",
             },
+            "video_prepare_total_ms": {
+                "value": metrics.get("video_prepare_total_ms"),
+                "included_in": "video_preprocess_ms",
+                "add_to_total_ms": False,
+                "description": "Runner-side video preparation wrapper for resized preloaded frames; includes decode/read plus resize.",
+            },
+            "video_frame_resize_ms": {
+                "value": metrics.get("video_frame_resize_ms"),
+                "included_in": "video_preprocess_without_autogaze_ms",
+                "add_to_total_ms": False,
+                "description": "Frame resize time separated from decode/read when runner-side resize is enabled.",
+            },
             "preprocess_rest_without_decode_autogaze_ms": {
                 "value": preprocess_rest_without_decode_autogaze_ms,
                 "included_in": "video_preprocess_without_autogaze_ms",
@@ -964,6 +988,8 @@ def build_latency_accounting(metrics: dict[str, Any]) -> dict[str, Any]:
             "video_decode_ms",
             "video_decode_read_ms",
             "preprocess_rest_without_decode_autogaze_ms",
+            "video_prepare_total_ms",
+            "video_frame_resize_ms",
             "video_tiling_ms",
             "autogaze_ms",
             "gazing_info_total_ms",
@@ -1972,25 +1998,43 @@ def _load_sampled_video_frames_scan(
     resize: dict[str, int | str],
     *,
     requested_strategy: str,
+    profiler: StageProfiler | None = None,
 ) -> tuple[list[Image.Image], dict[str, Any]]:
     stats = _new_decode_stats(requested_strategy)
     stats["decode_strategy"] = "scan"
     max_index = max(target_counts)
 
     frames: list[Image.Image] = []
-    container = av.open(video)
+    container = _profile_cpu_stage(profiler, "video_container_open", lambda: av.open(video))
     try:
-        for frame_index, frame in enumerate(container.decode(video=0)):
+        decoder = container.decode(video=0)
+        frame_index = 0
+        while frame_index <= max_index:
+            try:
+                frame = _profile_cpu_stage(profiler, "video_decode_scan", lambda: next(decoder))
+            except StopIteration:
+                break
             if frame_index > max_index:
                 break
             stats["decode_frames_read"] += 1
             count = target_counts.get(frame_index, 0)
             if count == 0:
+                frame_index += 1
                 continue
-            image = resize_frame(frame.to_image().convert("RGB"), resize)
+            image = _profile_cpu_stage(
+                profiler,
+                "video_frame_to_pil",
+                lambda frame=frame: frame.to_image().convert("RGB"),
+            )
+            image = _profile_cpu_stage(
+                profiler,
+                "video_frame_resize",
+                lambda image=image: resize_frame(image, resize),
+            )
             frames.extend(image.copy() for _ in range(count))
             if len(frames) >= sum(target_counts.values()):
                 break
+            frame_index += 1
     finally:
         container.close()
     return frames, stats
@@ -2002,10 +2046,15 @@ def _load_sampled_video_frames_seek(
     resize: dict[str, int | str],
     *,
     requested_strategy: str,
+    profiler: StageProfiler | None = None,
 ) -> tuple[list[Image.Image], dict[str, Any]]:
     stats = _new_decode_stats(requested_strategy)
     stats["decode_strategy"] = "seek"
-    keyframe_indices, keyframe_metadata = read_video_keyframe_indices(video)
+    keyframe_indices, keyframe_metadata = _profile_cpu_stage(
+        profiler,
+        "video_keyframe_index_scan",
+        lambda: read_video_keyframe_indices(video),
+    )
     stats["decode_keyframes_indexed"] = keyframe_metadata["keyframes"]
     stats["decode_packets_scanned_for_keyframes"] = keyframe_metadata["packets_scanned"]
     groups = build_seek_decode_groups(
@@ -2016,7 +2065,7 @@ def _load_sampled_video_frames_seek(
 
     frames_by_index: dict[int, Image.Image] = {}
     processed_targets: set[int] = set()
-    container = av.open(video)
+    container = _profile_cpu_stage(profiler, "video_container_open", lambda: av.open(video))
     try:
         stream = container.streams.video[0]
         pts_per_frame = stream_pts_per_frame(average_rate=stream.average_rate, time_base=stream.time_base)
@@ -2029,13 +2078,22 @@ def _load_sampled_video_frames_seek(
                 pts_per_frame=pts_per_frame,
                 start_time=start_time,
             )
-            container.seek(seek_pts, stream=stream, backward=True, any_frame=False)
+            _profile_cpu_stage(
+                profiler,
+                "video_seek",
+                lambda seek_pts=seek_pts: container.seek(
+                    seek_pts,
+                    stream=stream,
+                    backward=True,
+                    any_frame=False,
+                ),
+            )
             group_targets = set(int(index) for index in group["target_indices"])
             group_last_target = max(group_targets)
             decoder = container.decode(video=0)
             while True:
                 try:
-                    frame = next(decoder)
+                    frame = _profile_cpu_stage(profiler, "video_decode_seek", lambda: next(decoder))
                 except StopIteration:
                     break
                 stats["decode_frames_read"] += 1
@@ -2043,7 +2101,16 @@ def _load_sampled_video_frames_seek(
                     continue
                 frame_index = pts_to_frame_index(frame.pts, pts_per_frame=pts_per_frame, start_time=start_time)
                 if frame_index in group_targets and frame_index not in processed_targets:
-                    frames_by_index[frame_index] = resize_frame(frame.to_image().convert("RGB"), resize)
+                    image = _profile_cpu_stage(
+                        profiler,
+                        "video_frame_to_pil",
+                        lambda frame=frame: frame.to_image().convert("RGB"),
+                    )
+                    frames_by_index[frame_index] = _profile_cpu_stage(
+                        profiler,
+                        "video_frame_resize",
+                        lambda image=image: resize_frame(image, resize),
+                    )
                     processed_targets.add(frame_index)
                 if frame_index >= group_last_target:
                     break
@@ -2065,8 +2132,9 @@ def load_sampled_video_frames(
     resize: dict[str, int | str],
     *,
     decode_strategy: str = "auto",
+    profiler: StageProfiler | None = None,
 ) -> tuple[list[Image.Image], dict[str, Any]]:
-    metadata = read_video_metadata(video)
+    metadata = _profile_cpu_stage(profiler, "video_metadata_read", lambda: read_video_metadata(video))
     total_frames = metadata.get("frames")
     if total_frames is None:
         raise ValueError("Video frame count is required for runner-side resize sampling.")
@@ -2081,6 +2149,7 @@ def load_sampled_video_frames(
                 target_counts,
                 resize,
                 requested_strategy=decode_strategy,
+                profiler=profiler,
             )
             if len(frames) >= sample_count:
                 while len(frames) < sample_count:
@@ -2104,6 +2173,7 @@ def load_sampled_video_frames(
             target_counts,
             resize,
             requested_strategy=decode_strategy,
+            profiler=profiler,
         )
         stats["decode_strategy_fallback_error"] = fallback_error
     else:
@@ -2112,6 +2182,7 @@ def load_sampled_video_frames(
             target_counts,
             resize,
             requested_strategy=decode_strategy,
+            profiler=profiler,
         )
 
     if not frames:
@@ -3657,6 +3728,27 @@ def stage_total(timings: dict[str, dict[str, float | int]], stage: str) -> float
     return float(value["total_ms"])
 
 
+VIDEO_DECODE_READ_STAGES = (
+    "video_container_open",
+    "video_keyframe_index_scan",
+    "video_seek",
+    "video_decode_seek",
+    "video_decode_scan",
+    "video_frame_to_pil",
+)
+
+
+def video_decode_read_total(timings: dict[str, dict[str, float | int]]) -> float | None:
+    fine_grained_values = [
+        stage_total(timings, stage)
+        for stage in VIDEO_DECODE_READ_STAGES
+        if stage_total(timings, stage) is not None
+    ]
+    if fine_grained_values:
+        return sum(fine_grained_values)
+    return stage_total(timings, "video_decode_sampling")
+
+
 def video_resize_config(args: argparse.Namespace, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
     source_width = int(metadata["width"]) if metadata and metadata.get("width") is not None else None
     source_height = int(metadata["height"]) if metadata and metadata.get("height") is not None else None
@@ -3797,10 +3889,14 @@ def build_video_input_summary(
     }
 
 
-def prepare_video_for_processor(video: str, args: argparse.Namespace) -> tuple[Any, dict[str, Any]]:
+def prepare_video_for_processor(
+    video: str,
+    args: argparse.Namespace,
+    profiler: StageProfiler | None = None,
+) -> tuple[Any, dict[str, Any]]:
     if not has_video_resize(args):
         return video, {"mode": "path_or_url", "resize": video_resize_config(args)}
-    metadata = read_video_metadata(video)
+    metadata = _profile_cpu_stage(profiler, "video_metadata_read", lambda: read_video_metadata(video))
     resize = apply_resize_to_dimensions(
         width=int(metadata["width"]),
         height=int(metadata["height"]),
@@ -3814,6 +3910,7 @@ def prepare_video_for_processor(video: str, args: argparse.Namespace) -> tuple[A
         args.num_video_frames,
         resize,
         decode_strategy=getattr(args, "video_decode_strategy", "auto"),
+        profiler=profiler,
     )
     return frames, {
         "mode": "preloaded_resized_frames",
@@ -4848,8 +4945,8 @@ def generate_one(
         video_payload: Any = resolved_video
         video_input_info: dict[str, Any] = {"mode": "path_or_url", "resize": video_resize_config(args)}
         if has_video_resize(args):
-            with profiler.measure("video_decode_sampling"):
-                video_payload, video_input_info = prepare_video_for_processor(resolved_video, args)
+            with profiler.measure("runner_video_prepare_total"):
+                video_payload, video_input_info = prepare_video_for_processor(resolved_video, args, profiler=profiler)
         with profiler.measure("processor_total"):
             inputs = processor(
                 text=f"{video_token}\n\n{prompt}",
@@ -4927,9 +5024,11 @@ def generate_one(
 
     preprocess_ms = stage_total(processor_timings, "processor_total") or 0.0
     if video_input_info["mode"] == "preloaded_resized_frames":
-        preprocess_ms += stage_total(processor_timings, "video_decode_sampling") or 0.0
+        preprocess_ms += stage_total(processor_timings, "runner_video_prepare_total") or 0.0
     decode_estimated_ms = max(result["generate_ms"] - ttft_ms, 0.0) if ttft_ms is not None else None
-    video_decode_ms = stage_total(processor_timings, "video_decode_sampling")
+    video_prepare_total_ms = stage_total(processor_timings, "runner_video_prepare_total")
+    video_decode_ms = video_decode_read_total(processor_timings)
+    video_frame_resize_ms = stage_total(processor_timings, "video_frame_resize")
     video_tiling_ms = stage_total(processor_timings, "video_tiling_and_tensorize")
     gazing_info_total_ms = stage_total(processor_timings, "autogaze_total")
     autogaze_total_ms = gazing_info_total_ms if gazing_info_total_ms is not None else 0.0
@@ -4955,6 +5054,8 @@ def generate_one(
             "generate_ms": result["generate_ms"],
             "ttft_ms": ttft_ms,
             "video_decode_ms": video_decode_ms,
+            "video_prepare_total_ms": video_prepare_total_ms,
+            "video_frame_resize_ms": video_frame_resize_ms,
             "video_tiling_ms": video_tiling_ms,
             "gazing_info_total_ms": gazing_info_total_ms,
             "autogaze_model_forward_ms": autogaze_model_forward_ms,
@@ -4992,6 +5093,8 @@ def generate_one(
         "preprocess_rest_without_decode_autogaze_ms": preprocess_rest_without_decode_autogaze_ms,
         "autogaze_total_ms": autogaze_total_ms,
         "video_decode_ms": video_decode_ms,
+        "video_prepare_total_ms": video_prepare_total_ms,
+        "video_frame_resize_ms": video_frame_resize_ms,
         "video_tiling_ms": video_tiling_ms,
         "autogaze_ms": gazing_info_total_ms,
         "gazing_info_total_ms": gazing_info_total_ms,

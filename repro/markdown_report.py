@@ -29,6 +29,8 @@ DISPLAY_LABELS = {
     "video_decode_read_median": "Decode/read ms",
     "video_decode_ms": "Decode/read ms",
     "video_decode_median": "Decode/read ms",
+    "video_prepare_total_ms": "Runner video prep ms",
+    "video_frame_resize_ms": "Frame resize ms",
     "preprocess_rest_without_decode_autogaze_ms": "Prep rest ms",
     "preprocess_rest_without_decode_autogaze_median": "Prep rest ms",
     "preprocess_without_autogaze_ms": "Preprocess(no AG) ms",
@@ -341,6 +343,8 @@ def key_metrics(payload: dict[str, Any]) -> dict[str, Any]:
             "preprocess_rest_without_decode_autogaze_ms": result.get(
                 "preprocess_rest_without_decode_autogaze_ms"
             ),
+            "video_prepare_total_ms": result.get("video_prepare_total_ms"),
+            "video_frame_resize_ms": result.get("video_frame_resize_ms"),
             "preprocess_without_autogaze_ms": result.get("video_preprocess_without_autogaze_ms"),
             "preprocess_total_ms": result.get("video_preprocess_ms"),
             "autogaze_ms": result.get("autogaze_ms"),

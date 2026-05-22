@@ -56,6 +56,7 @@ from repro.nvila_runner import (
     summarize_token_budget_rows,
     summarize_stream_chunks,
     uniform_sample_indices,
+    video_decode_read_total,
 )
 
 
@@ -83,6 +84,20 @@ def make_args(**overrides):
     }
     values.update(overrides)
     return argparse.Namespace(**values)
+
+
+def test_video_decode_read_total_prefers_fine_grained_decode_over_broad_sampling_wrapper():
+    timings = {
+        "runner_video_prepare_total": {"total_ms": 120.0, "count": 1, "mean_ms": 120.0},
+        "video_decode_sampling": {"total_ms": 120.0, "count": 1, "mean_ms": 120.0},
+        "video_keyframe_index_scan": {"total_ms": 4.0, "count": 1, "mean_ms": 4.0},
+        "video_seek": {"total_ms": 1.0, "count": 2, "mean_ms": 0.5},
+        "video_decode_seek": {"total_ms": 30.0, "count": 20, "mean_ms": 1.5},
+        "video_frame_to_pil": {"total_ms": 15.0, "count": 8, "mean_ms": 1.875},
+        "video_frame_resize": {"total_ms": 70.0, "count": 8, "mean_ms": 8.75},
+    }
+
+    assert video_decode_read_total(timings) == 50.0
 
 
 def test_build_latency_accounting_separates_additive_total_from_nested_breakdown():
