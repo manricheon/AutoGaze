@@ -201,7 +201,7 @@ Plugin runner도 기본 runner와 같은 형태의 핵심 필드를 남깁니다
 
 ## Caption/Action Benchmark Adapter
 
-HLVid 이후의 task 확장은 `repro.video_task_benchmark`에서 시작합니다. 이 runner는 `flexible_runner --mode single`을 row별로 호출하고, caption/action별 schema와 scoring만 분리합니다.
+HLVid 이후의 task 확장은 `repro.video_task_benchmark`에서 시작합니다. 이 runner는 `flexible_runner --mode single`을 row별로 호출하고, caption/action별 schema와 scoring만 분리합니다. 우선 선택한 HF dataset은 captioning용 `VLM2Vec/MSR-VTT`, action classification용 `bitmind/UCF101-Videos`입니다.
 
 CUDA 머신에서 사용할 HF dataset과 model weight는 `scripts/prepare_video_task_assets.py`로 준비합니다. 이 스크립트는 실제 benchmark를 실행하지 않고, HF `snapshot_download`로 local dataset/model directory를 맞춰 주는 역할입니다.
 
@@ -210,12 +210,11 @@ CUDA 머신에서 사용할 HF dataset과 model weight는 `scripts/prepare_video
   --dry-run \
   --local-root /data/video_tasks \
   --weight-root /models/weight \
-  --dataset caption_set=ORG_OR_USER/CAPTION_DATASET \
-  --dataset action_set=ORG_OR_USER/ACTION_DATASET \
+  --dataset-preset caption-action-smoke \
   --model-preset qwen-compare
 ```
 
-기본 모델 preset은 `qwen-video-task`이며 `Qwen/Qwen3-VL-8B-Instruct`와 `nvidia/AutoGaze`를 `weight/` 아래로 받는 계획을 만듭니다. Qwen2.5/Qwen3 비교는 `--model-preset qwen-compare`, 여러 MLLM smoke 자산은 `--model-preset expand-smoke`를 사용합니다. dataset은 repo와 manifest 구조가 실험마다 달라서 preset 대신 `--dataset name=org/repo[@revision]`을 명시합니다.
+기본 모델 preset은 `qwen-video-task`이며 `Qwen/Qwen3-VL-8B-Instruct`와 `nvidia/AutoGaze`를 `weight/` 아래로 받는 계획을 만듭니다. Qwen2.5/Qwen3 비교는 `--model-preset qwen-compare`, 여러 MLLM smoke 자산은 `--model-preset expand-smoke`를 사용합니다. 다른 dataset은 `--dataset name=org/repo[@revision]`으로 추가할 수 있습니다. 다운로드 후 `scripts/convert_video_task_dataset.py --dataset-preset msrvtt-caption|ucf101-action`으로 manifest를 만듭니다.
 
 | task_type | required fields | scoring |
 | --- | --- | --- |

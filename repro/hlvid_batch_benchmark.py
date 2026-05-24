@@ -2025,7 +2025,12 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run keep-all and AutoGaze HLVid benchmarks from a local folder.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run keep-all and AutoGaze HLVid benchmarks from a local folder. "
+            "For plugin Qwen/VILA/LLaVA options, use: scripts/run_hlvid_folder_benchmark.py --plugin-suite qwen --help"
+        )
+    )
     parser.add_argument("--dataset-dir", required=True)
     parser.add_argument("--manifest")
     parser.add_argument("--video-root")

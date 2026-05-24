@@ -242,13 +242,35 @@ Qwen suite mode의 의미는 다음과 같습니다.
 
 ### Caption/Action Benchmark
 
-HLVid가 아닌 caption/action task는 `repro.video_task_benchmark`를 사용합니다. 이 경로는 같은 plugin mode를 row별 `flexible_runner --mode single`로 실행하고, task별 scoring만 분리합니다.
+HLVid가 아닌 caption/action task는 `repro.video_task_benchmark`를 사용합니다. 이 경로는 같은 plugin mode를 row별 `flexible_runner --mode single`로 실행하고, task별 scoring만 분리합니다. 현재 우선 smoke dataset은 captioning용 `VLM2Vec/MSR-VTT`, action classification용 `bitmind/UCF101-Videos`입니다.
+
+```bash
+.venv/bin/python scripts/prepare_video_task_assets.py \
+  --local-root /data/video_tasks \
+  --weight-root /models/weight \
+  --dataset-preset caption-action-smoke \
+  --model-preset qwen-compare
+```
+
+```bash
+.venv/bin/python scripts/convert_video_task_dataset.py \
+  --dataset-preset msrvtt-caption \
+  --input /data/video_tasks/msrvtt \
+  --output /data/video_tasks/manifests/msrvtt_caption.jsonl
+```
+
+```bash
+.venv/bin/python scripts/convert_video_task_dataset.py \
+  --dataset-preset ucf101-action \
+  --input /data/video_tasks/ucf101-videos \
+  --output /data/video_tasks/manifests/ucf101_action.jsonl
+```
 
 ```bash
 .venv/bin/python -m repro.video_task_benchmark \
   --task-type captioning \
-  --manifest /path/to/caption_manifest.jsonl \
-  --video-root /path/to/videos \
+  --manifest /data/video_tasks/manifests/msrvtt_caption.jsonl \
+  --video-root /data/video_tasks/msrvtt \
   --output-dir outputs/autogaze_repro/video_task_caption_qwen_limit3 \
   --modes qwen3_full_vit,qwen3_chunked_vit,qwen3_chunked_vit_autogaze_sparse \
   --model qwen3-vl=weight/Qwen3-VL-8B-Instruct \
@@ -263,8 +285,8 @@ HLVid가 아닌 caption/action task는 `repro.video_task_benchmark`를 사용합
 ```bash
 .venv/bin/python -m repro.video_task_benchmark \
   --task-type action_classification \
-  --manifest /path/to/action_manifest.jsonl \
-  --video-root /path/to/videos \
+  --manifest /data/video_tasks/manifests/ucf101_action.jsonl \
+  --video-root /data/video_tasks/ucf101-videos \
   --output-dir outputs/autogaze_repro/video_task_action_qwen_limit3 \
   --modes qwen3_full_vit,qwen3_chunked_vit,qwen3_chunked_vit_autogaze_sparse \
   --model qwen3-vl=weight/Qwen3-VL-8B-Instruct \

@@ -204,6 +204,19 @@ def test_plugin_hlvid_qwen_vit_limit3_config_defines_matched_qwen_modes():
     assert args.qwen_vit_max_spatial_chunks == 4
 
 
+def test_video_task_dataset_assets_config_selects_caption_and_action_datasets():
+    root = Path(__file__).resolve().parents[1]
+    config = OmegaConf.load(root / "configs" / "repro" / "video_task_dataset_assets_and_conversion.yaml")
+
+    assert config.asset_prep.script == "scripts/prepare_video_task_assets.py"
+    assert config.asset_prep.args.dataset_preset == "caption-action-smoke"
+    assert config.asset_prep.args.model_preset == "qwen-compare"
+    assert config.selected_datasets.captioning.repo_id == "VLM2Vec/MSR-VTT"
+    assert config.selected_datasets.action_classification.repo_id == "bitmind/UCF101-Videos"
+    assert config.manifest_conversion.msrvtt_caption.args.dataset_preset == "msrvtt-caption"
+    assert config.manifest_conversion.ucf101_action.args.dataset_preset == "ucf101-action"
+
+
 def test_autogaze_priority_validation_config_lists_expand_tracks():
     root = Path(__file__).resolve().parents[1]
     config = OmegaConf.load(root / "configs" / "repro" / "autogaze_priority_validation.yaml")

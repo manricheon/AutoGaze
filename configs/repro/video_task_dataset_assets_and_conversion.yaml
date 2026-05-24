@@ -1,0 +1,39 @@
+name: video_task_dataset_assets_and_conversion
+description: >
+  CUDA-machine prep for HLVid-adjacent caption/action benchmarks. Downloads
+  selected HF datasets and model weights, then converts local dataset metadata
+  to repro.video_task_benchmark JSONL manifests.
+
+selected_datasets:
+  captioning:
+    preset: msrvtt-caption
+    repo_id: VLM2Vec/MSR-VTT
+    converter: scripts/convert_video_task_dataset.py
+    manifest: /data/video_tasks/manifests/msrvtt_caption.jsonl
+  action_classification:
+    preset: ucf101-action
+    repo_id: bitmind/UCF101-Videos
+    converter: scripts/convert_video_task_dataset.py
+    manifest: /data/video_tasks/manifests/ucf101_action.jsonl
+
+asset_prep:
+  script: scripts/prepare_video_task_assets.py
+  args:
+    local_root: /data/video_tasks
+    weight_root: /models/weight
+    dataset_preset: caption-action-smoke
+    model_preset: qwen-compare
+
+manifest_conversion:
+  msrvtt_caption:
+    script: scripts/convert_video_task_dataset.py
+    args:
+      dataset_preset: msrvtt-caption
+      input: /data/video_tasks/msrvtt
+      output: /data/video_tasks/manifests/msrvtt_caption.jsonl
+  ucf101_action:
+    script: scripts/convert_video_task_dataset.py
+    args:
+      dataset_preset: ucf101-action
+      input: /data/video_tasks/ucf101-videos
+      output: /data/video_tasks/manifests/ucf101_action.jsonl

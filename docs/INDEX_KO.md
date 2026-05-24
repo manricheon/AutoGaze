@@ -81,17 +81,16 @@ AutoGaze를 실제 비디오 MLLM 파이프라인에 붙였을 때 다음을 재
 
 ## HLVid 외 Caption/Action Benchmark
 
-HLVid 이후 task 확장은 `repro.video_task_benchmark`를 사용합니다. 이 경로는 `flexible_runner`를 row별로 호출하므로 Qwen/LongVILA/LLaVA 등 plugin mode와 같은 latency/token/memory/failure logging 구조를 재사용합니다.
+HLVid 이후 task 확장은 `repro.video_task_benchmark`를 사용합니다. 이 경로는 `flexible_runner`를 row별로 호출하므로 Qwen/LongVILA/LLaVA 등 plugin mode와 같은 latency/token/memory/failure logging 구조를 재사용합니다. 우선 선택한 smoke dataset은 captioning용 `VLM2Vec/MSR-VTT`, action classification용 `bitmind/UCF101-Videos`입니다.
 
-CUDA 머신에서 dataset/model weight를 먼저 받을 때는 HF snapshot 기반 준비 스크립트를 사용합니다. dataset preset은 일부러 비워 두었고, 실제 사용할 HF dataset repo를 `--dataset name=org/repo[@revision]` 형태로 넘깁니다.
+CUDA 머신에서 dataset/model weight를 먼저 받을 때는 HF snapshot 기반 준비 스크립트를 사용합니다.
 
 ```bash
 .venv/bin/python scripts/prepare_video_task_assets.py \
   --dry-run \
   --local-root /data/video_tasks \
   --weight-root /models/weight \
-  --dataset caption_set=ORG_OR_USER/CAPTION_DATASET \
-  --dataset action_set=ORG_OR_USER/ACTION_DATASET \
+  --dataset-preset caption-action-smoke \
   --model-preset qwen-compare
 ```
 
@@ -99,12 +98,27 @@ CUDA 머신에서 dataset/model weight를 먼저 받을 때는 HF snapshot 기�
 .venv/bin/python scripts/prepare_video_task_assets.py \
   --local-root /data/video_tasks \
   --weight-root /models/weight \
-  --dataset caption_set=ORG_OR_USER/CAPTION_DATASET \
-  --dataset action_set=ORG_OR_USER/ACTION_DATASET \
+  --dataset-preset caption-action-smoke \
   --model-preset qwen-compare
 ```
 
 모델 preset은 `qwen-video-task`(Qwen3-VL + AutoGaze), `qwen-compare`(Qwen2.5-VL + Qwen3-VL + AutoGaze), `expand-smoke`(Qwen/NVILA/LLaVA/InternVL 계열 smoke용)를 지원합니다. 대용량 모델은 CUDA 머신의 디스크/네트워크 정책에 맞춰 `--include`, `--exclude`, `--max-workers`로 조절하세요.
+
+다운로드 후 local metadata를 우리 manifest로 변환합니다.
+
+```bash
+.venv/bin/python scripts/convert_video_task_dataset.py \
+  --dataset-preset msrvtt-caption \
+  --input /data/video_tasks/msrvtt \
+  --output /data/video_tasks/manifests/msrvtt_caption.jsonl
+```
+
+```bash
+.venv/bin/python scripts/convert_video_task_dataset.py \
+  --dataset-preset ucf101-action \
+  --input /data/video_tasks/ucf101-videos \
+  --output /data/video_tasks/manifests/ucf101_action.jsonl
+```
 
 ```bash
 .venv/bin/python -m repro.video_task_benchmark \

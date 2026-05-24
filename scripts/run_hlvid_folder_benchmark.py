@@ -156,6 +156,13 @@ def _contains_qwen_modes(modes: list[str]) -> bool:
     return any(mode.startswith("qwen") for mode in modes)
 
 
+def _print_plugin_help_hint() -> None:
+    print(
+        "Plugin HLVid routes are available through this wrapper. "
+        "For plugin options, run: scripts/run_hlvid_folder_benchmark.py --plugin-suite qwen --help\n"
+    )
+
+
 def main(argv: list[str] | None = None) -> None:
     original_argv = sys.argv
     routed_argv = list(sys.argv[1:] if argv is None else argv)
@@ -166,6 +173,8 @@ def main(argv: list[str] | None = None) -> None:
         payload = run_plugin_route(routed_argv)
         print(json.dumps(payload["summary"], indent=2, sort_keys=True))
         return
+    if "--help" in routed_argv or "-h" in routed_argv:
+        _print_plugin_help_hint()
     if argv is None:
         run_nvila_hlvid_main()
         return

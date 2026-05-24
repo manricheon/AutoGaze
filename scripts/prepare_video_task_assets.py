@@ -83,6 +83,18 @@ MODEL_PRESETS: dict[str, list[dict[str, str]]] = {
 DATASET_PRESETS: dict[str, list[dict[str, str]]] = {
     "none": [],
     "custom": [],
+    "caption-action-smoke": [
+        {
+            "name": "msrvtt-caption",
+            "repo_id": "VLM2Vec/MSR-VTT",
+            "local_subdir": "msrvtt",
+        },
+        {
+            "name": "ucf101-action",
+            "repo_id": "bitmind/UCF101-Videos",
+            "local_subdir": "ucf101-videos",
+        },
+    ],
 }
 
 
@@ -175,7 +187,7 @@ def build_asset_plan(args: argparse.Namespace) -> dict[str, Any]:
             for row in model_assets
         ],
         "notes": [
-            "Dataset presets are intentionally empty by default; pass --dataset name=org/repo for the HF dataset you will use.",
+            "Use --dataset-preset caption-action-smoke for the selected MSR-VTT/UCF101 smoke datasets, or pass --dataset name=org/repo for custom HF datasets.",
             "Use --dry-run on the CUDA machine first to check local_dir, repo_type, and revision before large downloads.",
         ],
     }

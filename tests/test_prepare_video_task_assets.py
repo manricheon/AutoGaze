@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from scripts.prepare_video_task_assets import (
+    DATASET_PRESETS,
     MODEL_PRESETS,
     build_asset_plan,
     download_asset_plan,
@@ -62,6 +63,26 @@ def test_custom_dataset_and_expand_model_plan_use_separate_roots():
     ]
     assert [row["name"] for row in plan["models"]] == ["qwen2.5-vl-7b", "qwen3-vl-8b", "autogaze"]
     assert plan["models"][0]["local_dir"] == "/models/weight/Qwen2.5-VL-7B-Instruct"
+
+
+def test_caption_action_dataset_preset_uses_selected_hf_video_datasets():
+    args = parse_args(
+        [
+            "--local-root",
+            "/data/video_tasks",
+            "--dataset-preset",
+            "caption-action-smoke",
+            "--model-preset",
+            "none",
+        ]
+    )
+    plan = build_asset_plan(args)
+
+    assert DATASET_PRESETS["caption-action-smoke"][0]["repo_id"] == "VLM2Vec/MSR-VTT"
+    assert DATASET_PRESETS["caption-action-smoke"][1]["repo_id"] == "bitmind/UCF101-Videos"
+    assert [row["name"] for row in plan["datasets"]] == ["msrvtt-caption", "ucf101-action"]
+    assert plan["datasets"][0]["local_dir"] == "/data/video_tasks/msrvtt"
+    assert plan["datasets"][1]["local_dir"] == "/data/video_tasks/ucf101-videos"
 
 
 def test_download_asset_plan_calls_snapshot_download_with_repo_types(monkeypatch, tmp_path):

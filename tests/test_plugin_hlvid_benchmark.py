@@ -526,6 +526,63 @@ def test_plugin_hlvid_summary_surfaces_processing_budget_by_mode():
     assert "100" in markdown
 
 
+def test_plugin_hlvid_summary_separates_sidecar_and_actual_pruning_claims():
+    summary = _summarize_by_mode(
+        [
+            {
+                "mode": "longvila-autogaze-actual",
+                "question_id": "q1",
+                "answer": "A",
+                "raw_output": "A",
+                "runner_status": "executed_dense_with_autogaze_sidecar",
+                "visual_pruning_applied": False,
+                "vision_encoder_latency_reduced": False,
+                "mllm_context_reduced": False,
+            },
+            {
+                "mode": "qwen3_chunked_vit_autogaze_sparse",
+                "question_id": "q1",
+                "answer": "A",
+                "raw_output": "A",
+                "runner_status": "executed",
+                "visual_pruning_applied": True,
+                "vision_encoder_latency_reduced": True,
+                "mllm_context_reduced": True,
+            },
+            {
+                "mode": "llava-onevision-autogaze-actual",
+                "question_id": "q1",
+                "answer": "A",
+                "raw_output": "A",
+                "runner_status": "executed",
+                "visual_pruning_applied": True,
+                "vision_encoder_latency_reduced": False,
+                "mllm_context_reduced": True,
+            },
+        ]
+    )
+
+    longvila = summary["modes"]["longvila-autogaze-actual"]["integration_summary"]
+    qwen = summary["modes"]["qwen3_chunked_vit_autogaze_sparse"]["integration_summary"]
+    llava = summary["modes"]["llava-onevision-autogaze-actual"]["integration_summary"]
+
+    assert longvila["execution_claim"] == "dense_generation_with_autogaze_sidecar"
+    assert longvila["vision_encoder_latency_reduction_claim"] == "no"
+    assert longvila["mllm_context_reduction_claim"] == "no"
+    assert qwen["execution_claim"] == "actual_pre_encoder_sparse"
+    assert qwen["vision_encoder_latency_reduction_claim"] == "yes"
+    assert qwen["mllm_context_reduction_claim"] == "yes"
+    assert llava["execution_claim"] == "actual_post_encoder_token_prune"
+    assert llava["vision_encoder_latency_reduction_claim"] == "no"
+    assert llava["mllm_context_reduction_claim"] == "yes"
+
+    markdown = build_markdown_report(summary)
+    assert "## AutoGaze Integration Claims" in markdown
+    assert "| longvila-autogaze-actual | post_encoder_token_prune | dense_generation_with_autogaze_sidecar | no | no | no |" in markdown
+    assert "| qwen3_chunked_vit_autogaze_sparse | pre_encoder_sparse | actual_pre_encoder_sparse | yes | yes | yes |" in markdown
+    assert "| llava-onevision-autogaze-actual | post_encoder_token_prune | actual_post_encoder_token_prune | yes | no | yes |" in markdown
+
+
 def test_run_plugin_hlvid_benchmark_writes_predictions_summary_and_markdown(tmp_path):
     manifest = tmp_path / "manifest.json"
     video_root = tmp_path / "videos"

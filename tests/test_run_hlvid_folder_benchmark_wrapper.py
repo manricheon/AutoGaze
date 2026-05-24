@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 import scripts.run_hlvid_folder_benchmark as wrapper
 
 
@@ -151,3 +153,12 @@ def test_plugin_suite_routes_vila_llava_and_expand_smoke(monkeypatch, tmp_path):
     assert "llava-onevision-autogaze-actual" in captured[2]["modes"]
     assert captured[2]["qwen_video_nframes"] == captured[2]["num_video_frames"]
     assert captured[2]["qwen_vit_max_spatial_chunks"] == captured[2]["max_tiles_video"]
+
+
+def test_default_help_mentions_plugin_help_entrypoint(capsys):
+    with pytest.raises(SystemExit):
+        wrapper.main(["--help"])
+
+    captured = capsys.readouterr()
+
+    assert "--plugin-suite qwen --help" in captured.out

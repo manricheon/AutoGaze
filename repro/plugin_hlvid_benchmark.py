@@ -605,6 +605,32 @@ def build_markdown_report(
                 next_action=mode_summary.get("next_action"),
             )
         )
+    integration_rows = []
+    for mode, mode_summary in summary["modes"].items():
+        integration = mode_summary.get("integration_summary", {})
+        if integration:
+            integration_rows.append(
+                [
+                    mode,
+                    integration.get("integration_level"),
+                    integration.get("execution_claim"),
+                    integration.get("actual_pruning_applied_claim"),
+                    integration.get("vision_encoder_latency_reduction_claim"),
+                    integration.get("mllm_context_reduction_claim"),
+                ]
+            )
+    if integration_rows:
+        lines.extend(
+            [
+                "",
+                "## AutoGaze Integration Claims",
+                "",
+                "| mode | integration_level | execution_claim | actual_pruning_applied | ViT latency reduction | MLLM context reduction |",
+                "|---|---|---|---|---|---|",
+            ]
+        )
+        for row in integration_rows:
+            lines.append("| " + " | ".join(_markdown_cell(value) for value in row) + " |")
     budget_rows = []
     for mode, mode_summary in summary["modes"].items():
         budget = mode_summary.get("processing_budget_summary", {})
@@ -946,8 +972,97 @@ def _summarize_by_mode(predictions: list[dict[str, Any]]) -> dict[str, Any]:
         summary["status_counts"] = _status_counts(rows)
         summary["next_action"] = _next_action_for_mode(mode, rows)
         summary["processing_budget_summary"] = _summarize_processing_budget_by_mode(rows)
+        summary["integration_summary"] = _summarize_integration_by_mode(mode, rows)
         summaries[mode] = summary
     return {"modes": summaries, "mode_order": modes, "total_predictions": len(predictions)}
+
+
+def _summarize_integration_by_mode(mode: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    integration_level = _integration_level_for_mode(mode)
+    execution_claim = _execution_claim_for_mode(mode)
+    return {
+        "integration_level": integration_level,
+        "execution_claim": execution_claim,
+        "actual_pruning_applied_count": _count_truthy(rows, "visual_pruning_applied"),
+        "actual_pruning_applied_claim": _claim_from_rows(rows, "visual_pruning_applied", default=_default_pruning_claim(mode)),
+        "vision_encoder_latency_reduction_claim": _claim_from_rows(
+            rows,
+            "vision_encoder_latency_reduced",
+            default=_default_vit_claim(mode),
+        ),
+        "mllm_context_reduction_claim": _claim_from_rows(
+            rows,
+            "mllm_context_reduced",
+            default=_default_mllm_claim(mode),
+        ),
+    }
+
+
+def _integration_level_for_mode(mode: str) -> str:
+    if mode.endswith("_chunked_vit_autogaze_sparse") or mode == "qwen3-vl-autogaze-direct-pre-vit-sparse":
+        return "pre_encoder_sparse"
+    if "autogaze" in mode:
+        return "post_encoder_token_prune"
+    return "none"
+
+
+def _execution_claim_for_mode(mode: str) -> str:
+    if mode.endswith("_chunked_vit_autogaze_sparse") or mode == "qwen3-vl-autogaze-direct-pre-vit-sparse":
+        return "actual_pre_encoder_sparse"
+    if mode in {
+        "nvila-video-autogaze-actual",
+        "nvila-video-autogaze-sidecar-generate",
+        "longvila-autogaze-actual",
+        "longvila-autogaze-sidecar-generate",
+        "internvl3-autogaze-sidecar-generate",
+    }:
+        return "dense_generation_with_autogaze_sidecar"
+    if mode in {"llava-onevision-autogaze-actual", "llava-onevision-autogaze-prune-generate"}:
+        return "actual_post_encoder_token_prune"
+    if "autogaze-probe" in mode:
+        return "probe_only"
+    if "autogaze" in mode:
+        return "autogaze_requested"
+    return "off_or_dense_baseline"
+
+
+def _default_pruning_claim(mode: str) -> str:
+    if _execution_claim_for_mode(mode) in {"dense_generation_with_autogaze_sidecar", "probe_only"}:
+        return "no"
+    if "autogaze" not in mode:
+        return "not_applicable"
+    return "pending_cuda"
+
+
+def _default_vit_claim(mode: str) -> str:
+    if _integration_level_for_mode(mode) == "pre_encoder_sparse":
+        return "pending_cuda"
+    if "autogaze" not in mode:
+        return "not_applicable"
+    return "no"
+
+
+def _default_mllm_claim(mode: str) -> str:
+    if "autogaze" not in mode:
+        return "not_applicable"
+    if _execution_claim_for_mode(mode) in {"dense_generation_with_autogaze_sidecar", "probe_only"}:
+        return "no"
+    return "pending_cuda"
+
+
+def _claim_from_rows(rows: list[dict[str, Any]], field: str, *, default: str) -> str:
+    values = [row.get(field) for row in rows if row.get(field) is not None]
+    if not values:
+        return default
+    if any(value is True for value in values):
+        return "yes"
+    if all(value is False for value in values):
+        return "no"
+    return default
+
+
+def _count_truthy(rows: list[dict[str, Any]], field: str) -> int:
+    return sum(1 for row in rows if row.get(field) is True)
 
 
 def _summarize_processing_budget_by_mode(rows: list[dict[str, Any]]) -> dict[str, Any]:
