@@ -48,13 +48,22 @@ def test_normalize_single_report_extracts_latency_tokens_memory_and_failure(tmp_
             "source_path": str(report),
             "report_kind": "single_inference",
             "mode": "single",
+            "comparison_pair": None,
+            "baseline_mode": None,
+            "candidate_mode": None,
             "model_path": "weight/Qwen3-VL",
             "status": "oom",
+            "integration_level": None,
+            "execution_claim": None,
+            "actual_pruning_applied": None,
+            "vit_latency_reduction_claim": None,
+            "mllm_context_reduction_claim": None,
             "oom": True,
             "oom_stage": "qwen_vit_prepare",
             "failure_kind": "oom",
             "failure_message": "CUDA out of memory",
                 "total_ms": 1200.0,
+                "latency_speedup": None,
                 "preprocess_ms": 1000.0,
                 "video_decode_read_ms": 300.0,
                 "video_prepare_total_ms": None,
@@ -75,6 +84,9 @@ def test_normalize_single_report_extracts_latency_tokens_memory_and_failure(tmp_
             "autogaze_selected_patch_tokens": 100.0,
             "llm_visual_tokens": 220.0,
             "token_reduction_ratio": 10.0,
+            "llm_visual_token_reduction_ratio": None,
+            "memory_reduction_ratio": None,
+            "accuracy_total_delta": None,
             "peak_memory_bytes": 80000000000.0,
             "accuracy_total": None,
             "accuracy_scored": None,
@@ -263,6 +275,65 @@ def test_normalize_video_task_summary_reports_task_kind_and_scores(tmp_path):
     assert rows[0]["full_or_raw_patch_tokens"] == 100.0
     assert rows[0]["autogaze_selected_patch_tokens"] == 40.0
     assert rows[0]["peak_memory_bytes"] == 4096.0
+
+
+def test_normalize_plugin_summary_preserves_integration_claim_fields(tmp_path):
+    report = tmp_path / "plugin_hlvid_summary.json"
+    report.write_text(
+        json.dumps(
+            {
+                "modes": {
+                    "qwen3_chunked_vit_autogaze_sparse": {
+                        "total": 1,
+                        "correct": 1,
+                        "failed": 0,
+                        "parse_failed": 0,
+                        "accuracy_total": 1.0,
+                        "accuracy_scored": 1.0,
+                        "status_counts": {"executed": 1},
+                        "integration_summary": {
+                            "integration_level": "pre_encoder_sparse",
+                            "execution_claim": "actual_pre_encoder_sparse",
+                            "actual_pruning_applied_claim": "yes",
+                            "vision_encoder_latency_reduction_claim": "yes",
+                            "mllm_context_reduction_claim": "yes",
+                        },
+                        "processing_budget_summary": {
+                            "mode_median": {
+                                "patch_budget_before_vit.actual_raw_patch_tokens_before_vit": 1000,
+                                "patch_budget_before_vit.estimated_visual_tokens_after_prune": 100,
+                                "patch_budget_before_vit.estimated_visual_token_reduction_ratio": 10,
+                                "llm_visual_budget.actual_visual_tokens": 100,
+                            }
+                        },
+                    }
+                },
+                "pairwise_comparisons": [
+                    {
+                        "pair": "qwen3_full_vit -> qwen3_chunked_vit_autogaze_sparse",
+                        "latency_speedup": 2.0,
+                        "patch_or_visual_token_reduction_ratio": 10.0,
+                    }
+                ],
+            }
+        )
+    )
+
+    rows = normalize_report_file(report)
+
+    assert rows[0]["integration_level"] == "pre_encoder_sparse"
+    assert rows[0]["execution_claim"] == "actual_pre_encoder_sparse"
+    assert rows[0]["actual_pruning_applied"] == "yes"
+    assert rows[0]["vit_latency_reduction_claim"] == "yes"
+    assert rows[0]["mllm_context_reduction_claim"] == "yes"
+    assert rows[0]["token_reduction_ratio"] == 10.0
+    pairwise = rows[1]
+    assert pairwise["report_kind"] == "plugin_pairwise_comparison"
+    assert pairwise["comparison_pair"] == "qwen3_full_vit -> qwen3_chunked_vit_autogaze_sparse"
+    assert pairwise["baseline_mode"] == "qwen3_full_vit"
+    assert pairwise["candidate_mode"] == "qwen3_chunked_vit_autogaze_sparse"
+    assert pairwise["latency_speedup"] == 2.0
+    assert pairwise["token_reduction_ratio"] == 10.0
 
 
 def test_aggregate_report_roots_accepts_sort_mode(tmp_path):

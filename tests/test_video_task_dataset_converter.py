@@ -55,6 +55,51 @@ def test_ucf101_action_converter_strips_leading_slash_and_keeps_label():
     ]
 
 
+def test_nextqa_videoqa_converter_maps_choices_and_numeric_answer_to_letter():
+    rows = [
+        {
+            "video": "123.mp4",
+            "question": "Why does she wipe her eyes?",
+            "answer": 1,
+            "a0": "remove makeup",
+            "a1": "wipe tears",
+            "a2": "dance",
+            "type": "CW",
+        }
+    ]
+
+    converted = convert_dataset_rows(rows, dataset_preset="nextqa-videoqa")
+
+    assert converted == [
+        {
+            "sample_id": "123",
+            "video_path": "123.mp4",
+            "question": "Why does she wipe her eyes?",
+            "answer": "B",
+            "choices": ["remove makeup", "wipe tears", "dance"],
+            "source": "VLM2Vec/nextqa",
+            "category": "CW",
+        }
+    ]
+
+
+def test_activitynet_caption_converter_preserves_temporal_metadata():
+    rows = [{"video_id": "v_abc", "caption": "a person jumps", "start_time": 1.2, "end_time": 3.4, "duration": 5.0}]
+
+    converted = convert_dataset_rows(rows, dataset_preset="activitynet-caption")
+
+    assert converted == [
+        {
+            "sample_id": "v_abc",
+            "video_path": "v_abc",
+            "references": ["a person jumps"],
+            "source": "qingy2024/ActivityNet-Captions",
+            "duration": 5.0,
+            "temporal_segments": [{"start_time": 1.2, "end_time": 3.4, "caption": "a person jumps"}],
+        }
+    ]
+
+
 def test_convert_dataset_to_manifest_writes_jsonl_from_csv(tmp_path):
     source = tmp_path / "ucf.csv"
     source.write_text("clip_name,clip_path,label\nclip1,/train/Run/clip1.avi,Run\n")

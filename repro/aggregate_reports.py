@@ -25,13 +25,22 @@ ROW_FIELDS = [
     "source_path",
     "report_kind",
     "mode",
+    "comparison_pair",
+    "baseline_mode",
+    "candidate_mode",
     "model_path",
     "status",
+    "integration_level",
+    "execution_claim",
+    "actual_pruning_applied",
+    "vit_latency_reduction_claim",
+    "mllm_context_reduction_claim",
     "oom",
     "oom_stage",
     "failure_kind",
     "failure_message",
     "total_ms",
+    "latency_speedup",
     "preprocess_ms",
     "video_decode_read_ms",
     "video_prepare_total_ms",
@@ -52,6 +61,9 @@ ROW_FIELDS = [
     "autogaze_selected_patch_tokens",
     "llm_visual_tokens",
     "token_reduction_ratio",
+    "llm_visual_token_reduction_ratio",
+    "memory_reduction_ratio",
+    "accuracy_total_delta",
     "peak_memory_bytes",
     "accuracy_total",
     "accuracy_scored",
@@ -73,10 +85,12 @@ def load_json(path: str | Path) -> dict[str, Any]:
 def normalize_report_file(path: str | Path) -> list[dict[str, Any]]:
     source = Path(path)
     payload = load_json(source)
-    if payload.get("task_type") in {"captioning", "action_classification"} and isinstance(payload.get("modes"), dict):
+    if payload.get("task_type") in {"captioning", "action_classification", "videoqa"} and isinstance(payload.get("modes"), dict):
         return [_normalize_video_task_mode(source, mode, summary) for mode, summary in payload["modes"].items()]
     if "modes" in payload and isinstance(payload.get("modes"), dict):
-        return [_normalize_plugin_mode(source, mode, summary) for mode, summary in payload["modes"].items()]
+        rows = [_normalize_plugin_mode(source, mode, summary) for mode, summary in payload["modes"].items()]
+        rows.extend(_normalize_plugin_pairwise(source, row) for row in payload.get("pairwise_comparisons") or [])
+        return rows
     if "readable_summary" in payload and any(mode in payload for mode in HLVID_MODE_ORDER):
         return [_normalize_hlvid_mode(source, payload, mode) for mode in HLVID_MODE_ORDER if mode in payload]
     return [_normalize_single(source, payload)]
@@ -87,13 +101,22 @@ def _blank_row(path: Path, *, report_kind: str, mode: str | None, model_path: st
         "source_path": str(path),
         "report_kind": report_kind,
         "mode": mode,
+        "comparison_pair": None,
+        "baseline_mode": None,
+        "candidate_mode": None,
         "model_path": model_path,
         "status": None,
+        "integration_level": None,
+        "execution_claim": None,
+        "actual_pruning_applied": None,
+        "vit_latency_reduction_claim": None,
+        "mllm_context_reduction_claim": None,
         "oom": False,
         "oom_stage": None,
         "failure_kind": None,
         "failure_message": None,
         "total_ms": None,
+        "latency_speedup": None,
         "preprocess_ms": None,
         "video_decode_read_ms": None,
         "video_prepare_total_ms": None,
@@ -114,6 +137,9 @@ def _blank_row(path: Path, *, report_kind: str, mode: str | None, model_path: st
         "autogaze_selected_patch_tokens": None,
         "llm_visual_tokens": None,
         "token_reduction_ratio": None,
+        "llm_visual_token_reduction_ratio": None,
+        "memory_reduction_ratio": None,
+        "accuracy_total_delta": None,
         "peak_memory_bytes": None,
         "accuracy_total": None,
         "accuracy_scored": None,
@@ -179,6 +205,12 @@ def _normalize_plugin_mode(path: Path, mode: str, summary: dict[str, Any]) -> di
     status_counts = as_mapping(summary.get("status_counts"))
     row["status"] = "oom" if status_counts.get("oom") else "ok"
     row["oom"] = bool(status_counts.get("oom"))
+    integration = as_mapping(summary.get("integration_summary"))
+    row["integration_level"] = integration.get("integration_level")
+    row["execution_claim"] = integration.get("execution_claim")
+    row["actual_pruning_applied"] = integration.get("actual_pruning_applied_claim")
+    row["vit_latency_reduction_claim"] = integration.get("vision_encoder_latency_reduction_claim")
+    row["mllm_context_reduction_claim"] = integration.get("mllm_context_reduction_claim")
     row["accuracy_total"] = numeric_or_none(summary.get("accuracy_total"))
     row["accuracy_scored"] = numeric_or_none(summary.get("accuracy_scored"))
     row["failed"] = numeric_or_none(summary.get("failed"))
@@ -206,6 +238,38 @@ def _normalize_video_task_mode(path: Path, mode: str, summary: dict[str, Any]) -
     row["autogaze_selected_patch_tokens"] = after
     row["llm_visual_tokens"] = after
     row["token_reduction_ratio"] = before / after if before is not None and after not in {None, 0} else None
+    return row
+
+
+def _normalize_plugin_pairwise(path: Path, comparison: dict[str, Any]) -> dict[str, Any]:
+    pair = comparison.get("pair")
+    baseline_mode = comparison.get("baseline_mode")
+    candidate_mode = comparison.get("candidate_mode")
+    if (baseline_mode is None or candidate_mode is None) and isinstance(pair, str) and "->" in pair:
+        left, right = pair.split("->", 1)
+        baseline_mode = baseline_mode or left.strip()
+        candidate_mode = candidate_mode or right.strip()
+    row = _blank_row(
+        path,
+        report_kind="plugin_pairwise_comparison",
+        mode=pair,
+        model_path=None,
+    )
+    row["comparison_pair"] = pair
+    row["baseline_mode"] = baseline_mode
+    row["candidate_mode"] = candidate_mode
+    row["status"] = comparison.get("candidate_status") or comparison.get("baseline_status")
+    row["integration_level"] = comparison.get("integration_level")
+    row["execution_claim"] = comparison.get("execution_claim")
+    row["latency_speedup"] = numeric_or_none(comparison.get("latency_speedup"))
+    row["full_or_raw_patch_tokens"] = numeric_or_none(comparison.get("baseline_patch_or_visual_tokens"))
+    row["autogaze_selected_patch_tokens"] = numeric_or_none(comparison.get("candidate_patch_or_visual_tokens"))
+    row["token_reduction_ratio"] = numeric_or_none(comparison.get("patch_or_visual_token_reduction_ratio"))
+    row["llm_visual_tokens"] = numeric_or_none(comparison.get("candidate_llm_visual_tokens"))
+    row["llm_visual_token_reduction_ratio"] = numeric_or_none(comparison.get("llm_visual_token_reduction_ratio"))
+    row["memory_reduction_ratio"] = numeric_or_none(comparison.get("memory_reduction_ratio"))
+    row["accuracy_total"] = numeric_or_none(comparison.get("candidate_accuracy_total"))
+    row["accuracy_total_delta"] = numeric_or_none(comparison.get("accuracy_total_delta"))
     return row
 
 
@@ -656,6 +720,9 @@ def _render_markdown(rows: list[dict[str, Any]], charts: dict[str, Path], output
     columns = [
         ("mode", "Mode"),
         ("status", "Status"),
+        ("integration_level", "Integration"),
+        ("execution_claim", "Claim"),
+        ("latency_speedup", "Latency x"),
         ("oom_stage", "OOM stage"),
         ("frames", "Frames"),
         ("processor_input_resolution", "Input res"),
@@ -675,6 +742,9 @@ def _render_markdown(rows: list[dict[str, Any]], charts: dict[str, Path], output
         ("full_or_raw_patch_tokens", "Full patch"),
         ("autogaze_selected_patch_tokens", "Selected patch"),
         ("token_reduction_ratio", "Patch x"),
+        ("llm_visual_token_reduction_ratio", "LLM visual x"),
+        ("memory_reduction_ratio", "Memory x"),
+        ("accuracy_total_delta", "Acc delta"),
         ("peak_memory_bytes", "Peak bytes"),
         ("accuracy_total", "Accuracy"),
     ]

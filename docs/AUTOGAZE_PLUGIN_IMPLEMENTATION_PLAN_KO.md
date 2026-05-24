@@ -142,6 +142,10 @@ Qwen은 이미 `SparseSelectionPlan -> Qwen visual index -> chunked ViT sparse f
 `probe_required`는 AutoGaze selector 요청을 무시하지 않았다는 뜻입니다. 아직 실제 pruning 적용 성공은 아니므로 report에서 `executed`와 분리해서 봐야 합니다.
 `executed_dense_with_autogaze_sidecar`는 모델 답변 생성은 수행했지만 visual pruning은 적용하지 않았다는 뜻입니다. `visual_pruning_applied=false`, `vision_encoder_latency_reduced=false`, `mllm_context_reduced=false`를 같이 확인하세요.
 
+Plugin HLVid summary는 mode별 표와 별도로 pairwise 비교를 함께 생성합니다. 기본 비교 축은 `qwen*_full_vit -> qwen*_chunked_vit_autogaze_sparse`, `qwen*_chunked_vit -> qwen*_chunked_vit_autogaze_sparse`, `nvila-video-off -> nvila-video-autogaze-actual`, `longvila-off -> longvila-autogaze-actual`, `llava-onevision-off -> llava-onevision-autogaze-actual`입니다. 여기서 `latency_speedup`, `patch_or_visual_token_reduction_ratio`, `llm_visual_token_reduction_ratio`, `memory_reduction_ratio`, `accuracy_total_delta`를 봅니다.
+
+Markdown report를 만들면 `pairwise_latency_speedup.svg`와 `pairwise_token_reduction.svg`도 같이 저장됩니다. Qwen sparse는 ViT/LLM 감소 주장을 할 수 있는 후보이고, VILA-family sidecar는 selector 측정만 붙인 상태라 pairwise token gain이 있어도 모델 내부 compute gain으로 해석하지 않습니다.
+
 ## Plugin HLVid 실행 예
 
 ```bash
@@ -199,9 +203,9 @@ Plugin runner도 기본 runner와 같은 형태의 핵심 필드를 남깁니다
 | memory | selector peak, vision peak, LLM peak, overall peak |
 | benchmark | accuracy, failed, oom, parse_failed, skipped |
 
-## Caption/Action Benchmark Adapter
+## Video Task Benchmark Adapter
 
-HLVid 이후의 task 확장은 `repro.video_task_benchmark`에서 시작합니다. 이 runner는 `flexible_runner --mode single`을 row별로 호출하고, caption/action별 schema와 scoring만 분리합니다. 우선 선택한 HF dataset은 captioning용 `VLM2Vec/MSR-VTT`, action classification용 `bitmind/UCF101-Videos`입니다.
+HLVid 이후의 task 확장은 `repro.video_task_benchmark`에서 시작합니다. 이 runner는 `flexible_runner --mode single`을 row별로 호출하고, VideoQA/caption/action별 schema와 scoring만 분리합니다. 우선 선택한 HF dataset은 captioning용 `VLM2Vec/MSR-VTT`, action classification용 `bitmind/UCF101-Videos`, VideoQA용 `VLM2Vec/EgoSchema`, `VLM2Vec/nextqa`, `vid-modeling/videomme`, `VLM2Vec/ActivityNetQA`입니다.
 
 CUDA 머신에서 사용할 HF dataset과 model weight는 `scripts/prepare_video_task_assets.py`로 준비합니다. 이 스크립트는 실제 benchmark를 실행하지 않고, HF `snapshot_download`로 local dataset/model directory를 맞춰 주는 역할입니다.
 
@@ -214,14 +218,38 @@ CUDA 머신에서 사용할 HF dataset과 model weight는 `scripts/prepare_video
   --model-preset qwen-compare
 ```
 
-기본 모델 preset은 `qwen-video-task`이며 `Qwen/Qwen3-VL-8B-Instruct`와 `nvidia/AutoGaze`를 `weight/` 아래로 받는 계획을 만듭니다. Qwen2.5/Qwen3 비교는 `--model-preset qwen-compare`, 여러 MLLM smoke 자산은 `--model-preset expand-smoke`를 사용합니다. 다른 dataset은 `--dataset name=org/repo[@revision]`으로 추가할 수 있습니다. 다운로드 후 `scripts/convert_video_task_dataset.py --dataset-preset msrvtt-caption|ucf101-action`으로 manifest를 만듭니다.
+기본 모델 preset은 `qwen-video-task`이며 `Qwen/Qwen3-VL-8B-Instruct`와 `nvidia/AutoGaze`를 `weight/` 아래로 받는 계획을 만듭니다. Qwen2.5/Qwen3 비교는 `--model-preset qwen-compare`, 여러 MLLM smoke 자산은 `--model-preset expand-smoke`를 사용합니다. 다른 dataset은 `--dataset name=org/repo[@revision]`으로 추가할 수 있습니다. VideoQA 후보는 `--dataset-preset videoqa-smoke`로 받습니다.
+
+다운로드 후 `scripts/convert_video_task_dataset.py --dataset-preset msrvtt-caption|ucf101-action|nextqa-videoqa|egoschema-videoqa|videomme-videoqa|activitynet-qa|activitynet-caption`으로 manifest를 만듭니다.
 
 | task_type | required fields | scoring |
 | --- | --- | --- |
 | `captioning` | `video_path`, `caption` 또는 `references` | 기본 `not_scored`; reference overlap hint만 기록 |
 | `action_classification` | `video_path`, `label` 또는 `answer` | exact label match + multiple-choice letter parsing |
+| `videoqa` | `video_path`, `question`, `answer` | answer가 letter이면 multiple-choice parsing, open answer이면 text containment |
 
 출력은 task별 `*_predictions.jsonl`, `*_scored.jsonl`, `*_summary.json`, `*_report.md`입니다. CUDA 검증 전에는 `configs/repro/video_task_caption_qwen_limit3.yaml`과 `configs/repro/video_task_action_qwen_limit3.yaml`을 smoke config로 사용합니다.
+VideoQA smoke config는 `configs/repro/video_task_videoqa_qwen_limit3.yaml`입니다.
+
+## Qwen Sparse Preflight
+
+Qwen pre-ViT sparse 후보는 CUDA smoke 전에 정적 token/context risk를 볼 수 있습니다.
+
+```bash
+.venv/bin/python -m repro.qwen_sparse_preflight \
+  --model-family qwen3-vl \
+  --num-frames 128 \
+  --height 720 \
+  --width 1280 \
+  --patch-size 14 \
+  --spatial-merge-size 2 \
+  --autogaze-reduction-ratio 10 \
+  --chunk-frames 16 \
+  --context-limit 32768 \
+  --h100-budget-gib 70
+```
+
+이 preflight는 `raw_patch_tokens_before_vit`, `visual_tokens_before_prune`, `selected_patch_tokens_after_autogaze`, `visual_tokens_after_prune`, `llm_context_tokens_estimated`, `risk.context`, `risk.memory`를 JSON으로 냅니다. 실제 성능 주장은 CUDA에서 `qwen*_full_vit`, `qwen*_chunked_vit`, `qwen*_chunked_vit_autogaze_sparse` 세 모드를 같은 입력으로 돌린 후 report의 pairwise 비교를 기준으로 제한합니다.
 
 ## 남은 구현/검증
 
@@ -230,4 +258,4 @@ CUDA 머신에서 사용할 HF dataset과 model weight는 `scripts/prepare_video
 3. LLaVA-OneVision post-encoder prune-generate가 실제 checkpoint별 remote/API에서 통과하는지 CUDA smoke로 확인.
 4. LongVILA/NVILA-Video/InternVL에서 sidecar 이후 실제 remote-code visual pruning hook을 어디에 넣을지 확정.
 5. probe/sidecar mode에서 `SparseSelectionPlan -> encoder mapping -> MLLM visual token mapping`이 실제 좌표 단위로 이어지는지 모델별 CUDA smoke로 확인.
-6. Caption/action benchmark를 실제 CUDA model output으로 검증하고, 이후 새 VideoQA 데이터셋을 같은 task adapter 규격으로 추가.
+6. VideoQA/caption/action benchmark를 실제 CUDA model output으로 검증하고, dataset별 scoring 품질을 확인.

@@ -108,6 +108,58 @@ def test_run_action_benchmark_scores_exact_match_and_records_failure(monkeypatch
     assert result["predictions"][1]["failure_stage"] == "mllm_generate"
 
 
+def test_run_videoqa_benchmark_scores_multiple_choice(monkeypatch, tmp_path):
+    manifest = tmp_path / "videoqa.jsonl"
+    manifest.write_text(
+        json.dumps(
+            {
+                "sample_id": "vq1",
+                "video_path": "clip.mp4",
+                "question": "What happens? A. one B. two",
+                "answer": "A",
+                "choices": ["one", "two"],
+            }
+        )
+        + "\n"
+    )
+    video_root = tmp_path / "videos"
+    video_root.mkdir()
+    (video_root / "clip.mp4").write_text("fake")
+
+    def fake_run_single(args):
+        return {
+            "implementation_status": "executed",
+            "generation": {
+                "text": "A",
+                "status": "executed",
+                "metrics": {
+                    "latency_ms": {"total": 10.0, "generate": 4.0},
+                    "tokens": {"visual_tokens_before_prune": 100, "visual_tokens_after_prune": 50},
+                    "memory_bytes": {"peak_cuda_reserved": 1234},
+                },
+            },
+        }
+
+    monkeypatch.setattr("repro.video_task_benchmark.run_single", fake_run_single)
+
+    result = run_video_task_benchmark(
+        manifest=manifest,
+        video_root=video_root,
+        output_dir=tmp_path / "out",
+        task_type="videoqa",
+        modes=["qwen3_full_vit"],
+        limit=1,
+    )
+
+    summary = result["summary"]["modes"]["qwen3_full_vit"]
+    assert result["predictions"][0]["task_type"] == "videoqa"
+    assert result["predictions"][0]["question"] == "What happens? A. one B. two"
+    assert summary["task_type"] == "videoqa"
+    assert summary["correct"] == 1
+    assert summary["accuracy_total"] == 1.0
+    assert Path(result["artifacts"]["markdown"]).name == "videoqa_report.md"
+
+
 def test_build_markdown_report_lists_modes_and_task_type():
     markdown = build_markdown_report(
         {

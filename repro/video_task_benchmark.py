@@ -18,10 +18,12 @@ from repro.plugin_hlvid_benchmark import (
 from repro.video_task_schema import (
     TASK_TYPE_ACTION_CLASSIFICATION,
     TASK_TYPE_CAPTIONING,
+    TASK_TYPE_VIDEOQA,
     TASK_TYPES,
     read_video_task_manifest,
     score_action_predictions,
     score_caption_predictions,
+    score_videoqa_predictions,
 )
 
 DEFAULT_VIDEO_TASK_MODES = ["qwen3_full_vit", "qwen3_chunked_vit", "qwen3_chunked_vit_autogaze_sparse"]
@@ -137,6 +139,8 @@ def summarize_video_task_predictions(predictions: list[dict[str, Any]], *, task_
             mode_summary, scored = score_action_predictions(rows)
         elif task_type == TASK_TYPE_CAPTIONING:
             mode_summary, scored = score_caption_predictions(rows)
+        elif task_type == TASK_TYPE_VIDEOQA:
+            mode_summary, scored = score_videoqa_predictions(rows)
         else:
             raise ValueError(f"unsupported video task_type: {task_type}")
         mode_summary["status_counts"] = _status_counts(rows)
@@ -185,6 +189,7 @@ def build_markdown_report(summary: dict[str, Any]) -> str:
             "## Notes",
             "",
             "- Action classification uses exact label or multiple-choice letter parsing.",
+            "- VideoQA uses multiple-choice parsing when the answer is a letter, and text containment for open answers.",
             "- Captioning keeps references and overlap hints, but defaults to `not_scored` unless an external judge is added.",
             "- Per-row latency, token, memory, and failure details are stored in the predictions JSONL.",
         ]
@@ -209,7 +214,7 @@ def _runner_row(row: dict[str, Any]) -> dict[str, Any]:
         "category": row.get("category"),
         "video_path": row["video_path"],
         "question": row["prompt"],
-        "answer": row.get("label") or (row.get("references") or [None])[0],
+        "answer": row.get("answer") or row.get("label") or (row.get("references") or [None])[0],
     }
 
 
@@ -226,6 +231,8 @@ def _prediction_from_payload(mode: str, row: dict[str, Any], video_path: Path, p
         "video_path": row.get("video_path"),
         "resolved_video_path": str(video_path),
         "prompt": row.get("prompt"),
+        "question": row.get("question"),
+        "answer": row.get("answer"),
         "label": row.get("label"),
         "choices": row.get("choices"),
         "references": row.get("references"),
@@ -296,7 +303,7 @@ def _format_metric(value: Any) -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run caption/action video task benchmarks through flexible_runner")
+    parser = argparse.ArgumentParser(description="Run VideoQA/caption/action video task benchmarks through flexible_runner")
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--video-root", required=True)
     parser.add_argument("--output-dir", default="outputs/autogaze_repro/video_task_benchmark")

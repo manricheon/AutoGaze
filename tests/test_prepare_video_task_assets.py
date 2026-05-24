@@ -85,6 +85,18 @@ def test_caption_action_dataset_preset_uses_selected_hf_video_datasets():
     assert plan["datasets"][1]["local_dir"] == "/data/video_tasks/ucf101-videos"
 
 
+def test_videoqa_dataset_preset_lists_long_video_qa_candidates():
+    args = parse_args(["--dataset-preset", "videoqa-smoke", "--model-preset", "none"])
+    plan = build_asset_plan(args)
+
+    assert [row["repo_id"] for row in plan["datasets"]] == [
+        "VLM2Vec/EgoSchema",
+        "VLM2Vec/nextqa",
+        "vid-modeling/videomme",
+        "VLM2Vec/ActivityNetQA",
+    ]
+
+
 def test_download_asset_plan_calls_snapshot_download_with_repo_types(monkeypatch, tmp_path):
     calls = []
 

@@ -1,8 +1,8 @@
 name: video_task_dataset_assets_and_conversion
 description: >
-  CUDA-machine prep for HLVid-adjacent caption/action benchmarks. Downloads
-  selected HF datasets and model weights, then converts local dataset metadata
-  to repro.video_task_benchmark JSONL manifests.
+  CUDA-machine prep for HLVid-adjacent caption/action/VideoQA benchmarks.
+  Downloads selected HF datasets and model weights, then converts local dataset
+  metadata to repro.video_task_benchmark JSONL manifests.
 
 selected_datasets:
   captioning:
@@ -15,6 +15,17 @@ selected_datasets:
     repo_id: bitmind/UCF101-Videos
     converter: scripts/convert_video_task_dataset.py
     manifest: /data/video_tasks/manifests/ucf101_action.jsonl
+  videoqa:
+    presets:
+      - egoschema-videoqa
+      - nextqa-videoqa
+      - videomme-videoqa
+      - activitynet-qa
+    dataset_prep_preset: videoqa-smoke
+    converter: scripts/convert_video_task_dataset.py
+    manifest_examples:
+      nextqa: /data/video_tasks/manifests/nextqa_videoqa.jsonl
+      activitynet_qa: /data/video_tasks/manifests/activitynetqa_videoqa.jsonl
 
 asset_prep:
   script: scripts/prepare_video_task_assets.py
@@ -22,6 +33,11 @@ asset_prep:
     local_root: /data/video_tasks
     weight_root: /models/weight
     dataset_preset: caption-action-smoke
+    model_preset: qwen-compare
+  videoqa_args:
+    local_root: /data/video_tasks
+    weight_root: /models/weight
+    dataset_preset: videoqa-smoke
     model_preset: qwen-compare
 
 manifest_conversion:
@@ -37,3 +53,15 @@ manifest_conversion:
       dataset_preset: ucf101-action
       input: /data/video_tasks/ucf101-videos
       output: /data/video_tasks/manifests/ucf101_action.jsonl
+  nextqa_videoqa:
+    script: scripts/convert_video_task_dataset.py
+    args:
+      dataset_preset: nextqa-videoqa
+      input: /data/video_tasks/nextqa
+      output: /data/video_tasks/manifests/nextqa_videoqa.jsonl
+  activitynet_caption:
+    script: scripts/convert_video_task_dataset.py
+    args:
+      dataset_preset: activitynet-caption
+      input: /data/video_tasks/activitynet-captions
+      output: /data/video_tasks/manifests/activitynet_caption.jsonl

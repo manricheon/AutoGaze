@@ -1,0 +1,44 @@
+description: >
+  VideoQA smoke benchmark for the plugin runner. Rows are scored with
+  multiple-choice parsing when the answer is a letter, and text containment for
+  open answers.
+
+video_task_benchmark:
+  module: repro.video_task_benchmark
+  args:
+    task_type: videoqa
+    manifest: /path/to/videoqa_manifest.jsonl
+    video_root: /path/to/videos
+    output_dir: outputs/autogaze_repro/video_task_videoqa_qwen_limit3
+    limit: 3
+    modes:
+      - qwen3_full_vit
+      - qwen3_chunked_vit
+      - qwen3_chunked_vit_autogaze_sparse
+    models:
+      qwen3-vl: weight/Qwen3-VL-8B-Instruct
+    num_video_frames: 32
+    qwen_video_nframes: 32
+    video_resize_longest_edge: 448
+    max_tiles_video: 4
+    qwen_vit_chunk_frames: 16
+    qwen_vit_max_spatial_chunks: 4
+    max_new_tokens: 8
+
+manifest_schema:
+  required:
+    - video_path
+    - question
+    - answer
+  optional:
+    - sample_id or question_id or qid
+    - choices
+    - category
+    - source
+    - duration
+
+outputs:
+  predictions: outputs/autogaze_repro/video_task_videoqa_qwen_limit3/videoqa_predictions.jsonl
+  scored: outputs/autogaze_repro/video_task_videoqa_qwen_limit3/videoqa_scored.jsonl
+  summary: outputs/autogaze_repro/video_task_videoqa_qwen_limit3/videoqa_summary.json
+  markdown: outputs/autogaze_repro/video_task_videoqa_qwen_limit3/videoqa_report.md

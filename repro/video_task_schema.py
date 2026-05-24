@@ -11,7 +11,8 @@ from repro.hlvid import parse_choice, read_jsonl
 
 TASK_TYPE_CAPTIONING = "captioning"
 TASK_TYPE_ACTION_CLASSIFICATION = "action_classification"
-TASK_TYPES = (TASK_TYPE_CAPTIONING, TASK_TYPE_ACTION_CLASSIFICATION)
+TASK_TYPE_VIDEOQA = "videoqa"
+TASK_TYPES = (TASK_TYPE_CAPTIONING, TASK_TYPE_ACTION_CLASSIFICATION, TASK_TYPE_VIDEOQA)
 
 DEFAULT_CAPTION_PROMPT = "Describe the video."
 DEFAULT_ACTION_PROMPT = "What action is shown in the video?"
@@ -50,7 +51,9 @@ def normalize_video_task(row: dict[str, Any], *, task_type: str, row_index: int)
         raise ValueError(f"{task_type} row missing required fields: ['video_path']")
     if task_type == TASK_TYPE_CAPTIONING:
         return _normalize_caption_task(row, row_index=row_index)
-    return _normalize_action_task(row, row_index=row_index)
+    if task_type == TASK_TYPE_ACTION_CLASSIFICATION:
+        return _normalize_action_task(row, row_index=row_index)
+    return _normalize_videoqa_task(row, row_index=row_index)
 
 
 def score_action_predictions(rows: list[dict[str, Any]]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -141,6 +144,58 @@ def score_caption_predictions(rows: list[dict[str, Any]]) -> tuple[dict[str, Any
     return summary, scored_rows
 
 
+def score_videoqa_predictions(rows: list[dict[str, Any]]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    scored_rows: list[dict[str, Any]] = []
+    correct = 0
+    scored = 0
+    failed = 0
+    parse_failed = 0
+    skipped = 0
+    for row in rows:
+        output = row.get("raw_output")
+        expected = str(row.get("answer", row.get("label", ""))).strip()
+        status = str(row.get("status") or "")
+        scored_row = dict(row)
+        if status in {"failed", "oom"}:
+            failed += 1
+            scored_row["correct"] = False
+            scored_row["parse_failed"] = False
+            scored_rows.append(scored_row)
+            continue
+        if status == "skipped":
+            skipped += 1
+            scored_row["correct"] = False
+            scored_row["parse_failed"] = False
+            scored_rows.append(scored_row)
+            continue
+        parsed = _parse_videoqa_answer(output, expected=expected)
+        if parsed is None or not expected:
+            parse_failed += 1
+            scored_row["correct"] = False
+            scored_row["parse_failed"] = True
+            scored_rows.append(scored_row)
+            continue
+        is_correct = _videoqa_answers_match(parsed, expected)
+        correct += int(is_correct)
+        scored += 1
+        scored_row["parsed_answer"] = parsed
+        scored_row["correct"] = is_correct
+        scored_row["parse_failed"] = False
+        scored_rows.append(scored_row)
+    summary = {
+        "task_type": TASK_TYPE_VIDEOQA,
+        "total": len(rows),
+        "scored": scored,
+        "correct": correct,
+        "failed": failed,
+        "parse_failed": parse_failed,
+        "skipped": skipped,
+        "accuracy_scored": correct / scored if scored else 0.0,
+        "accuracy_total": correct / len(rows) if rows else 0.0,
+    }
+    return summary, scored_rows
+
+
 def _normalize_caption_task(row: dict[str, Any], *, row_index: int) -> dict[str, Any]:
     references = _caption_references(row)
     if not references:
@@ -164,9 +219,30 @@ def _normalize_action_task(row: dict[str, Any], *, row_index: int) -> dict[str, 
     return normalized
 
 
+def _normalize_videoqa_task(row: dict[str, Any], *, row_index: int) -> dict[str, Any]:
+    question = row.get("question", row.get("prompt"))
+    answer = row.get("answer", row.get("label"))
+    missing = []
+    if question is None or str(question).strip() == "":
+        missing.append("question")
+    if answer is None or str(answer).strip() == "":
+        missing.append("answer")
+    if missing:
+        raise ValueError(f"videoqa row missing required fields: {missing}")
+    normalized = _common_task(row, task_type=TASK_TYPE_VIDEOQA, row_index=row_index)
+    question_text = str(question).strip()
+    normalized["prompt"] = question_text
+    normalized["question"] = question_text
+    normalized["answer"] = str(answer).strip()
+    choices = _coerce_choices(row.get("choices"))
+    if choices:
+        normalized["choices"] = choices
+    return normalized
+
+
 def _common_task(row: dict[str, Any], *, task_type: str, row_index: int) -> dict[str, Any]:
     normalized: dict[str, Any] = {
-        "sample_id": str(row.get("sample_id") or row.get("question_id") or row.get("id") or row_index),
+        "sample_id": str(row.get("sample_id") or row.get("question_id") or row.get("qid") or row.get("id") or row_index),
         "task_type": task_type,
         "video_path": str(row["video_path"]),
     }
@@ -225,6 +301,27 @@ def _parse_action_answer(output: Any, *, expected: str) -> str | None:
         return parsed_choice
     text = str(output).strip()
     return text if text else None
+
+
+def _parse_videoqa_answer(output: Any, *, expected: str) -> str | None:
+    if output is None:
+        return None
+    if re.fullmatch(r"[A-E]", expected.strip(), re.IGNORECASE):
+        return parse_choice(str(output))
+    text = str(output).strip()
+    if not text:
+        return None
+    normalized_text = _normalize_label(text)
+    normalized_expected = _normalize_label(expected)
+    if normalized_expected and normalized_expected in normalized_text:
+        return expected
+    return text
+
+
+def _videoqa_answers_match(parsed: str, expected: str) -> bool:
+    if re.fullmatch(r"[A-E]", expected.strip(), re.IGNORECASE):
+        return parsed.strip().upper() == expected.strip().upper()
+    return _normalize_label(expected) in _normalize_label(parsed)
 
 
 def _normalize_label(value: str) -> str:

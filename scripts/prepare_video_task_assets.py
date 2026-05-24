@@ -95,6 +95,28 @@ DATASET_PRESETS: dict[str, list[dict[str, str]]] = {
             "local_subdir": "ucf101-videos",
         },
     ],
+    "videoqa-smoke": [
+        {
+            "name": "egoschema-videoqa",
+            "repo_id": "VLM2Vec/EgoSchema",
+            "local_subdir": "egoschema",
+        },
+        {
+            "name": "nextqa-videoqa",
+            "repo_id": "VLM2Vec/nextqa",
+            "local_subdir": "nextqa",
+        },
+        {
+            "name": "videomme-videoqa",
+            "repo_id": "vid-modeling/videomme",
+            "local_subdir": "videomme",
+        },
+        {
+            "name": "activitynet-videoqa",
+            "repo_id": "VLM2Vec/ActivityNetQA",
+            "local_subdir": "activitynetqa",
+        },
+    ],
 }
 
 
@@ -187,7 +209,7 @@ def build_asset_plan(args: argparse.Namespace) -> dict[str, Any]:
             for row in model_assets
         ],
         "notes": [
-            "Use --dataset-preset caption-action-smoke for the selected MSR-VTT/UCF101 smoke datasets, or pass --dataset name=org/repo for custom HF datasets.",
+            "Use --dataset-preset caption-action-smoke for MSR-VTT/UCF101, --dataset-preset videoqa-smoke for EgoSchema/NextQA/VideoMME/ActivityNetQA, or pass --dataset name=org/repo for custom HF datasets.",
             "Use --dry-run on the CUDA machine first to check local_dir, repo_type, and revision before large downloads.",
         ],
     }

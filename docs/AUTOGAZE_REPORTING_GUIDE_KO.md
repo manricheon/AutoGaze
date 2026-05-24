@@ -46,6 +46,15 @@ assets/memory_peak_by_config.svg
 assets/status_by_config.svg
 ```
 
+Plugin HLVid report는 별도 chart도 만듭니다.
+
+```text
+plugin_hlvid_report_assets/pairwise_latency_speedup.svg
+plugin_hlvid_report_assets/pairwise_token_reduction.svg
+```
+
+Qwen sparse처럼 실제 pre-ViT sparse를 목표로 하는 mode는 이 pairwise chart를 먼저 봅니다. VILA/LongVILA sidecar mode는 selector metric만 붙인 상태일 수 있으므로 `integration_level`, `execution_claim`, `actual_pruning_applied`, `vit_latency_reduction_claim`, `mllm_context_reduction_claim`을 같이 확인해야 합니다.
+
 ## 실험 폴더 이름 추천
 
 폴더 이름에 비교 축을 넣으면 aggregate report를 읽기 쉽습니다.
@@ -206,6 +215,8 @@ OOM이 나도 가능한 경우 다음 값을 남깁니다.
 | status chart | success/OOM/parse_failed/skipped 분포 |
 | accuracy table | keep-all, AutoGaze, paper baseline 점수 비교 |
 | pairwise correctness table | keep-all/single-scale/AutoGaze 중 어떤 모드만 정답을 맞췄는지 paired sample 기준으로 비교 |
+| plugin pairwise table | Qwen full/chunked/sparse, VILA/LLaVA off/on pair의 latency/token/memory/accuracy delta 비교 |
+| plugin integration claim table | `pre_encoder_sparse`, `post_encoder_token_prune`, sidecar/probe 상태를 분리해 “실제 pruning 적용” 여부 표시 |
 
 ## 결과 코멘트 템플릿
 

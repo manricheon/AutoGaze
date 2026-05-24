@@ -35,9 +35,10 @@ AutoGaze를 실제 비디오 MLLM 파이프라인에 붙였을 때 다음을 재
 | Direct HLVid 실행 | `python -m repro.nvila_runner --mode hlvid` | 한 가지 `gazing-mode`로 HLVid manifest를 직접 실행 |
 | 기본/Plugin HLVid benchmark | `python scripts/run_hlvid_folder_benchmark.py` | 기본 3모드 keep-all/single-scale dense/autogaze 비교, paper baseline 비교, H100 preflight, `--plugin-suite qwen|vila|llava|expand-smoke` 확장 실험 라우팅 |
 | Plugin HLVid 내부 경로 | `python -m repro.plugin_hlvid_benchmark` | Qwen2.5/Qwen3/LongVILA/NVILA-Video/LLaVA 등 확장 실험을 직접 호출할 때 |
-| Caption/Action benchmark | `python -m repro.video_task_benchmark` | HLVid 외 captioning/action classification manifest를 plugin runner로 실행 |
-| Caption/Action 자산 준비 | `python scripts/prepare_video_task_assets.py` | CUDA 머신에서 HF dataset snapshot과 모델 weight를 local dir로 다운로드 |
+| Video task benchmark | `python -m repro.video_task_benchmark` | HLVid 외 VideoQA/captioning/action classification manifest를 plugin runner로 실행 |
+| Video task 자산 준비 | `python scripts/prepare_video_task_assets.py` | CUDA 머신에서 HF dataset snapshot과 모델 weight를 local dir로 다운로드 |
 | Plugin single/inspect | `python -m repro.flexible_runner` | token selector / ViT / MLLM 조합을 명시해 실험 |
+| Qwen sparse preflight | `python -m repro.qwen_sparse_preflight` | CUDA 없이 Qwen grid patch 수, visual token 수, context/H100 risk를 정적 계산 |
 | VILA pre-ViT probe | `python -m repro.vila_feature_probe` | NVILA-Video/LongVILA를 external CLI가 아닌 in-process hook으로 옮기기 전 필요한 tensor/position boundary 기록 |
 | InternVL dynamic tile probe | `python -m repro.internvl_dynamic_tile_probe` | InternVL3의 dynamic tile order, `num_patches_list`, thumbnail 정책 기록 |
 | Streaming profile | `python -m repro.nvila_runner --mode stream-profile` | LLM 없이 decode/tile/AutoGaze/SigLIP 구간 profile |
@@ -77,11 +78,11 @@ AutoGaze를 실제 비디오 MLLM 파이프라인에 붙였을 때 다음을 재
 | `token_selector` | keep-all, AutoGaze, PixelPrune reference, external mask 계약 | SparseGazePlan 표준화, selector별 token/latency/memory 비교 |
 | `vit_encoder` | NVILA SigLIP, Qwen grid ViT/chunked ViT | V-JEPA2, InternVL dynamic tile, Qwen pre-ViT sparse hook 안정화 |
 | `mllm` | NVILA-HD, VILA CLI 계열, Qwen, LLaVA-OneVision, InternVL3 adapter | visual token packing과 position/grid metadata를 모델별로 명확히 기록 |
-| benchmark task | HLVid/VideoQA, captioning, action classification schema | caption은 reference 보존 + overlap hint, action은 exact/choice scoring |
+| benchmark task | HLVid/VideoQA, captioning, action classification schema | VideoQA는 choice/text scoring, caption은 reference 보존 + overlap hint, action은 exact/choice scoring |
 
-## HLVid 외 Caption/Action Benchmark
+## HLVid 외 Video Task Benchmark
 
-HLVid 이후 task 확장은 `repro.video_task_benchmark`를 사용합니다. 이 경로는 `flexible_runner`를 row별로 호출하므로 Qwen/LongVILA/LLaVA 등 plugin mode와 같은 latency/token/memory/failure logging 구조를 재사용합니다. 우선 선택한 smoke dataset은 captioning용 `VLM2Vec/MSR-VTT`, action classification용 `bitmind/UCF101-Videos`입니다.
+HLVid 이후 task 확장은 `repro.video_task_benchmark`를 사용합니다. 이 경로는 `flexible_runner`를 row별로 호출하므로 Qwen/LongVILA/LLaVA 등 plugin mode와 같은 latency/token/memory/failure logging 구조를 재사용합니다. 우선 선택한 smoke dataset은 captioning용 `VLM2Vec/MSR-VTT`, action classification용 `bitmind/UCF101-Videos`, VideoQA용 `VLM2Vec/EgoSchema`, `VLM2Vec/nextqa`, `vid-modeling/videomme`, `VLM2Vec/ActivityNetQA`입니다.
 
 CUDA 머신에서 dataset/model weight를 먼저 받을 때는 HF snapshot 기반 준비 스크립트를 사용합니다.
 
@@ -91,6 +92,17 @@ CUDA 머신에서 dataset/model weight를 먼저 받을 때는 HF snapshot 기�
   --local-root /data/video_tasks \
   --weight-root /models/weight \
   --dataset-preset caption-action-smoke \
+  --model-preset qwen-compare
+```
+
+VideoQA 후보 dataset은 따로 받을 수 있습니다.
+
+```bash
+.venv/bin/python scripts/prepare_video_task_assets.py \
+  --dry-run \
+  --local-root /data/video_tasks \
+  --weight-root /models/weight \
+  --dataset-preset videoqa-smoke \
   --model-preset qwen-compare
 ```
 
@@ -118,6 +130,13 @@ CUDA 머신에서 dataset/model weight를 먼저 받을 때는 HF snapshot 기�
   --dataset-preset ucf101-action \
   --input /data/video_tasks/ucf101-videos \
   --output /data/video_tasks/manifests/ucf101_action.jsonl
+```
+
+```bash
+.venv/bin/python scripts/convert_video_task_dataset.py \
+  --dataset-preset nextqa-videoqa \
+  --input /data/video_tasks/nextqa \
+  --output /data/video_tasks/manifests/nextqa_videoqa.jsonl
 ```
 
 ```bash
@@ -153,6 +172,24 @@ CUDA 머신에서 dataset/model weight를 먼저 받을 때는 HF snapshot 기�
 ```
 
 Caption manifest는 `video_path`와 `caption` 또는 `references`가 필요합니다. Caption 점수는 기본 `not_scored`이고, reference overlap hint만 별도 기록합니다. Action manifest는 `video_path`와 `label` 또는 `answer`가 필요하며, `choices`가 있으면 multiple-choice letter parsing을 같이 사용합니다.
+VideoQA manifest는 `video_path`, `question`, `answer`가 필요합니다. 정답이 A/B/C/D/E 같은 choice letter이면 multiple-choice parsing을 사용하고, open answer이면 normalize된 text containment로 기본 scoring합니다.
+
+## Qwen Sparse Preflight
+
+Qwen plugin sparse mode를 CUDA에서 돌리기 전에 patch/token 규모와 context risk를 정적으로 볼 수 있습니다.
+
+```bash
+.venv/bin/python -m repro.qwen_sparse_preflight \
+  --model-family qwen3-vl \
+  --num-frames 128 \
+  --height 720 \
+  --width 1280 \
+  --autogaze-reduction-ratio 10 \
+  --context-limit 32768 \
+  --h100-budget-gib 70
+```
+
+이 값은 CUDA allocator 실측이 아니라 scheduler preflight입니다. 실제 주장은 `plugin_hlvid_report.md`의 pairwise table, `pairwise_latency_speedup.svg`, `pairwise_token_reduction.svg`, 그리고 CUDA memory log를 함께 보고 판단하세요.
 
 ## Pre-ViT Sparse 확장 우선순위
 

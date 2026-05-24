@@ -7,6 +7,7 @@ from repro.video_task_schema import (
     read_video_task_manifest,
     score_action_predictions,
     score_caption_predictions,
+    score_videoqa_predictions,
 )
 
 
@@ -50,6 +51,32 @@ def test_normalize_action_task_accepts_answer_choices_and_question_prompt():
     assert task["label"] == "A"
     assert task["choices"] == ["running", "cooking"]
     assert task["source"] == "toy-action"
+
+
+def test_normalize_videoqa_task_preserves_question_answer_and_choices():
+    task = normalize_video_task(
+        {
+            "question_id": "vq-1",
+            "video_path": "clips/c.mp4",
+            "question": "What does the person do? A. run B. cook",
+            "answer": "B",
+            "choices": "run|cook",
+            "duration": 12.5,
+        },
+        task_type="videoqa",
+        row_index=4,
+    )
+
+    assert task == {
+        "sample_id": "vq-1",
+        "task_type": "videoqa",
+        "video_path": "clips/c.mp4",
+        "prompt": "What does the person do? A. run B. cook",
+        "question": "What does the person do? A. run B. cook",
+        "answer": "B",
+        "choices": ["run", "cook"],
+        "duration": 12.5,
+    }
 
 
 def test_normalize_video_task_reports_missing_required_fields():
@@ -105,6 +132,26 @@ def test_score_caption_predictions_is_not_scored_but_keeps_overlap_hint():
     assert summary["failed"] == 1
     assert summary["caption_overlap"]["count"] == 1
     assert scored[0]["caption_overlap_f1"] > 0
+
+
+def test_score_videoqa_predictions_handles_multiple_choice_and_text_answers():
+    summary, scored = score_videoqa_predictions(
+        [
+            {"sample_id": "1", "answer": "A", "raw_output": "A", "status": "ok"},
+            {"sample_id": "2", "answer": "open door", "raw_output": "The answer is open door.", "status": "ok"},
+            {"sample_id": "3", "answer": "C", "raw_output": "No clue", "status": "ok"},
+            {"sample_id": "4", "answer": "D", "raw_output": None, "status": "oom"},
+        ]
+    )
+
+    assert summary["task_type"] == "videoqa"
+    assert summary["total"] == 4
+    assert summary["correct"] == 2
+    assert summary["failed"] == 1
+    assert summary["parse_failed"] == 1
+    assert summary["accuracy_scored"] == 1.0
+    assert summary["accuracy_total"] == 0.5
+    assert scored[1]["parsed_answer"] == "open door"
 
 
 def test_read_video_task_manifest_supports_jsonl_json_and_csv(tmp_path):

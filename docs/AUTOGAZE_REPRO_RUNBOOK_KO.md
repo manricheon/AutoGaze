@@ -240,15 +240,23 @@ Qwen suite mode의 의미는 다음과 같습니다.
 
 `--plugin-suite vila`는 `nvila-video-off`, `nvila-video-autogaze-actual`, `longvila-off`, `longvila-autogaze-actual`를 실행합니다. 단, 현재 VILA-family actual entry는 external CLI dense generation에 AutoGaze selector sidecar metric을 붙인 단계라서 ViT/LLM token pruning 성공으로 해석하면 안 됩니다. `--plugin-suite llava`는 LLaVA-OneVision off와 post-encoder visual-token prune generate 경로를 비교합니다.
 
-### Caption/Action Benchmark
+### VideoQA/Caption/Action Benchmark
 
-HLVid가 아닌 caption/action task는 `repro.video_task_benchmark`를 사용합니다. 이 경로는 같은 plugin mode를 row별 `flexible_runner --mode single`로 실행하고, task별 scoring만 분리합니다. 현재 우선 smoke dataset은 captioning용 `VLM2Vec/MSR-VTT`, action classification용 `bitmind/UCF101-Videos`입니다.
+HLVid가 아닌 VideoQA/caption/action task는 `repro.video_task_benchmark`를 사용합니다. 이 경로는 같은 plugin mode를 row별 `flexible_runner --mode single`로 실행하고, task별 scoring만 분리합니다. 현재 우선 smoke dataset은 captioning용 `VLM2Vec/MSR-VTT`, action classification용 `bitmind/UCF101-Videos`, VideoQA용 `VLM2Vec/EgoSchema`, `VLM2Vec/nextqa`, `vid-modeling/videomme`, `VLM2Vec/ActivityNetQA`입니다.
 
 ```bash
 .venv/bin/python scripts/prepare_video_task_assets.py \
   --local-root /data/video_tasks \
   --weight-root /models/weight \
   --dataset-preset caption-action-smoke \
+  --model-preset qwen-compare
+```
+
+```bash
+.venv/bin/python scripts/prepare_video_task_assets.py \
+  --local-root /data/video_tasks \
+  --weight-root /models/weight \
+  --dataset-preset videoqa-smoke \
   --model-preset qwen-compare
 ```
 
@@ -264,6 +272,13 @@ HLVid가 아닌 caption/action task는 `repro.video_task_benchmark`를 사용합
   --dataset-preset ucf101-action \
   --input /data/video_tasks/ucf101-videos \
   --output /data/video_tasks/manifests/ucf101_action.jsonl
+```
+
+```bash
+.venv/bin/python scripts/convert_video_task_dataset.py \
+  --dataset-preset nextqa-videoqa \
+  --input /data/video_tasks/nextqa \
+  --output /data/video_tasks/manifests/nextqa_videoqa.jsonl
 ```
 
 ```bash
@@ -298,7 +313,23 @@ HLVid가 아닌 caption/action task는 `repro.video_task_benchmark`를 사용합
   --max-new-tokens 8
 ```
 
-Caption은 `video_path`와 `caption` 또는 `references`가 필요하고 기본 점수는 `not_scored`입니다. Action은 `video_path`와 `label` 또는 `answer`가 필요하며 exact label/choice parsing으로 accuracy를 계산합니다.
+```bash
+.venv/bin/python -m repro.video_task_benchmark \
+  --task-type videoqa \
+  --manifest /data/video_tasks/manifests/nextqa_videoqa.jsonl \
+  --video-root /data/video_tasks/nextqa \
+  --output-dir outputs/autogaze_repro/video_task_videoqa_qwen_limit3 \
+  --modes qwen3_full_vit,qwen3_chunked_vit,qwen3_chunked_vit_autogaze_sparse \
+  --model qwen3-vl=weight/Qwen3-VL-8B-Instruct \
+  --limit 3 \
+  --num-video-frames 32 \
+  --qwen-video-nframes 32 \
+  --video-resize-longest-edge 448 \
+  --max-tiles-video 4 \
+  --max-new-tokens 8
+```
+
+Caption은 `video_path`와 `caption` 또는 `references`가 필요하고 기본 점수는 `not_scored`입니다. Action은 `video_path`와 `label` 또는 `answer`가 필요하며 exact label/choice parsing으로 accuracy를 계산합니다. VideoQA는 `video_path`, `question`, `answer`를 요구하고, answer가 letter이면 multiple-choice parsing, open answer이면 text containment로 기본 scoring합니다.
 
 ## 6. Stream Profile과 H100 Preflight
 
@@ -330,6 +361,19 @@ HLVid 폴더 전체의 metadata 기반 H100 risk를 보려면 기본 benchmark w
   --h100-preflight \
   --h100-budget-gib 70 \
   --allow-missing-videos
+```
+
+Qwen plugin sparse mode만 CUDA 전에 빠르게 검토하려면 Qwen preflight를 사용합니다.
+
+```bash
+.venv/bin/python -m repro.qwen_sparse_preflight \
+  --model-family qwen3-vl \
+  --num-frames 128 \
+  --height 720 \
+  --width 1280 \
+  --autogaze-reduction-ratio 10 \
+  --context-limit 32768 \
+  --h100-budget-gib 70
 ```
 
 ## 7. Markdown Chart Report

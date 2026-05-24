@@ -39,6 +39,19 @@ DEFAULT_PLUGIN_HLVID_MODES = [
     "internvl3-autogaze-sidecar-generate",
 ]
 
+PAIRWISE_COMPARISON_PAIRS = (
+    ("qwen2.5_full_vit", "qwen2.5_chunked_vit"),
+    ("qwen2.5_chunked_vit", "qwen2.5_chunked_vit_autogaze_sparse"),
+    ("qwen2.5_full_vit", "qwen2.5_chunked_vit_autogaze_sparse"),
+    ("qwen3_full_vit", "qwen3_chunked_vit"),
+    ("qwen3_chunked_vit", "qwen3_chunked_vit_autogaze_sparse"),
+    ("qwen3_full_vit", "qwen3_chunked_vit_autogaze_sparse"),
+    ("nvila-video-off", "nvila-video-autogaze-actual"),
+    ("longvila-off", "longvila-autogaze-actual"),
+    ("llava-onevision-off", "llava-onevision-autogaze-actual"),
+    ("internvl3-off", "internvl3-autogaze-sidecar-generate"),
+)
+
 
 def resolve_hlvid_video_path(video_root: str | Path, row_video_path: str) -> Path:
     root = Path(video_root)
@@ -631,6 +644,37 @@ def build_markdown_report(
         )
         for row in integration_rows:
             lines.append("| " + " | ".join(_markdown_cell(value) for value in row) + " |")
+    pairwise_rows = summary.get("pairwise_comparisons") or []
+    if pairwise_rows:
+        lines.extend(
+            [
+                "",
+                "## Pairwise Plugin Comparisons",
+                "",
+                "| pair | baseline_status | candidate_status | latency_speedup | patch_or_visual_token_x | llm_visual_token_x | memory_x | accuracy_delta | integration_level | execution_claim |",
+                "|---|---|---|---:|---:|---:|---:|---:|---|---|",
+            ]
+        )
+        for row in pairwise_rows:
+            lines.append(
+                "| "
+                + " | ".join(
+                    _markdown_cell(row.get(field))
+                    for field in (
+                        "pair",
+                        "baseline_status",
+                        "candidate_status",
+                        "latency_speedup",
+                        "patch_or_visual_token_reduction_ratio",
+                        "llm_visual_token_reduction_ratio",
+                        "memory_reduction_ratio",
+                        "accuracy_total_delta",
+                        "integration_level",
+                        "execution_claim",
+                    )
+                )
+                + " |"
+            )
     budget_rows = []
     for mode, mode_summary in summary["modes"].items():
         budget = mode_summary.get("processing_budget_summary", {})
@@ -722,14 +766,20 @@ def _write_plugin_summary_charts(summary: dict[str, Any], assets_dir: Path) -> l
     memory_bars = []
     token_bars = []
     status_bars = []
+    pairwise_latency_bars = []
+    pairwise_token_bars = []
     for mode, mode_summary in modes.items():
         budget = mode_summary.get("processing_budget_summary", {})
         mode_median = budget.get("mode_median", {}) if isinstance(budget, dict) else {}
         selected = first_present(
+            _mode_metric_median(mode_summary, "selected_patch_tokens"),
+            _mode_metric_median(mode_summary, "visual_tokens_after_prune"),
             mode_median.get("patch_budget_before_siglip.autogaze_selected_total_patch_tokens"),
             mode_median.get("patch_budget_before_vit.estimated_visual_tokens_after_prune"),
         )
         reduction = first_present(
+            _mode_metric_median(mode_summary, "patch_token_reduction_ratio"),
+            _mode_metric_median(mode_summary, "visual_token_reduction_ratio"),
             mode_median.get("patch_budget_before_siglip.total_patch_reduction_ratio"),
             mode_median.get("patch_budget_before_vit.estimated_visual_token_reduction_ratio"),
         )
@@ -742,12 +792,30 @@ def _write_plugin_summary_charts(summary: dict[str, Any], assets_dir: Path) -> l
             for status, count in status_counts.items():
                 status_bars.append(ChartBar(f"{mode}:{status}", [ChartSegment(str(status), float(count))]))
         latency = mode_summary.get("latency_ms", {})
-        if isinstance(latency, dict) and latency.get("total", {}).get("median") is not None:
-            latency_bars.append(ChartBar(str(mode), [ChartSegment("total_ms", float(latency["total"]["median"]))]))
+        latency_median = first_present(
+            _mode_metric_median(mode_summary, "total_ms"),
+            latency.get("total", {}).get("median") if isinstance(latency.get("total"), dict) else None,
+        )
+        if latency_median is not None:
+            latency_bars.append(ChartBar(str(mode), [ChartSegment("total_ms", float(latency_median))]))
         memory = mode_summary.get("memory_bytes", {})
-        if isinstance(memory, dict) and memory.get("peak_memory_bytes", {}).get("median") is not None:
-            memory_bars.append(
-                ChartBar(str(mode), [ChartSegment("peak_memory_bytes", float(memory["peak_memory_bytes"]["median"]))])
+        memory_median = first_present(
+            _mode_metric_median(mode_summary, "peak_memory_bytes"),
+            memory.get("peak_memory_bytes", {}).get("median") if isinstance(memory.get("peak_memory_bytes"), dict) else None,
+        )
+        if memory_median is not None:
+            memory_bars.append(ChartBar(str(mode), [ChartSegment("peak_memory_bytes", float(memory_median))]))
+    for row in summary.get("pairwise_comparisons") or []:
+        pair = row.get("pair")
+        latency_speedup = row.get("latency_speedup")
+        token_reduction = row.get("patch_or_visual_token_reduction_ratio")
+        if pair and latency_speedup is not None:
+            pairwise_latency_bars.append(
+                ChartBar(str(pair), [ChartSegment("latency_speedup", float(latency_speedup))])
+            )
+        if pair and token_reduction is not None:
+            pairwise_token_bars.append(
+                ChartBar(str(pair), [ChartSegment("token_reduction_ratio", float(token_reduction))])
             )
     if latency_bars:
         artifact = write_bar_chart(assets_dir / "latency_by_mode.svg", title="Latency By Mode", bars=latency_bars, unit="ms")
@@ -765,6 +833,22 @@ def _write_plugin_summary_charts(summary: dict[str, Any], assets_dir: Path) -> l
         charts.append((artifact.title, artifact.path))
     if status_bars:
         artifact = write_bar_chart(assets_dir / "status_by_mode.svg", title="Status By Mode", bars=status_bars, unit="count")
+        charts.append((artifact.title, artifact.path))
+    if pairwise_latency_bars:
+        artifact = write_bar_chart(
+            assets_dir / "pairwise_latency_speedup.svg",
+            title="Pairwise Latency Speedup",
+            bars=pairwise_latency_bars,
+            unit="x",
+        )
+        charts.append((artifact.title, artifact.path))
+    if pairwise_token_bars:
+        artifact = write_bar_chart(
+            assets_dir / "pairwise_token_reduction.svg",
+            title="Pairwise Token Reduction",
+            bars=pairwise_token_bars,
+            unit="x",
+        )
         charts.append((artifact.title, artifact.path))
     return charts
 
@@ -973,8 +1057,193 @@ def _summarize_by_mode(predictions: list[dict[str, Any]]) -> dict[str, Any]:
         summary["next_action"] = _next_action_for_mode(mode, rows)
         summary["processing_budget_summary"] = _summarize_processing_budget_by_mode(rows)
         summary["integration_summary"] = _summarize_integration_by_mode(mode, rows)
+        summary["plugin_metric_summary"] = _summarize_flattened_plugin_metrics(rows)
         summaries[mode] = summary
-    return {"modes": summaries, "mode_order": modes, "total_predictions": len(predictions)}
+    return {
+        "modes": summaries,
+        "mode_order": modes,
+        "total_predictions": len(predictions),
+        "pairwise_comparisons": _pairwise_comparisons(summaries),
+    }
+
+
+def _summarize_flattened_plugin_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    fields = (
+        "total_ms",
+        "generate_ms",
+        "selector_ms",
+        "vision_encoder_ms",
+        "qwen_vit_prepare_ms",
+        "peak_memory_bytes",
+        "llm_peak_memory_bytes",
+        "visual_tokens_before_prune",
+        "visual_tokens_after_prune",
+        "visual_token_reduction_ratio",
+        "raw_patch_tokens",
+        "selected_patch_tokens",
+        "patch_token_reduction_ratio",
+        "encoder_input_tokens",
+        "llm_visual_tokens",
+    )
+    return {field: compute_stats(_numeric_values(rows, field)) for field in fields}
+
+
+def _numeric_values(rows: list[dict[str, Any]], field: str) -> list[float]:
+    values: list[float] = []
+    for row in rows:
+        value = row.get(field)
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            values.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    return values
+
+
+def _pairwise_comparisons(summaries: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    comparisons: list[dict[str, Any]] = []
+    for baseline_mode, candidate_mode in PAIRWISE_COMPARISON_PAIRS:
+        baseline = summaries.get(baseline_mode)
+        candidate = summaries.get(candidate_mode)
+        if baseline is None or candidate is None:
+            continue
+        baseline_latency = _mode_metric_median(baseline, "total_ms")
+        candidate_latency = _mode_metric_median(candidate, "total_ms")
+        baseline_memory = _mode_metric_median(baseline, "peak_memory_bytes")
+        candidate_memory = _mode_metric_median(candidate, "peak_memory_bytes")
+        baseline_tokens = _mode_token_reference(baseline)
+        candidate_tokens = _mode_token_actual(candidate)
+        baseline_llm_tokens = _mode_llm_visual_tokens(baseline)
+        candidate_llm_tokens = _mode_llm_visual_tokens(candidate)
+        integration = candidate.get("integration_summary") or {}
+        comparisons.append(
+            {
+                "pair": f"{baseline_mode} -> {candidate_mode}",
+                "baseline_mode": baseline_mode,
+                "candidate_mode": candidate_mode,
+                "baseline_status": _dominant_status(baseline),
+                "candidate_status": _dominant_status(candidate),
+                "baseline_total_ms": baseline_latency,
+                "candidate_total_ms": candidate_latency,
+                "latency_speedup": _ratio(baseline_latency, candidate_latency),
+                "baseline_patch_or_visual_tokens": baseline_tokens,
+                "candidate_patch_or_visual_tokens": candidate_tokens,
+                "patch_or_visual_token_reduction_ratio": _ratio(baseline_tokens, candidate_tokens),
+                "baseline_llm_visual_tokens": baseline_llm_tokens,
+                "candidate_llm_visual_tokens": candidate_llm_tokens,
+                "llm_visual_token_reduction_ratio": _ratio(baseline_llm_tokens, candidate_llm_tokens),
+                "baseline_peak_memory_bytes": baseline_memory,
+                "candidate_peak_memory_bytes": candidate_memory,
+                "memory_reduction_ratio": _ratio(baseline_memory, candidate_memory),
+                "baseline_accuracy_total": baseline.get("accuracy_total"),
+                "candidate_accuracy_total": candidate.get("accuracy_total"),
+                "accuracy_total_delta": _difference(candidate.get("accuracy_total"), baseline.get("accuracy_total")),
+                "integration_level": integration.get("integration_level"),
+                "execution_claim": integration.get("execution_claim"),
+            }
+        )
+    return comparisons
+
+
+def _mode_metric_median(summary: dict[str, Any], field: str) -> float | None:
+    plugin_metric = summary.get("plugin_metric_summary") or {}
+    direct = _number_from_stats(plugin_metric.get(field))
+    if direct is not None:
+        return direct
+    if field == "total_ms":
+        return _number_from_stats((summary.get("latency_ms") or {}).get("total_ms"))
+    if field == "peak_memory_bytes":
+        return _number_from_stats((summary.get("memory_bytes") or {}).get("peak_memory_bytes"))
+    return None
+
+
+def _mode_token_reference(summary: dict[str, Any]) -> float | None:
+    plugin_metric = summary.get("plugin_metric_summary") or {}
+    for field in ("raw_patch_tokens", "visual_tokens_before_prune", "encoder_input_tokens", "llm_visual_tokens"):
+        value = _number_from_stats(plugin_metric.get(field))
+        if value is not None:
+            return value
+    budget = ((summary.get("processing_budget_summary") or {}).get("mode_median") or {})
+    return _to_float(
+        first_present(
+            budget.get("patch_budget_before_vit.actual_raw_patch_tokens_before_vit"),
+            budget.get("patch_budget_before_vit.estimated_visual_tokens_before_prune"),
+            budget.get("patch_budget_before_siglip.keep_all_total_patch_tokens"),
+            budget.get("llm_visual_budget.keep_all_visual_tokens_estimated"),
+        )
+    )
+
+
+def _mode_token_actual(summary: dict[str, Any]) -> float | None:
+    plugin_metric = summary.get("plugin_metric_summary") or {}
+    for field in ("selected_patch_tokens", "visual_tokens_after_prune", "encoder_input_tokens", "llm_visual_tokens"):
+        value = _number_from_stats(plugin_metric.get(field))
+        if value is not None:
+            return value
+    budget = ((summary.get("processing_budget_summary") or {}).get("mode_median") or {})
+    return _to_float(
+        first_present(
+            budget.get("patch_budget_before_vit.estimated_visual_tokens_after_prune"),
+            budget.get("patch_budget_before_siglip.autogaze_selected_total_patch_tokens"),
+            budget.get("llm_visual_budget.actual_visual_tokens"),
+        )
+    )
+
+
+def _mode_llm_visual_tokens(summary: dict[str, Any]) -> float | None:
+    plugin_metric = summary.get("plugin_metric_summary") or {}
+    value = _number_from_stats(plugin_metric.get("llm_visual_tokens"))
+    if value is not None:
+        return value
+    budget = ((summary.get("processing_budget_summary") or {}).get("mode_median") or {})
+    return _to_float(
+        first_present(
+            budget.get("llm_visual_budget.actual_visual_tokens"),
+            budget.get("llm_visual_budget.keep_all_visual_tokens_estimated"),
+        )
+    )
+
+
+def _number_from_stats(stats: Any) -> float | None:
+    if not isinstance(stats, dict):
+        return _to_float(stats)
+    count = stats.get("count")
+    if count in {None, 0}:
+        return None
+    return _to_float(stats.get("median"))
+
+
+def _ratio(before: Any, after: Any) -> float | None:
+    before_value = _to_float(before)
+    after_value = _to_float(after)
+    if before_value is None or after_value in {None, 0.0}:
+        return None
+    return before_value / after_value
+
+
+def _difference(after: Any, before: Any) -> float | None:
+    after_value = _to_float(after)
+    before_value = _to_float(before)
+    if after_value is None or before_value is None:
+        return None
+    return after_value - before_value
+
+
+def _to_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _dominant_status(summary: dict[str, Any]) -> str:
+    counts = summary.get("status_counts") or {}
+    if not isinstance(counts, dict) or not counts:
+        return "unknown"
+    return max(counts.items(), key=lambda item: (int(item[1]), str(item[0])))[0]
 
 
 def _summarize_integration_by_mode(mode: str, rows: list[dict[str, Any]]) -> dict[str, Any]:

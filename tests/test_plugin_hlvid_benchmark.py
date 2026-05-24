@@ -583,6 +583,61 @@ def test_plugin_hlvid_summary_separates_sidecar_and_actual_pruning_claims():
     assert "| llava-onevision-autogaze-actual | post_encoder_token_prune | actual_post_encoder_token_prune | yes | no | yes |" in markdown
 
 
+def test_plugin_hlvid_summary_adds_pairwise_autogaze_comparisons():
+    summary = _summarize_by_mode(
+        [
+            {
+                "mode": "qwen3_full_vit",
+                "question_id": "q1",
+                "answer": "A",
+                "raw_output": "A",
+                "status": "ok",
+                "runner_status": "executed",
+                "total_ms": 1000.0,
+                "peak_memory_bytes": 2000,
+                "visual_tokens_before_prune": 1000,
+                "visual_tokens_after_prune": 1000,
+                "llm_visual_tokens": 1000,
+            },
+            {
+                "mode": "qwen3_chunked_vit_autogaze_sparse",
+                "question_id": "q1",
+                "answer": "A",
+                "raw_output": "A",
+                "status": "ok",
+                "runner_status": "executed",
+                "total_ms": 400.0,
+                "peak_memory_bytes": 800,
+                "raw_patch_tokens": 1000,
+                "selected_patch_tokens": 100,
+                "encoder_input_tokens": 100,
+                "llm_visual_tokens": 100,
+                "visual_tokens_before_prune": 1000,
+                "visual_tokens_after_prune": 100,
+                "visual_token_reduction_ratio": 10.0,
+                "visual_pruning_applied": True,
+                "vision_encoder_latency_reduced": True,
+                "mllm_context_reduced": True,
+            },
+        ]
+    )
+
+    comparisons = summary["pairwise_comparisons"]
+    pair = next(item for item in comparisons if item["candidate_mode"] == "qwen3_chunked_vit_autogaze_sparse")
+
+    assert pair["baseline_mode"] == "qwen3_full_vit"
+    assert pair["integration_level"] == "pre_encoder_sparse"
+    assert pair["latency_speedup"] == 2.5
+    assert pair["patch_or_visual_token_reduction_ratio"] == 10.0
+    assert pair["llm_visual_token_reduction_ratio"] == 10.0
+    assert pair["memory_reduction_ratio"] == 2.5
+
+    markdown = build_markdown_report(summary)
+    assert "## Pairwise Plugin Comparisons" in markdown
+    assert "qwen3_full_vit -> qwen3_chunked_vit_autogaze_sparse" in markdown
+    assert "10" in markdown
+
+
 def test_run_plugin_hlvid_benchmark_writes_predictions_summary_and_markdown(tmp_path):
     manifest = tmp_path / "manifest.json"
     video_root = tmp_path / "videos"
