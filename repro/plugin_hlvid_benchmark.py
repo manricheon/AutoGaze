@@ -46,6 +46,7 @@ PAIRWISE_COMPARISON_PAIRS = (
     ("qwen3_full_vit", "qwen3_chunked_vit"),
     ("qwen3_chunked_vit", "qwen3_chunked_vit_autogaze_sparse"),
     ("qwen3_full_vit", "qwen3_chunked_vit_autogaze_sparse"),
+    ("qwen3_tile_packed_vit", "qwen3_tile_packed_vit_autogaze_sparse"),
     ("nvila-video-off", "nvila-video-autogaze-actual"),
     ("longvila-off", "longvila-autogaze-actual"),
     ("llava-onevision-off", "llava-onevision-autogaze-actual"),
@@ -278,14 +279,24 @@ def build_mode_runner_args(
             video_resize_width=video_resize_width,
             video_resize_height=video_resize_height,
         )
-    if mode in {"llava-onevision-autogaze-probe", "llava-onevision-autogaze-prune-generate", "llava-onevision-autogaze-actual"}:
+    if mode in {
+        "llava-onevision-autogaze-probe",
+        "llava-onevision-autogaze-prune-generate",
+        "llava-onevision-autogaze-actual",
+        "llava-onevision-autogaze-materialized",
+    }:
+        integration_level = (
+            "input_materialization_diagnostic"
+            if mode == "llava-onevision-autogaze-materialized"
+            else "post_encoder_token_prune"
+        )
         args = _base_args(
             model_family="llava-onevision",
             model_path=models.get("llava-onevision", DEFAULT_MODELS["llava-onevision"]),
             token_selector="autogaze",
             vision_adapter="llava-onevision-siglip",
             mllm_adapter="llava-onevision",
-            integration_level="post_encoder_token_prune",
+            integration_level=integration_level,
             row=row,
             video_path=video_path,
             output_json=output_json,
@@ -304,7 +315,11 @@ def build_mode_runner_args(
             video_resize_width=video_resize_width,
             video_resize_height=video_resize_height,
         )
-        if mode in {"llava-onevision-autogaze-prune-generate", "llava-onevision-autogaze-actual"}:
+        if mode in {
+            "llava-onevision-autogaze-prune-generate",
+            "llava-onevision-autogaze-actual",
+            "llava-onevision-autogaze-materialized",
+        }:
             args.extend(["--run-autogaze-selector", "--autogaze-generate-only", "--enable-visual-prune-generate"])
         return args
     if mode == "qwen3-vl-off":
@@ -336,7 +351,10 @@ def build_mode_runner_args(
     qwen_mode = _resolve_qwen_vit_mode(mode)
     if qwen_mode is not None:
         family, model_key, canonical_vit_mode = qwen_mode
-        sparse = canonical_vit_mode == "qwen_chunked_vit_autogaze_sparse"
+        sparse = canonical_vit_mode in {
+            "qwen_chunked_vit_autogaze_sparse",
+            "qwen_tile_packed_vit_autogaze_sparse",
+        }
         args = _base_args(
             model_family=family,
             model_path=models.get(model_key, DEFAULT_MODELS[model_key]),
@@ -456,6 +474,12 @@ def _resolve_qwen_vit_mode(mode: str) -> tuple[str, str, str] | None:
             "qwen3-vl",
             "qwen_chunked_vit_autogaze_sparse",
         ),
+        "qwen_tile_packed_vit": ("qwen3-vl", "qwen3-vl", "qwen_tile_packed_vit"),
+        "qwen_tile_packed_vit_autogaze_sparse": (
+            "qwen3-vl",
+            "qwen3-vl",
+            "qwen_tile_packed_vit_autogaze_sparse",
+        ),
         "qwen3_full_vit": ("qwen3-vl", "qwen3-vl", "qwen_full_vit"),
         "qwen3_chunked_vit": ("qwen3-vl", "qwen3-vl", "qwen_chunked_vit"),
         "qwen3_chunked_vit_autogaze_sparse": (
@@ -463,12 +487,24 @@ def _resolve_qwen_vit_mode(mode: str) -> tuple[str, str, str] | None:
             "qwen3-vl",
             "qwen_chunked_vit_autogaze_sparse",
         ),
+        "qwen3_tile_packed_vit": ("qwen3-vl", "qwen3-vl", "qwen_tile_packed_vit"),
+        "qwen3_tile_packed_vit_autogaze_sparse": (
+            "qwen3-vl",
+            "qwen3-vl",
+            "qwen_tile_packed_vit_autogaze_sparse",
+        ),
         "qwen2.5_full_vit": ("qwen2.5-vl", "qwen2.5-vl", "qwen_full_vit"),
         "qwen2.5_chunked_vit": ("qwen2.5-vl", "qwen2.5-vl", "qwen_chunked_vit"),
         "qwen2.5_chunked_vit_autogaze_sparse": (
             "qwen2.5-vl",
             "qwen2.5-vl",
             "qwen_chunked_vit_autogaze_sparse",
+        ),
+        "qwen2.5_tile_packed_vit": ("qwen2.5-vl", "qwen2.5-vl", "qwen_tile_packed_vit"),
+        "qwen2.5_tile_packed_vit_autogaze_sparse": (
+            "qwen2.5-vl",
+            "qwen2.5-vl",
+            "qwen_tile_packed_vit_autogaze_sparse",
         ),
     }
     return aliases.get(mode)
@@ -974,6 +1010,7 @@ def _prediction_status(generation_status: str | None) -> str:
     if generation_status in {
         "executed",
         "executed_dense_with_autogaze_sidecar",
+        "executed_materialized_sparse_video",
         "probe_required",
         "probe_collected",
         "poc_ready",
@@ -997,6 +1034,17 @@ def _flatten_key_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     tile_grid = spatial_chunking.get("tile_grid") or {}
     encoder_indices = encoder_mapping.get("encoder_patch_indices")
     visual_indices = mllm_mapping.get("visual_feature_indices")
+    qwen_actual_pre_vit = (
+        qwen_vit.get("mode")
+        in {
+            "qwen_chunked_vit_autogaze_sparse",
+            "qwen_tile_packed_vit_autogaze_sparse",
+        }
+        or bool((metrics.get("qwen_pre_vit_sparse") or {}).get("enabled"))
+    )
+    attachment_mode = autogaze_attachment.get("mode")
+    if attachment_mode is None and qwen_actual_pre_vit:
+        attachment_mode = "actual_pre_encoder_sparse"
     return {
         "total_ms": latency.get("total"),
         "generate_ms": latency.get("generate"),
@@ -1024,10 +1072,13 @@ def _flatten_key_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         ),
         "failure_kind": failure.get("kind"),
         "failure_stage": failure.get("stage"),
-        "autogaze_attachment_mode": autogaze_attachment.get("mode"),
-        "visual_pruning_applied": autogaze_attachment.get("visual_pruning_applied"),
-        "vision_encoder_latency_reduced": autogaze_attachment.get("vision_encoder_latency_reduced"),
-        "mllm_context_reduced": autogaze_attachment.get("mllm_context_reduced"),
+        "autogaze_attachment_mode": attachment_mode,
+        "visual_pruning_applied": first_present(autogaze_attachment.get("visual_pruning_applied"), True if qwen_actual_pre_vit else None),
+        "vision_encoder_latency_reduced": first_present(
+            autogaze_attachment.get("vision_encoder_latency_reduced"),
+            True if qwen_actual_pre_vit else None,
+        ),
+        "mllm_context_reduced": first_present(autogaze_attachment.get("mllm_context_reduced"), True if qwen_actual_pre_vit else None),
     }
 
 
@@ -1248,7 +1299,7 @@ def _dominant_status(summary: dict[str, Any]) -> str:
 
 def _summarize_integration_by_mode(mode: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
     integration_level = _integration_level_for_mode(mode)
-    execution_claim = _execution_claim_for_mode(mode)
+    execution_claim = _execution_claim_from_rows(rows) or _execution_claim_for_mode(mode)
     return {
         "integration_level": integration_level,
         "execution_claim": execution_claim,
@@ -1267,17 +1318,45 @@ def _summarize_integration_by_mode(mode: str, rows: list[dict[str, Any]]) -> dic
     }
 
 
+def _execution_claim_from_rows(rows: list[dict[str, Any]]) -> str | None:
+    claims = [
+        str(row.get("autogaze_attachment_mode"))
+        for row in rows
+        if row.get("autogaze_attachment_mode") in {
+            "materialized_sparse_video",
+            "dense_generation_with_autogaze_sidecar",
+        }
+    ]
+    if not claims:
+        return None
+    if "materialized_sparse_video" in claims:
+        return "materialized_sparse_video"
+    return claims[0]
+
+
 def _integration_level_for_mode(mode: str) -> str:
-    if mode.endswith("_chunked_vit_autogaze_sparse") or mode == "qwen3-vl-autogaze-direct-pre-vit-sparse":
+    if (
+        mode.endswith("_chunked_vit_autogaze_sparse")
+        or mode.endswith("_tile_packed_vit_autogaze_sparse")
+        or mode == "qwen3-vl-autogaze-direct-pre-vit-sparse"
+    ):
         return "pre_encoder_sparse"
+    if mode.endswith("-autogaze-materialized"):
+        return "input_materialization_diagnostic"
     if "autogaze" in mode:
         return "post_encoder_token_prune"
     return "none"
 
 
 def _execution_claim_for_mode(mode: str) -> str:
-    if mode.endswith("_chunked_vit_autogaze_sparse") or mode == "qwen3-vl-autogaze-direct-pre-vit-sparse":
+    if (
+        mode.endswith("_chunked_vit_autogaze_sparse")
+        or mode.endswith("_tile_packed_vit_autogaze_sparse")
+        or mode == "qwen3-vl-autogaze-direct-pre-vit-sparse"
+    ):
         return "actual_pre_encoder_sparse"
+    if mode.endswith("-autogaze-materialized"):
+        return "materialized_sparse_video"
     if mode in {
         "nvila-video-autogaze-actual",
         "nvila-video-autogaze-sidecar-generate",

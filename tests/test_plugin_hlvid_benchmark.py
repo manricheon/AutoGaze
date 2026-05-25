@@ -4,6 +4,7 @@ from pathlib import Path
 
 from repro.plugin_hlvid_benchmark import (
     _flatten_key_metrics,
+    _prediction_status,
     _summarize_by_mode,
     build_markdown_report,
     build_mode_runner_args,
@@ -268,6 +269,8 @@ def test_build_mode_runner_args_for_qwen_vit_comparison_modes():
     full_args = build_mode_runner_args(mode="qwen_full_vit", **common)
     chunked_args = build_mode_runner_args(mode="qwen_chunked_vit", **common)
     sparse_args = build_mode_runner_args(mode="qwen_chunked_vit_autogaze_sparse", **common)
+    tile_dense_args = build_mode_runner_args(mode="qwen_tile_packed_vit", **common)
+    tile_sparse_args = build_mode_runner_args(mode="qwen_tile_packed_vit_autogaze_sparse", **common)
 
     assert full_args[full_args.index("--qwen-vit-mode") + 1] == "qwen_full_vit"
     assert full_args[full_args.index("--token-selector-adapter") + 1] == "keep-all"
@@ -278,6 +281,11 @@ def test_build_mode_runner_args_for_qwen_vit_comparison_modes():
     assert sparse_args[sparse_args.index("--pre-encoder-prune-adapter") + 1] == "autogaze-sparse"
     assert "--run-autogaze-selector" in sparse_args
     assert "--enable-qwen-prune-generate" in sparse_args
+    assert tile_dense_args[tile_dense_args.index("--qwen-vit-mode") + 1] == "qwen_tile_packed_vit"
+    assert tile_dense_args[tile_dense_args.index("--token-selector-adapter") + 1] == "keep-all"
+    assert tile_sparse_args[tile_sparse_args.index("--qwen-vit-mode") + 1] == "qwen_tile_packed_vit_autogaze_sparse"
+    assert tile_sparse_args[tile_sparse_args.index("--pre-encoder-prune-adapter") + 1] == "autogaze-sparse"
+    assert "--run-autogaze-selector" in tile_sparse_args
 
 
 def test_build_mode_runner_args_for_qwen25_and_qwen3_named_vit_modes():
@@ -344,6 +352,7 @@ def test_build_mode_runner_args_for_llava_and_internvl_autogaze_probe_modes():
 
     llava_off = build_mode_runner_args(mode="llava-onevision-off", **common)
     llava_probe = build_mode_runner_args(mode="llava-onevision-autogaze-probe", **common)
+    llava_materialized = build_mode_runner_args(mode="llava-onevision-autogaze-materialized", **common)
     internvl_off = build_mode_runner_args(mode="internvl3-off", **common)
     internvl_probe = build_mode_runner_args(mode="internvl3-autogaze-probe", **common)
 
@@ -360,6 +369,9 @@ def test_build_mode_runner_args_for_llava_and_internvl_autogaze_probe_modes():
     assert internvl_off[internvl_off.index("--video-resize-longest-edge") + 1] == "448"
     assert llava_probe[llava_probe.index("--num-video-frames-thumbnail") + 1] == "8"
     assert llava_probe[llava_probe.index("--video-resize-longest-edge") + 1] == "448"
+    assert llava_materialized[llava_materialized.index("--autogaze-integration-level") + 1] == "input_materialization_diagnostic"
+    assert "--run-autogaze-selector" in llava_materialized
+    assert "--enable-visual-prune-generate" in llava_materialized
 
 
 def test_build_mode_runner_args_for_executable_autogaze_expansion_modes():
@@ -427,6 +439,10 @@ def test_flatten_key_metrics_includes_qwen_vit_comparison_fields():
     assert flattened["qwen_vit_raw_patch_tokens_before_vit"] == 4000
     assert flattened["qwen_vit_executed_chunk_count"] == 3
     assert flattened["qwen_vit_spatial_tiles"] == 4
+    assert flattened["autogaze_attachment_mode"] == "actual_pre_encoder_sparse"
+    assert flattened["visual_pruning_applied"] is True
+    assert flattened["vision_encoder_latency_reduced"] is True
+    assert flattened["mllm_context_reduced"] is True
 
 
 def test_flatten_key_metrics_includes_common_selector_vit_memory_and_failure_fields():
@@ -581,6 +597,37 @@ def test_plugin_hlvid_summary_separates_sidecar_and_actual_pruning_claims():
     assert "| longvila-autogaze-actual | post_encoder_token_prune | dense_generation_with_autogaze_sidecar | no | no | no |" in markdown
     assert "| qwen3_chunked_vit_autogaze_sparse | pre_encoder_sparse | actual_pre_encoder_sparse | yes | yes | yes |" in markdown
     assert "| llava-onevision-autogaze-actual | post_encoder_token_prune | actual_post_encoder_token_prune | yes | no | yes |" in markdown
+
+
+def test_plugin_hlvid_summary_reports_materialized_sparse_video_claim_from_rows():
+    summary = _summarize_by_mode(
+        [
+            {
+                "mode": "longvila-autogaze-actual",
+                "question_id": "q1",
+                "answer": "A",
+                "raw_output": "A",
+                "runner_status": "executed_materialized_sparse_video",
+                "autogaze_attachment_mode": "materialized_sparse_video",
+                "visual_pruning_applied": False,
+                "vision_encoder_latency_reduced": False,
+                "mllm_context_reduced": False,
+            }
+        ]
+    )
+
+    integration = summary["modes"]["longvila-autogaze-actual"]["integration_summary"]
+    assert integration["execution_claim"] == "materialized_sparse_video"
+    assert integration["actual_pruning_applied_claim"] == "no"
+    assert integration["vision_encoder_latency_reduction_claim"] == "no"
+    assert integration["mllm_context_reduction_claim"] == "no"
+
+    markdown = build_markdown_report(summary)
+    assert "| longvila-autogaze-actual | post_encoder_token_prune | materialized_sparse_video | no | no | no |" in markdown
+
+
+def test_prediction_status_treats_materialized_sparse_video_as_ok():
+    assert _prediction_status("executed_materialized_sparse_video") == "ok"
 
 
 def test_plugin_hlvid_summary_adds_pairwise_autogaze_comparisons():

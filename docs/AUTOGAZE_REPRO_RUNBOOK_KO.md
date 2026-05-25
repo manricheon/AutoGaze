@@ -207,6 +207,26 @@ Qwen/LongVILA/NVILA-Video 등 다른 token selector / ViT / MLLM 조합을 HLVid
 
 `--plugin-suite qwen`은 Qwen2.5-VL과 Qwen3-VL 각각에 대해 full ViT, chunked ViT, chunked ViT + AutoGaze sparse 세 경로를 실행합니다. Qwen frame 수를 따로 주지 않으면 `--qwen-video-nframes`는 `--num-video-frames`와 같게 맞춰집니다. 더 좁은 비교를 원하면 `--plugin-suite custom --plugin-modes qwen3_full_vit,qwen3_chunked_vit`처럼 지정합니다.
 
+NVILA-HD처럼 고해상도 spatial tile을 먼저 만들고 Qwen에 넣는 실험은 별도 suite로 분리했습니다.
+
+```bash
+.venv/bin/python scripts/run_hlvid_folder_benchmark.py \
+  --dataset-dir /data/HLVid \
+  --output-dir outputs/autogaze_repro/plugin_hlvid_qwen_tile_limit3 \
+  --plugin-suite qwen-tile \
+  --plugin-model qwen3-vl=weight/Qwen3-VL-8B-Instruct \
+  --limit 3 \
+  --num-video-frames 32 \
+  --max-tiles-video 4 \
+  --video-resize-longest-edge 448 \
+  --qwen-vit-chunk-frames 16 \
+  --qwen-vit-max-spatial-chunks 4 \
+  --qwen-thumbnail-mode append-video \
+  --continue-on-error
+```
+
+`qwen_tile_packed_vit`는 dense tile-packed baseline이고, `qwen_tile_packed_vit_autogaze_sparse`는 AutoGaze tile-local patch index를 packed Qwen visual index로 매핑해 선택 token만 통과시키는 zero-shot experimental path입니다. packing 순서는 NVILA-HD의 tile sequence 직관에 맞춰 temporal chunk 안에서 `chunk -> tile -> frame`이고, 끝에 thumbnail tail을 붙입니다. Qwen은 이 tile들을 원래 spatial tile이 아니라 temporal video sequence처럼 보므로, 리포트의 `packing_policy=qwen_tile_packed_experimental`, `frame_ordering=tile_major_temporal_chunks_then_thumbnail_tail`, `position_semantics=spatial_tiles_encoded_as_temporal_sequence`를 확인하고 Qwen native-grid sparse 결과와 분리해서 해석해야 합니다.
+
 Qwen suite mode의 의미는 다음과 같습니다.
 
 | mode | 의미 |
@@ -214,6 +234,95 @@ Qwen suite mode의 의미는 다음과 같습니다.
 | `qwen2.5_full_vit`, `qwen3_full_vit` | Qwen native/full ViT 경로 |
 | `qwen2.5_chunked_vit`, `qwen3_chunked_vit` | Qwen ViT를 temporal/spatial chunk로 나눠 실행하되 AutoGaze off |
 | `qwen2.5_chunked_vit_autogaze_sparse`, `qwen3_chunked_vit_autogaze_sparse` | AutoGaze selected token만 Qwen ViT/MLLM context에 통과시키는 pre-ViT sparse 경로 |
+| `qwen3_tile_packed_vit`, `qwen3_tile_packed_vit_autogaze_sparse` | spatial tile을 temporal chunk 안에서 tile-major 순서로 Qwen video sequence에 packing하는 NVILA-like 실험 경로 |
+
+### Qwen 버전 지원 상태
+
+Qwen 경로는 특정 checkpoint 하나에만 묶인 구현이 아니라, Qwen-VL 계열에서 공통으로 기대하는 `pixel_values_videos`, `video_grid_thw`, `spatial_merge_size`, `get_video_features` 계약을 사용합니다. 그래서 같은 API를 유지하는 checkpoint라면 `--model-path`만 바꿔 적용할 수 있습니다. 다만 HLVid wrapper의 preset/suite에는 명시된 alias만 들어 있습니다.
+
+| 구분 | 현재 지원 형태 | AutoGaze sparse | 비고 |
+| --- | --- | --- | --- |
+| Qwen2.5-VL | `qwen2.5_*` plugin modes, `qwen2.5-vl` adapter | pre-ViT sparse 구현됨, CUDA 검증 필요 | AutoGaze 논문 비교 후보로 우선 검증 |
+| Qwen3-VL | `qwen3_*` plugin modes, `qwen3-vl` adapter | pre-ViT sparse 구현됨, CUDA 검증 필요 | 기본 video task asset preset은 Qwen3 |
+| Qwen3-VL-MoE | `flexible_runner --model-family qwen3-vl-moe` 선택 가능 | 공통 Qwen grid API가 맞으면 적용 가능 | HLVid suite alias는 아직 없음 |
+| Qwen2-VL | `flexible_runner --model-family qwen2-vl` 선택 가능 | 공통 Qwen grid API가 맞으면 적용 가능 | HLVid suite alias는 아직 없음 |
+| Qwen3.5 계열 | 미등록 | 미검증 | 모델 family/adapter alias와 asset preset을 추가한 뒤 API smoke 필요 |
+
+새 Qwen 버전을 시험할 때 가장 보수적인 순서는 `qwen_full_vit -> qwen_chunked_vit -> qwen_chunked_vit_autogaze_sparse`입니다. `qwen_tile_packed_*`는 NVILA-like 고해상도 tile 활용성 확인용 zero-shot 실험이므로, Qwen native-grid sparse와 분리해서 봅니다.
+
+### AutoGaze On/Off 동작 플로우
+
+NVILA-HD native resize 중심 경로:
+
+```mermaid
+flowchart TD
+  A["Video mp4"] --> B["Decode / frame sampling"]
+  B --> C["Optional runner resize<br/>longest/shortest/width/height"]
+  C --> D["NVILA-HD processor"]
+  D --> E["Frame tensorize + thumbnail"]
+  E --> F{"gazing-mode"}
+  F -->|keep-all / keep-all-single| G["AutoGaze off<br/>dense visual patches"]
+  F -->|autogaze| H["AutoGaze selector<br/>selected patches"]
+  G --> I["SigLIP vision encoder"]
+  H --> I
+  I --> J["TokenShuffle / MM projector"]
+  J --> K["NVILA-HD LLM prefill + generate"]
+  K --> L["latency / token / memory / answer report"]
+```
+
+NVILA-HD native 고해상도 tile 경로:
+
+```mermaid
+flowchart TD
+  A["High-res video<br/>FHD / 4K"] --> B["Decode sampled frames"]
+  B --> C["Optional resize cap"]
+  C --> D["Spatial tiling<br/>max_tiles_video"]
+  D --> E["Tile sequences<br/>usually 16-frame units"]
+  E --> F{"AutoGaze"}
+  F -->|off| G["Keep all tile patches"]
+  F -->|on| H["AutoGaze per tile sequence<br/>keep selected patches"]
+  G --> I["SigLIP vision encoder"]
+  H --> I
+  I --> J["Projector / TokenShuffle"]
+  J --> K["NVILA-HD LLM"]
+```
+
+Qwen native-grid resize 중심 경로:
+
+```mermaid
+flowchart TD
+  A["Video mp4"] --> B["Decode / sampled frames"]
+  B --> C["Optional runner resize"]
+  C --> D["Qwen processor"]
+  D --> E["pixel_values_videos<br/>video_grid_thw"]
+  E --> F{"qwen-vit-mode"}
+  F -->|qwen_full_vit| G["Dense full ViT"]
+  F -->|qwen_chunked_vit| H["Dense chunked ViT<br/>memory/latency split only"]
+  F -->|qwen_chunked_vit_autogaze_sparse| I["AutoGaze plan<br/>patch index -> Qwen grid index"]
+  I --> J["Sparse selected visual tokens"]
+  G --> K["Qwen MLLM"]
+  H --> K
+  J --> K
+  K --> L["Generate + report"]
+```
+
+Qwen tile-packed 고해상도 실험 경로:
+
+```mermaid
+flowchart TD
+  A["High-res video"] --> B["Decode sampled frames"]
+  B --> C["Optional resize cap"]
+  C --> D["NVILA-style spatial tiling"]
+  D --> E["Tile-major temporal chunks<br/>chunk -> tile -> frame"]
+  E --> F["Qwen processor sees tiles<br/>as video temporal sequence"]
+  F --> G{"qwen tile mode"}
+  G -->|qwen_tile_packed_vit| H["Dense tile-packed ViT"]
+  G -->|qwen_tile_packed_vit_autogaze_sparse| I["AutoGaze tile-local patch index<br/>-> packed Qwen visual index"]
+  H --> J["Qwen MLLM"]
+  I --> K["Sparse selected tile tokens"]
+  K --> J
+  J --> L["Generate + report"]
+```
 
 다른 suite는 다음처럼 호출합니다.
 
@@ -238,7 +347,7 @@ Qwen suite mode의 의미는 다음과 같습니다.
   --continue-on-error
 ```
 
-`--plugin-suite vila`는 `nvila-video-off`, `nvila-video-autogaze-actual`, `longvila-off`, `longvila-autogaze-actual`를 실행합니다. 단, 현재 VILA-family actual entry는 external CLI dense generation에 AutoGaze selector sidecar metric을 붙인 단계라서 ViT/LLM token pruning 성공으로 해석하면 안 됩니다. `--plugin-suite llava`는 LLaVA-OneVision off와 post-encoder visual-token prune generate 경로를 비교합니다.
+`--plugin-suite vila`는 `nvila-video-off`, `nvila-video-autogaze-actual`, `longvila-off`, `longvila-autogaze-actual`를 실행합니다. VILA-family actual entry는 현재 dense generation + AutoGaze sidecar를 기록하며, exact pre-ViT sparse는 VILA in-process hook 구현 후 검증합니다. `--plugin-suite llava`는 LLaVA-OneVision off와 post-encoder visual-token prune generate를 비교합니다. `materialized_sparse_video`는 sparse patch layout을 dense frame/crop으로 바꾸기 때문에 기본 suite에서 제외했고, 필요할 때만 custom 진단 모드로 사용합니다.
 
 ### VideoQA/Caption/Action Benchmark
 

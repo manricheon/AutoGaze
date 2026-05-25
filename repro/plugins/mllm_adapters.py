@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 import re
 import json
@@ -17,6 +17,7 @@ from repro.plugins.gaze_plan import (
     qwen_visual_indices_from_sparse_plan,
     sparse_selection_plan_from_dict,
 )
+from repro.plugins.materialized_sparse_video import materialize_sparse_video
 from repro.vila_feature_probe import run_vila_feature_probe
 
 SIGLIP_DENSE_REFERENCE_TILE_SIZE = 392
@@ -494,7 +495,8 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
             "note": (
                 "qwen_full_vit uses the native full-video path; qwen_chunked_vit and "
                 "qwen_chunked_vit_autogaze_sparse split Qwen pixel_values_videos after processor build "
-                "across temporal chunks and NVILA-style spatial chunks."
+                "across temporal chunks and Qwen-grid spatial chunks; qwen_tile_packed_* packs "
+                "NVILA-style spatial tiles as tile-major temporal chunks in an experimental Qwen video sequence."
             ),
         }
         if request.token_selector_kind == "autogaze" or request.integration_level != "none":
@@ -506,6 +508,10 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
             return self._run_qwen_chunked_vit_generate(request)
         if request.qwen_vit_mode == "qwen_chunked_vit_autogaze_sparse":
             return self._run_qwen_chunked_vit_autogaze_sparse_generate(request)
+        if request.qwen_vit_mode == "qwen_tile_packed_vit":
+            return self._run_qwen_tile_packed_vit_generate(request)
+        if request.qwen_vit_mode == "qwen_tile_packed_vit_autogaze_sparse":
+            return self._run_qwen_tile_packed_vit_autogaze_sparse_generate(request)
         if (
             request.token_selector_kind == "autogaze"
             and request.integration_level == "pre_encoder_sparse"
@@ -926,6 +932,205 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
             metrics=metrics,
         )
 
+    def _run_qwen_tile_packed_vit_generate(self, request: MllmRunRequest) -> MllmRunResult:
+        return self._run_qwen_tile_packed_vit_generate_impl(request, sparse=False)
+
+    def _run_qwen_tile_packed_vit_autogaze_sparse_generate(self, request: MllmRunRequest) -> MllmRunResult:
+        return self._run_qwen_tile_packed_vit_generate_impl(request, sparse=True)
+
+    def _run_qwen_tile_packed_vit_generate_impl(
+        self,
+        request: MllmRunRequest,
+        *,
+        sparse: bool,
+    ) -> MllmRunResult:
+        try:
+            from transformers import AutoModelForImageTextToText, AutoProcessor
+        except ModuleNotFoundError as exc:
+            raise RuntimeError("transformers is required for Qwen grid MLLM execution") from exc
+
+        model_kwargs: dict[str, Any] = {
+            "device_map": request.device_map,
+            "trust_remote_code": request.trust_remote_code,
+        }
+        if request.dtype != "auto":
+            model_kwargs["dtype"] = request.dtype
+        if request.attn_implementation:
+            model_kwargs["attn_implementation"] = request.attn_implementation
+
+        metrics = build_metric_skeleton(request)
+        metrics["feature_packing_probe"] = build_feature_packing_probe(self.name, request)
+        total_start = time.perf_counter()
+        start = time.perf_counter()
+        model = AutoModelForImageTextToText.from_pretrained(request.model_path, **model_kwargs)
+        metrics["latency_ms"]["model_load"] = _elapsed_ms(start)
+        start = time.perf_counter()
+        processor = AutoProcessor.from_pretrained(request.model_path, trust_remote_code=request.trust_remote_code)
+        metrics["latency_ms"]["processor_load"] = _elapsed_ms(start)
+        messages = self.build_messages(request)
+        start = time.perf_counter()
+        inputs, tile_packing = _build_qwen_tile_packed_grid_inputs(processor, messages, request)
+        metrics["latency_ms"]["input_build"] = _elapsed_ms(start)
+        _record_input_token_metrics(metrics, inputs)
+        model_device = getattr(model, "device", None)
+        if model_device is not None and hasattr(inputs, "to"):
+            inputs = inputs.to(model_device)
+
+        mapping = None
+        thumbnail_metadata: dict[str, Any] = {"enabled": False, "reason": "sparse mode is disabled"}
+        keep_indices: list[int] | None = None
+        try:
+            if sparse:
+                if not request.sparse_selection_plan_path:
+                    raise ValueError(
+                        "qwen_tile_packed_vit_autogaze_sparse requires --sparse-selection-plan-json "
+                        "or --run-autogaze-selector"
+                    )
+                raw_visual_tokens = count_qwen_visual_placeholders(model, inputs)
+                mapping, mapping_metadata = _qwen_tile_packed_mapping_from_sparse_plan_path(
+                    request.sparse_selection_plan_path,
+                    model=model,
+                    inputs=inputs,
+                    tile_packing=tile_packing,
+                )
+                thumbnail_keep, thumbnail_metadata = qwen_tile_packed_thumbnail_visual_keep_indices(
+                    request,
+                    video_grid_thw=_qwen_video_grid_thw(inputs),
+                    spatial_merge_size=qwen_spatial_merge_size(model),
+                    tile_packing=tile_packing,
+                )
+                keep_indices = [
+                    int(index)
+                    for index in dict.fromkeys(list(mapping.visual_feature_indices or []) + thumbnail_keep)
+                    if 0 <= int(index) < int(raw_visual_tokens)
+                ]
+                if not keep_indices:
+                    raise ValueError(f"AutoGaze sparse plan did not map to Qwen tile-packed visual tokens: {mapping.reason}")
+            start = time.perf_counter()
+            video_features, chunk_metadata = qwen_chunked_video_features(
+                model,
+                dict(inputs),
+                chunk_frames=request.qwen_vit_chunk_frames,
+                max_spatial_chunks=request.qwen_vit_max_spatial_chunks,
+                keep_indices=keep_indices,
+            )
+            packed_inputs = build_qwen_inputs_from_video_features(
+                model,
+                inputs,
+                video_features,
+                original_keep_indices=keep_indices,
+                metadata_key=(
+                    "qwen_tile_packed_vit_sparse_metadata"
+                    if sparse
+                    else "qwen_tile_packed_vit_metadata"
+                ),
+            )
+            metrics["latency_ms"]["qwen_vit_prepare"] = _elapsed_ms(start)
+        except Exception as exc:
+            metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
+            metrics["qwen_vit"] = {
+                "mode": request.qwen_vit_mode,
+                "status": "failed_before_generate",
+                "reason": str(exc),
+                "tile_packing": tile_packing,
+            }
+            metrics["metric_status"] = {
+                "value": f"failed_{request.qwen_vit_mode}",
+                "reason": str(exc),
+            }
+            _record_cuda_memory(metrics)
+            return MllmRunResult(
+                text=None,
+                prompt=request.prompt,
+                video=request.video,
+                image=request.image,
+                adapter=self.name,
+                status=f"failed_{request.qwen_vit_mode}",
+                metrics=metrics,
+            )
+
+        metadata_key = "qwen_tile_packed_vit_sparse_metadata" if sparse else "qwen_tile_packed_vit_metadata"
+        feature_metadata = packed_inputs.pop(metadata_key)
+        qwen_vit_metrics: dict[str, Any] = {
+            "mode": request.qwen_vit_mode,
+            "status": "inputs_embeds_prepared",
+            "packing_policy": "qwen_tile_packed_experimental",
+            "position_semantics": "spatial_tiles_encoded_as_temporal_sequence",
+            "tile_packing": tile_packing,
+            **chunk_metadata,
+            **feature_metadata,
+        }
+        if sparse:
+            qwen_vit_metrics.update(
+                {
+                    "sparse_selection_plan_path": request.sparse_selection_plan_path,
+                    "mllm_mapping": mapping.to_dict() if mapping is not None else None,
+                    "thumbnail_keep_all": thumbnail_metadata,
+                    "experimental_warning": (
+                        "Spatial tiles are packed on Qwen's video temporal axis; this is zero-shot "
+                        "tile-aware AutoGaze sparse packing, not a Qwen-native spatial tile embedding."
+                    ),
+                }
+            )
+        metrics["qwen_vit"] = qwen_vit_metrics
+        metrics["tokens"]["visual_tokens_before_prune"] = feature_metadata["visual_tokens_before_prune"]
+        metrics["tokens"]["visual_tokens_after_prune"] = feature_metadata["visual_tokens_after_prune"]
+        if feature_metadata["visual_tokens_after_prune"]:
+            metrics["tokens"]["visual_token_reduction_ratio"] = (
+                feature_metadata["visual_tokens_before_prune"] / feature_metadata["visual_tokens_after_prune"]
+            )
+        input_ids = packed_inputs.get("input_ids")
+        if input_ids is not None and hasattr(input_ids, "shape"):
+            metrics["tokens"]["llm_context_tokens"] = int(input_ids.shape[-1])
+
+        start = time.perf_counter()
+        try:
+            generated_ids = model.generate(**packed_inputs, max_new_tokens=request.max_new_tokens)
+        except Exception as exc:
+            metrics["latency_ms"]["generate"] = _elapsed_ms(start)
+            metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
+            metrics["qwen_vit"]["status"] = "failed_during_generate"
+            metrics["qwen_vit"]["reason"] = str(exc)
+            metrics["metric_status"] = {
+                "value": f"failed_{request.qwen_vit_mode}",
+                "reason": str(exc),
+            }
+            _record_cuda_memory(metrics)
+            return MllmRunResult(
+                text=None,
+                prompt=request.prompt,
+                video=request.video,
+                image=request.image,
+                adapter=self.name,
+                status=f"failed_{request.qwen_vit_mode}",
+                metrics=metrics,
+            )
+
+        metrics["latency_ms"]["generate"] = _elapsed_ms(start)
+        if input_ids is not None:
+            generated_ids = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(input_ids, generated_ids)]
+        text = processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+        metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
+        metrics["metric_status"] = {
+            "value": f"executed_{request.qwen_vit_mode}",
+            "reason": (
+                "Qwen ran on NVILA/AutoGaze-style spatial tiles packed as tile-major temporal chunks. "
+                "Sparse mode keeps AutoGaze-selected tile-local visual tokens and matching MLLM placeholders."
+                if sparse
+                else "Qwen ran dense ViT on NVILA/AutoGaze-style spatial tiles packed as tile-major temporal chunks."
+            ),
+        }
+        _record_cuda_memory(metrics)
+        return MllmRunResult(
+            text=text,
+            prompt=request.prompt,
+            video=request.video,
+            image=request.image,
+            adapter=self.name,
+            status="executed",
+            metrics=metrics,
+        )
+
     def _run_qwen_autogaze_pre_vit_sparse_generate(self, request: MllmRunRequest) -> MllmRunResult:
         try:
             from transformers import AutoModelForImageTextToText, AutoProcessor
@@ -1213,6 +1418,12 @@ class LlavaOneVisionMllmAdapter(QwenGridMllmAdapter):
         if request.token_selector_kind == "autogaze" or request.integration_level != "none":
             if (
                 request.token_selector_kind == "autogaze"
+                and request.integration_level == "input_materialization_diagnostic"
+                and request.enable_visual_prune_generate
+            ):
+                return self._run_llava_onevision_materialized_sparse_generate(request)
+            if (
+                request.token_selector_kind == "autogaze"
                 and request.integration_level == "post_encoder_token_prune"
                 and request.enable_visual_prune_generate
             ):
@@ -1238,6 +1449,80 @@ class LlavaOneVisionMllmAdapter(QwenGridMllmAdapter):
                 metrics=metrics,
             )
         return self._run_llava_onevision_generate(request)
+
+    def _run_llava_onevision_materialized_sparse_generate(self, request: MllmRunRequest) -> MllmRunResult:
+        materialized = materialize_sparse_video_for_request(request, adapter_name=self.name)
+        if materialized.get("status") != "executed" or not materialized.get("path"):
+            metrics = build_metric_skeleton(request)
+            metrics["feature_packing_probe"] = build_feature_packing_probe(self.name, request)
+            metrics["autogaze_attachment"] = {
+                "mode": "materialized_sparse_video",
+                "materialized_sparse_video": materialized,
+                "visual_pruning_applied": False,
+                "vision_encoder_latency_reduced": False,
+                "mllm_context_reduced": False,
+            }
+            metrics["metric_status"] = {
+                "value": "failed_materialized_sparse_video",
+                "reason": str(materialized.get("reason") or "materialized sparse video was not created"),
+            }
+            return MllmRunResult(
+                text=None,
+                prompt=request.prompt,
+                video=request.video,
+                image=request.image,
+                adapter=self.name,
+                status="failed_materialized_sparse_video",
+                metrics=metrics,
+            )
+
+        sparse_request = replace(
+            request,
+            video=str(materialized["path"]),
+            num_video_frames=max(1, int(materialized.get("kept_frame_count") or request.num_video_frames)),
+            token_selector_kind="keep-all",
+            integration_level="none",
+            enable_visual_prune_generate=False,
+        )
+        result = self._run_llava_onevision_generate(sparse_request)
+        metrics = dict(result.metrics)
+        metrics["autogaze_attachment"] = {
+            "mode": "materialized_sparse_video",
+            "selector_executed": bool(request.sparse_selection_plan_path),
+            "sparse_selection_plan_path": request.sparse_selection_plan_path,
+            "materialized_sparse_video": materialized,
+            "visual_pruning_applied": False,
+            "vision_encoder_latency_reduced": False,
+            "mllm_context_reduced": False,
+            "exact_patch_sparse_applied": False,
+            "diagnostic_only": True,
+            "reason": (
+                "LLaVA-OneVision ran on an AutoGaze materialized sparse video. This is coarse "
+                "frame/crop-level input materialization, not exact patch-level sparse attention; "
+                "do not use it as an AutoGaze compute-gain claim."
+            ),
+        }
+        if result.status == "executed":
+            metrics["metric_status"] = {
+                "value": "executed_materialized_sparse_video",
+                "reason": (
+                    "LLaVA-OneVision generation executed on AutoGaze materialized sparse video. "
+                    "This is a diagnostic input-transformation run, not a verified pre-ViT sparse integration."
+                ),
+            }
+            status = "executed_materialized_sparse_video"
+        else:
+            metrics.setdefault("metric_status", {"value": result.status, "reason": "materialized sparse video generation failed"})
+            status = result.status
+        return MllmRunResult(
+            text=result.text,
+            prompt=request.prompt,
+            video=request.video,
+            image=request.image,
+            adapter=self.name,
+            status=status,
+            metrics=metrics,
+        )
 
     def _run_llava_onevision_autogaze_prune_generate(self, request: MllmRunRequest) -> MllmRunResult:
         try:
@@ -1561,6 +1846,101 @@ def _qwen_preloaded_video_frames(request: MllmRunRequest) -> tuple[list[Any], di
         "decode": decode_stats,
         "frames_for_processor": frames + thumbnail_frames,
     }
+
+
+def _qwen_tile_packed_video_frames(request: MllmRunRequest) -> tuple[list[Any], dict[str, Any]]:
+    from repro.nvila_runner import build_spatial_tile_sequences, spatial_tile_grid
+
+    frames, metadata = _qwen_preloaded_video_frames(request)
+    if not frames:
+        raise ValueError("Qwen tile-packed mode requires at least one sampled frame")
+    width, height = frames[0].size
+    tile_size = SIGLIP_DENSE_REFERENCE_TILE_SIZE
+    grid = spatial_tile_grid(
+        width=int(width),
+        height=int(height),
+        max_tiles_video=max(1, int(request.max_tiles_video or 1)),
+        image_size=tile_size,
+    )
+    tile_sequences = build_spatial_tile_sequences(
+        frames,
+        cols=int(grid["cols"]),
+        rows=int(grid["rows"]),
+        tile_size=tile_size,
+    )
+    chunk_frames = max(1, int(request.qwen_vit_chunk_frames or len(frames) or 1))
+    packed_frames: list[Any] = []
+    for chunk_start in range(0, len(frames), chunk_frames):
+        chunk_end = min(chunk_start + chunk_frames, len(frames))
+        for tile_index in range(int(grid["tiles"])):
+            for frame_index in range(chunk_start, chunk_end):
+                packed_frames.append(tile_sequences[tile_index][frame_index])
+
+    thumbnail_count = qwen_thumbnail_count(request)
+    thumbnail_positions = qwen_thumbnail_frame_positions(len(frames), thumbnail_count)
+    thumbnail_frames = [
+        frames[position].resize((tile_size, tile_size))
+        for position in thumbnail_positions
+        if 0 <= position < len(frames)
+    ]
+    packed_frames.extend(thumbnail_frames)
+    tile_metadata = {
+        "packing_policy": "qwen_tile_packed_experimental",
+        "position_semantics": "spatial_tiles_encoded_as_temporal_sequence",
+        "frame_ordering": "tile_major_temporal_chunks_then_thumbnail_tail",
+        "tile_temporal_chunk_frames": chunk_frames,
+        "temporal_tile_chunks": int(math.ceil(len(frames) / chunk_frames)),
+        "source_frame_count": len(frames),
+        "sampled_frame_indices": metadata.get("sampled_frame_indices"),
+        "thumbnail_frame_indices": metadata.get("thumbnail_frame_indices"),
+        "thumbnail_frame_count": len(thumbnail_frames),
+        "spatial_tiles_per_frame": int(grid["tiles"]),
+        "tile_grid_cols": int(grid["cols"]),
+        "tile_grid_rows": int(grid["rows"]),
+        "tile_size": tile_size,
+        "packed_main_frame_count": len(frames) * int(grid["tiles"]),
+        "packed_total_frame_count": len(packed_frames),
+        "source_resize": metadata.get("resize"),
+        "decode": metadata.get("decode"),
+        "note": (
+            "Qwen sees tile-major spatial-tile chunks as a video temporal sequence. This approximates NVILA-HD "
+            "tile processing without retraining, so accuracy must be evaluated separately."
+        ),
+    }
+    return packed_frames, tile_metadata
+
+
+def _build_qwen_tile_packed_grid_inputs(
+    processor: Any,
+    messages: list[dict[str, Any]],
+    request: MllmRunRequest,
+) -> tuple[Any, dict[str, Any]]:
+    if not request.video:
+        raise ValueError("Qwen tile-packed mode requires a video input")
+    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    try:
+        frames, tile_metadata = _qwen_tile_packed_video_frames(request)
+    except Exception as exc:
+        raise RuntimeError(
+            "Qwen tile-packed video decode/tile build failed before processor tokenization. "
+            f"{_qwen_video_debug_context(request)}"
+        ) from exc
+    processor_kwargs: dict[str, Any] = {
+        "text": [text],
+        "images": None,
+        "videos": [frames],
+        "return_tensors": "pt",
+    }
+    if request.qwen_video_fps is not None:
+        processor_kwargs["fps"] = float(request.qwen_video_fps)
+    try:
+        return processor(**processor_kwargs), tile_metadata
+    except Exception as exc:
+        raise RuntimeError(
+            "Qwen processor failed on tile-packed video frames. "
+            f"{_qwen_video_debug_context(request)} "
+            "Check that the Qwen processor accepts preloaded PIL frame lists."
+        ) from exc
 
 
 def qwen_thumbnail_frame_positions(main_count: int, thumbnail_count: int) -> list[int]:
@@ -2185,6 +2565,237 @@ def _qwen_mapping_from_sparse_plan_path(
     )
 
 
+def _qwen_tile_packed_mapping_from_sparse_plan_path(
+    path: str,
+    *,
+    model: Any,
+    inputs: Any,
+    tile_packing: dict[str, Any],
+) -> tuple[Any, dict[str, Any]]:
+    with Path(path).open("r", encoding="utf-8") as handle:
+        plan = sparse_selection_plan_from_dict(json.load(handle))
+    video_grid_thw = _qwen_video_grid_thw(inputs)
+    if video_grid_thw is None:
+        from repro.plugins.gaze_plan import MllmMapping
+
+        return (
+            MllmMapping(
+                status="mapping_failed",
+                visual_feature_indices=[],
+                reason="Qwen processor outputs did not include video_grid_thw",
+            ),
+            {"position_semantics": "spatial_tiles_encoded_as_temporal_sequence"},
+        )
+    return qwen_tile_packed_visual_indices_from_sparse_plan(
+        plan,
+        video_grid_thw=video_grid_thw,
+        spatial_merge_size=qwen_spatial_merge_size(model),
+        tile_packing=tile_packing,
+    )
+
+
+def qwen_tile_packed_visual_indices_from_sparse_plan(
+    plan: SparseSelectionPlan,
+    *,
+    video_grid_thw: Any,
+    spatial_merge_size: int,
+    tile_packing: dict[str, Any],
+) -> tuple[Any, dict[str, Any]]:
+    from repro.plugins.gaze_plan import MllmMapping
+
+    t, h, w = _single_qwen_grid(video_grid_thw)
+    merge = max(1, int(spatial_merge_size or 1))
+    merged_h = max(1, math.ceil(h / merge))
+    merged_w = max(1, math.ceil(w / merge))
+    spatial_tiles = max(1, int(tile_packing.get("spatial_tiles_per_frame") or _plan_spatial_tiles(plan)))
+    source_frames = max(
+        1,
+        int(
+            tile_packing.get("source_frame_count")
+            or len(plan.source_video.sampled_frame_indices)
+            or (max((patch.frame_order for patch in plan.selected_patches), default=0) + 1)
+        ),
+    )
+    packed_main = max(1, int(tile_packing.get("packed_main_frame_count") or source_frames * spatial_tiles))
+    packed_total = max(packed_main, int(tile_packing.get("packed_total_frame_count") or packed_main))
+    chunk_frames = max(1, int(tile_packing.get("tile_temporal_chunk_frames") or source_frames))
+    main_qwen_t = _qwen_tile_packed_main_temporal_tokens(
+        qwen_t=t,
+        packed_main_frame_count=packed_main,
+        packed_total_frame_count=packed_total,
+    )
+    indices: list[int] = []
+    for patch in sorted(plan.selected_patches, key=lambda item: item.autoregressive_order):
+        tile_id = min(max(int(patch.tile_id), 0), spatial_tiles - 1)
+        frame_order = min(max(int(patch.frame_order), 0), source_frames - 1)
+        packed_order = _tile_major_temporal_chunk_packed_order(
+            frame_order=frame_order,
+            tile_id=tile_id,
+            source_frames=source_frames,
+            spatial_tiles=spatial_tiles,
+            chunk_frames=chunk_frames,
+        )
+        temporal_index = _map_packed_order_to_qwen_temporal_index(
+            packed_order=packed_order,
+            packed_main_frame_count=packed_main,
+            main_qwen_t=main_qwen_t,
+        )
+        row_col = _qwen_tile_local_row_col_for_patch(plan, patch, h=h, w=w)
+        if row_col is None:
+            continue
+        row, col = row_col
+        merged_row = min(max(row // merge, 0), merged_h - 1)
+        merged_col = min(max(col // merge, 0), merged_w - 1)
+        index = temporal_index * merged_h * merged_w + merged_row * merged_w + merged_col
+        if index not in indices:
+            indices.append(index)
+    metadata = {
+        "position_semantics": "spatial_tiles_encoded_as_temporal_sequence",
+        "packed_main_frame_count": packed_main,
+        "packed_total_frame_count": packed_total,
+        "main_qwen_temporal_tokens": main_qwen_t,
+        "qwen_video_grid_thw": [t, h, w],
+        "spatial_tiles_per_frame": spatial_tiles,
+        "tile_temporal_chunk_frames": chunk_frames,
+        "frame_ordering": "tile_major_temporal_chunks_then_thumbnail_tail",
+        "spatial_merge_size": merge,
+        "mapping_policy": "tile_major_temporal_chunk_patch_to_qwen_temporal_grid",
+    }
+    if not indices:
+        return (
+            MllmMapping(
+                status="mapping_failed",
+                visual_feature_indices=[],
+                reason="no selected AutoGaze tile-local patch could be mapped to Qwen tile-packed indices",
+            ),
+            metadata,
+        )
+    return (
+        MllmMapping(
+            status="tile_packed_approximate_grid",
+            visual_feature_indices=indices,
+            reason=(
+                f"mapped {len(plan.selected_patches)} AutoGaze tile-local patches to "
+                f"{len(indices)} Qwen tile-packed visual feature indices"
+            ),
+        ),
+        metadata,
+    )
+
+
+def _plan_spatial_tiles(plan: SparseSelectionPlan) -> int:
+    grid = plan.preprocess_space.tile_grid
+    if grid and len(grid) >= 2:
+        return max(1, int(grid[0]) * int(grid[1]))
+    return max((int(patch.tile_id) for patch in plan.selected_patches), default=0) + 1
+
+
+def _qwen_tile_local_row_col_for_patch(
+    plan: SparseSelectionPlan,
+    patch: Any,
+    *,
+    h: int,
+    w: int,
+) -> tuple[int, int] | None:
+    autogaze_patch_size = plan.patch_space.autogaze_patch_size
+    scale_size = patch.scale_size or (plan.patch_space.scale_sizes[0] if plan.patch_space.scale_sizes else None)
+    if not autogaze_patch_size or not scale_size:
+        return None
+    grid = max(1, int(scale_size) // int(autogaze_patch_size))
+    patch_row = int(patch.patch_index) // grid
+    patch_col = int(patch.patch_index) % grid
+    row = min(max(int((patch_row + 0.5) * h / grid), 0), h - 1)
+    col = min(max(int((patch_col + 0.5) * w / grid), 0), w - 1)
+    return row, col
+
+
+def _tile_major_temporal_chunk_packed_order(
+    *,
+    frame_order: int,
+    tile_id: int,
+    source_frames: int,
+    spatial_tiles: int,
+    chunk_frames: int,
+) -> int:
+    frames = max(1, int(source_frames))
+    tiles = max(1, int(spatial_tiles))
+    chunk = max(1, int(chunk_frames))
+    frame = min(max(int(frame_order), 0), frames - 1)
+    tile = min(max(int(tile_id), 0), tiles - 1)
+    chunk_start = (frame // chunk) * chunk
+    packed_order = 0
+    for previous_start in range(0, chunk_start, chunk):
+        packed_order += tiles * min(chunk, frames - previous_start)
+    current_chunk_len = min(chunk, frames - chunk_start)
+    return packed_order + tile * current_chunk_len + (frame - chunk_start)
+
+
+def _qwen_tile_packed_main_temporal_tokens(
+    *,
+    qwen_t: int,
+    packed_main_frame_count: int,
+    packed_total_frame_count: int,
+) -> int:
+    if int(packed_total_frame_count) <= int(packed_main_frame_count):
+        return max(1, int(qwen_t))
+    return min(
+        max(1, int(round(int(packed_main_frame_count) * int(qwen_t) / max(int(packed_total_frame_count), 1)))),
+        int(qwen_t),
+    )
+
+
+def _map_packed_order_to_qwen_temporal_index(
+    *,
+    packed_order: int,
+    packed_main_frame_count: int,
+    main_qwen_t: int,
+) -> int:
+    if int(main_qwen_t) <= 1 or int(packed_main_frame_count) <= 1:
+        return 0
+    return min(
+        max(int(round(int(packed_order) * (int(main_qwen_t) - 1) / (int(packed_main_frame_count) - 1))), 0),
+        int(main_qwen_t) - 1,
+    )
+
+
+def qwen_tile_packed_thumbnail_visual_keep_indices(
+    request: MllmRunRequest,
+    *,
+    video_grid_thw: Any,
+    spatial_merge_size: int,
+    tile_packing: dict[str, Any],
+) -> tuple[list[int], dict[str, Any]]:
+    thumbnail_count = int(tile_packing.get("thumbnail_frame_count") or 0)
+    if thumbnail_count <= 0 or video_grid_thw is None:
+        return [], {
+            "enabled": False,
+            "reason": "tile-packed thumbnail tail is not active or video_grid_thw is unavailable",
+        }
+    t, h, w = _single_qwen_grid(video_grid_thw)
+    merge = max(1, int(spatial_merge_size or 1))
+    merged_h = max(1, math.ceil(h / merge))
+    merged_w = max(1, math.ceil(w / merge))
+    packed_main = max(1, int(tile_packing.get("packed_main_frame_count") or 1))
+    packed_total = max(packed_main, int(tile_packing.get("packed_total_frame_count") or packed_main))
+    thumbnail_start = _qwen_tile_packed_main_temporal_tokens(
+        qwen_t=t,
+        packed_main_frame_count=packed_main,
+        packed_total_frame_count=packed_total,
+    )
+    per_frame_tokens = merged_h * merged_w
+    indices = list(range(thumbnail_start * per_frame_tokens, t * per_frame_tokens))
+    return indices, {
+        "enabled": True,
+        "mode": request.qwen_thumbnail_mode,
+        "thumbnail_frames": thumbnail_count,
+        "qwen_temporal_tokens": t,
+        "thumbnail_temporal_start": thumbnail_start,
+        "thumbnail_visual_tokens": len(indices),
+        "pruning_policy": "keep_all",
+        "packing_policy": "qwen_tile_packed_experimental",
+    }
+
+
 def _qwen_video_grid_thw(inputs: Any) -> Any:
     values = dict(inputs)
     return values.get("video_grid_thw")
@@ -2742,27 +3353,45 @@ def run_external_dense_with_autogaze_sidecar(
 ) -> MllmRunResult:
     metrics = build_metric_skeleton(request)
     metrics["feature_packing_probe"] = feature_probe
+    materialized: dict[str, Any] = {"status": "not_requested"}
+    command_to_run = list(command)
+    if (
+        request.integration_level == "input_materialization_diagnostic"
+        and request.sparse_selection_plan_path
+        and request.video
+    ):
+        materialized = materialize_sparse_video_for_request(request, adapter_name=adapter_name)
+        if materialized.get("status") == "executed" and materialized.get("path"):
+            command_to_run = _replace_external_media_and_frame_count(
+                command_to_run,
+                media=str(materialized["path"]),
+                frame_count=materialized.get("kept_frame_count"),
+            )
     metrics["sparse_selection_plan"] = build_probe_sparse_selection_plan(
         request,
         selector_name="autogaze",
         reason=sparse_plan_reason,
     ).to_dict()
+    materialized_applied = materialized.get("status") == "executed" and bool(materialized.get("path"))
     metrics["autogaze_attachment"] = {
-        "mode": "dense_generation_with_autogaze_sidecar",
+        "mode": "materialized_sparse_video" if materialized_applied else "dense_generation_with_autogaze_sidecar",
         "selector_executed": bool(request.sparse_selection_plan_path),
         "sparse_selection_plan_path": request.sparse_selection_plan_path,
+        "materialized_sparse_video": materialized,
         "visual_pruning_applied": False,
         "vision_encoder_latency_reduced": False,
         "mllm_context_reduced": False,
+        "exact_patch_sparse_applied": False,
+        "diagnostic_only": bool(materialized_applied),
         "reason": sparse_plan_reason,
     }
     metrics["external_cli"] = {
-        "command": command,
+        "command": command_to_run,
         "stdout_tail": None,
         "stderr_tail": None,
         "returncode": None,
     }
-    if not _command_available(command[0]):
+    if not _command_available(command_to_run[0]):
         metrics["metric_status"] = {
             "value": "failed_missing_dependency",
             "reason": missing_dependency_reason,
@@ -2779,7 +3408,7 @@ def run_external_dense_with_autogaze_sidecar(
 
     total_start = time.perf_counter()
     try:
-        completed = subprocess.run(command, check=False, capture_output=True, text=True)
+        completed = subprocess.run(command_to_run, check=False, capture_output=True, text=True)
     except OSError as exc:
         metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
         metrics["metric_status"] = {"value": "failed", "reason": str(exc)}
@@ -2814,9 +3443,16 @@ def run_external_dense_with_autogaze_sidecar(
             status="failed",
             metrics=metrics,
         )
+    status = "executed_materialized_sparse_video" if materialized_applied else "executed_dense_with_autogaze_sidecar"
     metrics["metric_status"] = {
-        "value": "executed_dense_with_autogaze_sidecar",
-        "reason": success_reason,
+        "value": status,
+        "reason": (
+            "External generation ran on an AutoGaze materialized sparse video. This reduces the downstream "
+            "input shape in a diagnostic way, but it is not exact patch-level sparse attention inside "
+            "the model and should not be counted as a verified AutoGaze compute gain."
+            if materialized_applied
+            else success_reason
+        ),
     }
     return MllmRunResult(
         text=text,
@@ -2824,9 +3460,74 @@ def run_external_dense_with_autogaze_sidecar(
         video=request.video,
         image=request.image,
         adapter=adapter_name,
-        status="executed_dense_with_autogaze_sidecar",
+        status=status,
         metrics=metrics,
     )
+
+
+def materialize_sparse_video_for_request(request: MllmRunRequest, *, adapter_name: str) -> dict[str, Any]:
+    if not request.sparse_selection_plan_path:
+        return {"status": "not_requested", "reason": "no sparse selection plan path"}
+    if not request.video:
+        return {"status": "not_requested", "reason": "no source video path"}
+    try:
+        return materialize_sparse_video(
+            plan_path=request.sparse_selection_plan_path,
+            source_video=request.video,
+            sample_count=request.num_video_frames,
+            resize=_request_resize_dict(request),
+            fps=2.0,
+            crop_to_selection=True,
+        )
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "adapter": adapter_name,
+            "reason": str(exc),
+            "exception_type": type(exc).__name__,
+        }
+
+
+def _request_resize_dict(request: MllmRunRequest) -> dict[str, Any]:
+    resize: dict[str, Any] = {}
+    if request.video_resize_shortest_edge is not None:
+        resize["shortest_edge"] = int(request.video_resize_shortest_edge)
+    if request.video_resize_longest_edge is not None:
+        resize["longest_edge"] = int(request.video_resize_longest_edge)
+    if request.video_resize_width is not None:
+        resize["width"] = int(request.video_resize_width)
+    if request.video_resize_height is not None:
+        resize["height"] = int(request.video_resize_height)
+    return resize
+
+
+def _replace_external_media_and_frame_count(
+    command: list[str],
+    *,
+    media: str,
+    frame_count: Any,
+) -> list[str]:
+    updated = list(command)
+    for flag in ("--media", "--video"):
+        if flag in updated:
+            index = updated.index(flag)
+            if index + 1 < len(updated):
+                updated[index + 1] = media
+                break
+    frame_value = None
+    try:
+        if frame_count is not None:
+            frame_value = str(max(1, int(frame_count)))
+    except (TypeError, ValueError):
+        frame_value = None
+    if frame_value is not None:
+        for flag in ("--num_video_frames", "--num-video-frames"):
+            if flag in updated:
+                index = updated.index(flag)
+                if index + 1 < len(updated):
+                    updated[index + 1] = frame_value
+                    break
+    return updated
 
 
 def _estimate_qwen_visual_tokens(request: MllmRunRequest) -> int:

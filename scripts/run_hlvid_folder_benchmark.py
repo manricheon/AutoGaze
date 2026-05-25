@@ -23,6 +23,10 @@ PLUGIN_SUITE_MODES = {
         "qwen3_chunked_vit",
         "qwen3_chunked_vit_autogaze_sparse",
     ],
+    "qwen-tile": [
+        "qwen3_tile_packed_vit",
+        "qwen3_tile_packed_vit_autogaze_sparse",
+    ],
     "vila": [
         "nvila-video-off",
         "nvila-video-autogaze-actual",
@@ -36,6 +40,7 @@ PLUGIN_SUITE_MODES = {
 }
 PLUGIN_SUITE_MODES["expand-smoke"] = [
     *PLUGIN_SUITE_MODES["qwen"],
+    *PLUGIN_SUITE_MODES["qwen-tile"],
     *PLUGIN_SUITE_MODES["vila"],
     *PLUGIN_SUITE_MODES["llava"],
 ]
@@ -50,7 +55,7 @@ def build_plugin_router_parser(*, add_help: bool = False) -> argparse.ArgumentPa
     parser.add_argument("--manifest")
     parser.add_argument("--video-root")
     parser.add_argument("--output-dir")
-    parser.add_argument("--plugin-suite", choices=["qwen", "vila", "llava", "expand-smoke", "custom"])
+    parser.add_argument("--plugin-suite", choices=["qwen", "qwen-tile", "vila", "llava", "expand-smoke", "custom"])
     parser.add_argument("--plugin-modes")
     parser.add_argument(
         "--plugin-model",

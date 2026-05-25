@@ -162,7 +162,10 @@ Use the same HLVid wrapper with `--plugin-suite qwen` for Qwen extension experim
 `qwen2.5_full_vit,qwen2.5_chunked_vit,qwen2.5_chunked_vit_autogaze_sparse,qwen3_full_vit,qwen3_chunked_vit,qwen3_chunked_vit_autogaze_sparse`.
 Use `--plugin-suite custom --plugin-modes ...` for narrower comparisons.
 
-Other suites are `vila`, `llava`, and `expand-smoke`. The VILA-family AutoGaze actual entries currently run dense external VILA generation with AutoGaze sidecar metrics; they do not claim ViT or LLM token pruning until an in-process VILA hook is added.
+Use `--plugin-suite qwen-tile` for the NVILA-like Qwen tile-aware experiment:
+`qwen3_tile_packed_vit,qwen3_tile_packed_vit_autogaze_sparse`. This creates NVILA-style spatial tiles and packs them into Qwen as tile-major temporal chunks (`chunk -> tile -> frame`, plus optional thumbnail tail). It is a zero-shot experimental path with `packing_policy=qwen_tile_packed_experimental`, not Qwen's native video-grid semantics.
+
+Other suites are `vila`, `llava`, and `expand-smoke`. VILA-family and InternVL AutoGaze entries run dense generation with AutoGaze selector sidecar metrics until model-specific in-process sparse hooks are implemented. `llava-onevision-autogaze-actual` is a post-encoder visual-token prune path. A materialized sparse video mode exists only as a custom diagnostic input-transformation path; it is excluded from default suites because sparse AutoGaze patch indices do not preserve their layout when converted into dense frame/crop video.
 
 ## 6. Stream Profile / H100 Preflight
 
@@ -232,6 +235,15 @@ assets/status_by_config.svg
 | Memory | processor/autogaze/vision/LLM/overall peak memory |
 | Benchmark | `accuracy_total`, `accuracy_scored`, `failed`, `parse_failed`, `oom`, `skipped` |
 | OOM | `failure.kind`, `failure.stage`, `failure.message` |
+
+Plugin reports use `execution_claim` to prevent overclaiming:
+
+| execution_claim | Meaning |
+| --- | --- |
+| `actual_pre_encoder_sparse` | AutoGaze-selected tokens/patches are fed before the vision encoder, so ViT and MLLM reductions can be claimed after CUDA validation. |
+| `materialized_sparse_video` | AutoGaze creates a reduced frame/crop video before the downstream processor. This is diagnostic input materialization, not exact patch-level sparse attention, and should not be used as a compute-gain claim. |
+| `actual_post_encoder_token_prune` | Vision encoder still runs dense; LLM visual context is reduced. |
+| `dense_generation_with_autogaze_sidecar` | Model generation is dense; AutoGaze metrics are recorded only for comparison. |
 
 Primary latency accounting:
 

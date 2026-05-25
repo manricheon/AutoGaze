@@ -54,6 +54,7 @@ AUTOGAZE_INTEGRATION_LEVEL_CHOICES = (
     "none",
     "native_processor",
     "pre_encoder_sparse",
+    "input_materialization_diagnostic",
     "post_encoder_token_prune",
     "planned_plugin",
 )
@@ -62,6 +63,8 @@ QWEN_VIT_MODE_CHOICES = (
     "qwen_full_vit",
     "qwen_chunked_vit",
     "qwen_chunked_vit_autogaze_sparse",
+    "qwen_tile_packed_vit",
+    "qwen_tile_packed_vit_autogaze_sparse",
 )
 QWEN_THUMBNAIL_MODE_CHOICES = ("none", "append-video")
 
@@ -284,6 +287,8 @@ def build_four_step_execution_plan(spec: ExperimentSpec) -> dict[str, dict[str, 
         pre_status = "pixelprune_reference_available"
     elif spec.integration_level == "pre_encoder_sparse":
         pre_status = "candidate_next"
+    elif spec.integration_level == "input_materialization_diagnostic":
+        pre_status = "diagnostic_only_not_sparse"
     else:
         pre_status = "requires_model_specific_probe"
     return {

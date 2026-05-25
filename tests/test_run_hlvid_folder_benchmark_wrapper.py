@@ -150,9 +150,30 @@ def test_plugin_suite_routes_vila_llava_and_expand_smoke(monkeypatch, tmp_path):
     ]
     assert "qwen3_chunked_vit_autogaze_sparse" in captured[2]["modes"]
     assert "longvila-autogaze-actual" in captured[2]["modes"]
+    assert "llava-onevision-autogaze-materialized" not in captured[2]["modes"]
     assert "llava-onevision-autogaze-actual" in captured[2]["modes"]
     assert captured[2]["qwen_video_nframes"] == captured[2]["num_video_frames"]
     assert captured[2]["qwen_vit_max_spatial_chunks"] == captured[2]["max_tiles_video"]
+
+
+def test_qwen_tile_plugin_suite_routes_tile_packed_modes(monkeypatch, tmp_path):
+    dataset = tmp_path / "hlvid"
+    write_minimal_hlvid_dataset(dataset)
+    captured = {}
+
+    def fake_run_plugin_hlvid_benchmark(**kwargs):
+        captured.update(kwargs)
+        return {"summary": {"ok": True}}
+
+    monkeypatch.setattr(wrapper, "run_plugin_hlvid_benchmark", fake_run_plugin_hlvid_benchmark)
+
+    wrapper.main(["--dataset-dir", str(dataset), "--plugin-suite", "qwen-tile", "--max-tiles-video", "4"])
+
+    assert captured["modes"] == [
+        "qwen3_tile_packed_vit",
+        "qwen3_tile_packed_vit_autogaze_sparse",
+    ]
+    assert captured["qwen_vit_max_spatial_chunks"] == 4
 
 
 def test_default_help_mentions_plugin_help_entrypoint(capsys):

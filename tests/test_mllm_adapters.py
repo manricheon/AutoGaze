@@ -4,6 +4,8 @@ import types
 
 from repro.plugins.mllm_adapters import (
     _build_qwen_grid_inputs,
+    _qwen_tile_packed_mapping_from_sparse_plan_path,
+    _qwen_tile_packed_video_frames,
     build_llava_onevision_pruned_visual_inputs,
     build_qwen_inputs_from_video_features,
     build_qwen_pruned_visual_inputs,
@@ -23,6 +25,15 @@ from repro.plugins.mllm_adapters import (
     qwen_thumbnail_visual_keep_indices,
     resolve_mllm_adapter,
     resolve_qwen_visual_keep_indices,
+)
+from repro.plugins.gaze_plan import (
+    EncoderMapping,
+    MllmMapping,
+    PatchSpace,
+    PreprocessSpace,
+    SelectedPatch,
+    SourceVideo,
+    SparseSelectionPlan,
 )
 
 
@@ -239,6 +250,119 @@ def test_build_qwen_grid_inputs_appends_thumbnail_frames_to_preloaded_video(monk
 
     assert calls["load"]["sample_count"] == 4
     assert calls["processor"]["videos"] == [[frames[0], frames[1], frames[2], frames[3], frames[0], frames[2]]]
+
+
+def test_qwen_tile_packed_video_frames_use_tile_major_temporal_chunks_then_thumbnail_tail(monkeypatch):
+    from PIL import Image
+
+    frames = [
+        Image.new("RGB", (8, 4), color=(255, 0, 0)),
+        Image.new("RGB", (8, 4), color=(0, 255, 0)),
+    ]
+
+    monkeypatch.setattr("repro.plugins.mllm_adapters.load_sampled_video_frames", lambda *args, **kwargs: (frames, {}))
+    monkeypatch.setattr(
+        "repro.plugins.mllm_adapters.apply_resize_to_dimensions",
+        lambda **kwargs: {"width": 8, "height": 4, "mode": "exact"},
+    )
+    monkeypatch.setattr(
+        "repro.plugins.mllm_adapters.read_video_metadata",
+        lambda video: {"width": 8, "height": 4, "frames": 10},
+    )
+    monkeypatch.setattr(
+        "repro.plugins.mllm_adapters.uniform_sample_indices",
+        lambda total, count: [0, 9],
+    )
+
+    packed, metadata = _qwen_tile_packed_video_frames(
+        make_request(
+            qwen_video_nframes=2,
+            max_tiles_video=2,
+            num_video_frames_thumbnail=1,
+            qwen_thumbnail_mode="append-video",
+            qwen_vit_chunk_frames=16,
+            video_resize_width=8,
+            video_resize_height=4,
+        )
+    )
+
+    assert metadata["packing_policy"] == "qwen_tile_packed_experimental"
+    assert metadata["frame_ordering"] == "tile_major_temporal_chunks_then_thumbnail_tail"
+    assert metadata["tile_temporal_chunk_frames"] == 16
+    assert metadata["temporal_tile_chunks"] == 1
+    assert metadata["spatial_tiles_per_frame"] == 2
+    assert metadata["packed_main_frame_count"] == 4
+    assert metadata["thumbnail_frame_count"] == 1
+    assert metadata["packed_total_frame_count"] == 5
+    assert len(packed) == 5
+    assert all(frame.size == (392, 392) for frame in packed[:4])
+    assert packed[-1].size == (392, 392)
+    assert [frame.getpixel((0, 0)) for frame in packed] == [
+        (255, 0, 0),
+        (0, 255, 0),
+        (255, 0, 0),
+        (0, 255, 0),
+        (255, 0, 0),
+    ]
+
+
+def test_qwen_tile_packed_mapping_maps_autogaze_tile_local_patch_to_packed_visual_index(tmp_path):
+    torch = __import__("torch")
+
+    plan = SparseSelectionPlan(
+        selector_name="autogaze-direct",
+        source_video=SourceVideo(path="video.mp4", sampled_frame_indices=[0, 10]),
+        preprocess_space=PreprocessSpace(
+            resize_policy="autogaze_largest_scale=392",
+            resized_width=784,
+            resized_height=392,
+            tile_grid=[2, 1],
+            tile_size=392,
+        ),
+        patch_space=PatchSpace(
+            autogaze_patch_size=16,
+            encoder_patch_size=16,
+            scale_ids=[0],
+            scale_sizes=[64],
+        ),
+        selected_patches=[
+            SelectedPatch(
+                frame_index=0,
+                frame_order=0,
+                tile_id=1,
+                scale_id=0,
+                scale_size=64,
+                patch_index=10,
+                bbox_resized_xyxy=[0, 0, 0, 0],
+                bbox_original_xyxy=[0.0, 0.0, 0.0, 0.0],
+                autoregressive_order=0,
+            )
+        ],
+        encoder_mapping=EncoderMapping(status="not_mapped"),
+        mllm_mapping=MllmMapping(status="not_mapped"),
+    )
+    path = tmp_path / "plan.json"
+    path.write_text(__import__("json").dumps(plan.to_dict()), encoding="utf-8")
+
+    class FakeModel:
+        config = type("Config", (), {"vision_config": type("VisionConfig", (), {"spatial_merge_size": 2})()})()
+
+    mapping, metadata = _qwen_tile_packed_mapping_from_sparse_plan_path(
+        str(path),
+        model=FakeModel(),
+        inputs={"video_grid_thw": torch.tensor([[4, 4, 4]])},
+        tile_packing={
+            "source_frame_count": 2,
+            "spatial_tiles_per_frame": 2,
+            "packed_main_frame_count": 4,
+            "packed_total_frame_count": 4,
+            "tile_temporal_chunk_frames": 16,
+        },
+    )
+
+    assert mapping.status == "tile_packed_approximate_grid"
+    assert mapping.visual_feature_indices == [11]
+    assert metadata["position_semantics"] == "spatial_tiles_encoded_as_temporal_sequence"
 
 
 def test_build_qwen_grid_inputs_still_passes_qwen_video_kwargs_without_runner_resize(monkeypatch):
@@ -968,6 +1092,56 @@ def test_qwen_grid_adapter_routes_chunked_vit_autogaze_sparse_mode(monkeypatch):
     assert result.metrics["qwen_vit"]["mode"] == "qwen_chunked_vit_autogaze_sparse"
 
 
+def test_qwen_grid_adapter_routes_tile_packed_modes(monkeypatch):
+    adapter = resolve_mllm_adapter("qwen3-vl")
+    calls = []
+
+    def fake_dense(self, request):
+        calls.append(("dense", request.qwen_vit_mode))
+        return MllmRunResult(
+            text="tile packed dense",
+            prompt=request.prompt,
+            video=request.video,
+            image=request.image,
+            adapter=self.name,
+            status="executed",
+            metrics={"qwen_vit": {"mode": request.qwen_vit_mode}},
+        )
+
+    def fake_sparse(self, request):
+        calls.append(("sparse", request.qwen_vit_mode))
+        return MllmRunResult(
+            text="tile packed sparse",
+            prompt=request.prompt,
+            video=request.video,
+            image=request.image,
+            adapter=self.name,
+            status="executed",
+            metrics={"qwen_vit": {"mode": request.qwen_vit_mode}},
+        )
+
+    monkeypatch.setattr(QwenGridMllmAdapter, "_run_qwen_tile_packed_vit_generate", fake_dense)
+    monkeypatch.setattr(QwenGridMllmAdapter, "_run_qwen_tile_packed_vit_autogaze_sparse_generate", fake_sparse)
+
+    dense = adapter.run(make_request(qwen_vit_mode="qwen_tile_packed_vit"))
+    sparse = adapter.run(
+        make_request(
+            qwen_vit_mode="qwen_tile_packed_vit_autogaze_sparse",
+            token_selector_kind="autogaze",
+            integration_level="pre_encoder_sparse",
+            pre_encoder_prune_adapter="autogaze-sparse",
+            sparse_selection_plan_path="outputs/plan.json",
+        )
+    )
+
+    assert dense.text == "tile packed dense"
+    assert sparse.text == "tile packed sparse"
+    assert calls == [
+        ("dense", "qwen_tile_packed_vit"),
+        ("sparse", "qwen_tile_packed_vit_autogaze_sparse"),
+    ]
+
+
 def test_llava_onevision_adapter_uses_path_style_video_content():
     adapter = resolve_mllm_adapter("llava-onevision")
 
@@ -1034,6 +1208,62 @@ def test_llava_onevision_autogaze_on_dispatches_prune_generate_when_enabled(monk
     assert result.status == "executed"
     assert result.text == "llava sparse answer"
     assert result.metrics["llava_onevision_prune_generate"]["enabled"] is True
+
+
+def test_llava_onevision_pre_encoder_sparse_uses_materialized_sparse_video(monkeypatch, tmp_path):
+    adapter = resolve_mllm_adapter("llava-onevision")
+    plan = tmp_path / "autogaze_plan.json"
+    plan.write_text('{"selector_name": "autogaze"}')
+    sparse_video = tmp_path / "llava.materialized.mp4"
+    sparse_video.write_text("fake video")
+    calls = {}
+
+    def fake_materialize(request, *, adapter_name):
+        calls["materialize"] = {"adapter_name": adapter_name, "video": request.video}
+        return {
+            "status": "executed",
+            "path": str(sparse_video),
+            "kept_frame_count": 3,
+            "original_sampled_frame_count": 8,
+            "integration_claim": "materialized_sparse_video",
+        }
+
+    def fake_generate(self, request):
+        calls["generate_video"] = request.video
+        calls["generate_frames"] = request.num_video_frames
+        return MllmRunResult(
+            text="llava materialized answer",
+            prompt=request.prompt,
+            video=request.video,
+            image=request.image,
+            adapter=self.name,
+            status="executed",
+            metrics={"latency_ms": {"total": 11.0}, "tokens": {}, "memory_bytes": {}},
+        )
+
+    monkeypatch.setattr("repro.plugins.mllm_adapters.materialize_sparse_video_for_request", fake_materialize)
+    monkeypatch.setattr(type(adapter), "_run_llava_onevision_generate", fake_generate)
+
+    result = adapter.run(
+        make_request(
+            model_family="llava-onevision",
+            mllm_adapter="llava-onevision",
+            token_selector_kind="autogaze",
+            integration_level="input_materialization_diagnostic",
+            enable_visual_prune_generate=True,
+            sparse_selection_plan_path=str(plan),
+            video="inputs/original.mp4",
+            num_video_frames=8,
+        )
+    )
+
+    assert calls["materialize"] == {"adapter_name": "llava-onevision", "video": "inputs/original.mp4"}
+    assert calls["generate_video"] == str(sparse_video)
+    assert calls["generate_frames"] == 3
+    assert result.status == "executed_materialized_sparse_video"
+    assert result.metrics["autogaze_attachment"]["mode"] == "materialized_sparse_video"
+    assert result.metrics["autogaze_attachment"]["vision_encoder_latency_reduced"] is False
+    assert result.metrics["autogaze_attachment"]["diagnostic_only"] is True
 
 
 def test_build_llava_onevision_pruned_visual_inputs_removes_unselected_video_placeholders():
@@ -1197,8 +1427,59 @@ def test_vila_cli_adapter_can_run_dense_generation_with_autogaze_sidecar(tmp_pat
 
     assert result.status == "executed_dense_with_autogaze_sidecar"
     assert result.text == "sidecar answer"
+
+
+def test_vila_cli_adapter_uses_materialized_sparse_video_when_plan_is_available(monkeypatch, tmp_path):
+    script = tmp_path / "fake-vila"
+    script.write_text("#!/bin/sh\necho \"$@\"\necho materialized answer\n")
+    script.chmod(0o755)
+    plan = tmp_path / "autogaze_plan.json"
+    plan.write_text('{"selector_name": "autogaze"}')
+    sparse_video = tmp_path / "clip.materialized.mp4"
+    sparse_video.write_text("fake video")
+    calls = {}
+
+    def fake_materialize(request, *, adapter_name):
+        calls["adapter_name"] = adapter_name
+        calls["video"] = request.video
+        return {
+            "status": "executed",
+            "path": str(sparse_video),
+            "kept_frame_count": 2,
+            "original_sampled_frame_count": 8,
+            "integration_claim": "materialized_sparse_video",
+        }
+
+    monkeypatch.setattr("repro.plugins.mllm_adapters.materialize_sparse_video_for_request", fake_materialize)
+    adapter = resolve_mllm_adapter("longvila")
+
+    result = adapter.run(
+        make_request(
+            model_family="longvila",
+            model_path="weight/LongVILA",
+            mllm_adapter="longvila",
+            token_selector_kind="autogaze",
+            integration_level="input_materialization_diagnostic",
+            enable_visual_prune_generate=True,
+            sparse_selection_plan_path=str(plan),
+            video="inputs/original.mp4",
+            external_mllm_command=str(script),
+            num_video_frames=8,
+        )
+    )
+
+    assert calls == {"adapter_name": "longvila", "video": "inputs/original.mp4"}
+    assert result.status == "executed_materialized_sparse_video"
+    assert result.text == "materialized answer"
+    attachment = result.metrics["autogaze_attachment"]
+    assert attachment["mode"] == "materialized_sparse_video"
+    assert attachment["visual_pruning_applied"] is False
+    assert attachment["vision_encoder_latency_reduced"] is False
+    assert attachment["mllm_context_reduced"] is False
+    assert attachment["diagnostic_only"] is True
+    assert result.metrics["external_cli"]["command"][result.metrics["external_cli"]["command"].index("--media") + 1] == str(sparse_video)
+    assert result.metrics["external_cli"]["command"][result.metrics["external_cli"]["command"].index("--num_video_frames") + 1] == "2"
     assert result.metrics["autogaze_attachment"]["selector_executed"] is True
-    assert result.metrics["autogaze_attachment"]["visual_pruning_applied"] is False
 
 
 def test_vila_cli_adapter_collects_static_feature_probe_when_config_exists(tmp_path):

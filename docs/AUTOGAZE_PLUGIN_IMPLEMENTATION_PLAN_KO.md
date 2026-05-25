@@ -54,12 +54,12 @@ video
 | NVILA-HD + AutoGaze | 안정 | 기준 재현, HLVid, latency/token/memory profile |
 | NVILA-HD keep-all | 안정 | AutoGaze off ablation, OOM 비교 |
 | NVILA-8B-Video paper baseline | 준비 | 논문 table baseline 후보, AutoGaze not applicable |
-| NVILA-Video plugin | off/sidecar | 별도 VILA family model에 selector를 붙이는 실험 준비. sidecar mode는 dense generation과 AutoGaze selector metric을 같이 기록 |
-| LongVILA plugin | off/sidecar | 긴 video MLLM 확장성 검토. sidecar mode는 아직 LongVILA 내부 token pruning을 적용하지 않음 |
-| Qwen3-VL plugin | 구현/검증 대상 | `full_vit`, `chunked_vit`, `chunked_vit_autogaze_sparse` 비교. sparse mode는 direct AutoGaze selector plan을 사용 |
+| NVILA-Video plugin | off/sidecar | 별도 VILA family model에 selector를 붙이는 실험 준비. 현재 actual entry는 dense generation + AutoGaze sidecar이고, exact pre-ViT sparse는 hook probe 후 구현 |
+| LongVILA plugin | off/sidecar | 긴 video MLLM 확장성 검토. 현재는 dense sidecar로 selector 결과를 기록하고, materialized video는 진단용 explicit mode로만 사용 |
+| Qwen3-VL plugin | 구현/검증 대상 | `full_vit`, `chunked_vit`, `chunked_vit_autogaze_sparse`, `tile_packed_vit`, `tile_packed_vit_autogaze_sparse` 비교. sparse mode는 direct AutoGaze selector plan을 사용 |
 | Qwen2/2.5-VL | adapter/probe | processor/video packing 차이 검토 필요 |
 | LLaVA-OneVision | off/prune 실험 | AutoGaze on 요청 시 dense fallback을 막고, 선택 시 post-encoder visual token prune-generate를 시도 |
-| InternVL3 | off/sidecar | dynamic tiling과 `num_patches_list` mapping probe 중심. sidecar mode는 dense generation과 selector metric을 같이 기록 |
+| InternVL3 | off/sidecar | dynamic tiling과 `num_patches_list` mapping probe 중심. exact dynamic tile pruning은 후속 |
 
 ## Integration Level
 
@@ -67,6 +67,7 @@ video
 | --- | --- | --- |
 | `off` | selector 없이 모델 기본 processor 사용 | 없음 |
 | `post_encoder_prune` | ViT 이후 visual token 일부 제거 | LLM 비용 감소, ViT 비용 감소 없음 |
+| `input_materialization_diagnostic` | AutoGaze 선택 frame/crop을 새 비디오로 저장한 뒤 기존 MLLM processor에 입력 | 진단/시각화용. sparse patch index가 dense crop으로 바뀌므로 ViT/MLLM compute gain으로 주장하지 않음 |
 | `dense_mask` | patch grid는 유지하고 mask/zero-fill 적용 | 구현 쉬움, ViT 비용 감소 제한적 |
 | `pre_encoder_sparse` | 선택 patch만 ViT에 넣도록 repack | ViT와 LLM 모두 감소 가능, 모델별 position/grid 처리 필요 |
 | `native_processor` | 모델 processor 내부 기능에 selector 연결 | 안정적이나 모델별 커스텀 필요 |
@@ -76,10 +77,11 @@ video
 | 상태 | 의미 |
 | --- | --- |
 | actual prune/sparse | encoder 입력 token 또는 LLM visual token을 실제로 줄인 경로 |
+| materialized sparse video | AutoGaze plan으로 선택 frame/crop 비디오를 만들어 기존 MLLM에 넣은 진단 경로. sparse patch layout을 보존하지 않음 |
 | sidecar generate | dense model generation은 그대로 실행하고 AutoGaze selector 결과/latency/token만 sidecar로 함께 기록한 경로 |
 | probe_required | 모델별 visual packing hook이 아직 없어 pruning을 적용하지 않고 필요한 mapping 정보만 기록하는 경로 |
 
-Qwen2.5/Qwen3의 `*_chunked_vit_autogaze_sparse`는 actual sparse 검증 대상입니다. LLaVA-OneVision `llava-onevision-autogaze-actual`는 post-encoder visual token prune-generate 실험 경로입니다. VILA-family의 `*-autogaze-actual` entry는 현재 external CLI dense generation에 AutoGaze selector sidecar metric을 붙인 단계라서 아직 모델 내부 compute gain을 주장하지 않습니다. InternVL3 sidecar mode도 selector를 무시하지 않지만 pruning은 적용하지 않습니다.
+Qwen2.5/Qwen3의 `*_chunked_vit_autogaze_sparse`는 actual sparse 검증 대상입니다. LLaVA-OneVision `llava-onevision-autogaze-actual`는 post-encoder visual token prune-generate 실험 경로입니다. VILA-family와 InternVL3의 `*-autogaze-actual` entry는 dense generation + AutoGaze selector sidecar를 기록합니다. Materialized sparse video는 sparse patch들이 프레임 내에서 흩어지는 AutoGaze 특성상 compute-gain 주장에 부적합하므로 기본 suite에서 제외하고, 필요할 때만 `input_materialization_diagnostic` 진단 모드로 사용합니다.
 
 ## Pre-ViT Sparse 적용 우선순위
 
@@ -94,7 +96,7 @@ Qwen2.5/Qwen3의 `*_chunked_vit_autogaze_sparse`는 actual sparse 검증 대상�
 | 5 | InternVL3 | `dynamic_tile_probe_required` | medium | dynamic tile order, `num_patches_list` |
 | 6 | LLaVA-OneVision | `candidate_design_required` | high | frame/tile before SigLIP pooling |
 
-Qwen은 이미 `SparseSelectionPlan -> Qwen visual index -> chunked ViT sparse feature -> MLLM visual placeholder` 흐름을 코드에 둔 상태라 CUDA smoke가 다음 검증입니다. VILA-family는 external CLI만으로는 pre-ViT hook을 주입하기 어렵기 때문에, `repro.vila_feature_probe`의 `pre_vit_sparse_probe`가 요구 hook과 위치 정렬 위험을 먼저 기록합니다. InternVL3는 `repro.internvl_dynamic_tile_probe`가 `num_patches_list`와 dynamic tile 정책을 정리합니다. LLaVA-OneVision은 patch-level보다 frame/tile-level pre-ViT candidate를 먼저 검토합니다.
+Qwen은 이미 `SparseSelectionPlan -> Qwen visual index -> chunked ViT sparse feature -> MLLM visual placeholder` 흐름을 코드에 둔 상태라 CUDA smoke가 다음 검증입니다. 추가로 `qwen_tile_packed_vit`와 `qwen_tile_packed_vit_autogaze_sparse`는 NVILA/AutoGaze식 spatial tile을 먼저 만들고, 16프레임 같은 temporal chunk 안에서 `chunk -> tile -> frame` 순서로 Qwen video temporal sequence에 packing해 고해상도 tile 활용성을 보는 zero-shot experimental mode입니다. 이 모드는 재학습 없이 실행 가능하지만 Qwen이 tile position을 native하게 학습한 것은 아니므로, `packing_policy=qwen_tile_packed_experimental`, `frame_ordering=tile_major_temporal_chunks_then_thumbnail_tail`, `position_semantics=spatial_tiles_encoded_as_temporal_sequence`를 반드시 같이 해석합니다. VILA-family는 external CLI만으로는 pre-ViT hook을 주입하기 어렵기 때문에, `repro.vila_feature_probe`의 `pre_vit_sparse_probe`가 요구 hook과 위치 정렬 위험을 먼저 기록합니다. InternVL3는 `repro.internvl_dynamic_tile_probe`가 `num_patches_list`와 dynamic tile 정책을 정리합니다. LLaVA-OneVision은 patch-level보다 frame/tile-level pre-ViT candidate를 먼저 검토합니다.
 
 ### Probe command 예시
 
@@ -136,15 +138,17 @@ Qwen은 이미 `SparseSelectionPlan -> Qwen visual index -> chunked ViT sparse f
 | 그룹 | modes | 의미 |
 | --- | --- | --- |
 | Qwen comparison | `qwen2.5_full_vit`, `qwen2.5_chunked_vit`, `qwen2.5_chunked_vit_autogaze_sparse`, `qwen3_full_vit`, `qwen3_chunked_vit`, `qwen3_chunked_vit_autogaze_sparse` | 같은 비디오/질문에서 full ViT, chunked ViT, AutoGaze sparse ViT를 Qwen2.5/Qwen3 각각 비교 |
-| VILA-family | `nvila-video-off`, `nvila-video-autogaze-actual`, `longvila-off`, `longvila-autogaze-actual` | off는 external VILA CLI 경로, actual entry는 dense generation + AutoGaze selector metric 기록 |
-| Other MLLM | `llava-onevision-off`, `llava-onevision-autogaze-actual`, `internvl3-off`, `internvl3-autogaze-sidecar-generate` | LLaVA는 post-encoder prune generate 실험, InternVL3는 sidecar generate |
+| Qwen tile-aware | `qwen3_tile_packed_vit`, `qwen3_tile_packed_vit_autogaze_sparse` | NVILA-HD처럼 spatial tiles를 먼저 만들고, temporal chunk 안에서 tile-major 순서로 Qwen video sequence에 넣는 실험 모드. `--plugin-suite qwen-tile`로 실행 |
+| VILA-family | `nvila-video-off`, `nvila-video-autogaze-actual`, `longvila-off`, `longvila-autogaze-actual` | off는 external VILA CLI 경로, actual entry는 dense generation + AutoGaze sidecar. pre-ViT sparse는 in-process hook 필요 |
+| Other MLLM | `llava-onevision-off`, `llava-onevision-autogaze-actual`, `internvl3-off`, `internvl3-autogaze-sidecar-generate` | LLaVA는 post-encoder prune generate, InternVL3는 sidecar generate. materialized mode는 custom 진단용 |
 
 `probe_required`는 AutoGaze selector 요청을 무시하지 않았다는 뜻입니다. 아직 실제 pruning 적용 성공은 아니므로 report에서 `executed`와 분리해서 봐야 합니다.
 `executed_dense_with_autogaze_sidecar`는 모델 답변 생성은 수행했지만 visual pruning은 적용하지 않았다는 뜻입니다. `visual_pruning_applied=false`, `vision_encoder_latency_reduced=false`, `mllm_context_reduced=false`를 같이 확인하세요.
+`executed_materialized_sparse_video`는 AutoGaze 선택 결과로 새 비디오를 만들고 그 비디오를 downstream MLLM에 넣었다는 뜻입니다. 이 경우 `visual_pruning_applied=false`, `vision_encoder_latency_reduced=false`, `mllm_context_reduced=false`로 기록합니다. sparse patch index가 dense crop/frame으로 바뀌기 때문에 exact patch-level pre-ViT sparse 또는 compute gain으로 해석하지 않습니다.
 
 Plugin HLVid summary는 mode별 표와 별도로 pairwise 비교를 함께 생성합니다. 기본 비교 축은 `qwen*_full_vit -> qwen*_chunked_vit_autogaze_sparse`, `qwen*_chunked_vit -> qwen*_chunked_vit_autogaze_sparse`, `nvila-video-off -> nvila-video-autogaze-actual`, `longvila-off -> longvila-autogaze-actual`, `llava-onevision-off -> llava-onevision-autogaze-actual`입니다. 여기서 `latency_speedup`, `patch_or_visual_token_reduction_ratio`, `llm_visual_token_reduction_ratio`, `memory_reduction_ratio`, `accuracy_total_delta`를 봅니다.
 
-Markdown report를 만들면 `pairwise_latency_speedup.svg`와 `pairwise_token_reduction.svg`도 같이 저장됩니다. Qwen sparse는 ViT/LLM 감소 주장을 할 수 있는 후보이고, VILA-family sidecar는 selector 측정만 붙인 상태라 pairwise token gain이 있어도 모델 내부 compute gain으로 해석하지 않습니다.
+Markdown report를 만들면 `pairwise_latency_speedup.svg`와 `pairwise_token_reduction.svg`도 같이 저장됩니다. Qwen sparse는 ViT/LLM 감소 주장을 할 수 있는 후보입니다. Materialized sparse video와 sidecar fallback은 selector 측정 또는 진단용이므로 pairwise token gain이 있어도 모델 내부 compute gain으로 해석하지 않습니다.
 
 ## Plugin HLVid 실행 예
 

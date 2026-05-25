@@ -185,8 +185,9 @@ qwen3_chunked_vit_autogaze_sparse
 | suite | 기본 modes | 주의 |
 | --- | --- | --- |
 | `qwen` | Qwen2.5/Qwen3의 full, chunked, AutoGaze sparse | pre-ViT sparse 실제 적용 검증 대상 |
-| `vila` | `nvila-video-off`, `nvila-video-autogaze-actual`, `longvila-off`, `longvila-autogaze-actual` | 현재 actual entry는 dense VILA CLI + AutoGaze sidecar metric이며 pruning gain을 주장하지 않음 |
-| `llava` | `llava-onevision-off`, `llava-onevision-autogaze-actual` | post-encoder visual-token prune generate |
+| `qwen-tile` | `qwen3_tile_packed_vit`, `qwen3_tile_packed_vit_autogaze_sparse` | NVILA-HD처럼 spatial tile을 만들고 temporal chunk 안에서 tile-major 순서로 Qwen video sequence에 packing하는 zero-shot 실험. Qwen native-grid sparse와 분리 해석 |
+| `vila` | `nvila-video-off`, `nvila-video-autogaze-actual`, `longvila-off`, `longvila-autogaze-actual` | dense generation + AutoGaze sidecar. pre-ViT sparse는 VILA in-process hook 구현 후 검증 |
+| `llava` | `llava-onevision-off`, `llava-onevision-autogaze-actual` | post-encoder visual-token prune generate 비교. materialized video는 custom 진단 모드에서만 사용 |
 | `expand-smoke` | Qwen/VILA/LLaVA smoke-safe modes 전체 | CUDA smoke와 dependency 상태 점검용 |
 
 내부 runner를 직접 호출해야 할 때만 아래 형태를 사용합니다.
