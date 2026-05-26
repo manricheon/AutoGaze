@@ -953,12 +953,14 @@ def _write_trend_charts(rows: list[dict[str, Any]], assets: Path) -> dict[str, P
         title="Accuracy Vs Base Token Budget",
         rows=rows,
         token_field="base_token_budget",
+        scored_only=True,
     )
     charts["accuracy_vs_actual_tokens"] = _write_token_accuracy_scatter(
         assets / "accuracy_vs_actual_processed_tokens.svg",
         title="Accuracy Vs Actual Processed Tokens",
         rows=rows,
         token_field="actual_processed_tokens",
+        scored_only=True,
     )
     charts.update(_write_metric_scatter_suite(rows, assets))
     reduction_bars = [
@@ -993,10 +995,23 @@ def _write_trend_charts(rows: list[dict[str, Any]], assets: Path) -> dict[str, P
         bars=[ChartBar(status, [ChartSegment(status, count)]) for status, count in sorted(status_counts.items())],
         unit="runs",
     ).path
+    charts["runnability_vs_base_tokens"] = _write_status_scatter(
+        assets / "runnability_vs_base_tokens.svg",
+        title="Runnability Vs Base Tokens",
+        rows=rows,
+        x_field="base_token_budget",
+    )
     return charts
 
 
-def _write_token_accuracy_scatter(path: Path, *, title: str, rows: list[dict[str, Any]], token_field: str) -> Path:
+def _write_token_accuracy_scatter(
+    path: Path,
+    *,
+    title: str,
+    rows: list[dict[str, Any]],
+    token_field: str,
+    scored_only: bool,
+) -> Path:
     return _write_metric_scatter(
         path,
         title=title,
@@ -1004,7 +1019,10 @@ def _write_token_accuracy_scatter(path: Path, *, title: str, rows: list[dict[str
         x_field=token_field,
         y_field="accuracy",
         y_label="Accuracy",
-        note="x-axis uses log scale. Accuracy defaults to 0 when a run has no score.",
+        note="Scored runnable rows only. x-axis uses log scale; OOM/unscored runs are shown in runnability charts.",
+        scored_only=scored_only,
+        runnable_only=True,
+        require_resolution=True,
     )
 
 
@@ -1077,6 +1095,9 @@ def _write_metric_scatter_suite(rows: list[dict[str, Any]], assets: Path) -> dic
             y_field=y_field,
             y_label=y_label,
             note="Color shows selector mode, shape shows input resolution, marker size shows frame count.",
+            scored_only=False,
+            runnable_only=True,
+            require_resolution=True,
         )
 
     for family in ("single", "autogaze", "keep_all"):
@@ -1093,6 +1114,9 @@ def _write_metric_scatter_suite(rows: list[dict[str, Any]], assets: Path) -> dic
             y_field="accuracy",
             y_label="Accuracy",
             note="Mode-filtered view. Shape shows resolution and marker size shows frame count.",
+            scored_only=True,
+            runnable_only=True,
+            require_resolution=True,
         )
         charts[f"{family}_accuracy_vs_actual_tokens"] = _write_metric_scatter(
             assets / "by_mode" / f"{family_slug}_accuracy_vs_actual_processed_tokens.svg",
@@ -1102,6 +1126,9 @@ def _write_metric_scatter_suite(rows: list[dict[str, Any]], assets: Path) -> dic
             y_field="accuracy",
             y_label="Accuracy",
             note="Mode-filtered view. Shape shows resolution and marker size shows frame count.",
+            scored_only=True,
+            runnable_only=True,
+            require_resolution=True,
         )
         charts[f"{family}_latency_vs_actual_tokens"] = _write_metric_scatter(
             assets / "by_mode" / f"{family_slug}_latency_vs_actual_processed_tokens.svg",
@@ -1111,6 +1138,9 @@ def _write_metric_scatter_suite(rows: list[dict[str, Any]], assets: Path) -> dic
             y_field="total_ms",
             y_label="Total latency (ms)",
             note="Mode-filtered view. Shape shows resolution and marker size shows frame count.",
+            scored_only=False,
+            runnable_only=True,
+            require_resolution=True,
         )
     return charts
 
@@ -1124,12 +1154,16 @@ def _write_metric_scatter(
     y_field: str,
     y_label: str,
     note: str,
+    scored_only: bool,
+    runnable_only: bool,
+    require_resolution: bool,
 ) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     points = [
         (row, x_value, y_value)
         for row in rows
-        if (x_value := _scatter_value(row, x_field)) is not None
+        if _include_metric_point(row, y_field=y_field, scored_only=scored_only, runnable_only=runnable_only, require_resolution=require_resolution)
+        and (x_value := _scatter_value(row, x_field)) is not None
         and x_value > 0
         and (y_value := _scatter_value(row, y_field)) is not None
         and y_value >= 0
@@ -1149,7 +1183,7 @@ def _write_metric_scatter(
                     f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="180" viewBox="0 0 {width} 180">',
                     '<rect width="100%" height="100%" fill="#ffffff"/>',
                     f'<text x="24" y="48" font-size="20" font-family="Arial, sans-serif" fill="#111827">{escape(title)}</text>',
-                    '<text x="24" y="88" font-size="14" font-family="Arial, sans-serif" fill="#6b7280">No data available for this metric pair.</text>',
+                    '<text x="24" y="88" font-size="14" font-family="Arial, sans-serif" fill="#6b7280">No chartable rows after filtering OOM/unscored/unknown metadata.</text>',
                     "</svg>",
                 ]
             ),
@@ -1246,12 +1280,188 @@ def _write_metric_scatter(
     return path
 
 
+def _write_status_scatter(path: Path, *, title: str, rows: list[dict[str, Any]], x_field: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    points = [
+        (row, x_value, _status_y(row))
+        for row in rows
+        if (x_value := _scatter_value(row, x_field)) is not None and x_value > 0
+    ]
+    width = 980
+    height = 360
+    margin_left = 98
+    margin_right = 190
+    margin_top = 56
+    margin_bottom = 76
+    plot_width = width - margin_left - margin_right
+    plot_height = height - margin_top - margin_bottom
+    if not points:
+        path.write_text(
+            "\n".join(
+                [
+                    f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="180" viewBox="0 0 {width} 180">',
+                    '<rect width="100%" height="100%" fill="#ffffff"/>',
+                    f'<text x="24" y="48" font-size="20" font-family="Arial, sans-serif" fill="#111827">{escape(title)}</text>',
+                    '<text x="24" y="88" font-size="14" font-family="Arial, sans-serif" fill="#6b7280">No runnability data available.</text>',
+                    "</svg>",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    x_values = [x_value for _, x_value, _ in points]
+    min_x = min(x_values)
+    max_x = max(x_values)
+    log_min = math.log10(min_x)
+    log_max = math.log10(max_x)
+    if math.isclose(log_min, log_max):
+        log_min -= 0.5
+        log_max += 0.5
+
+    def x_pos(value: float) -> float:
+        return margin_left + ((math.log10(value) - log_min) / (log_max - log_min)) * plot_width
+
+    def y_pos(value: float) -> float:
+        return margin_top + ((2.0 - value) / 2.0) * plot_height
+
+    lines = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<rect width="100%" height="100%" fill="#ffffff"/>',
+        f'<text x="{margin_left}" y="30" font-size="21" font-weight="700" font-family="Arial, sans-serif" fill="#111827">{escape(title)}</text>',
+        f'<text x="{margin_left}" y="50" font-size="12" font-family="Arial, sans-serif" fill="#6b7280">All rows are shown here, including OOM/failed/unscored runs.</text>',
+        f'<line x1="{margin_left}" y1="{margin_top + plot_height}" x2="{margin_left + plot_width}" y2="{margin_top + plot_height}" stroke="#111827" stroke-width="1"/>',
+        f'<line x1="{margin_left}" y1="{margin_top}" x2="{margin_left}" y2="{margin_top + plot_height}" stroke="#111827" stroke-width="1"/>',
+    ]
+    for label, value in (("failed/OOM", 0.0), ("unscored", 1.0), ("scored", 2.0)):
+        y = y_pos(value)
+        lines.extend(
+            [
+                f'<line x1="{margin_left - 5}" y1="{y:.2f}" x2="{margin_left + plot_width}" y2="{y:.2f}" stroke="#e5e7eb" stroke-width="1"/>',
+                f'<text x="{margin_left - 12}" y="{y + 4:.2f}" text-anchor="end" font-size="11" font-family="Arial, sans-serif" fill="#4b5563">{escape(label)}</text>',
+            ]
+        )
+    for tick in _log_token_ticks(min_x, max_x):
+        x = x_pos(tick)
+        lines.extend(
+            [
+                f'<line x1="{x:.2f}" y1="{margin_top}" x2="{x:.2f}" y2="{margin_top + plot_height + 5}" stroke="#e5e7eb" stroke-width="1"/>',
+                f'<text x="{x:.2f}" y="{margin_top + plot_height + 24}" text-anchor="middle" font-size="11" font-family="Arial, sans-serif" fill="#4b5563">{escape(_format_axis_tick(tick, x_field))}</text>',
+            ]
+        )
+    lines.extend(
+        [
+            f'<text x="{margin_left + plot_width / 2:.2f}" y="{height - 24}" text-anchor="middle" font-size="13" font-family="Arial, sans-serif" fill="#111827">{escape(_axis_label(x_field))}</text>',
+            f'<text x="24" y="{margin_top + plot_height / 2:.2f}" transform="rotate(-90 24 {margin_top + plot_height / 2:.2f})" text-anchor="middle" font-size="13" font-family="Arial, sans-serif" fill="#111827">Run status</text>',
+        ]
+    )
+    for index, (row, x_value, status_value) in enumerate(points):
+        color = _status_color(row)
+        shape = "triangle" if _is_failure_row(row) else ("square" if not _is_scored_row(row) else "circle")
+        x = x_pos(x_value)
+        y = y_pos(status_value)
+        tooltip = "\n".join(
+            [
+                _row_label(row, index),
+                f"mode={row.get('mode')}",
+                f"status={row.get('status')}",
+                f"failure_kind={row.get('failure_kind')}",
+                f"oom_stage={row.get('oom_stage')}",
+                f"{x_field}={x_value}",
+                f"accuracy={_accuracy_value(row)}",
+            ]
+        )
+        lines.append(f'<g opacity="0.92"><title>{escape(tooltip)}</title>{_svg_marker(shape, x, y, _marker_size(row), color)}</g>')
+    legend_x = margin_left + plot_width + 30
+    legend_y = margin_top + 18
+    for offset, (label, color, shape) in enumerate(
+        (
+            ("scored", "#16a34a", "circle"),
+            ("unscored", "#f59e0b", "square"),
+            ("OOM/failed", "#dc2626", "triangle"),
+        )
+    ):
+        y = legend_y + offset * 28
+        lines.append(_svg_marker(shape, legend_x + 8, y - 4, 7, color))
+        lines.append(f'<text x="{legend_x + 26}" y="{y}" font-size="12" font-family="Arial, sans-serif" fill="#374151">{escape(label)}</text>')
+    lines.append("</svg>")
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
 def _scatter_value(row: dict[str, Any], field: str) -> float | None:
     if field == "accuracy":
         return _accuracy_value(row)
     if field == "llm_generation_ms":
         return numeric_or_none(first_present(row.get("llm_generation_ms"), row.get("generate_ms"), row.get("llm_forward_ms")))
     return numeric_or_none(row.get(field))
+
+
+def _include_metric_point(
+    row: dict[str, Any],
+    *,
+    y_field: str,
+    scored_only: bool,
+    runnable_only: bool,
+    require_resolution: bool,
+) -> bool:
+    if runnable_only and _is_failure_row(row):
+        return False
+    if scored_only and not _is_scored_row(row):
+        return False
+    if require_resolution and not _has_known_resolution(row):
+        return False
+    if y_field != "accuracy" and not _has_metric_value(row, y_field):
+        return False
+    return True
+
+
+def _is_failure_row(row: dict[str, Any]) -> bool:
+    status = str(row.get("status") or "").lower()
+    failure_kind = str(row.get("failure_kind") or "").lower()
+    return bool(
+        row.get("oom")
+        or status == "oom"
+        or status.startswith("failed")
+        or failure_kind in {"oom", "failed", "error"}
+        or row.get("oom_stage")
+    )
+
+
+def _is_scored_row(row: dict[str, Any]) -> bool:
+    if _is_failure_row(row):
+        return False
+    if numeric_or_none(row.get("accuracy_scored")) is not None:
+        return True
+    if numeric_or_none(row.get("accuracy_total")) is not None:
+        failed = numeric_or_none(row.get("failed"))
+        parse_failed = numeric_or_none(row.get("parse_failed"))
+        return failed is not None or parse_failed is not None
+    return False
+
+
+def _has_known_resolution(row: dict[str, Any]) -> bool:
+    return _resolution_pixels(row) != float("inf")
+
+
+def _has_metric_value(row: dict[str, Any], field: str) -> bool:
+    return _scatter_value(row, field) is not None
+
+
+def _status_y(row: dict[str, Any]) -> float:
+    if _is_failure_row(row):
+        return 0.0
+    if _is_scored_row(row):
+        return 2.0
+    return 1.0
+
+
+def _status_color(row: dict[str, Any]) -> str:
+    if _is_failure_row(row):
+        return "#dc2626"
+    if _is_scored_row(row):
+        return "#16a34a"
+    return "#f59e0b"
 
 
 def _scatter_y_max(y_field: str, y_values: list[float]) -> float:
@@ -1473,6 +1683,7 @@ def _render_markdown(rows: list[dict[str, Any]], charts: dict[str, Path], output
                 ("Token Reduction By Config", "token_reduction"),
                 ("Memory Peak By Config", "memory"),
                 ("Status Counts", "status"),
+                ("Runnability Vs Base Tokens", "runnability_vs_base_tokens"),
             ),
         ),
         (
@@ -1510,6 +1721,13 @@ def _render_markdown(rows: list[dict[str, Any]], charts: dict[str, Path], output
         ),
     ]
     lines.extend(["## Charts", ""])
+    lines.extend(
+        [
+            "> Accuracy/latency scatter charts exclude OOM, failed, unscored, and unknown-resolution rows so that missing results are not plotted as real zero-accuracy model behavior.",
+            "> Those excluded runs remain in the CSV/JSON and are summarized in the runnability/status charts.",
+            "",
+        ]
+    )
     for section_title, entries in chart_sections:
         visible_entries = [(title, key) for title, key in entries if key in charts]
         if not visible_entries:
