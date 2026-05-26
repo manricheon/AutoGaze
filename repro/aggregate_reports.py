@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import escape
 
 from repro.common import write_csv, write_json
 from repro.markdown_report import (
@@ -671,6 +673,7 @@ def aggregate_report_roots(input_roots: list[str | Path], output_dir: str | Path
     for row in rows:
         compact = {field: row.get(field) for field in ROW_FIELDS}
         _zero_missing_accuracy(compact)
+        _apply_derived_token_budgets(compact)
         output_rows.append(compact)
     rows = sort_rows(output_rows, sort=sort)
     csv_path = output / "aggregate_rows.csv"
@@ -697,6 +700,10 @@ def sort_rows(rows: list[dict[str, Any]], *, sort: str = "comparison") -> list[d
         return sorted(rows, key=lambda row: (_status_rank(row), number(row, "peak_memory_bytes"), _comparison_key(row)))
     if sort == "accuracy":
         return sorted(rows, key=lambda row: (_status_rank(row), -number(row, "accuracy_scored", 0.0), _comparison_key(row)))
+    if sort == "base-tokens":
+        return sorted(rows, key=lambda row: (_status_rank(row), number(row, "base_token_budget"), _selector_rank(row), _comparison_key(row)))
+    if sort == "actual-tokens":
+        return sorted(rows, key=lambda row: (_status_rank(row), number(row, "actual_processed_tokens"), _selector_rank(row), _comparison_key(row)))
     if sort == "frames":
         return sorted(rows, key=lambda row: (_status_rank(row), number(row, "frames"), _selector_rank(row), _comparison_key(row)))
     if sort == "resolution":
@@ -724,10 +731,10 @@ def _selector_rank(row: dict[str, Any]) -> int:
     gazing_mode = str(row.get("gazing_mode") or "").lower()
     if mode in {"keep-all", "keepall", "off", "baseline"} or "keep-all" in mode or gazing_mode == "keep-all":
         return 0
-    if mode in {"single-scale-dense", "keep-all-single", "single-scale"} or "single-scale" in mode:
-        return 1
-    if mode == "autogaze" or "autogaze" in mode:
+    if mode == "autogaze" or "autogaze" in mode or "sparse" in mode or "gazed" in mode:
         return 2
+    if _is_dense_or_off_baseline(mode):
+        return 1
     if "probe" in mode or "sidecar" in mode:
         return 4
     return 3
@@ -750,6 +757,76 @@ def _config_group_key(row: dict[str, Any]) -> tuple[Any, ...]:
 
 def _comparison_key(row: dict[str, Any]) -> tuple[str, str]:
     return (str(row.get("mode") or ""), str(row.get("source_path") or ""))
+
+
+def _apply_derived_token_budgets(row: dict[str, Any]) -> None:
+    row["base_token_budget"] = _base_token_budget(row)
+    row["actual_processed_tokens"] = _actual_processed_tokens(row)
+
+
+def _base_token_budget(row: dict[str, Any]) -> float | None:
+    return numeric_or_none(
+        first_present(
+            row.get("full_or_raw_patch_tokens"),
+            row.get("single_scale_dense_patch_tokens"),
+            row.get("llm_visual_tokens"),
+            row.get("autogaze_selected_patch_tokens"),
+        )
+    )
+
+
+def _actual_processed_tokens(row: dict[str, Any]) -> float | None:
+    mode_family = _selector_family(row)
+    if mode_family == "autogaze":
+        return numeric_or_none(
+            first_present(
+                row.get("autogaze_selected_patch_tokens"),
+                row.get("llm_visual_tokens"),
+                row.get("full_or_raw_patch_tokens"),
+            )
+        )
+    if mode_family == "single":
+        return numeric_or_none(
+            first_present(
+                row.get("single_scale_dense_patch_tokens"),
+                row.get("full_or_raw_patch_tokens"),
+                row.get("llm_visual_tokens"),
+            )
+        )
+    return numeric_or_none(
+        first_present(
+            row.get("full_or_raw_patch_tokens"),
+            row.get("single_scale_dense_patch_tokens"),
+            row.get("llm_visual_tokens"),
+            row.get("autogaze_selected_patch_tokens"),
+        )
+    )
+
+
+def _selector_family(row: dict[str, Any]) -> str:
+    mode = str(row.get("mode") or "").lower().replace("_", "-")
+    gazing_mode = str(row.get("gazing_mode") or "").lower().replace("_", "-")
+    text = f"{mode} {gazing_mode}"
+    if "autogaze" in text or "gazed" in text or "sparse" in text:
+        return "autogaze"
+    if _is_dense_or_off_baseline(mode):
+        return "single"
+    if "keep-all" in text or "keepall" in text or mode in {"off", "baseline"}:
+        return "keep_all"
+    return "other"
+
+
+def _is_dense_or_off_baseline(mode: str) -> bool:
+    return (
+        mode in {"single-scale-dense", "keep-all-single", "single-scale", "off", "baseline"}
+        or "single-scale" in mode
+        or "dense" in mode
+        or mode.endswith("-off")
+        or mode.endswith("-full-vit")
+        or mode.endswith("-chunked-vit")
+        or "full-vit" in mode
+        or "chunked-vit" in mode
+    )
 
 
 def _resolution_pixels(row: dict[str, Any]) -> float:
@@ -871,6 +948,18 @@ def _write_trend_charts(rows: list[dict[str, Any]], assets: Path) -> dict[str, P
             bars=[ChartBar(_row_label(row, index), [ChartSegment("accuracy", _accuracy_value(row))]) for index, row in enumerate(resolution_rows)],
             unit="acc",
         ).path
+    charts["accuracy_vs_base_tokens"] = _write_token_accuracy_scatter(
+        assets / "accuracy_vs_base_tokens.svg",
+        title="Accuracy Vs Base Token Budget",
+        rows=rows,
+        token_field="base_token_budget",
+    )
+    charts["accuracy_vs_actual_tokens"] = _write_token_accuracy_scatter(
+        assets / "accuracy_vs_actual_processed_tokens.svg",
+        title="Accuracy Vs Actual Processed Tokens",
+        rows=rows,
+        token_field="actual_processed_tokens",
+    )
     reduction_bars = [
         ChartBar(label, [ChartSegment("token_reduction_ratio", value)])
         for label, row in zip(labels, rows)
@@ -904,6 +993,212 @@ def _write_trend_charts(rows: list[dict[str, Any]], assets: Path) -> dict[str, P
         unit="runs",
     ).path
     return charts
+
+
+def _write_token_accuracy_scatter(path: Path, *, title: str, rows: list[dict[str, Any]], token_field: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    points = [
+        (row, token, _accuracy_value(row))
+        for row in rows
+        if (token := numeric_or_none(row.get(token_field))) is not None and token > 0
+    ]
+    width = 980
+    height = 560
+    margin_left = 88
+    margin_right = 190
+    margin_top = 56
+    margin_bottom = 82
+    plot_width = width - margin_left - margin_right
+    plot_height = height - margin_top - margin_bottom
+    if not points:
+        path.write_text(
+            "\n".join(
+                [
+                    f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="180" viewBox="0 0 {width} 180">',
+                    '<rect width="100%" height="100%" fill="#ffffff"/>',
+                    f'<text x="24" y="48" font-size="20" font-family="Arial, sans-serif" fill="#111827">{escape(title)}</text>',
+                    '<text x="24" y="88" font-size="14" font-family="Arial, sans-serif" fill="#6b7280">No token/accuracy data available.</text>',
+                    "</svg>",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    tokens = [token for _, token, _ in points]
+    accuracies = [accuracy for _, _, accuracy in points]
+    min_token = min(tokens)
+    max_token = max(tokens)
+    log_min = math.log10(min_token)
+    log_max = math.log10(max_token)
+    if math.isclose(log_min, log_max):
+        log_min -= 0.5
+        log_max += 0.5
+    y_min = 0.0
+    y_max = max(1.0, max(accuracies) * 1.05)
+
+    def x_pos(token: float) -> float:
+        return margin_left + ((math.log10(token) - log_min) / (log_max - log_min)) * plot_width
+
+    def y_pos(accuracy: float) -> float:
+        return margin_top + ((y_max - accuracy) / (y_max - y_min)) * plot_height
+
+    lines = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<rect width="100%" height="100%" fill="#ffffff"/>',
+        f'<text x="{margin_left}" y="30" font-size="21" font-weight="700" font-family="Arial, sans-serif" fill="#111827">{escape(title)}</text>',
+        f'<text x="{margin_left}" y="50" font-size="12" font-family="Arial, sans-serif" fill="#6b7280">x-axis uses log scale. Accuracy defaults to 0 when a run has no score.</text>',
+        f'<line x1="{margin_left}" y1="{margin_top + plot_height}" x2="{margin_left + plot_width}" y2="{margin_top + plot_height}" stroke="#111827" stroke-width="1"/>',
+        f'<line x1="{margin_left}" y1="{margin_top}" x2="{margin_left}" y2="{margin_top + plot_height}" stroke="#111827" stroke-width="1"/>',
+    ]
+
+    for tick in _accuracy_ticks(y_max):
+        y = y_pos(tick)
+        lines.extend(
+            [
+                f'<line x1="{margin_left - 5}" y1="{y:.2f}" x2="{margin_left + plot_width}" y2="{y:.2f}" stroke="#e5e7eb" stroke-width="1"/>',
+                f'<text x="{margin_left - 12}" y="{y + 4:.2f}" text-anchor="end" font-size="11" font-family="Arial, sans-serif" fill="#4b5563">{tick:.2f}</text>',
+            ]
+        )
+    for tick in _log_token_ticks(min_token, max_token):
+        x = x_pos(tick)
+        lines.extend(
+            [
+                f'<line x1="{x:.2f}" y1="{margin_top}" x2="{x:.2f}" y2="{margin_top + plot_height + 5}" stroke="#e5e7eb" stroke-width="1"/>',
+                f'<text x="{x:.2f}" y="{margin_top + plot_height + 24}" text-anchor="middle" font-size="11" font-family="Arial, sans-serif" fill="#4b5563">{escape(_format_token_tick(tick))}</text>',
+            ]
+        )
+    lines.extend(
+        [
+            f'<text x="{margin_left + plot_width / 2:.2f}" y="{height - 24}" text-anchor="middle" font-size="13" font-family="Arial, sans-serif" fill="#111827">{escape(_token_axis_label(token_field))}</text>',
+            f'<text x="22" y="{margin_top + plot_height / 2:.2f}" transform="rotate(-90 22 {margin_top + plot_height / 2:.2f})" text-anchor="middle" font-size="13" font-family="Arial, sans-serif" fill="#111827">Accuracy</text>',
+        ]
+    )
+
+    for index, (row, token, accuracy) in enumerate(points):
+        family = _selector_family(row)
+        color = _selector_color(family)
+        x = x_pos(token)
+        y = y_pos(accuracy)
+        size = _marker_size(row)
+        tooltip = _point_tooltip(row, index, token_field, token, accuracy)
+        lines.append(f'<g opacity="0.92"><title>{escape(tooltip)}</title>{_svg_marker(family, x, y, size, color)}</g>')
+
+    legend_x = margin_left + plot_width + 28
+    legend_y = margin_top + 16
+    lines.append(f'<text x="{legend_x}" y="{legend_y}" font-size="13" font-weight="700" font-family="Arial, sans-serif" fill="#111827">Mode</text>')
+    for offset, family in enumerate(("single", "autogaze", "keep_all", "other"), start=1):
+        y = legend_y + offset * 26
+        lines.append(_svg_marker(family, legend_x + 8, y - 4, 7, _selector_color(family)))
+        lines.append(f'<text x="{legend_x + 26}" y="{y}" font-size="12" font-family="Arial, sans-serif" fill="#374151">{escape(_selector_label(family))}</text>')
+    lines.extend(
+        [
+            f'<text x="{legend_x}" y="{legend_y + 142}" font-size="12" font-weight="700" font-family="Arial, sans-serif" fill="#111827">Read</text>',
+            f'<text x="{legend_x}" y="{legend_y + 162}" font-size="11" font-family="Arial, sans-serif" fill="#4b5563">Base-token chart compares</text>',
+            f'<text x="{legend_x}" y="{legend_y + 178}" font-size="11" font-family="Arial, sans-serif" fill="#4b5563">accuracy at the dense budget.</text>',
+            f'<text x="{legend_x}" y="{legend_y + 198}" font-size="11" font-family="Arial, sans-serif" fill="#4b5563">Actual-token chart shifts</text>',
+            f'<text x="{legend_x}" y="{legend_y + 214}" font-size="11" font-family="Arial, sans-serif" fill="#4b5563">AutoGaze left after pruning.</text>',
+        ]
+    )
+    lines.append("</svg>")
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def _accuracy_ticks(y_max: float) -> list[float]:
+    if y_max <= 1.0:
+        return [0.0, 0.25, 0.5, 0.75, 1.0]
+    step = y_max / 4
+    return [round(step * index, 2) for index in range(5)]
+
+
+def _log_token_ticks(min_token: float, max_token: float) -> list[float]:
+    if math.isclose(min_token, max_token):
+        return [min_token]
+    log_min = math.log10(min_token)
+    log_max = math.log10(max_token)
+    return [10 ** (log_min + (log_max - log_min) * index / 4) for index in range(5)]
+
+
+def _format_token_tick(value: float) -> str:
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M"
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}K"
+    return f"{value:.0f}"
+
+
+def _token_axis_label(token_field: str) -> str:
+    if token_field == "actual_processed_tokens":
+        return "Actual processed visual tokens / patches"
+    return "Base visual token / patch budget before selector"
+
+
+def _selector_color(family: str) -> str:
+    return {
+        "single": "#2563eb",
+        "autogaze": "#f97316",
+        "keep_all": "#6b7280",
+        "other": "#7c3aed",
+    }.get(family, "#7c3aed")
+
+
+def _selector_label(family: str) -> str:
+    return {
+        "single": "single-scale/off",
+        "autogaze": "AutoGaze/sparse",
+        "keep_all": "keep-all",
+        "other": "other",
+    }.get(family, family)
+
+
+def _marker_size(row: dict[str, Any]) -> float:
+    frames = numeric_or_none(row.get("frames"))
+    if frames is None or frames <= 0:
+        return 6.5
+    return min(12.0, max(5.5, 4.5 + math.log2(frames + 1) * 0.65))
+
+
+def _svg_marker(family: str, x: float, y: float, size: float, color: str) -> str:
+    stroke = "#111827"
+    if family == "autogaze":
+        points = [
+            (x, y - size),
+            (x + size, y),
+            (x, y + size),
+            (x - size, y),
+        ]
+        point_text = " ".join(f"{px:.2f},{py:.2f}" for px, py in points)
+        return f'<polygon points="{point_text}" fill="{color}" stroke="{stroke}" stroke-width="0.7"/>'
+    if family == "keep_all":
+        return f'<rect x="{x - size:.2f}" y="{y - size:.2f}" width="{size * 2:.2f}" height="{size * 2:.2f}" fill="{color}" stroke="{stroke}" stroke-width="0.7"/>'
+    if family == "other":
+        points = [
+            (x, y - size),
+            (x + size * 0.92, y + size * 0.72),
+            (x - size * 0.92, y + size * 0.72),
+        ]
+        point_text = " ".join(f"{px:.2f},{py:.2f}" for px, py in points)
+        return f'<polygon points="{point_text}" fill="{color}" stroke="{stroke}" stroke-width="0.7"/>'
+    return f'<circle cx="{x:.2f}" cy="{y:.2f}" r="{size:.2f}" fill="{color}" stroke="{stroke}" stroke-width="0.7"/>'
+
+
+def _point_tooltip(row: dict[str, Any], index: int, token_field: str, token: float, accuracy: float) -> str:
+    lines = [
+        _row_label(row, index),
+        f"mode={row.get('mode')}",
+        f"status={row.get('status')}",
+        f"frames={row.get('frames')}",
+        f"thumbnail_frames={row.get('thumbnail_frames')}",
+        f"input_resolution={row.get('processor_input_resolution')}",
+        f"{token_field}={token}",
+    ]
+    if token_field != "base_token_budget":
+        lines.append(f"base_token_budget={row.get('base_token_budget')}")
+    if token_field != "actual_processed_tokens":
+        lines.append(f"actual_processed_tokens={row.get('actual_processed_tokens')}")
+    lines.append(f"accuracy={accuracy}")
+    return "\n".join(lines)
 
 
 def _row_label(row: dict[str, Any], index: int) -> str:
@@ -965,6 +1260,8 @@ def _render_markdown(rows: list[dict[str, Any]], charts: dict[str, Path], output
         ("Accuracy By Config", "accuracy"),
         ("Accuracy Vs Frames", "accuracy_vs_frames"),
         ("Accuracy Vs Input Resolution", "accuracy_vs_input_resolution"),
+        ("Accuracy Vs Base Tokens", "accuracy_vs_base_tokens"),
+        ("Accuracy Vs Actual Processed Tokens", "accuracy_vs_actual_tokens"),
         ("Token Reduction By Config", "token_reduction"),
         ("Memory Peak By Config", "memory"),
         ("Status Counts", "status"),
@@ -996,8 +1293,12 @@ def _render_markdown(rows: list[dict[str, Any]], charts: dict[str, Path], output
         ("llm_generation_ms", "LLM generation ms"),
         ("llm_forward_ms", "LLM forward ms"),
         ("generation_rest_ms", "Generate rest ms"),
+        ("single_scale_dense_patch_tokens", "Single patch"),
         ("full_or_raw_patch_tokens", "Full patch"),
         ("autogaze_selected_patch_tokens", "Selected patch"),
+        ("llm_visual_tokens", "LLM visual"),
+        ("base_token_budget", "Base token budget"),
+        ("actual_processed_tokens", "Actual processed"),
         ("token_reduction_ratio", "Patch x"),
         ("peak_memory_bytes", "Peak bytes"),
         ("accuracy_total", "Accuracy total"),
@@ -1021,7 +1322,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument(
         "--sort",
-        choices=("comparison", "config", "frames", "resolution", "latency", "token-reduction", "memory", "accuracy", "status"),
+        choices=(
+            "comparison",
+            "config",
+            "frames",
+            "resolution",
+            "base-tokens",
+            "actual-tokens",
+            "latency",
+            "token-reduction",
+            "memory",
+            "accuracy",
+            "status",
+        ),
         default="comparison",
     )
     return parser
