@@ -1200,8 +1200,7 @@ def _write_metric_scatter(
     if math.isclose(log_min, log_max):
         log_min -= 0.5
         log_max += 0.5
-    y_min = 0.0
-    y_max = _scatter_y_max(y_field, y_values)
+    y_min, y_max = _scatter_y_range(y_field, y_values)
 
     def x_pos(value: float) -> float:
         return margin_left + ((math.log10(value) - log_min) / (log_max - log_min)) * plot_width
@@ -1218,7 +1217,7 @@ def _write_metric_scatter(
         f'<line x1="{margin_left}" y1="{margin_top}" x2="{margin_left}" y2="{margin_top + plot_height}" stroke="#111827" stroke-width="1"/>',
     ]
 
-    for tick in _y_ticks(y_field, y_max):
+    for tick in _y_ticks(y_field, y_min, y_max):
         y = y_pos(tick)
         lines.extend(
             [
@@ -1261,18 +1260,24 @@ def _write_metric_scatter(
 
     shape_y = legend_y + 140
     lines.append(f'<text x="{legend_x}" y="{shape_y}" font-size="13" font-weight="700" font-family="Arial, sans-serif" fill="#111827">Resolution</text>')
-    for offset, shape in enumerate(("circle", "diamond", "square", "triangle"), start=1):
+    used_shapes = {
+        _resolution_shape(row)
+        for row, _, _ in points
+    }
+    shape_order = [shape for shape in ("circle", "diamond", "square", "triangle", "cross") if shape in used_shapes]
+    for offset, shape in enumerate(shape_order, start=1):
         y = shape_y + offset * 24
         lines.append(_svg_marker(shape, legend_x + 8, y - 4, 7, "#9ca3af"))
         lines.append(f'<text x="{legend_x + 26}" y="{y}" font-size="12" font-family="Arial, sans-serif" fill="#374151">{escape(_shape_label(shape))}</text>')
 
+    read_y = shape_y + 30 + len(shape_order) * 24
     lines.extend(
         [
-            f'<text x="{legend_x}" y="{shape_y + 126}" font-size="12" font-weight="700" font-family="Arial, sans-serif" fill="#111827">Read</text>',
-            f'<text x="{legend_x}" y="{shape_y + 146}" font-size="11" font-family="Arial, sans-serif" fill="#4b5563">Log x-axis separates token</text>',
-            f'<text x="{legend_x}" y="{shape_y + 162}" font-size="11" font-family="Arial, sans-serif" fill="#4b5563">budgets across scale.</text>',
-            f'<text x="{legend_x}" y="{shape_y + 182}" font-size="11" font-family="Arial, sans-serif" fill="#4b5563">Marker size grows with</text>',
-            f'<text x="{legend_x}" y="{shape_y + 198}" font-size="11" font-family="Arial, sans-serif" fill="#4b5563">sampled frame count.</text>',
+            f'<text x="{legend_x}" y="{read_y}" font-size="12" font-weight="700" font-family="Arial, sans-serif" fill="#111827">Read</text>',
+            f'<text x="{legend_x}" y="{read_y + 20}" font-size="11" font-family="Arial, sans-serif" fill="#4b5563">Log x-axis separates token</text>',
+            f'<text x="{legend_x}" y="{read_y + 36}" font-size="11" font-family="Arial, sans-serif" fill="#4b5563">budgets across scale.</text>',
+            f'<text x="{legend_x}" y="{read_y + 56}" font-size="11" font-family="Arial, sans-serif" fill="#4b5563">Marker size grows with</text>',
+            f'<text x="{legend_x}" y="{read_y + 72}" font-size="11" font-family="Arial, sans-serif" fill="#4b5563">sampled frame count.</text>',
         ]
     )
     lines.append("</svg>")
@@ -1464,15 +1469,24 @@ def _status_color(row: dict[str, Any]) -> str:
     return "#f59e0b"
 
 
-def _scatter_y_max(y_field: str, y_values: list[float]) -> float:
+def _scatter_y_range(y_field: str, y_values: list[float]) -> tuple[float, float]:
     if y_field == "accuracy":
-        return max(1.0, max(y_values) * 1.05)
-    return max(1.0, max(y_values) * 1.08)
+        data_min = min(y_values)
+        data_max = max(y_values)
+        lower = min(0.25, data_min - 0.03)
+        upper = max(0.66, data_max + 0.03)
+        return max(0.0, lower), min(1.0, upper)
+    return 0.0, max(1.0, max(y_values) * 1.08)
 
 
-def _y_ticks(y_field: str, y_max: float) -> list[float]:
-    if y_field == "accuracy" and y_max <= 1.0:
-        return [0.0, 0.25, 0.5, 0.75, 1.0]
+def _y_ticks(y_field: str, y_min: float, y_max: float) -> list[float]:
+    if y_field == "accuracy":
+        if y_min <= 0.25 and y_max >= 0.66:
+            base_ticks = [0.25, 0.35, 0.45, 0.55, 0.66]
+        else:
+            step = (y_max - y_min) / 4
+            base_ticks = [round(y_min + step * index, 2) for index in range(5)]
+        return [tick for tick in base_ticks if y_min <= tick <= y_max]
     step = y_max / 4
     return [round(step * index, 2) for index in range(5)]
 
@@ -1549,7 +1563,7 @@ def _marker_size(row: dict[str, Any]) -> float:
 def _resolution_shape(row: dict[str, Any]) -> str:
     pixels = _resolution_pixels(row)
     if pixels == float("inf"):
-        return "triangle"
+        return "cross"
     if pixels <= 448 * 448:
         return "circle"
     if pixels <= 720 * 1280:
@@ -1564,7 +1578,8 @@ def _shape_label(shape: str) -> str:
         "circle": "<=448p-ish",
         "diamond": "<=720p-ish",
         "square": "<=1080p-ish",
-        "triangle": ">1080p/unknown",
+        "triangle": ">1080p",
+        "cross": "unknown",
     }.get(shape, shape)
 
 
@@ -1589,6 +1604,13 @@ def _svg_marker(shape: str, x: float, y: float, size: float, color: str) -> str:
         ]
         point_text = " ".join(f"{px:.2f},{py:.2f}" for px, py in points)
         return f'<polygon points="{point_text}" fill="{color}" stroke="{stroke}" stroke-width="0.7"/>'
+    if shape == "cross":
+        return (
+            f'<line x1="{x - size:.2f}" y1="{y - size:.2f}" x2="{x + size:.2f}" y2="{y + size:.2f}" '
+            f'stroke="{color}" stroke-width="2"/>'
+            f'<line x1="{x + size:.2f}" y1="{y - size:.2f}" x2="{x - size:.2f}" y2="{y + size:.2f}" '
+            f'stroke="{color}" stroke-width="2"/>'
+        )
     return f'<circle cx="{x:.2f}" cy="{y:.2f}" r="{size:.2f}" fill="{color}" stroke="{stroke}" stroke-width="0.7"/>'
 
 
