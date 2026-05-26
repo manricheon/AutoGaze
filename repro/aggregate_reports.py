@@ -77,6 +77,8 @@ def normalize_report_file(path: str | Path) -> list[dict[str, Any]]:
         return [_normalize_plugin_mode(source, mode, summary) for mode, summary in payload["modes"].items()]
     if "readable_summary" in payload and any(mode in payload for mode in HLVID_MODE_ORDER):
         return [_normalize_hlvid_mode(source, payload, mode) for mode in HLVID_MODE_ORDER if mode in payload]
+    if isinstance(payload.get("rows"), list):
+        return [_normalize_legacy_summary_row(source, row) for row in payload["rows"] if isinstance(row, dict)]
     return [_normalize_single(source, payload)]
 
 
@@ -140,8 +142,20 @@ def _normalize_single(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
     row = _blank_row(
         path,
         report_kind=report_kind,
-        mode=str(payload.get("mode") or payload.get("gazing_mode") or "single"),
-        model_path=payload.get("model_path") or get_path(payload, "result.model_path"),
+        mode=str(
+            first_present(
+                payload.get("gazing_mode"),
+                get_path(payload, "generation.metrics.qwen_vit.mode"),
+                get_path(payload, "experiment_spec.qwen_vit_mode"),
+                payload.get("mode"),
+                "single",
+            )
+        ),
+        model_path=first_present(
+            payload.get("model_path"),
+            get_path(payload, "result.model_path"),
+            get_path(payload, "experiment_spec.model_path"),
+        ),
     )
     failure = as_mapping(payload.get("failure") or get_path(payload, "generation.failure"))
     status = first_present(
@@ -154,6 +168,7 @@ def _normalize_single(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
     _apply_failure(row, failure, status)
     _apply_metrics(row, metrics)
     _apply_video_budget(row, processing_budget_summary(payload))
+    _apply_legacy_payload(row, payload)
     row["gazing_mode"] = payload.get("gazing_mode")
     return row
 
@@ -169,6 +184,7 @@ def _normalize_hlvid_mode(path: Path, payload: dict[str, Any], mode: str) -> dic
     row["parse_failed"] = numeric_or_none(accuracy.get("parse_failed"))
     metrics = enriched_key_metrics(payload, key_metrics(payload))
     _apply_metrics(row, metrics, mode=mode)
+    _apply_flat_budget(row, _mode_budget(payload, mode))
     return row
 
 
@@ -183,6 +199,51 @@ def _normalize_plugin_mode(path: Path, mode: str, summary: dict[str, Any]) -> di
     row["parse_failed"] = numeric_or_none(summary.get("parse_failed"))
     budget = as_mapping(get_path(summary, "processing_budget_summary.mode_median"))
     _apply_flat_budget(row, budget)
+    _zero_missing_accuracy(row)
+    return row
+
+
+def _normalize_legacy_summary_row(path: Path, summary: dict[str, Any]) -> dict[str, Any]:
+    row = _blank_row(
+        path,
+        report_kind="legacy_summary_rows",
+        mode=str(summary.get("mode") or summary.get("gazing_mode") or summary.get("name") or "summary_row"),
+        model_path=summary.get("model_path"),
+    )
+    row["status"] = str(summary.get("status") or "ok")
+    row["frames"] = numeric_or_none(summary.get("frames"))
+    row["thumbnail_frames"] = numeric_or_none(summary.get("thumbnail_frames"))
+    row["processor_input_resolution"] = _resolution(summary.get("effective_width"), summary.get("effective_height"))
+    row["max_tiles_video"] = numeric_or_none(first_present(summary.get("tile_sequences"), summary.get("max_tiles_video")))
+    row["video_decode_read_ms"] = numeric_or_none(summary.get("video_decode_read_ms"))
+    row["selector_input_build_ms"] = numeric_or_none(summary.get("autogaze_tensorize_ms"))
+    row["autogaze_ms"] = numeric_or_none(summary.get("autogaze_forward_ms"))
+    row["vision_encoder_ms"] = numeric_or_none(
+        first_present(summary.get("siglip_gazed_forward_ms"), summary.get("siglip_keep_all_forward_ms"))
+    )
+    row["total_ms"] = numeric_or_none(
+        first_present(summary.get("estimated_autogaze_stream_ms"), summary.get("estimated_keep_all_stream_ms"))
+    )
+    row["token_reduction_ratio"] = numeric_or_none(
+        first_present(
+            summary.get("encoder_total_token_reduction_ratio"),
+            summary.get("encoder_tile_token_reduction_ratio"),
+            summary.get("llm_visual_token_lower_bound_reduction_ratio"),
+        )
+    )
+    row["llm_visual_tokens"] = numeric_or_none(
+        first_present(
+            summary.get("llm_autogaze_visual_tokens_lower_bound_estimated"),
+            summary.get("llm_keep_all_visual_tokens_estimated"),
+        )
+    )
+    row["peak_memory_bytes"] = numeric_or_none(
+        first_present(
+            summary.get("raw_frame_buffer_peak_bytes"),
+            summary.get("siglip_keep_all_hidden_peak_bytes"),
+            summary.get("siglip_gazed_hidden_peak_bytes"),
+        )
+    )
     return row
 
 
@@ -357,49 +418,241 @@ def _apply_video_budget(row: dict[str, Any], budget: dict[str, Any]) -> None:
     video = as_mapping(budget.get("video"))
     tiling = as_mapping(budget.get("tiling"))
     thumbnail = as_mapping(budget.get("thumbnail"))
-    row["frames"] = numeric_or_none(first_present(video.get("actual_video_frames"), video.get("requested_video_frames")))
-    row["thumbnail_frames"] = numeric_or_none(first_present(thumbnail.get("actual_frames"), thumbnail.get("effective_frames")))
-    row["source_resolution"] = video.get("source_resolution")
-    row["processor_input_resolution"] = video.get("processor_input_resolution")
-    row["max_tiles_video"] = numeric_or_none(tiling.get("spatial_tiles_per_frame"))
+    _set_if_missing(
+        row,
+        "frames",
+        numeric_or_none(first_present(video.get("actual_video_frames"), video.get("requested_video_frames"))),
+    )
+    _set_if_missing(
+        row,
+        "thumbnail_frames",
+        numeric_or_none(
+            first_present(
+                thumbnail.get("actual_frames"),
+                thumbnail.get("effective_frames"),
+                thumbnail.get("requested_frames"),
+            )
+        ),
+    )
+    _set_if_missing(row, "source_resolution", video.get("source_resolution"))
+    _set_if_missing(row, "processor_input_resolution", video.get("processor_input_resolution"))
+    _set_if_missing(
+        row,
+        "max_tiles_video",
+        numeric_or_none(first_present(tiling.get("spatial_tiles_per_frame"), tiling.get("max_tiles_video"))),
+    )
 
 
 def _apply_flat_budget(row: dict[str, Any], budget: dict[str, Any]) -> None:
     if not budget:
         return
-    row["frames"] = numeric_or_none(budget.get("video.requested_video_frames"))
-    row["thumbnail_frames"] = numeric_or_none(
-        first_present(budget.get("thumbnail.actual_frames"), budget.get("thumbnail.effective_frames"))
+    _set_if_missing(
+        row,
+        "frames",
+        numeric_or_none(first_present(budget.get("video.actual_video_frames"), budget.get("video.requested_video_frames"))),
     )
-    row["source_resolution"] = budget.get("video.source_resolution")
-    row["processor_input_resolution"] = budget.get("video.processor_input_resolution")
-    row["max_tiles_video"] = numeric_or_none(budget.get("tiling.spatial_tiles_per_frame"))
-    row["single_scale_dense_patch_tokens"] = numeric_or_none(
+    _set_if_missing(
+        row,
+        "thumbnail_frames",
+        numeric_or_none(
+            first_present(
+                budget.get("thumbnail.actual_frames"),
+                budget.get("thumbnail.effective_frames"),
+                budget.get("thumbnail.requested_frames"),
+            )
+        ),
+    )
+    _set_if_missing(row, "source_resolution", budget.get("video.source_resolution"))
+    _set_if_missing(row, "processor_input_resolution", budget.get("video.processor_input_resolution"))
+    _set_if_missing(
+        row,
+        "max_tiles_video",
+        numeric_or_none(first_present(budget.get("tiling.spatial_tiles_per_frame"), budget.get("tiling.max_tiles_video"))),
+    )
+    _set_if_missing(
+        row,
+        "single_scale_dense_patch_tokens",
+        numeric_or_none(
         first_present(
             budget.get("single_scale_dense_vision_budget.total_patch_tokens"),
             budget.get("single_scale_dense_vision_budget.estimated_total_patch_tokens"),
         )
+        ),
     )
-    row["full_or_raw_patch_tokens"] = numeric_or_none(
+    _set_if_missing(
+        row,
+        "full_or_raw_patch_tokens",
+        numeric_or_none(
         first_present(
             budget.get("patch_budget_before_siglip.keep_all_total_patch_tokens"),
+            budget.get("patch_budget_before_siglip.keep_all_tile_patch_tokens"),
             budget.get("patch_budget_before_vit.actual_raw_patch_tokens_before_vit"),
             budget.get("patch_budget_before_vit.estimated_visual_tokens_before_prune"),
         )
+        ),
     )
-    row["autogaze_selected_patch_tokens"] = numeric_or_none(
+    _set_if_missing(
+        row,
+        "autogaze_selected_patch_tokens",
+        numeric_or_none(
         first_present(
             budget.get("patch_budget_before_siglip.autogaze_selected_total_patch_tokens"),
+            budget.get("patch_budget_before_siglip.autogaze_selected_tile_patch_tokens"),
             budget.get("patch_budget_before_vit.estimated_visual_tokens_after_prune"),
         )
+        ),
     )
-    row["token_reduction_ratio"] = numeric_or_none(
+    _set_if_missing(
+        row,
+        "token_reduction_ratio",
+        numeric_or_none(
         first_present(
             budget.get("patch_budget_before_siglip.total_patch_reduction_ratio"),
             budget.get("patch_budget_before_vit.estimated_visual_token_reduction_ratio"),
         )
+        ),
     )
-    row["llm_visual_tokens"] = numeric_or_none(budget.get("llm_visual_budget.actual_visual_tokens"))
+    _set_if_missing(row, "llm_visual_tokens", numeric_or_none(budget.get("llm_visual_budget.actual_visual_tokens")))
+
+
+def _set_if_missing(row: dict[str, Any], field: str, value: Any) -> None:
+    if row.get(field) in {None, ""} and value not in {None, ""}:
+        row[field] = value
+
+
+def _mode_budget(payload: dict[str, Any], mode: str | None) -> dict[str, Any]:
+    if mode:
+        for path in (
+            f"readable_summary.processing_budget_summary.{mode}_median",
+            f"readable_summary.processing_budget_summary.mode_median.{mode}",
+            f"readable_summary.processing_budget_summary.comparison.{mode}",
+        ):
+            budget = as_mapping(get_path(payload, path))
+            if budget:
+                return budget
+    return _flatten_budget(as_mapping(processing_budget_summary(payload)))
+
+
+def _flatten_budget(budget: dict[str, Any]) -> dict[str, Any]:
+    if not budget:
+        return {}
+    if any("." in key for key in budget):
+        return budget
+    flat: dict[str, Any] = {}
+
+    def walk(prefix: str, value: Any) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                walk(f"{prefix}.{key}" if prefix else str(key), child)
+        else:
+            flat[prefix] = value
+
+    walk("", budget)
+    return flat
+
+
+def _apply_legacy_payload(row: dict[str, Any], payload: dict[str, Any]) -> None:
+    _apply_video_budget(row, as_mapping(get_path(payload, "generation.metrics.processing_budget_summary")))
+    _apply_video_budget(row, as_mapping(payload.get("processing_budget_summary")))
+    _apply_stream_profile_legacy(row, payload)
+    _apply_generation_metrics_legacy(row, as_mapping(get_path(payload, "generation.metrics")))
+
+
+def _apply_generation_metrics_legacy(row: dict[str, Any], metrics: dict[str, Any]) -> None:
+    if not metrics:
+        return
+    _apply_metrics(row, metrics)
+    _apply_video_budget(row, as_mapping(metrics.get("processing_budget_summary")))
+
+
+def _apply_stream_profile_legacy(row: dict[str, Any], payload: dict[str, Any]) -> None:
+    source = as_mapping(payload.get("source_metadata"))
+    sampling = as_mapping(payload.get("sampling"))
+    effective = as_mapping(payload.get("effective_video"))
+    timings = as_mapping(payload.get("timing_ms"))
+    tokens = as_mapping(payload.get("token_metrics"))
+    memory = as_mapping(payload.get("memory_bytes"))
+    if not any((source, sampling, effective, timings, tokens, memory)):
+        return
+
+    _set_if_missing(row, "source_resolution", _resolution(source.get("width"), source.get("height")))
+    _set_if_missing(row, "processor_input_resolution", _resolution(effective.get("width"), effective.get("height")))
+    _set_if_missing(row, "frames", numeric_or_none(first_present(sampling.get("num_video_frames"), sampling.get("decoded_selected_frames"))))
+    _set_if_missing(row, "thumbnail_frames", numeric_or_none(sampling.get("num_video_frames_thumbnail")))
+    _set_if_missing(row, "video_decode_read_ms", _sum_present(timings.get("video_decode_seek"), timings.get("video_decode_scan")))
+    _set_if_missing(row, "video_frame_resize_ms", numeric_or_none(timings.get("video_frame_resize")))
+    _set_if_missing(row, "video_tiling_ms", numeric_or_none(timings.get("spatial_tile_build")))
+    _set_if_missing(row, "selector_input_build_ms", numeric_or_none(timings.get("tile_autogaze_tensorize")))
+    _set_if_missing(row, "autogaze_ms", numeric_or_none(timings.get("tile_autogaze_forward")))
+    _set_if_missing(row, "total_ms", numeric_or_none(timings.get("pre_llm_stream_total_measured")))
+    _set_if_missing(row, "vision_encoder_ms", _stream_vision_ms(row, timings))
+    _set_if_missing(
+        row,
+        "full_or_raw_patch_tokens",
+        numeric_or_none(
+            first_present(
+                tokens.get("encoder_raw_patch_tokens"),
+                tokens.get("encoder_raw_tile_patch_tokens"),
+                tokens.get("encoder_input_patch_tokens_before_autogaze"),
+            )
+        ),
+    )
+    _set_if_missing(
+        row,
+        "autogaze_selected_patch_tokens",
+        numeric_or_none(
+            first_present(
+                tokens.get("encoder_autogaze_selected_total_patch_tokens"),
+                tokens.get("encoder_autogaze_selected_patch_tokens"),
+                tokens.get("encoder_autogaze_selected_tile_patch_tokens"),
+            )
+        ),
+    )
+    if row.get("token_reduction_ratio") is None:
+        before = numeric_or_none(row.get("full_or_raw_patch_tokens"))
+        after = numeric_or_none(row.get("autogaze_selected_patch_tokens"))
+        if before is not None and after not in {None, 0.0}:
+            row["token_reduction_ratio"] = before / after
+    _set_if_missing(row, "llm_visual_tokens", numeric_or_none(tokens.get("llm_actual_visual_tokens")))
+    _set_if_missing(row, "peak_memory_bytes", _max_numeric(memory.values()))
+    _set_if_missing(row, "max_tiles_video", _legacy_tiles(tokens))
+
+
+def _stream_vision_ms(row: dict[str, Any], timings: dict[str, Any]) -> float | None:
+    mode = str(row.get("mode") or row.get("gazing_mode") or "").lower()
+    if "autogaze" in mode or "gazed" in mode:
+        return numeric_or_none(timings.get("siglip_gazed_forward"))
+    if "keep" in mode:
+        return numeric_or_none(timings.get("siglip_keep_all_forward"))
+    return numeric_or_none(first_present(timings.get("siglip_gazed_forward"), timings.get("siglip_keep_all_forward")))
+
+
+def _legacy_tiles(tokens: dict[str, Any]) -> float | None:
+    tiles = tokens.get("spatial_tiles_per_video")
+    if isinstance(tiles, list) and tiles:
+        return numeric_or_none(tiles[0])
+    return numeric_or_none(first_present(tiles, tokens.get("spatial_tiles_per_frame")))
+
+
+def _resolution(width: Any, height: Any) -> str | None:
+    w = numeric_or_none(width)
+    h = numeric_or_none(height)
+    if w is None or h is None:
+        return None
+    return f"{int(w)}x{int(h)}"
+
+
+def _max_numeric(values: Any) -> float | None:
+    numbers = [numeric_or_none(value) for value in values]
+    present = [value for value in numbers if value is not None]
+    return max(present) if present else None
+
+
+def _zero_missing_accuracy(row: dict[str, Any]) -> None:
+    if row.get("accuracy_total") is None:
+        row["accuracy_total"] = 0.0
+    if row.get("accuracy_scored") is None:
+        row["accuracy_scored"] = numeric_or_none(row.get("accuracy_total")) or 0.0
 
 
 def aggregate_report_roots(input_roots: list[str | Path], output_dir: str | Path, *, sort: str = "comparison") -> dict[str, Path]:
@@ -414,7 +667,12 @@ def aggregate_report_roots(input_roots: list[str | Path], output_dir: str | Path
                 rows.extend(normalize_report_file(path))
             except (json.JSONDecodeError, OSError):
                 continue
-    rows = sort_rows([{field: row.get(field) for field in ROW_FIELDS} for row in rows], sort=sort)
+    output_rows = []
+    for row in rows:
+        compact = {field: row.get(field) for field in ROW_FIELDS}
+        _zero_missing_accuracy(compact)
+        output_rows.append(compact)
+    rows = sort_rows(output_rows, sort=sort)
     csv_path = output / "aggregate_rows.csv"
     json_path = output / "aggregate_summary.json"
     md_path = output / "aggregate_report.md"
@@ -439,6 +697,12 @@ def sort_rows(rows: list[dict[str, Any]], *, sort: str = "comparison") -> list[d
         return sorted(rows, key=lambda row: (_status_rank(row), number(row, "peak_memory_bytes"), _comparison_key(row)))
     if sort == "accuracy":
         return sorted(rows, key=lambda row: (_status_rank(row), -number(row, "accuracy_scored", 0.0), _comparison_key(row)))
+    if sort == "frames":
+        return sorted(rows, key=lambda row: (_status_rank(row), number(row, "frames"), _selector_rank(row), _comparison_key(row)))
+    if sort == "resolution":
+        return sorted(rows, key=lambda row: (_status_rank(row), _resolution_pixels(row), number(row, "frames"), _selector_rank(row), _comparison_key(row)))
+    if sort == "config":
+        return sorted(rows, key=lambda row: (_status_rank(row), _config_group_key(row), _selector_rank(row), _comparison_key(row)))
     if sort == "status":
         return sorted(rows, key=lambda row: (_status_rank(row), str(row.get("status") or ""), _comparison_key(row)))
     return sorted(rows, key=lambda row: (_status_rank(row), _config_group_key(row), _selector_rank(row), _comparison_key(row)))
@@ -471,16 +735,28 @@ def _selector_rank(row: dict[str, Any]) -> int:
 
 def _config_group_key(row: dict[str, Any]) -> tuple[Any, ...]:
     return (
-        row.get("model_path") or "",
-        row.get("frames") or "",
-        row.get("thumbnail_frames") or "",
-        row.get("processor_input_resolution") or "",
-        row.get("max_tiles_video") or "",
+        str(row.get("model_path") or ""),
+        numeric_or_none(row.get("frames")) if numeric_or_none(row.get("frames")) is not None else float("inf"),
+        numeric_or_none(row.get("thumbnail_frames"))
+        if numeric_or_none(row.get("thumbnail_frames")) is not None
+        else float("inf"),
+        _resolution_pixels(row),
+        str(row.get("processor_input_resolution") or ""),
+        numeric_or_none(row.get("max_tiles_video"))
+        if numeric_or_none(row.get("max_tiles_video")) is not None
+        else float("inf"),
     )
 
 
 def _comparison_key(row: dict[str, Any]) -> tuple[str, str]:
     return (str(row.get("mode") or ""), str(row.get("source_path") or ""))
+
+
+def _resolution_pixels(row: dict[str, Any]) -> float:
+    width, height = _resolution_parts(row.get("processor_input_resolution"))
+    if width is None or height is None:
+        return float("inf")
+    return float(width * height)
 
 
 def _write_trend_charts(rows: list[dict[str, Any]], assets: Path) -> dict[str, Path]:
@@ -569,6 +845,32 @@ def _write_trend_charts(rows: list[dict[str, Any]], assets: Path) -> dict[str, P
         bars=attribution_bars,
         unit="ms",
     ).path
+    accuracy_bars = [
+        ChartBar(label, [ChartSegment("accuracy", _accuracy_value(row))])
+        for label, row in zip(labels, rows)
+    ]
+    charts["accuracy"] = write_bar_chart(
+        assets / "accuracy_by_config.svg",
+        title="Accuracy By Config",
+        bars=accuracy_bars,
+        unit="acc",
+    ).path
+    if len({row.get("frames") for row in rows if row.get("frames") is not None}) >= 2:
+        frame_rows = sorted(rows, key=lambda row: (numeric_or_none(row.get("frames")) or float("inf"), _selector_rank(row)))
+        charts["accuracy_vs_frames"] = write_bar_chart(
+            assets / "accuracy_vs_frames.svg",
+            title="Accuracy Vs Frames",
+            bars=[ChartBar(_row_label(row, index), [ChartSegment("accuracy", _accuracy_value(row))]) for index, row in enumerate(frame_rows)],
+            unit="acc",
+        ).path
+    if len({row.get("processor_input_resolution") for row in rows if row.get("processor_input_resolution")}) >= 2:
+        resolution_rows = sorted(rows, key=lambda row: (_resolution_pixels(row), numeric_or_none(row.get("frames")) or float("inf"), _selector_rank(row)))
+        charts["accuracy_vs_input_resolution"] = write_bar_chart(
+            assets / "accuracy_vs_input_resolution.svg",
+            title="Accuracy Vs Input Resolution",
+            bars=[ChartBar(_row_label(row, index), [ChartSegment("accuracy", _accuracy_value(row))]) for index, row in enumerate(resolution_rows)],
+            unit="acc",
+        ).path
     reduction_bars = [
         ChartBar(label, [ChartSegment("token_reduction_ratio", value)])
         for label, row in zip(labels, rows)
@@ -608,13 +910,50 @@ def _row_label(row: dict[str, Any], index: int) -> str:
     mode = row.get("mode") or "run"
     mode_label = {"single_scale_dense": "single-scale"}.get(str(mode), str(mode))
     frames = row.get("frames")
+    thumbnail = row.get("thumbnail_frames")
     resolution = row.get("processor_input_resolution")
-    parts = [mode_label]
+    tiles = row.get("max_tiles_video")
+    model = _model_label(row.get("model_path"))
+    parts = []
+    if model:
+        parts.append(model)
     if frames is not None:
-        parts.append(f"{int(float(frames))}f")
+        frame_label = f"{int(float(frames))}f"
+        if thumbnail not in {None, "", 0, 0.0}:
+            frame_label += f"+{int(float(thumbnail))}t"
+        parts.append(frame_label)
     if resolution:
         parts.append(str(resolution))
-    return shorten_label("/".join(parts) if parts else f"run_{index}", max_chars=34)
+    if tiles not in {None, ""}:
+        parts.append(f"tiles{int(float(tiles))}")
+    parts.append(mode_label)
+    if len(parts) == 1:
+        parts.insert(0, Path(str(row.get("source_path") or f"run_{index}")).stem)
+    return shorten_label("/".join(parts), max_chars=46)
+
+
+def _model_label(model_path: Any) -> str | None:
+    if not model_path:
+        return None
+    text = str(model_path).rstrip("/")
+    return text.rsplit("/", 1)[-1] if "/" in text else text
+
+
+def _resolution_parts(value: Any) -> tuple[int | None, int | None]:
+    if not value:
+        return None, None
+    text = str(value).lower().replace(" ", "")
+    if "x" not in text:
+        return None, None
+    left, right = text.split("x", 1)
+    try:
+        return int(float(left)), int(float(right))
+    except ValueError:
+        return None, None
+
+
+def _accuracy_value(row: dict[str, Any]) -> float:
+    return numeric_or_none(first_present(row.get("accuracy_scored"), row.get("accuracy_total"))) or 0.0
 
 
 def _render_markdown(rows: list[dict[str, Any]], charts: dict[str, Path], output_dir: Path) -> str:
@@ -623,19 +962,27 @@ def _render_markdown(rows: list[dict[str, Any]], charts: dict[str, Path], output
     for title, key in (
         ("Latency By Config", "latency"),
         ("Latency Attribution By Config", "latency_attribution"),
+        ("Accuracy By Config", "accuracy"),
+        ("Accuracy Vs Frames", "accuracy_vs_frames"),
+        ("Accuracy Vs Input Resolution", "accuracy_vs_input_resolution"),
         ("Token Reduction By Config", "token_reduction"),
         ("Memory Peak By Config", "memory"),
         ("Status Counts", "status"),
     ):
-        path = charts[key].relative_to(output_dir)
-        lines.extend([f"### {title}", "", f"![{title}]({path})", ""])
+        if key in charts:
+            path = charts[key].relative_to(output_dir)
+            lines.extend([f"### {title}", "", f"![{title}]({path})", ""])
     lines.extend(["## Summary Rows", ""])
     columns = [
         ("mode", "Mode"),
         ("status", "Status"),
         ("oom_stage", "OOM stage"),
         ("frames", "Frames"),
+        ("thumbnail_frames", "Thumb"),
         ("processor_input_resolution", "Input res"),
+        ("source_resolution", "Source res"),
+        ("max_tiles_video", "Tiles"),
+        ("accuracy_scored", "Accuracy scored"),
         ("total_ms", "Total ms"),
         ("video_decode_read_ms", "Decode/read ms"),
         ("video_frame_resize_ms", "Frame resize ms"),
@@ -653,7 +1000,7 @@ def _render_markdown(rows: list[dict[str, Any]], charts: dict[str, Path], output
         ("autogaze_selected_patch_tokens", "Selected patch"),
         ("token_reduction_ratio", "Patch x"),
         ("peak_memory_bytes", "Peak bytes"),
-        ("accuracy_total", "Accuracy"),
+        ("accuracy_total", "Accuracy total"),
     ]
     lines.append("| " + " | ".join(label for _, label in columns) + " |")
     lines.append("| " + " | ".join("---" for _ in columns) + " |")
@@ -674,7 +1021,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument(
         "--sort",
-        choices=("comparison", "latency", "token-reduction", "memory", "accuracy", "status"),
+        choices=("comparison", "config", "frames", "resolution", "latency", "token-reduction", "memory", "accuracy", "status"),
         default="comparison",
     )
     return parser
