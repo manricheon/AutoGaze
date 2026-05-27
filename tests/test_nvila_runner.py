@@ -54,6 +54,7 @@ from repro.nvila_runner import (
     repeat_last_stream_samples_after_eof,
     resolve_video,
     run_hlvid,
+    runtime_vision_patch_slots_per_frame,
     spatial_tile_grid,
     summarize_repeat_results,
     summarize_token_budget_rows,
@@ -713,6 +714,22 @@ def test_keep_all_single_alias_keeps_all_patches_on_single_runtime_scale():
     assert kwargs["target_scales"] == [392]
     assert kwargs["target_patch_size"] == 14
     assert build_run_identity(args)["autogaze_applicability"] == "hd_keep_all_single_scale_ablation"
+    assert runtime_vision_patch_slots_per_frame(args) == 784
+
+
+def test_preflight_can_use_single_scale_dense_patch_slots():
+    estimate = estimate_nvila_preflight(
+        width=1920,
+        height=1080,
+        source_frames=9000,
+        num_video_frames=16,
+        num_video_frames_thumbnail=8,
+        max_tiles_video=1,
+        patches_per_frame_tile=784,
+    )
+
+    assert estimate["tokens"]["patches_per_frame_tile"] == 784
+    assert estimate["tokens"]["tokens_per_frame_tile_after_shuffle"] == 88
 
 
 def test_stream_profile_can_override_gazing_ratio_for_quickstart_comparison():

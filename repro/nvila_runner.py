@@ -362,6 +362,11 @@ def patches_per_frame(scales: list[int] | None = None, patch_size: int = NVILA_T
     return sum(patch_positions_by_scale(active_scales, patch_size).values())
 
 
+def runtime_vision_patch_slots_per_frame(args: argparse.Namespace) -> int:
+    scales = parse_int_sequence(getattr(args, "autogaze_target_scales", None))
+    return patches_per_frame(scales, patch_size=NVILA_VISION_PATCH_SIZE)
+
+
 def parse_int_sequence(value: str | list[int] | tuple[int, ...] | None) -> list[int] | None:
     if value is None:
         return None
@@ -2333,6 +2338,7 @@ def estimate_nvila_preflight(
     max_tiles_video: int,
     image_size: int = NVILA_IMAGE_SIZE,
     context_limit: int = NVILA_CONTEXT_LIMIT,
+    patches_per_frame_tile: int | None = None,
 ) -> dict[str, Any]:
     grid = spatial_tile_grid(width, height, max_tiles_video, image_size)
     spatial_tiles = grid["tiles"]
@@ -2341,7 +2347,7 @@ def estimate_nvila_preflight(
     padded_sampled_frames = temporal_chunks * AUTOGAZE_CHUNK_FRAMES
     tile_images = padded_sampled_frames * spatial_tiles
     thumbnail_frames = min(num_video_frames, num_video_frames_thumbnail)
-    per_frame_patches = patches_per_frame()
+    per_frame_patches = int(patches_per_frame_tile or patches_per_frame())
     tokens_per_frame_tile = math.ceil(per_frame_patches / NVILA_TOKEN_SHUFFLE)
     keep_all_tile_tokens = num_video_frames * spatial_tiles * tokens_per_frame_tile
     keep_all_thumbnail_tokens = thumbnail_frames * tokens_per_frame_tile
@@ -2648,6 +2654,7 @@ def estimate_h100_preflight_config(
     max_batch_size_siglip: int = 32,
     autogaze_residency_policy: str = "resident",
     autogaze_model_resident_gib: float = 0.0,
+    patches_per_frame_tile: int | None = None,
 ) -> dict[str, Any]:
     effective = apply_resize_to_dimensions(
         width=width,
@@ -2665,6 +2672,7 @@ def estimate_h100_preflight_config(
         num_video_frames_thumbnail=num_video_frames_thumbnail,
         max_tiles_video=max_tiles_video,
         context_limit=context_limit,
+        patches_per_frame_tile=patches_per_frame_tile,
     )
     keep_all_visual_tokens = int(preflight["tokens"]["keep_all_projected_tokens"])
     ratio = max(float(token_reduction_ratio or 1.0), 1.0)
@@ -2966,6 +2974,7 @@ def estimate_h100_preflight_sweep(
     max_batch_size_siglip: int = 32,
     autogaze_residency_policy: str = "resident",
     autogaze_model_resident_gib: float = 0.0,
+    patches_per_frame_tile: int | None = None,
 ) -> dict[str, Any]:
     rows = []
     for num_frames in H100_SWEEP_FRAMES:
@@ -2993,6 +3002,7 @@ def estimate_h100_preflight_sweep(
                                 max_batch_size_siglip=max_batch_size_siglip,
                                 autogaze_residency_policy=autogaze_residency_policy,
                                 autogaze_model_resident_gib=autogaze_model_resident_gib,
+                                patches_per_frame_tile=patches_per_frame_tile,
                             )
                         )
     by_band = Counter(row["risk"]["band"] for row in rows)
@@ -5418,6 +5428,7 @@ def run_preflight(args: argparse.Namespace) -> None:
         num_video_frames=args.num_video_frames,
         num_video_frames_thumbnail=args.num_video_frames_thumbnail,
         max_tiles_video=args.max_tiles_video,
+        patches_per_frame_tile=runtime_vision_patch_slots_per_frame(args),
     )
     payload = {
         "model_path": args.model_path,
@@ -5487,6 +5498,7 @@ def run_h100_preflight_sweep(args: argparse.Namespace) -> None:
             max_batch_size_siglip=max_batch_size_siglip,
             autogaze_residency_policy=autogaze_residency_policy,
             autogaze_model_resident_gib=autogaze_model_resident_gib,
+            patches_per_frame_tile=runtime_vision_patch_slots_per_frame(args),
         )
         for ratio in requested_ratios
     ]
@@ -5502,6 +5514,7 @@ def run_h100_preflight_sweep(args: argparse.Namespace) -> None:
         max_batch_size_siglip=max_batch_size_siglip,
         autogaze_residency_policy=autogaze_residency_policy,
         autogaze_model_resident_gib=autogaze_model_resident_gib,
+        patches_per_frame_tile=runtime_vision_patch_slots_per_frame(args),
     )
     payload = {
         "model_path": args.model_path,

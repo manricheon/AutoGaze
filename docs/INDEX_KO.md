@@ -38,7 +38,7 @@ AutoGaze를 실제 비디오 MLLM 파이프라인에 붙였을 때 다음을 재
 | Plugin HLVid 내부 경로 | `python -m repro.plugin_hlvid_benchmark` | Qwen/LongVILA/NVILA-Video 등 확장 실험을 직접 호출할 때 |
 | Plugin single/inspect | `python -m repro.flexible_runner` | token selector / ViT / MLLM 조합을 명시해 실험 |
 | V-JEPA sparse PoC | `python -m repro.vjepa_poc --synthetic --scale-aware --tiny-encoder-smoke --qwen-bridge-smoke` | AutoGaze patch index를 V-JEPA tubelet/grid index로 매핑하고 sparse encoder hook 및 Qwen bridge를 검증 |
-| V-JEPA + Qwen actual single | `python -m repro.vjepa_qwen_runner` | 실제 비디오에서 dense/off V-JEPA baseline 또는 AutoGaze/on sparse V-JEPA를 Qwen generate까지 연결 |
+| V-JEPA + Qwen actual single | `python -m repro.vjepa_qwen_runner` | 실제 비디오에서 dense/off V-JEPA baseline 또는 AutoGaze/on sparse V-JEPA를 Qwen generate까지 연결. 기본 AutoGaze pyramid는 V-JEPA 224 crop 기준 `32+64+112+224` |
 | V-JEPA + Qwen HLVid | `python -m repro.vjepa_qwen_hlvid_benchmark` | HLVid row를 순회하며 `dense_off`, `autogaze_single_grid`, `autogaze_scale_aware`의 token/latency/failure/score를 기록 |
 | Streaming profile | `python -m repro.nvila_runner --mode stream-profile` | LLM 없이 decode/tile/AutoGaze/SigLIP 구간 profile |
 | Streaming sweep | `python -m repro.stream_profile_sweep` | 여러 stream config 후보를 비교 |
@@ -85,7 +85,7 @@ AutoGaze를 실제 비디오 MLLM 파이프라인에 붙였을 때 다음을 재
 3. Markdown report로 latency/token/memory/accuracy 표와 chart 확인
 4. 여러 해상도/프레임/thumbnail 설정을 돌린 뒤 aggregate trend report 생성
 5. 필요한 경우 paper baseline 또는 plugin Qwen/LongVILA 실험으로 확장
-6. V-JEPA 실험은 [AUTOGAZE_VJEPA_POC_KO.md](AUTOGAZE_VJEPA_POC_KO.md)의 Colab CUDA 셀로 actual AutoGaze + V-JEPA + Qwen smoke 확인
+6. V-JEPA 실험은 [AUTOGAZE_VJEPA_POC_KO.md](AUTOGAZE_VJEPA_POC_KO.md)의 Colab CUDA 셀로 actual AutoGaze + V-JEPA + Qwen smoke와 NVILA/Qwen CLI route 확인
 7. CUDA 머신 실험 결과는 [CUDA_RESULTS_TEMPLATE.md](CUDA_RESULTS_TEMPLATE.md)에 맞춰 요약
 
 ## 결과에서 먼저 볼 것

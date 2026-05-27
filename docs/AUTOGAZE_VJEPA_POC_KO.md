@@ -19,7 +19,9 @@
 - `tubelet_size=2`이면 같은 tubelet에 들어가는 두 프레임의 선택 patch를 union합니다.
 - 저해상도 AutoGaze patch는 V-JEPA grid에서 bbox overlap되는 모든 spatial cell로 확장합니다.
 - scale-aware 모드에서는 scale마다 별도 V-JEPA grid를 두므로 coarse patch가 고해상도 grid로 과도하게 펼쳐지는지 비교할 수 있습니다.
-- 기본 `nvidia/AutoGaze` checkpoint는 V-JEPA/Qwen PoC에서 `--autogaze-tile-size 224`와 `--autogaze-target-scales 32+64+112+224`를 우선 사용합니다. 즉 largest scale은 V-JEPA crop 224에 맞추고, 낮은 해상도 scale도 checkpoint의 scale 개수에 맞춰 함께 둡니다. `56+112+196+392` 같은 NVILA-HD multiscale 설정은 해당 scale 개수를 지원하는 AutoGaze checkpoint에서만 사용하세요.
+- 기본 `nvidia/AutoGaze` checkpoint는 V-JEPA/Qwen PoC에서 `--autogaze-tile-size 224`와 `--autogaze-target-scales 32+64+112+224`를 우선 사용합니다. 즉 largest scale은 V-JEPA crop 224에 맞추고, 낮은 해상도 scale도 checkpoint의 scale 개수에 맞춰 함께 둡니다. `32+64+112+224`는 NVILA-HD에서 쓰던 `56+112+196+392` pyramid를 `224 / 392` 비율로 줄인 값입니다.
+- V-JEPA 기본 crop이 224이고 patch size가 16이면 dense single-grid는 한 프레임당 `14 x 14 = 196` spatial cell을 봅니다. AutoGaze의 coarse scale patch는 이 224 기준 grid에서 overlap되는 cell들의 union으로 옮깁니다. 그래서 coarse patch 하나가 V-JEPA cell 여러 개로 펼쳐질 수 있습니다.
+- `56+112+196+392` 같은 NVILA-HD multiscale 설정은 해당 scale 개수를 지원하는 AutoGaze checkpoint와 392 기준 VLM pipeline에서만 사용하세요. V-JEPA/Qwen PoC에서는 224 기준 설정을 기본 비교점으로 둡니다.
 - `--gazing-ratio`를 생략하면 AutoGaze checkpoint의 inference 기본 정책을 사용합니다. token 감소율을 명시적으로 sweep하려면 `--gazing-ratio 0.1`, `--gazing-ratio 0.25`처럼 지정합니다.
 - Qwen 연결은 학습된 projector 전까지 `zero_shot_wiring_probe`로만 봅니다.
 
@@ -40,6 +42,8 @@ video frames
 scale-aware
 
 video frames
+  -> AutoGaze scale  32 selected patches -> V-JEPA  32 grid selected tokens
+  -> AutoGaze scale  64 selected patches -> V-JEPA  64 grid selected tokens
   -> AutoGaze scale 112 selected patches -> V-JEPA 112 grid selected tokens
   -> AutoGaze scale 224 selected patches -> V-JEPA 224 grid selected tokens
   -> concat scale-aware features with scale/frame/row/col metadata
@@ -403,6 +407,132 @@ subprocess.check_call([
     "--output-md", str(out_dir / "actual_vjepa_qwen_dense_off.md"),
 ])
 ```
+
+HLVid wrapper까지 확인하려면 최소 manifest 하나를 만들고 같은 비디오/질문으로 `dense_off`와 AutoGaze on 모드를 함께 실행합니다. 실제 HLVid manifest도 같은 schema를 사용하므로, CUDA 머신에서는 `manifest`와 `video-root`만 실제 경로로 바꾸면 됩니다.
+
+```python
+import json, pathlib, subprocess
+
+weights = pathlib.Path("/content/autogaze_weights")
+out_dir = pathlib.Path("/content/autogaze_vjepa_outputs")
+video = pathlib.Path("/content/AutoGaze/inputs/hlvid_example/clip_av_video_5_001.mp4")
+mini = out_dir / "mini_hlvid_vjepa_qwen.jsonl"
+mini.write_text(json.dumps({
+    "question_id": "mini-001",
+    "category": "smoke",
+    "video_path": video.name,
+    "question": "Describe the video in one short sentence.",
+    "answer": "unknown",
+}) + "\n")
+
+subprocess.check_call([
+    "python", "-m", "repro.vjepa_qwen_hlvid_benchmark",
+    "--manifest", str(mini),
+    "--video-root", str(video.parent),
+    "--output-dir", str(out_dir / "mini_hlvid_vjepa_qwen"),
+    "--limit", "1",
+    "--continue-on-error",
+    "--autogaze-model", str(weights / "nvidia__AutoGaze"),
+    "--vjepa-model", str(weights / "facebook__vjepa2-vitl-fpc64-256"),
+    "--qwen-model", str(weights / "Qwen__Qwen2.5-VL-3B-Instruct"),
+    "--device", "cuda",
+    "--dtype", "float16",
+    "--num-video-frames", "16",
+    "--frames-per-clip", "16",
+    "--autogaze-chunk-frames", "16",
+    "--max-tiles-video", "1",
+    "--autogaze-tile-size", "224",
+    "--autogaze-target-scales", "32+64+112+224",
+    "--video-decode-strategy", "seek",
+    "--video-resize-longest-edge", "448",
+    "--vjepa-qwen-modes", "dense_off,autogaze_single_grid",
+])
+
+summary = json.loads((out_dir / "mini_hlvid_vjepa_qwen" / "vjepa_qwen_hlvid_summary.json").read_text())
+print(json.dumps(summary, indent=2))
+```
+
+## Colab에서 NVILA/Qwen 계열 스크립트 같이 확인
+
+V-JEPA PoC와 별개로, 기존 NVILA-HD native AutoGaze on/off와 Qwen plugin route도 같은 Colab 런타임에서 CLI가 깨지지 않는지 확인합니다. 아래 명령은 실제 모델 weight가 있는 경우 바로 실행하고, weight가 아직 없으면 `--help` 검증부터 먼저 합니다.
+
+NVILA-HD single on/off:
+
+```bash
+python -m repro.nvila_runner --mode single \
+  --video /content/AutoGaze/inputs/hlvid_example/clip_av_video_5_001.mp4 \
+  --model-path /content/autogaze_weights/nvidia__NVILA-8B-HD-Video \
+  --autogaze-model /content/autogaze_weights/nvidia__AutoGaze \
+  --device cuda \
+  --dtype float16 \
+  --gazing-mode autogaze \
+  --num-video-frames 16 \
+  --num-video-frames-thumbnail 8 \
+  --max-tiles-video 1 \
+  --video-decode-strategy seek \
+  --video-resize-longest-edge 720 \
+  --max-batch-size-autogaze 4 \
+  --max-batch-size-siglip 4 \
+  --max-new-tokens 8 \
+  --output-json /content/autogaze_vjepa_outputs/nvila_single_autogaze.json \
+  --summary-json /content/autogaze_vjepa_outputs/nvila_single_autogaze_summary.json \
+  --print-summary
+```
+
+```bash
+python -m repro.nvila_runner --mode single \
+  --video /content/AutoGaze/inputs/hlvid_example/clip_av_video_5_001.mp4 \
+  --model-path /content/autogaze_weights/nvidia__NVILA-8B-HD-Video \
+  --device cuda \
+  --dtype float16 \
+  --gazing-mode keep-all-single \
+  --num-video-frames 16 \
+  --num-video-frames-thumbnail 8 \
+  --max-tiles-video 1 \
+  --video-decode-strategy seek \
+  --video-resize-longest-edge 720 \
+  --max-batch-size-siglip 4 \
+  --max-new-tokens 8 \
+  --output-json /content/autogaze_vjepa_outputs/nvila_single_keep_all_single.json \
+  --summary-json /content/autogaze_vjepa_outputs/nvila_single_keep_all_single_summary.json \
+  --print-summary
+```
+
+Qwen plugin HLVid route:
+
+```bash
+python scripts/run_hlvid_folder_benchmark.py \
+  --plugin-suite qwen \
+  --manifest /data/HLVid/test.jsonl \
+  --video-root /data/HLVid/videos \
+  --output-dir /content/autogaze_vjepa_outputs/plugin_qwen_hlvid_limit3 \
+  --plugin-model qwen3-vl=/content/autogaze_weights/Qwen__Qwen2.5-VL-3B-Instruct \
+  --autogaze-model /content/autogaze_weights/nvidia__AutoGaze \
+  --limit 3 \
+  --continue-on-error \
+  --device cuda \
+  --dtype float16 \
+  --num-video-frames 16 \
+  --num-video-frames-thumbnail 0 \
+  --max-tiles-video 1 \
+  --video-decode-strategy seek \
+  --video-resize-longest-edge 448 \
+  --autogaze-tile-size 224 \
+  --autogaze-target-scales 32+64+112+224 \
+  --autogaze-target-patch-size 16 \
+  --max-batch-size-autogaze 4 \
+  --qwen-vit-chunk-frames 16 \
+  --max-new-tokens 8
+```
+
+현재 plugin suite의 model override key는 `qwen3-vl`입니다. Qwen2.5 checkpoint를 테스트할 때도 우선 이 key에 로컬 path를 넣습니다. adapter 내부에서 Qwen 계열 processor/grid path를 공유하기 위한 임시 이름이고, 결과 리포트에서는 실제 `model_path`를 함께 확인하세요.
+
+검증 포인트:
+
+- NVILA on/off 결과는 `summary_json`의 key comparison에서 `keep-all-single`과 `autogaze`가 분리되어야 합니다.
+- Qwen plugin route는 `qwen_full_vit`, `qwen_chunked_vit`, `qwen_chunked_vit_autogaze_sparse` row를 만들어야 합니다.
+- V-JEPA/Qwen PoC는 `tokens.vjepa_raw_tokens > tokens.vjepa_selected_tokens`와 `tokens.qwen_visual_tokens_inserted == tokens.vjepa_selected_tokens`를 우선 확인합니다.
+- OOM이나 dependency error는 benchmark row의 `failure.kind`와 `failure.stage`에 남아야 합니다.
 
 ## 실제 AutoGaze output 연결
 
