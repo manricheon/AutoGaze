@@ -22,7 +22,8 @@
 | Markdown/chart report | 준비됨 | `python -m repro.markdown_report` |
 | aggregate trend report | 준비됨 | `python -m repro.aggregate_reports` |
 | plugin 확장 실험 | PoC/probe | `run_hlvid_folder_benchmark.py --plugin-suite qwen`, `python -m repro.flexible_runner` |
-| AutoGaze + V-JEPA + Qwen CUDA smoke | PoC | `python scripts/run_colab_autogaze_cuda_smoke.py` |
+| Colab 직접 검증 리포트 | PoC | `python -m repro.colab_verification_report` |
+| AutoGaze + V-JEPA + Qwen CUDA smoke | 선택형 wrapper | `python scripts/run_colab_autogaze_cuda_smoke.py` |
 
 HLVid 실행은 `scripts/run_hlvid_folder_benchmark.py`를 우선 사용하세요. 옵션을 주지 않으면 NVILA-HD keep-all/single-scale/autogaze 기본 경로로 가고, `--plugin-suite qwen`을 주면 Qwen/Plugin HLVid 경로로 라우팅됩니다. `repro.plugin_hlvid_benchmark`는 내부/고급 호출용으로 남겨둡니다.
 
@@ -73,7 +74,22 @@ Qwen3-VL 실험은 `qwen-vl-utils`가 필요합니다. 기본 requirements에 �
 
 `summary.passed=true`가 아니면 CUDA smoke로 넘어가지 말고, 실패한 `commands` 또는 `checks` 항목을 먼저 고칩니다.
 
-Colab/H100에서 V-JEPA+Qwen까지 실제 모델을 로드해 한 번에 확인하려면 아래 wrapper를 사용합니다. 이 명령은 `verify_autogaze_entrypoints.py`, V-JEPA+Qwen dense/off, AutoGaze+V-JEPA sparse+Qwen on generate를 순서대로 실행합니다.
+Colab/H100 검증의 기본 방식은 기존 runner를 직접 실행하고, 그 결과 JSON들을 `repro.colab_verification_report`로 모아 `colab_verification.md`를 만드는 것입니다. 예를 들어 NVILA, Qwen plugin, V-JEPA+Qwen 결과 JSON을 만든 뒤 아래처럼 묶습니다.
+
+```bash
+python -m repro.colab_verification_report \
+  --output-md /content/autogaze_vjepa_outputs/colab_verification.md \
+  --title "AutoGaze Colab Verification" \
+  --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
+  --query "Describe the video in one short sentence." \
+  --entrypoint-verification-json /content/autogaze_vjepa_outputs/entrypoint_verification.json \
+  --case nvila_keep_all_single=/content/autogaze_vjepa_outputs/nvila_keep_all_single.json \
+  --case nvila_autogaze=/content/autogaze_vjepa_outputs/nvila_autogaze_single.json \
+  --case vjepa_qwen_dense_off=/content/autogaze_vjepa_outputs/vjepa_qwen_dense_off.json \
+  --case autogaze_vjepa_qwen_on=/content/autogaze_vjepa_outputs/autogaze_vjepa_qwen_on.json
+```
+
+여러 단계를 한 번에 smoke로 확인하고 싶을 때만 아래 optional wrapper를 사용합니다. 이 명령은 `verify_autogaze_entrypoints.py`, V-JEPA+Qwen dense/off, AutoGaze+V-JEPA sparse+Qwen on generate를 순서대로 실행하고 같은 report generator로 Markdown을 만듭니다.
 
 ```bash
 python scripts/run_colab_autogaze_cuda_smoke.py \

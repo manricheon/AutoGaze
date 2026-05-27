@@ -262,7 +262,7 @@ subprocess.check_call([
 ])
 ```
 
-한 번에 검증하려면 아래 wrapper를 먼저 사용하세요. 이 명령은 missing checkpoint/video를 내려받고, 모델 로드 없는 entrypoint verifier를 실행한 뒤, 같은 비디오에서 `V-JEPA+Qwen dense/off`와 `AutoGaze+V-JEPA sparse+Qwen on` generate를 순서대로 실행합니다.
+권장 검증 방식은 아래 단계별 셀로 기존 runner를 직접 실행하고, 마지막에 `repro.colab_verification_report`로 결과 JSON을 묶는 것입니다. 여러 단계를 한 번에 smoke로 확인하고 싶을 때는 optional wrapper를 사용할 수 있습니다. 이 명령은 missing checkpoint/video를 내려받고, 모델 로드 없는 entrypoint verifier를 실행한 뒤, 같은 비디오에서 `V-JEPA+Qwen dense/off`와 `AutoGaze+V-JEPA sparse+Qwen on` generate를 순서대로 실행합니다.
 
 ```python
 import json, pathlib, subprocess
@@ -287,7 +287,26 @@ print("verification md:", out_dir / "colab_verification.md")
 
 통과 기준은 `summary.passed=true`, `results.vjepa_qwen_dense_off.status=passed`, `results.autogaze_vjepa_qwen_on.status=passed`입니다. AutoGaze on 결과에서는 `tokens.vjepa_selected_tokens < tokens.vjepa_raw_tokens`와 `tokens.qwen_visual_tokens_inserted == tokens.vjepa_selected_tokens`를 확인합니다.
 
-wrapper는 기본적으로 `/content/autogaze_vjepa_outputs/colab_verification.md`도 생성합니다. 이 파일에는 같은 text query에 대한 dense/off 답변과 AutoGaze/on 답변, token/latency/memory 비교, selected-frame grid, V-JEPA token mask, AutoGaze patch overlay 이미지 링크가 들어갑니다. 이미지 산출물은 `/content/autogaze_vjepa_outputs/visualizations/` 아래에 저장됩니다. 시각화를 끄려면 `--no-write-visualizations`, 저장 위치를 바꾸려면 `--visualization-output-dir /content/somewhere`를 사용하세요.
+wrapper는 기본적으로 `/content/autogaze_vjepa_outputs/colab_verification.md`도 생성합니다. 이 파일은 standalone report generator와 같은 renderer를 사용합니다. 같은 text query에 대한 dense/off 답변과 AutoGaze/on 답변, token/latency/memory 비교, selected-frame grid, V-JEPA token mask, AutoGaze patch overlay 이미지 링크가 들어갑니다. 이미지 산출물은 `/content/autogaze_vjepa_outputs/visualizations/` 아래에 저장됩니다. 시각화를 끄려면 `--no-write-visualizations`, 저장 위치를 바꾸려면 `--visualization-output-dir /content/somewhere`를 사용하세요.
+
+wrapper 없이 직접 실행한 결과를 묶을 때는 아래처럼 사용합니다. 없는 JSON이나 실패한 case는 report 생성 자체를 멈추지 않고 `Failures` 섹션에 기록됩니다.
+
+```python
+import pathlib, subprocess
+
+out_dir = pathlib.Path("/content/autogaze_vjepa_outputs")
+subprocess.check_call([
+    "python", "-m", "repro.colab_verification_report",
+    "--output-md", str(out_dir / "colab_verification.md"),
+    "--title", "AutoGaze Colab Verification",
+    "--video", "inputs/hlvid_example/clip_av_video_5_001.mp4",
+    "--query", "Describe the video in one short sentence.",
+    "--entrypoint-verification-json", str(out_dir / "entrypoint_verification_colab_cuda_smoke.json"),
+    "--case", f"vjepa_qwen_dense_off={out_dir / 'vjepa_qwen_dense_off_cuda_smoke.json'}",
+    "--case", f"autogaze_vjepa_qwen_on={out_dir / 'autogaze_vjepa_qwen_on_cuda_smoke.json'}",
+])
+print("verification md:", out_dir / "colab_verification.md")
+```
 
 아래 셀들은 문제가 생겼을 때 단계별로 쪼개서 확인하는 용도입니다.
 
