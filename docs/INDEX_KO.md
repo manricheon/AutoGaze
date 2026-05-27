@@ -44,6 +44,7 @@ AutoGaze를 실제 비디오 MLLM 파이프라인에 붙였을 때 다음을 재
 | Streaming sweep | `python -m repro.stream_profile_sweep` | 여러 stream config 후보를 비교 |
 | Markdown report | `python -m repro.markdown_report` | 단일/benchmark JSON을 표와 SVG chart가 있는 Markdown으로 변환 |
 | Trend report | `python -m repro.aggregate_reports` | 여러 실험 폴더의 JSON을 모아 CSV/Markdown/SVG trend 생성 |
+| Entrypoint verifier | `python scripts/verify_autogaze_entrypoints.py` | NVILA/Qwen/V-JEPA on/off runner, wrapper route, preflight token accounting, report/download helper CLI를 모델 로드 없이 검증 |
 
 ## 기본 Benchmark와 Plugin Benchmark 구분
 
@@ -81,12 +82,13 @@ AutoGaze를 실제 비디오 MLLM 파이프라인에 붙였을 때 다음을 재
 ## 추천 실행 순서
 
 1. NVILA single smoke로 모델/비디오 path 확인
-2. HLVid `--limit 3` 기본 benchmark로 keep-all/autogaze 결과 확인
-3. Markdown report로 latency/token/memory/accuracy 표와 chart 확인
-4. 여러 해상도/프레임/thumbnail 설정을 돌린 뒤 aggregate trend report 생성
-5. 필요한 경우 paper baseline 또는 plugin Qwen/LongVILA 실험으로 확장
-6. V-JEPA 실험은 [AUTOGAZE_VJEPA_POC_KO.md](AUTOGAZE_VJEPA_POC_KO.md)의 Colab CUDA 셀로 actual AutoGaze + V-JEPA + Qwen smoke와 NVILA/Qwen CLI route 확인
-7. CUDA 머신 실험 결과는 [CUDA_RESULTS_TEMPLATE.md](CUDA_RESULTS_TEMPLATE.md)에 맞춰 요약
+2. `scripts/verify_autogaze_entrypoints.py`로 CLI/route/preflight/token accounting 사전 검증
+3. HLVid `--limit 3` 기본 benchmark로 keep-all/autogaze 결과 확인
+4. Markdown report로 latency/token/memory/accuracy 표와 chart 확인
+5. 여러 해상도/프레임/thumbnail 설정을 돌린 뒤 aggregate trend report 생성
+6. 필요한 경우 paper baseline 또는 plugin Qwen/LongVILA 실험으로 확장
+7. V-JEPA 실험은 [AUTOGAZE_VJEPA_POC_KO.md](AUTOGAZE_VJEPA_POC_KO.md)의 Colab CUDA 셀로 actual AutoGaze + V-JEPA + Qwen smoke와 NVILA/Qwen CLI route 확인
+8. CUDA 머신 실험 결과는 [CUDA_RESULTS_TEMPLATE.md](CUDA_RESULTS_TEMPLATE.md)에 맞춰 요약
 
 ## 결과에서 먼저 볼 것
 

@@ -43,6 +43,34 @@ Qwen3-VL 실험은 `qwen-vl-utils`가 필요합니다. 기본 requirements에 �
 .venv/bin/python -m pip install -r requirements-repro.txt
 ```
 
+## 0. Entrypoint 사전 검증
+
+큰 모델 weight를 받거나 CUDA generate를 돌리기 전에, 현재 브랜치의 실행 스크립트와 wrapper route가 깨지지 않았는지 먼저 확인합니다. 이 검증은 NVILA/Qwen/V-JEPA weight를 로드하지 않고 다음을 확인합니다.
+
+- NVILA native on/off runner와 HLVid wrapper CLI
+- Qwen plugin HLVid route와 `qwen_full_vit`, `qwen_chunked_vit`, `qwen_chunked_vit_autogaze_sparse` 모드 분기
+- V-JEPA + Qwen dense/off 및 AutoGaze sparse runner CLI
+- `keep-all-single` preflight가 single-scale 392 기준 `784` patch/frame로 계산되는지
+- V-JEPA sparse encoder hook과 Qwen bridge synthetic smoke
+- download dry-run, Markdown/aggregate report helper CLI
+
+```bash
+.venv/bin/python scripts/verify_autogaze_entrypoints.py \
+  --output-json outputs/autogaze_repro/entrypoint_verification.json \
+  --output-md outputs/autogaze_repro/entrypoint_verification.md
+```
+
+로컬/Colab에서 테스트까지 함께 돌리고 싶으면 `--run-pytest`를 붙입니다.
+
+```bash
+.venv/bin/python scripts/verify_autogaze_entrypoints.py \
+  --run-pytest \
+  --output-json outputs/autogaze_repro/entrypoint_verification_with_tests.json \
+  --output-md outputs/autogaze_repro/entrypoint_verification_with_tests.md
+```
+
+`summary.passed=true`가 아니면 CUDA smoke로 넘어가지 말고, 실패한 `commands` 또는 `checks` 항목을 먼저 고칩니다.
+
 ## 1. NVILA-HD Single Inference Smoke
 
 가장 먼저 단일 비디오로 모델 로드, 비디오 샘플링, AutoGaze, generation, metric logging을 확인합니다.
