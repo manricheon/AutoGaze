@@ -227,7 +227,15 @@ def _vjepa_patch_embeddings(model: Any, pixel_values_videos: Any) -> Any:
     embeddings = getattr(encoder, "embeddings", None)
     if embeddings is None:
         raise ValueError("V-JEPA encoder does not expose embeddings")
+    pixel_values_videos = _ensure_vjepa_video_axis_order(pixel_values_videos)
     return embeddings(pixel_values_videos)
+
+
+def _ensure_vjepa_video_axis_order(pixel_values_videos: Any) -> Any:
+    shape = list(getattr(pixel_values_videos, "shape", []) or [])
+    if len(shape) == 5 and shape[1] != 3 and shape[2] == 3:
+        return pixel_values_videos.permute(0, 2, 1, 3, 4).contiguous()
+    return pixel_values_videos
 
 
 def _qwen_embedding_hidden_size(model: Any) -> int:

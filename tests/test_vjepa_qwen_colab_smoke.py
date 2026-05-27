@@ -3,6 +3,7 @@ from pathlib import Path
 from repro.vjepa_qwen_colab_smoke import (
     DEFAULT_QWEN_MODEL,
     DEFAULT_VJEPA_MODEL,
+    _ensure_vjepa_video_axis_order,
     build_parser,
     qwen_model_class_candidates,
     synthetic_vjepa_pixel_values,
@@ -63,3 +64,26 @@ def test_synthetic_vjepa_pixel_values_use_transformers_video_axis_order():
     )
 
     assert list(values.shape) == [1, 3, 4, 224, 224]
+
+
+def test_ensure_vjepa_video_axis_order_accepts_legacy_temporal_first_tensors():
+    import pytest
+
+    torch = pytest.importorskip("torch")
+
+    legacy = torch.zeros((1, 4, 3, 16, 16), dtype=torch.float32)
+    normalized = _ensure_vjepa_video_axis_order(legacy)
+
+    assert list(normalized.shape) == [1, 3, 4, 16, 16]
+    assert normalized.is_contiguous()
+
+
+def test_ensure_vjepa_video_axis_order_keeps_channel_first_tensors():
+    import pytest
+
+    torch = pytest.importorskip("torch")
+
+    values = torch.zeros((1, 3, 4, 16, 16), dtype=torch.float32)
+    normalized = _ensure_vjepa_video_axis_order(values)
+
+    assert list(normalized.shape) == [1, 3, 4, 16, 16]
