@@ -263,6 +263,7 @@ def test_build_mode_runner_args_for_qwen_vit_comparison_modes():
         "max_new_tokens": 8,
         "qwen_vit_chunk_frames": 16,
         "qwen_vit_max_spatial_chunks": 4,
+        "autogaze_model": "/models/autogaze",
     }
 
     full_args = build_mode_runner_args(mode="qwen_full_vit", **common)
@@ -276,6 +277,8 @@ def test_build_mode_runner_args_for_qwen_vit_comparison_modes():
     assert chunked_args[chunked_args.index("--qwen-vit-max-spatial-chunks") + 1] == "4"
     assert sparse_args[sparse_args.index("--qwen-vit-mode") + 1] == "qwen_chunked_vit_autogaze_sparse"
     assert sparse_args[sparse_args.index("--pre-encoder-prune-adapter") + 1] == "autogaze-sparse"
+    assert sparse_args[sparse_args.index("--autogaze-model") + 1] == "/models/autogaze"
+    assert sparse_args[sparse_args.index("--token-selector-path") + 1] == "/models/autogaze"
     assert "--run-autogaze-selector" in sparse_args
     assert "--enable-qwen-prune-generate" in sparse_args
 

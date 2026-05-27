@@ -57,6 +57,7 @@ def build_plugin_router_parser(*, add_help: bool = False) -> argparse.ArgumentPa
     parser.add_argument("--qwen-vit-chunk-frames", type=int, default=16)
     parser.add_argument("--qwen-vit-max-spatial-chunks", type=int)
     parser.add_argument("--qwen-thumbnail-mode", choices=["none", "append-video"], default="none")
+    parser.add_argument("--autogaze-model", default="weight/AutoGaze")
     parser.add_argument("--video-resize-shortest-edge", type=int)
     parser.add_argument("--video-resize-longest-edge", type=int)
     parser.add_argument("--video-resize-width", type=int)
@@ -126,6 +127,7 @@ def run_plugin_route(argv: list[str]) -> dict:
         qwen_vit_chunk_frames=args.qwen_vit_chunk_frames,
         qwen_vit_max_spatial_chunks=qwen_vit_max_spatial_chunks,
         qwen_thumbnail_mode=args.qwen_thumbnail_mode,
+        autogaze_model=args.autogaze_model,
         video_resize_shortest_edge=args.video_resize_shortest_edge,
         video_resize_longest_edge=args.video_resize_longest_edge,
         video_resize_width=args.video_resize_width,

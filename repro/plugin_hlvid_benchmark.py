@@ -51,6 +51,7 @@ def build_mode_runner_args(
     qwen_vit_chunk_frames: int = 16,
     qwen_vit_max_spatial_chunks: int | None = None,
     qwen_thumbnail_mode: str = "none",
+    autogaze_model: str = "weight/AutoGaze",
     video_resize_shortest_edge: int | None = None,
     video_resize_longest_edge: int | None = None,
     video_resize_width: int | None = None,
@@ -77,6 +78,7 @@ def build_mode_runner_args(
             qwen_video_max_pixels=qwen_video_max_pixels,
             qwen_video_min_pixels=qwen_video_min_pixels,
             qwen_thumbnail_mode=qwen_thumbnail_mode,
+            autogaze_model=autogaze_model,
             video_resize_shortest_edge=video_resize_shortest_edge,
             video_resize_longest_edge=video_resize_longest_edge,
             video_resize_width=video_resize_width,
@@ -103,6 +105,7 @@ def build_mode_runner_args(
             qwen_video_max_pixels=qwen_video_max_pixels,
             qwen_video_min_pixels=qwen_video_min_pixels,
             qwen_thumbnail_mode=qwen_thumbnail_mode,
+            autogaze_model=autogaze_model,
             video_resize_shortest_edge=video_resize_shortest_edge,
             video_resize_longest_edge=video_resize_longest_edge,
             video_resize_width=video_resize_width,
@@ -129,6 +132,7 @@ def build_mode_runner_args(
             qwen_video_max_pixels=qwen_video_max_pixels,
             qwen_video_min_pixels=qwen_video_min_pixels,
             qwen_thumbnail_mode=qwen_thumbnail_mode,
+            autogaze_model=autogaze_model,
             video_resize_shortest_edge=video_resize_shortest_edge,
             video_resize_longest_edge=video_resize_longest_edge,
             video_resize_width=video_resize_width,
@@ -155,6 +159,7 @@ def build_mode_runner_args(
             qwen_video_max_pixels=qwen_video_max_pixels,
             qwen_video_min_pixels=qwen_video_min_pixels,
             qwen_thumbnail_mode=qwen_thumbnail_mode,
+            autogaze_model=autogaze_model,
             video_resize_shortest_edge=video_resize_shortest_edge,
             video_resize_longest_edge=video_resize_longest_edge,
             video_resize_width=video_resize_width,
@@ -202,6 +207,7 @@ def build_mode_runner_args(
             qwen_video_max_pixels=qwen_video_max_pixels,
             qwen_video_min_pixels=qwen_video_min_pixels,
             qwen_thumbnail_mode=qwen_thumbnail_mode,
+            autogaze_model=autogaze_model,
             video_resize_shortest_edge=video_resize_shortest_edge,
             video_resize_longest_edge=video_resize_longest_edge,
             video_resize_width=video_resize_width,
@@ -232,6 +238,7 @@ def build_mode_runner_args(
             qwen_vit_chunk_frames=qwen_vit_chunk_frames,
             qwen_vit_max_spatial_chunks=qwen_vit_max_spatial_chunks or max_tiles_video,
             qwen_thumbnail_mode=qwen_thumbnail_mode,
+            autogaze_model=autogaze_model,
             video_resize_shortest_edge=video_resize_shortest_edge,
             video_resize_longest_edge=video_resize_longest_edge,
             video_resize_width=video_resize_width,
@@ -276,6 +283,7 @@ def build_mode_runner_args(
             qwen_video_max_pixels=qwen_video_max_pixels,
             qwen_video_min_pixels=qwen_video_min_pixels,
             qwen_thumbnail_mode=qwen_thumbnail_mode,
+            autogaze_model=autogaze_model,
             video_resize_shortest_edge=video_resize_shortest_edge,
             video_resize_longest_edge=video_resize_longest_edge,
             video_resize_width=video_resize_width,
@@ -309,6 +317,7 @@ def build_mode_runner_args(
             qwen_video_max_pixels=qwen_video_max_pixels,
             qwen_video_min_pixels=qwen_video_min_pixels,
             qwen_thumbnail_mode=qwen_thumbnail_mode,
+            autogaze_model=autogaze_model,
             video_resize_shortest_edge=video_resize_shortest_edge,
             video_resize_longest_edge=video_resize_longest_edge,
             video_resize_width=video_resize_width,
@@ -339,6 +348,7 @@ def run_plugin_hlvid_benchmark(
     qwen_vit_chunk_frames: int = 16,
     qwen_vit_max_spatial_chunks: int | None = None,
     qwen_thumbnail_mode: str = "none",
+    autogaze_model: str = "weight/AutoGaze",
     video_resize_shortest_edge: int | None = None,
     video_resize_longest_edge: int | None = None,
     video_resize_width: int | None = None,
@@ -374,6 +384,7 @@ def run_plugin_hlvid_benchmark(
                 qwen_vit_chunk_frames=qwen_vit_chunk_frames,
                 qwen_vit_max_spatial_chunks=qwen_vit_max_spatial_chunks,
                 qwen_thumbnail_mode=qwen_thumbnail_mode,
+                autogaze_model=autogaze_model,
                 video_resize_shortest_edge=video_resize_shortest_edge,
                 video_resize_longest_edge=video_resize_longest_edge,
                 video_resize_width=video_resize_width,
@@ -638,6 +649,7 @@ def _base_args(
     qwen_vit_max_spatial_chunks: int | None = None,
     num_video_frames_thumbnail: int = 0,
     qwen_thumbnail_mode: str = "none",
+    autogaze_model: str = "weight/AutoGaze",
     video_resize_shortest_edge: int | None = None,
     video_resize_longest_edge: int | None = None,
     video_resize_width: int | None = None,
@@ -674,7 +686,8 @@ def _base_args(
         str(output_json),
     ]
     if token_selector == "autogaze":
-        args.extend(["--token-selector-path", "weight/AutoGaze"])
+        args.extend(["--token-selector-path", autogaze_model])
+        args.extend(["--autogaze-model", autogaze_model])
         args.extend(["--gazing-ratio", "0.1"])
     if model_family.startswith("qwen"):
         if qwen_video_nframes is not None:
@@ -874,6 +887,7 @@ def main() -> None:
     parser.add_argument("--qwen-vit-chunk-frames", type=int, default=16)
     parser.add_argument("--qwen-vit-max-spatial-chunks", type=int)
     parser.add_argument("--qwen-thumbnail-mode", choices=["none", "append-video"], default="none")
+    parser.add_argument("--autogaze-model", default="weight/AutoGaze")
     parser.add_argument("--video-resize-shortest-edge", type=int)
     parser.add_argument("--video-resize-longest-edge", type=int)
     parser.add_argument("--video-resize-width", type=int)
@@ -898,6 +912,7 @@ def main() -> None:
         qwen_vit_chunk_frames=args.qwen_vit_chunk_frames,
         qwen_vit_max_spatial_chunks=args.qwen_vit_max_spatial_chunks,
         qwen_thumbnail_mode=args.qwen_thumbnail_mode,
+        autogaze_model=args.autogaze_model,
         video_resize_shortest_edge=args.video_resize_shortest_edge,
         video_resize_longest_edge=args.video_resize_longest_edge,
         video_resize_width=args.video_resize_width,
