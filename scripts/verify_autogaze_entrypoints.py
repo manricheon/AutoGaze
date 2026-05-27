@@ -208,6 +208,7 @@ def run_command(name: str, command: list[str], *, env: dict[str, str] | None = N
 
 def run_preflight_checks(python_executable: str, temp_root: Path) -> list[dict[str, Any]]:
     autogaze_json = temp_root / "nvila_preflight_autogaze.json"
+    keep_all_json = temp_root / "nvila_preflight_keep_all.json"
     single_json = temp_root / "nvila_preflight_keep_all_single.json"
     base = [
         python_executable,
@@ -230,6 +231,7 @@ def run_preflight_checks(python_executable: str, temp_root: Path) -> list[dict[s
     ]
     commands = [
         ("nvila_preflight_autogaze", [*base, "--gazing-mode", "autogaze", "--preflight-json", str(autogaze_json)]),
+        ("nvila_preflight_keep_all", [*base, "--gazing-mode", "keep-all", "--preflight-json", str(keep_all_json)]),
         (
             "nvila_preflight_keep_all_single",
             [*base, "--gazing-mode", "keep-all-single", "--preflight-json", str(single_json)],
@@ -241,11 +243,19 @@ def run_preflight_checks(python_executable: str, temp_root: Path) -> list[dict[s
     ]
     if all(item["returncode"] == 0 for item in command_results):
         autogaze = json.loads(autogaze_json.read_text(encoding="utf-8"))
+        keep_all = json.loads(keep_all_json.read_text(encoding="utf-8"))
         single = json.loads(single_json.read_text(encoding="utf-8"))
         checks.append(
             value_check(
                 "nvila_autogaze_preflight_multiscale_slots",
                 autogaze["estimate"]["tokens"]["patches_per_frame_tile"],
+                1060,
+            )
+        )
+        checks.append(
+            value_check(
+                "nvila_keep_all_preflight_multiscale_slots",
+                keep_all["estimate"]["tokens"]["patches_per_frame_tile"],
                 1060,
             )
         )
@@ -486,6 +496,14 @@ def entrypoint_matrix() -> list[dict[str, str]]:
             "vit": "NVILA-HD SigLIP",
             "mllm": "NVILA-HD",
             "verification": "help + preflight + unit tests; actual CUDA generate required separately",
+        },
+        {
+            "id": "nvila_single_keep_all",
+            "entrypoint": "python -m repro.nvila_runner --mode single --gazing-mode keep-all",
+            "selector": "AutoGaze off / multiscale dense",
+            "vit": "NVILA-HD SigLIP",
+            "mllm": "NVILA-HD",
+            "verification": "help + preflight token accounting 1060 slots/frame + unit tests",
         },
         {
             "id": "nvila_single_keep_all_single",

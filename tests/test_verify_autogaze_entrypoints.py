@@ -7,6 +7,7 @@ def test_entrypoint_matrix_covers_required_on_off_families():
     ids = {row["id"] for row in entrypoint_matrix()}
 
     assert "nvila_single_autogaze" in ids
+    assert "nvila_single_keep_all" in ids
     assert "nvila_single_keep_all_single" in ids
     assert "qwen_plugin_hlvid" in ids
     assert "vjepa_qwen_single" in ids
