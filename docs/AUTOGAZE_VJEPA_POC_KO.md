@@ -78,7 +78,8 @@ python -m repro.vjepa_qwen_runner \
   --frames-per-clip 16 \
   --autogaze-chunk-frames 16 \
   --max-tiles-video 1 \
-  --autogaze-target-scales 224 \
+  --autogaze-tile-size 392 \
+  --autogaze-target-scales 56+112+196+392 \
   --autogaze-target-patch-size 16 \
   --vjepa-selection-policy single_scale_union \
   --video-decode-strategy seek \
@@ -99,7 +100,8 @@ python -m repro.vjepa_qwen_runner \
   --device cuda \
   --num-video-frames 16 \
   --frames-per-clip 16 \
-  --autogaze-target-scales 112+224 \
+  --autogaze-tile-size 392 \
+  --autogaze-target-scales 56+112+196+392 \
   --vjepa-selection-policy scale_aware_multi_pass \
   --output-json outputs/autogaze_vjepa/vjepa_qwen_scale_aware_actual.json
 ```
@@ -133,7 +135,8 @@ python -m repro.vjepa_qwen_hlvid_benchmark \
   --frames-per-clip 16 \
   --autogaze-chunk-frames 16 \
   --max-tiles-video 1 \
-  --autogaze-target-scales 224 \
+  --autogaze-tile-size 392 \
+  --autogaze-target-scales 56+112+196+392 \
   --video-decode-strategy seek \
   --video-resize-longest-edge 448 \
   --vjepa-selection-policies single_scale_union,scale_aware_multi_pass
@@ -328,7 +331,8 @@ subprocess.check_call([
     "--frames-per-clip", "16",
     "--autogaze-chunk-frames", "16",
     "--max-tiles-video", "1",
-    "--autogaze-target-scales", "224",
+    "--autogaze-tile-size", "392",
+    "--autogaze-target-scales", "56+112+196+392",
     "--video-decode-strategy", "seek",
     "--video-resize-longest-edge", "448",
     "--output-json", str(out_dir / "actual_autogaze_vjepa_qwen.json"),
