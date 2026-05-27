@@ -20,6 +20,7 @@
 - 저해상도 AutoGaze patch는 V-JEPA grid에서 bbox overlap되는 모든 spatial cell로 확장합니다.
 - scale-aware 모드에서는 scale마다 별도 V-JEPA grid를 두므로 coarse patch가 고해상도 grid로 과도하게 펼쳐지는지 비교할 수 있습니다.
 - 기본 `nvidia/AutoGaze` checkpoint는 V-JEPA/Qwen PoC에서 `--autogaze-tile-size 224`와 `--autogaze-target-scales 32+64+112+224`를 우선 사용합니다. 즉 largest scale은 V-JEPA crop 224에 맞추고, 낮은 해상도 scale도 checkpoint의 scale 개수에 맞춰 함께 둡니다. `56+112+196+392` 같은 NVILA-HD multiscale 설정은 해당 scale 개수를 지원하는 AutoGaze checkpoint에서만 사용하세요.
+- `--gazing-ratio`를 생략하면 AutoGaze checkpoint의 inference 기본 정책을 사용합니다. token 감소율을 명시적으로 sweep하려면 `--gazing-ratio 0.1`, `--gazing-ratio 0.25`처럼 지정합니다.
 - Qwen 연결은 학습된 projector 전까지 `zero_shot_wiring_probe`로만 봅니다.
 
 ```text

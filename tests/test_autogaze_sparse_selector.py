@@ -136,6 +136,18 @@ def test_runtime_config_from_args_carries_runner_video_resize_options():
     assert config.video_resize_height is None
 
 
+def test_runtime_config_keeps_gazing_ratio_none_for_checkpoint_default():
+    config = runtime_config_from_args(
+        SimpleNamespace(
+            video="inputs/example.mp4",
+            output_json="outputs/run.json",
+            autogaze_target_scales="32+64+112+224",
+        )
+    )
+
+    assert config.gazing_ratio is None
+
+
 def test_autogaze_selector_video_plan_uses_resized_dimensions_for_tile_grid():
     config = AutogazeSelectorRuntimeConfig(
         video="inputs/example.mp4",
