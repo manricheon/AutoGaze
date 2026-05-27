@@ -1,4 +1,5 @@
 from scripts.verify_autogaze_entrypoints import check_plugin_qwen_routing
+from scripts.verify_autogaze_entrypoints import dry_run_commands
 from scripts.verify_autogaze_entrypoints import entrypoint_matrix
 from scripts.verify_autogaze_entrypoints import render_markdown
 
@@ -13,6 +14,15 @@ def test_entrypoint_matrix_covers_required_on_off_families():
     assert "vjepa_qwen_single" in ids
     assert "vjepa_qwen_hlvid" in ids
     assert "colab_cuda_smoke_wrapper" in ids
+
+
+def test_dry_run_commands_cover_nvila_qwen_and_vjepa_benchmark_routes(tmp_path):
+    names = [name for name, _command in dry_run_commands("python", tmp_path)]
+
+    assert "hlvid_nvila_prepare_only" in names
+    assert "hlvid_qwen_plugin_route_limit0" in names
+    assert "flexible_qwen_sparse_single_dry_run" in names
+    assert "vjepa_qwen_hlvid_dry_run" in names
 
 
 def test_plugin_qwen_routing_check_requires_sparse_mode_to_run_autogaze():
