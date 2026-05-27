@@ -156,7 +156,7 @@ def _vjepa_patch_embeddings(model: Any, pixel_values_videos: Any) -> Any:
     if embeddings is None:
         raise ValueError("V-JEPA encoder does not expose embeddings")
     original_shape = list(getattr(pixel_values_videos, "shape", []) or [])
-    normalized = _ensure_vjepa_video_axis_order(pixel_values_videos)
+    normalized = _ensure_vjepa_video_axis_order(pixel_values_videos, embedding_module=embeddings)
     normalized_shape = list(getattr(normalized, "shape", []) or [])
     try:
         return embeddings(normalized)

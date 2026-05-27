@@ -50,8 +50,9 @@ def qwen_model_class_candidates() -> list[tuple[str, str]]:
 def synthetic_vjepa_pixel_values(*, frames_per_clip: int, crop_size: int, dtype: Any, device: Any) -> Any:
     import torch
 
-    # Transformers V-JEPA2 embeddings expect video tensors as B, T, C, H, W and
-    # permute to B, C, T, H, W internally before Conv3d patch embedding.
+    # The public V-JEPA2 embeddings wrapper expects B, T, C, H, W, while some
+    # remote-code checkpoints expose the Conv3d patch embedder directly. The
+    # patch embedding boundary below normalizes this tensor per module type.
     return torch.zeros(
         (1, int(frames_per_clip), 3, int(crop_size), int(crop_size)),
         dtype=dtype,
@@ -228,15 +229,39 @@ def _vjepa_patch_embeddings(model: Any, pixel_values_videos: Any) -> Any:
     embeddings = getattr(encoder, "embeddings", None)
     if embeddings is None:
         raise ValueError("V-JEPA encoder does not expose embeddings")
-    pixel_values_videos = _ensure_vjepa_video_axis_order(pixel_values_videos)
-    return embeddings(pixel_values_videos)
+    original_shape = list(getattr(pixel_values_videos, "shape", []) or [])
+    normalized = _ensure_vjepa_video_axis_order(pixel_values_videos, embedding_module=embeddings)
+    normalized_shape = list(getattr(normalized, "shape", []) or [])
+    try:
+        return embeddings(normalized)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "V-JEPA embeddings failed after video axis normalization "
+            f"(embedding_module={type(embeddings).__name__}, "
+            f"original_shape={original_shape}, normalized_shape={normalized_shape})"
+        ) from exc
 
 
-def _ensure_vjepa_video_axis_order(pixel_values_videos: Any) -> Any:
+def _ensure_vjepa_video_axis_order(pixel_values_videos: Any, *, embedding_module: Any | None = None) -> Any:
     shape = list(getattr(pixel_values_videos, "shape", []) or [])
-    if len(shape) == 5 and shape[1] == 3 and shape[2] != 3:
+    if len(shape) != 5:
+        return pixel_values_videos
+    if _embedding_module_handles_temporal_first(embedding_module):
+        if shape[1] == 3 and shape[2] != 3:
+            return pixel_values_videos.permute(0, 2, 1, 3, 4).contiguous()
+        return pixel_values_videos.contiguous() if hasattr(pixel_values_videos, "contiguous") else pixel_values_videos
+    if shape[2] == 3 and shape[1] != 3:
         return pixel_values_videos.permute(0, 2, 1, 3, 4).contiguous()
-    return pixel_values_videos
+    return pixel_values_videos.contiguous() if hasattr(pixel_values_videos, "contiguous") else pixel_values_videos
+
+
+def _embedding_module_handles_temporal_first(embedding_module: Any | None) -> bool:
+    if embedding_module is None:
+        return False
+    if hasattr(embedding_module, "patch_embeddings"):
+        return True
+    class_name = type(embedding_module).__name__
+    return class_name.endswith("Embeddings") and "PatchEmbeddings" not in class_name
 
 
 def _qwen_embedding_hidden_size(model: Any) -> int:

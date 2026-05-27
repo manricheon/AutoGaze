@@ -116,10 +116,12 @@ def test_pil_frames_to_vjepa_pixel_values_shape_and_dtype():
     assert values.device.type == "cpu"
 
 
-def test_runner_vjepa_patch_embedding_boundary_normalizes_legacy_axis_order():
+def test_runner_vjepa_patch_embedding_boundary_supports_wrapper_embeddings():
     torch = pytest.importorskip("torch")
 
     class FakeEmbeddings:
+        patch_embeddings = object()
+
         def __init__(self):
             self.seen_shape = None
 
@@ -135,6 +137,27 @@ def test_runner_vjepa_patch_embedding_boundary_normalizes_legacy_axis_order():
 
     assert embeddings.seen_shape == [1, 16, 3, 8, 8]
     assert list(output.shape) == [1, 16, 3, 8, 8]
+
+
+def test_runner_vjepa_patch_embedding_boundary_supports_direct_patch_embeddings():
+    torch = pytest.importorskip("torch")
+
+    class FakePatchEmbeddings:
+        def __init__(self):
+            self.seen_shape = None
+
+        def __call__(self, values):
+            self.seen_shape = list(values.shape)
+            return values
+
+    embeddings = FakePatchEmbeddings()
+    model = SimpleNamespace(encoder=SimpleNamespace(embeddings=embeddings))
+    values = torch.zeros((1, 16, 3, 8, 8), dtype=torch.float32)
+
+    output = _vjepa_patch_embeddings(model, values)
+
+    assert embeddings.seen_shape == [1, 3, 16, 8, 8]
+    assert list(output.shape) == [1, 3, 16, 8, 8]
 
 
 def test_vjepa_resize_plan_prefers_exact_crop_for_encoder_inputs():
