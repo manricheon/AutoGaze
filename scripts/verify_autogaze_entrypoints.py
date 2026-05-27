@@ -123,6 +123,24 @@ def help_commands(python_executable: str) -> list[tuple[str, list[str]]]:
 
 
 def dry_run_commands(python_executable: str, temp_root: Path) -> list[tuple[str, list[str]]]:
+    mini_hlvid = temp_root / "mini_hlvid"
+    mini_videos = mini_hlvid / "videos"
+    mini_videos.mkdir(parents=True, exist_ok=True)
+    (mini_videos / "clip.mp4").write_bytes(b"fake-video")
+    mini_manifest = mini_hlvid / "manifest.jsonl"
+    mini_manifest.write_text(
+        json.dumps(
+            {
+                "question_id": "mini-001",
+                "category": "smoke",
+                "video_path": "clip.mp4",
+                "question": "What happens?",
+                "answer": "A",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     return [
         (
             "download_vjepa_qwen_dry_run",
@@ -158,6 +176,32 @@ def dry_run_commands(python_executable: str, temp_root: Path) -> list[tuple[str,
                 str(temp_root / "weights"),
                 "--video",
                 "inputs/hlvid_example/clip_av_video_5_001.mp4",
+            ],
+        ),
+        (
+            "vjepa_qwen_hlvid_dry_run",
+            [
+                python_executable,
+                "-m",
+                "repro.vjepa_qwen_hlvid_benchmark",
+                "--manifest",
+                str(mini_manifest),
+                "--video-root",
+                str(mini_videos),
+                "--output-dir",
+                str(temp_root / "vjepa_qwen_hlvid_dry_run"),
+                "--dry-run",
+                "--limit",
+                "1",
+                "--vjepa-qwen-modes",
+                "dense_off,autogaze_single_grid",
+                "--autogaze-model",
+                "weight/AutoGaze",
+                "--vjepa-model",
+                "weight/VJEPA",
+                "--qwen-model",
+                "weight/Qwen",
+                "--require-cuda",
             ],
         ),
     ]
@@ -551,7 +595,7 @@ def entrypoint_matrix() -> list[dict[str, str]]:
             "selector": "dense_off, autogaze_single_grid, autogaze_scale_aware",
             "vit": "V-JEPA2 dense/sparse",
             "mllm": "Qwen bridge/generate",
-            "verification": "help + unit tests; actual CUDA HLVid required separately",
+            "verification": "help + dry-run + unit tests; actual CUDA HLVid required separately",
         },
         {
             "id": "colab_cuda_smoke_wrapper",

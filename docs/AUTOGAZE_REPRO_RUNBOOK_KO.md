@@ -51,6 +51,7 @@ Qwen3-VL 실험은 `qwen-vl-utils`가 필요합니다. 기본 requirements에 �
 - NVILA native on/off runner와 HLVid wrapper CLI
 - Qwen plugin HLVid route와 `qwen_full_vit`, `qwen_chunked_vit`, `qwen_chunked_vit_autogaze_sparse` 모드 분기
 - V-JEPA + Qwen dense/off 및 AutoGaze sparse runner CLI
+- V-JEPA + Qwen HLVid wrapper `--dry-run`이 `dense_off`와 `autogaze_single_grid` runner plan을 생성하는지
 - `keep-all` preflight가 multiscale 기준 `1060` patch/frame, `keep-all-single` preflight가 single-scale 392 기준 `784` patch/frame로 계산되는지
 - V-JEPA sparse encoder hook과 Qwen bridge synthetic smoke
 - download dry-run, Markdown/aggregate report helper CLI

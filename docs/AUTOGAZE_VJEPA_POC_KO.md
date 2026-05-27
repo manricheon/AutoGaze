@@ -150,6 +150,21 @@ python -m repro.vjepa_qwen_runner \
 
 HLVid manifest와 mp4 root가 있으면 같은 runner를 여러 row에 대해 반복 실행할 수 있습니다.
 
+CUDA에서 실제 모델을 로드하기 전에 `--dry-run`으로 row/mode별 runner argument가 맞게 만들어지는지 먼저 확인할 수 있습니다. 이 명령은 checkpoint를 로드하지 않고 `vjepa_qwen_hlvid_dry_run_plan.json`만 생성합니다.
+
+```bash
+python -m repro.vjepa_qwen_hlvid_benchmark \
+  --manifest /data/HLVid/test.jsonl \
+  --video-root /data/HLVid/videos \
+  --output-dir outputs/autogaze_vjepa/hlvid_dry_run \
+  --dry-run \
+  --limit 3 \
+  --autogaze-model weight/AutoGaze \
+  --vjepa-model weight/vjepa2-vitl-fpc64-256 \
+  --qwen-model weight/Qwen2.5-VL-3B-Instruct \
+  --vjepa-qwen-modes dense_off,autogaze_single_grid
+```
+
 ```bash
 python -m repro.vjepa_qwen_hlvid_benchmark \
   --manifest /data/HLVid/test.jsonl \

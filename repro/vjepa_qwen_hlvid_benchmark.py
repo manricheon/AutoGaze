@@ -25,6 +25,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--video-root", required=True)
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--limit", type=int)
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Build the per-row runner plan without loading V-JEPA, Qwen, or AutoGaze weights.",
+    )
     parser.add_argument("--continue-on-error", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--vjepa-qwen-modes",
@@ -169,6 +174,8 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     if args.limit is not None:
         rows = rows[: int(args.limit)]
     modes = resolve_modes(args)
+    if getattr(args, "dry_run", False):
+        return build_dry_run_plan(args=args, rows=rows, modes=modes, output_dir=output_dir, runs_dir=runs_dir)
     predictions: list[dict[str, Any]] = []
     runner_parser = build_runner_parser()
 
@@ -221,6 +228,70 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "markdown": str(report_path),
         },
     }
+
+
+def build_dry_run_plan(
+    *,
+    args: argparse.Namespace,
+    rows: list[dict[str, Any]],
+    modes: list[str],
+    output_dir: Path,
+    runs_dir: Path,
+) -> dict[str, Any]:
+    plan = []
+    runner_parser = build_runner_parser()
+    for mode in modes:
+        for row_index, row in enumerate(rows):
+            video_path = resolve_hlvid_video_path(args.video_root, str(row["video_path"]))
+            run_json = runs_dir / mode / f"{row_index:05d}.json"
+            runner_argv = build_runner_args_for_row(
+                row=row,
+                video_path=video_path,
+                output_json=run_json,
+                mode=mode,
+                benchmark_args=args,
+            )
+            parsed = runner_parser.parse_args(runner_argv)
+            plan.append(
+                {
+                    "mode": mode,
+                    "row_index": row_index,
+                    "question_id": row.get("question_id"),
+                    "video_path": str(video_path),
+                    "output_json": str(run_json),
+                    "autogaze_mode": parsed.autogaze_mode,
+                    "vjepa_selection_policy": parsed.vjepa_selection_policy,
+                    "requires_cuda": bool(parsed.require_cuda),
+                    "runner_argv": runner_argv,
+                }
+            )
+    summary = {
+        "dry_run": True,
+        "row_count": len(rows),
+        "mode_count": len(modes),
+        "planned_run_count": len(plan),
+        "modes": modes,
+    }
+    plan_path = output_dir / "vjepa_qwen_hlvid_dry_run_plan.json"
+    payload = {
+        "runner": "repro.vjepa_qwen_hlvid_benchmark",
+        "summary": summary,
+        "artifacts": {"dry_run_plan": str(plan_path)},
+        "config": {
+            "manifest": str(args.manifest),
+            "video_root": str(args.video_root),
+            "output_dir": str(output_dir),
+            "autogaze_model": str(args.autogaze_model),
+            "vjepa_model": str(args.vjepa_model),
+            "qwen_model": str(args.qwen_model),
+            "num_video_frames": int(args.num_video_frames),
+            "frames_per_clip": int(args.frames_per_clip),
+            "autogaze_target_scales": str(args.autogaze_target_scales),
+        },
+        "plan": plan,
+    }
+    write_json(plan_path, payload)
+    return payload
 
 
 def resolve_modes(args: argparse.Namespace) -> list[str]:

@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from repro.vjepa_qwen_hlvid_benchmark import build_parser, build_runner_args_for_row, resolve_modes
+import json
+
+from repro.vjepa_qwen_hlvid_benchmark import build_parser, build_runner_args_for_row, resolve_modes, run_benchmark
 
 
 def test_vjepa_qwen_hlvid_defaults_are_smoke_safe():
@@ -100,3 +102,56 @@ def test_build_runner_args_for_dense_off_disables_autogaze(tmp_path):
 
     assert argv[argv.index("--autogaze-mode") + 1] == "off"
     assert argv[argv.index("--vjepa-selection-policy") + 1] == "single_scale_union"
+
+
+def test_vjepa_qwen_hlvid_dry_run_writes_dense_and_autogaze_plan(tmp_path):
+    manifest = tmp_path / "manifest.jsonl"
+    video_root = tmp_path / "videos"
+    video_root.mkdir()
+    (video_root / "clip.mp4").write_bytes(b"fake")
+    manifest.write_text(
+        json.dumps(
+                {
+                    "question_id": "q1",
+                    "category": "smoke",
+                    "video_path": "clip.mp4",
+                    "question": "What happens?",
+                "answer": "A",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    args = build_parser().parse_args(
+        [
+            "--manifest",
+            str(manifest),
+            "--video-root",
+            str(video_root),
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--dry-run",
+            "--vjepa-qwen-modes",
+            "dense_off,autogaze_single_grid",
+            "--autogaze-model",
+            "weights/AutoGaze",
+            "--vjepa-model",
+            "weights/VJEPA",
+            "--qwen-model",
+            "weights/Qwen",
+            "--require-cuda",
+        ]
+    )
+
+    payload = run_benchmark(args)
+    plan_path = Path(payload["artifacts"]["dry_run_plan"])
+    modes = [row["mode"] for row in payload["plan"]]
+
+    assert payload["summary"]["dry_run"] is True
+    assert payload["summary"]["planned_run_count"] == 2
+    assert modes == ["dense_off", "autogaze_single_grid"]
+    assert payload["plan"][0]["autogaze_mode"] == "off"
+    assert payload["plan"][1]["autogaze_mode"] == "on"
+    assert payload["plan"][1]["requires_cuda"] is True
+    assert plan_path.exists()
