@@ -1,0 +1,49 @@
+from pathlib import Path
+
+from repro.vjepa_qwen_colab_smoke import (
+    DEFAULT_QWEN_MODEL,
+    DEFAULT_VJEPA_MODEL,
+    build_parser,
+    qwen_model_class_candidates,
+)
+
+
+def test_colab_smoke_defaults_are_cuda_and_qwen25():
+    args = build_parser().parse_args([])
+
+    assert args.require_cuda is True
+    assert args.device == "cuda"
+    assert args.qwen_model == DEFAULT_QWEN_MODEL
+    assert args.qwen_model == "Qwen/Qwen2.5-VL-3B-Instruct"
+    assert args.vjepa_model == DEFAULT_VJEPA_MODEL
+    assert args.output_json == "outputs/autogaze_vjepa/colab_vjepa_qwen_smoke.json"
+
+
+def test_colab_smoke_can_point_to_local_checkpoint_paths(tmp_path):
+    qwen = tmp_path / "Qwen2.5-VL-3B-Instruct"
+    vjepa = tmp_path / "vjepa2-vitl-fpc64-256"
+
+    args = build_parser().parse_args(
+        [
+            "--qwen-model",
+            str(qwen),
+            "--vjepa-model",
+            str(vjepa),
+            "--frames-per-clip",
+            "4",
+            "--crop-size",
+            "224",
+        ]
+    )
+
+    assert Path(args.qwen_model) == qwen
+    assert Path(args.vjepa_model) == vjepa
+    assert args.frames_per_clip == 4
+    assert args.crop_size == 224
+
+
+def test_qwen_model_class_candidates_prefer_image_text_to_text():
+    names = [name for name, _ in qwen_model_class_candidates()]
+
+    assert names[0] == "AutoModelForImageTextToText"
+    assert "AutoModelForVision2Seq" in names

@@ -74,6 +74,25 @@ def test_run_mapping_probe_can_run_tiny_sparse_encoder_smoke(tmp_path):
     assert payload["vjepa_sparse_encoder_smoke"]["metrics"]["selected_token_count"] == payload["vjepa"]["selected_token_count"]
 
 
+def test_run_mapping_probe_can_include_qwen_bridge_smoke(tmp_path):
+    pytest.importorskip("torch")
+
+    payload = run_mapping_probe(
+        sparse_selection_plan=build_synthetic_sparse_selection_plan(),
+        frames_per_clip=4,
+        tubelet_size=2,
+        crop_size=224,
+        patch_size=16,
+        qwen_bridge_smoke=True,
+        output_json=tmp_path / "qwen_bridge.json",
+        output_md=tmp_path / "qwen_bridge.md",
+    )
+
+    assert payload["vjepa_qwen_bridge_smoke"]["status"] == "passed"
+    assert payload["vjepa_qwen_bridge_smoke"]["bridge_metadata"]["visual_tokens_inserted"] == payload["vjepa"]["selected_token_count"]
+    assert "V-JEPA To Qwen Bridge Smoke" in (tmp_path / "qwen_bridge.md").read_text()
+
+
 def test_vjepa_poc_main_writes_synthetic_outputs(tmp_path):
     output_json = tmp_path / "main.json"
     output_md = tmp_path / "main.md"
@@ -87,6 +106,7 @@ def test_vjepa_poc_main_writes_synthetic_outputs(tmp_path):
             str(output_md),
             "--scale-aware",
             "--tiny-encoder-smoke",
+            "--qwen-bridge-smoke",
         ]
     )
 

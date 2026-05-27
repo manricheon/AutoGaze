@@ -96,6 +96,7 @@ def run_mapping_probe(
     patch_size: int,
     include_scale_aware: bool = False,
     tiny_encoder_smoke: bool = False,
+    qwen_bridge_smoke: bool = False,
     output_json: str | Path | None = None,
     output_md: str | Path | None = None,
 ) -> dict[str, Any]:
@@ -132,6 +133,14 @@ def run_mapping_probe(
             grid_config=grid_config,
             selected_token_indices=selection.selected_token_indices,
         )
+    if qwen_bridge_smoke:
+        from repro.plugins.vjepa_qwen_bridge import run_fake_qwen_bridge_smoke
+
+        payload["vjepa_qwen_bridge_smoke"] = run_fake_qwen_bridge_smoke(
+            selected_token_count=max(1, len(selection.selected_token_indices)),
+            vjepa_hidden_size=72,
+            qwen_hidden_size=128,
+        )
     if output_json is not None:
         write_json(output_json, payload)
     if output_md is not None:
@@ -157,6 +166,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run a random-weight tiny V-JEPA encoder on selected embeddings to verify the sparse hook.",
     )
+    parser.add_argument(
+        "--qwen-bridge-smoke",
+        action="store_true",
+        help="Run a fake Qwen generate smoke that packs selected V-JEPA tokens as Qwen video embeddings.",
+    )
     parser.add_argument("--output-json", default="outputs/autogaze_vjepa/vjepa_mapping_probe.json")
     parser.add_argument("--output-md", default="outputs/autogaze_vjepa/vjepa_mapping_probe.md")
     return parser
@@ -179,6 +193,7 @@ def main(argv: list[str] | None = None) -> int:
         patch_size=args.patch_size,
         include_scale_aware=args.scale_aware,
         tiny_encoder_smoke=args.tiny_encoder_smoke,
+        qwen_bridge_smoke=args.qwen_bridge_smoke,
         output_json=args.output_json,
         output_md=args.output_md,
     )
@@ -211,6 +226,13 @@ def _summary_for_stdout(payload: dict[str, Any]) -> dict[str, Any]:
             "status": smoke["status"],
             "metrics": smoke["metrics"],
             "last_hidden_state_shape": smoke["last_hidden_state_shape"],
+        }
+    if "vjepa_qwen_bridge_smoke" in payload:
+        smoke = payload["vjepa_qwen_bridge_smoke"]
+        summary["vjepa_qwen_bridge_smoke"] = {
+            "status": smoke["status"],
+            "visual_tokens_inserted": smoke["bridge_metadata"]["visual_tokens_inserted"],
+            "accuracy_status": smoke["bridge_metadata"]["accuracy_status"],
         }
     return summary
 
@@ -285,6 +307,22 @@ def _write_markdown_report(path: str | Path, payload: dict[str, Any]) -> None:
                 f"- last_hidden_state_shape: `{smoke['last_hidden_state_shape']}`",
                 f"- position_mask_shape: `{smoke['position_mask_shape']}`",
                 f"- encoder_token_reduction_ratio: `{smoke['metrics']['encoder_token_reduction_ratio']}`",
+            ]
+        )
+    if "vjepa_qwen_bridge_smoke" in payload:
+        smoke = payload["vjepa_qwen_bridge_smoke"]
+        metadata = smoke["bridge_metadata"]
+        lines.extend(
+            [
+                "",
+                "## V-JEPA To Qwen Bridge Smoke",
+                "",
+                f"- status: `{smoke['status']}`",
+                f"- visual_tokens_inserted: `{metadata['visual_tokens_inserted']}`",
+                f"- qwen_hidden_size: `{metadata['qwen_hidden_size']}`",
+                f"- projection: `{metadata['projection']}`",
+                f"- accuracy_status: `{metadata['accuracy_status']}`",
+                f"- inputs_embeds_shape: `{smoke['generate_kwargs']['inputs_embeds_shape']}`",
             ]
         )
     lines.extend(
