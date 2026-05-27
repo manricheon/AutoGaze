@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import time
+from functools import wraps
 from typing import Any
 
 import numpy as np
@@ -276,6 +277,7 @@ def run_direct_autogaze_selector(config: AutogazeSelectorRuntimeConfig) -> dict[
     processor_load_ms = _elapsed_ms(start)
     start = time.perf_counter()
     model = move_model_to_device_dtype(AutoGaze.from_pretrained(config.autogaze_model), device, dtype)
+    patch_autogaze_inputs_embeds_generate_compat(model)
     model.eval()
     model_load_ms = _elapsed_ms(start)
 
@@ -492,6 +494,52 @@ def ensure_transformers_tied_weight_compat(model_cls: Any) -> None:
         model_cls.all_tied_weights_keys = {}
     if not hasattr(model_cls, "_tied_weights_keys"):
         model_cls._tied_weights_keys = []
+
+
+def patch_autogaze_inputs_embeds_generate_compat(model: Any) -> bool:
+    """Patch AutoGaze decoder generation for newer Transformers inputs_embeds handling."""
+    gaze_decoder = getattr(getattr(model, "gazing_model", None), "gaze_decoder", None)
+    if gaze_decoder is None or getattr(gaze_decoder, "_autogaze_inputs_embeds_generate_compat", False):
+        return False
+    original_generate = gaze_decoder.generate
+
+    @wraps(original_generate)
+    def generate_with_inputs_embeds_prefix(*args: Any, **kwargs: Any) -> Any:
+        inputs_embeds = kwargs.get("inputs_embeds")
+        if inputs_embeds is None or kwargs.get("input_ids") is not None:
+            return original_generate(*args, **kwargs)
+        prefix_len = int(inputs_embeds.shape[1])
+        if prefix_len <= 0:
+            return original_generate(*args, **kwargs)
+        max_new_tokens = kwargs.get("max_new_tokens")
+        kwargs["input_ids"] = _dummy_generation_input_ids(inputs_embeds)
+        if max_new_tokens is not None:
+            kwargs["max_new_tokens"] = prefix_len + _int_scalar(max_new_tokens)
+        output = original_generate(*args, **kwargs)
+        sequences = getattr(output, "sequences", None)
+        if sequences is not None and int(sequences.shape[1]) >= prefix_len:
+            output.sequences = sequences[:, prefix_len:]
+        return output
+
+    gaze_decoder.generate = generate_with_inputs_embeds_prefix
+    gaze_decoder._autogaze_inputs_embeds_generate_compat = True
+    return True
+
+
+def _dummy_generation_input_ids(inputs_embeds: Any) -> Any:
+    import torch
+
+    return torch.zeros(
+        (int(inputs_embeds.shape[0]), int(inputs_embeds.shape[1])),
+        dtype=torch.long,
+        device=inputs_embeds.device,
+    )
+
+
+def _int_scalar(value: Any) -> int:
+    if hasattr(value, "detach"):
+        return int(value.detach().cpu().item())
+    return int(value)
 
 
 def runtime_config_from_args(args: Any) -> AutogazeSelectorRuntimeConfig:

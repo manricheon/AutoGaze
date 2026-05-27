@@ -8,6 +8,7 @@ from repro.plugins.autogaze_sparse_selector import (
     build_autogaze_selector_video_plan,
     build_sparse_selection_plan_from_autogaze_outputs,
     ensure_transformers_tied_weight_compat,
+    patch_autogaze_inputs_embeds_generate_compat,
     runtime_config_from_args,
 )
 from repro.plugins.gaze_plan import qwen_visual_indices_from_sparse_plan
@@ -182,3 +183,38 @@ def test_ensure_transformers_tied_weight_compat_adds_newer_transformers_attrs():
 
     assert LegacyAutoGaze.all_tied_weights_keys == {}
     assert LegacyAutoGaze._tied_weights_keys == []
+
+
+def test_patch_autogaze_inputs_embeds_generate_compat_adds_and_strips_dummy_prefix():
+    class FakeGenerateOutput:
+        def __init__(self, sequences):
+            self.sequences = sequences
+
+    class FakeDecoder:
+        def __init__(self):
+            self.calls = []
+
+        def generate(self, *args, **kwargs):
+            self.calls.append(kwargs)
+            prefix = kwargs["input_ids"]
+            new_tokens = torch.tensor([[7, 8, 9]], device=prefix.device, dtype=prefix.dtype)
+            return FakeGenerateOutput(torch.cat([prefix, new_tokens], dim=1))
+
+    class FakeGazingModel:
+        def __init__(self):
+            self.gaze_decoder = FakeDecoder()
+
+    class FakeAutoGaze:
+        def __init__(self):
+            self.gazing_model = FakeGazingModel()
+
+    model = FakeAutoGaze()
+    patched = patch_autogaze_inputs_embeds_generate_compat(model)
+    embeds = torch.zeros((1, 5, 4))
+
+    output = model.gazing_model.gaze_decoder.generate(inputs_embeds=embeds, max_new_tokens=3)
+
+    assert patched is True
+    assert model.gazing_model.gaze_decoder.calls[-1]["input_ids"].shape == (1, 5)
+    assert model.gazing_model.gaze_decoder.calls[-1]["max_new_tokens"] == 8
+    assert output.sequences.tolist() == [[7, 8, 9]]
