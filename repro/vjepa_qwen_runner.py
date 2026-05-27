@@ -141,9 +141,9 @@ def pil_frames_to_vjepa_pixel_values(
     for frame in frames:
         image = frame.convert("RGB").resize((int(crop_size), int(crop_size)))
         arrays.append(np.asarray(image, dtype=np.float32) / 255.0)
-    values = torch.from_numpy(np.stack(arrays)).permute(3, 0, 1, 2)
-    mean = torch.tensor([0.485, 0.456, 0.406], dtype=values.dtype).view(3, 1, 1, 1)
-    std = torch.tensor([0.229, 0.224, 0.225], dtype=values.dtype).view(3, 1, 1, 1)
+    values = torch.from_numpy(np.stack(arrays)).permute(0, 3, 1, 2)
+    mean = torch.tensor([0.485, 0.456, 0.406], dtype=values.dtype).view(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225], dtype=values.dtype).view(1, 3, 1, 1)
     values = (values - mean) / std
     return values.unsqueeze(0).to(device=device, dtype=dtype)
 

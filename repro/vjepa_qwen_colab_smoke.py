@@ -50,9 +50,10 @@ def qwen_model_class_candidates() -> list[tuple[str, str]]:
 def synthetic_vjepa_pixel_values(*, frames_per_clip: int, crop_size: int, dtype: Any, device: Any) -> Any:
     import torch
 
-    # Transformers V-JEPA patch embedding expects video tensors as B, C, T, H, W.
+    # Transformers V-JEPA2 embeddings expect video tensors as B, T, C, H, W and
+    # permute to B, C, T, H, W internally before Conv3d patch embedding.
     return torch.zeros(
-        (1, 3, int(frames_per_clip), int(crop_size), int(crop_size)),
+        (1, int(frames_per_clip), 3, int(crop_size), int(crop_size)),
         dtype=dtype,
         device=device,
     )
@@ -233,7 +234,7 @@ def _vjepa_patch_embeddings(model: Any, pixel_values_videos: Any) -> Any:
 
 def _ensure_vjepa_video_axis_order(pixel_values_videos: Any) -> Any:
     shape = list(getattr(pixel_values_videos, "shape", []) or [])
-    if len(shape) == 5 and shape[1] != 3 and shape[2] == 3:
+    if len(shape) == 5 and shape[1] == 3 and shape[2] != 3:
         return pixel_values_videos.permute(0, 2, 1, 3, 4).contiguous()
     return pixel_values_videos
 
