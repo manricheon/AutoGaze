@@ -47,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-batch-size-autogaze", type=int, default=16)
     parser.add_argument("--gazing-ratio", type=float)
     parser.add_argument("--task-loss-requirement", type=float)
-    parser.add_argument("--autogaze-target-scales", default="224")
+    parser.add_argument("--autogaze-target-scales", default="32+64+112+224")
     parser.add_argument("--autogaze-target-patch-size", type=int, default=16)
     parser.add_argument("--autogaze-encoder-patch-size", type=int)
     parser.add_argument("--autogaze-generate-only", action="store_true")
