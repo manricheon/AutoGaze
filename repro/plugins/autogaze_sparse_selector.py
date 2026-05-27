@@ -489,7 +489,7 @@ def run_direct_autogaze_selector(config: AutogazeSelectorRuntimeConfig) -> dict[
 def ensure_transformers_tied_weight_compat(model_cls: Any) -> None:
     """Patch older local AutoGaze classes for newer Transformers loaders."""
     if not hasattr(model_cls, "all_tied_weights_keys"):
-        model_cls.all_tied_weights_keys = []
+        model_cls.all_tied_weights_keys = {}
     if not hasattr(model_cls, "_tied_weights_keys"):
         model_cls._tied_weights_keys = []
 

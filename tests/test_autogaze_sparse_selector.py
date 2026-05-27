@@ -180,5 +180,5 @@ def test_ensure_transformers_tied_weight_compat_adds_newer_transformers_attrs():
 
     ensure_transformers_tied_weight_compat(LegacyAutoGaze)
 
-    assert LegacyAutoGaze.all_tied_weights_keys == []
+    assert LegacyAutoGaze.all_tied_weights_keys == {}
     assert LegacyAutoGaze._tied_weights_keys == []
