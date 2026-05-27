@@ -47,6 +47,16 @@ def qwen_model_class_candidates() -> list[tuple[str, str]]:
     ]
 
 
+def synthetic_vjepa_pixel_values(*, frames_per_clip: int, crop_size: int, dtype: Any, device: Any) -> Any:
+    import torch
+
+    return torch.zeros(
+        (1, int(frames_per_clip), 3, int(crop_size), int(crop_size)),
+        dtype=dtype,
+        device=device,
+    )
+
+
 def run_colab_smoke(args: argparse.Namespace) -> dict[str, Any]:
     import torch
     from transformers import AutoModel, AutoTokenizer
@@ -72,8 +82,9 @@ def run_colab_smoke(args: argparse.Namespace) -> dict[str, Any]:
     )
     vjepa.eval().to(device)
 
-    pixel_values_videos = torch.zeros(
-        (1, 3, grid_config.frames_per_clip, grid_config.crop_size, grid_config.crop_size),
+    pixel_values_videos = synthetic_vjepa_pixel_values(
+        frames_per_clip=grid_config.frames_per_clip,
+        crop_size=grid_config.crop_size,
         dtype=dtype,
         device=device,
     )

@@ -5,6 +5,7 @@ from repro.vjepa_qwen_colab_smoke import (
     DEFAULT_VJEPA_MODEL,
     build_parser,
     qwen_model_class_candidates,
+    synthetic_vjepa_pixel_values,
 )
 
 
@@ -47,3 +48,18 @@ def test_qwen_model_class_candidates_prefer_image_text_to_text():
 
     assert names[0] == "AutoModelForImageTextToText"
     assert "AutoModelForVision2Seq" in names
+
+
+def test_synthetic_vjepa_pixel_values_use_transformers_video_axis_order():
+    import pytest
+
+    torch = pytest.importorskip("torch")
+
+    values = synthetic_vjepa_pixel_values(
+        frames_per_clip=4,
+        crop_size=224,
+        dtype=torch.float32,
+        device="cpu",
+    )
+
+    assert list(values.shape) == [1, 4, 3, 224, 224]
