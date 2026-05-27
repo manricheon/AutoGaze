@@ -50,6 +50,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--autogaze-target-patch-size", type=int, default=16)
     parser.add_argument("--prompt", default="Describe the video in one short sentence.")
     parser.add_argument("--summary-json", default=None)
+    parser.add_argument("--verification-md", default=None)
+    parser.add_argument("--write-visualizations", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--visualization-output-dir")
+    parser.add_argument("--visualization-max-frames", type=int, default=4)
     return parser
 
 
@@ -58,6 +62,11 @@ def main(argv: list[str] | None = None) -> None:
     payload = run_smoke(args)
     summary_json = Path(args.summary_json) if args.summary_json else Path(args.output_root) / "colab_autogaze_cuda_smoke_summary.json"
     if not args.dry_run:
+        verification_md = Path(args.verification_md) if args.verification_md else Path(args.output_root) / "colab_verification.md"
+        payload.setdefault("paths", {})["summary_json"] = str(summary_json)
+        payload.setdefault("paths", {})["verification_md"] = str(verification_md)
+        verification_md.parent.mkdir(parents=True, exist_ok=True)
+        verification_md.write_text(render_colab_verification_markdown(payload, output_md=verification_md), encoding="utf-8")
         summary_json.parent.mkdir(parents=True, exist_ok=True)
         summary_json.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     print(json.dumps(summarize_for_stdout(payload, summary_json), indent=2, sort_keys=True))
@@ -157,6 +166,7 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
             "weights_root": str(weights_root),
             "video": str(args.video),
         },
+        "prompt": str(args.prompt),
         "commands": commands,
         "results": compact_results(results),
         "failures": failures,
@@ -275,6 +285,16 @@ def vjepa_qwen_command(
                 str(args.autogaze_target_patch_size),
             ]
         )
+    if getattr(args, "write_visualizations", False):
+        viz_root = Path(args.visualization_output_dir) if args.visualization_output_dir else Path(args.output_root) / "visualizations"
+        command.extend(
+            [
+                "--visualization-output-dir",
+                str(viz_root),
+                "--visualization-max-frames",
+                str(args.visualization_max_frames),
+            ]
+        )
     return command
 
 
@@ -352,6 +372,8 @@ def compact_results(results: dict[str, Any]) -> dict[str, Any]:
             "autogaze_mode": payload.get("autogaze_mode"),
             "tokens": payload.get("tokens"),
             "latency_ms": payload.get("latency_ms"),
+            "memory_bytes": payload.get("memory_bytes"),
+            "visualizations": payload.get("visualizations"),
             "failure": payload.get("failure"),
             "generated_text": payload.get("generated_text"),
         }
@@ -414,9 +436,173 @@ def summarize_for_stdout(payload: dict[str, Any], summary_json: Path) -> dict[st
     return {
         "summary": payload.get("summary"),
         "summary_json": str(summary_json),
+        "verification_md": (payload.get("paths") or {}).get("verification_md"),
         "results": payload.get("results"),
         "failures": payload.get("failures"),
     }
+
+
+def render_colab_verification_markdown(payload: dict[str, Any], *, output_md: str | Path) -> str:
+    output_path = Path(output_md)
+    results = payload.get("results") or {}
+    dense = results.get("vjepa_qwen_dense_off") or {}
+    autogaze = results.get("autogaze_vjepa_qwen_on") or {}
+    verifier = results.get("entrypoint_verifier") or {}
+    summary = payload.get("summary") or {}
+    paths = payload.get("paths") or {}
+    prompt = payload.get("prompt") or ""
+    lines = [
+        "# Colab Verification",
+        "",
+        "## Environment",
+        "",
+        f"- status: `{summary.get('passed')}`",
+        f"- commands: `{summary.get('command_count')}`",
+        f"- failed: `{summary.get('failed_count')}`",
+        f"- elapsed_ms: `{_fmt(summary.get('elapsed_ms'))}`",
+        f"- repo_root: `{paths.get('repo_root')}`",
+        f"- output_root: `{paths.get('output_root')}`",
+        f"- weights_root: `{paths.get('weights_root')}`",
+        "",
+        "## Query / Video",
+        "",
+        f"- video: `{paths.get('video')}`",
+        f"- text_query: `{prompt}`",
+        "",
+        "## Case Summary",
+        "",
+        "| case | status | answer | total ms | V-JEPA tokens | Qwen visual tokens | peak memory |",
+        "|---|---|---|---:|---:|---:|---:|",
+        _case_summary_row("dense/off", dense),
+        _case_summary_row("AutoGaze/on", autogaze),
+        "",
+        "## Token And Latency Details",
+        "",
+        "| metric | dense/off | AutoGaze/on |",
+        "|---|---:|---:|",
+    ]
+    for key in (
+        "autogaze_raw_patch_tokens",
+        "autogaze_selected_patch_tokens",
+        "autogaze_reduction_ratio",
+        "vjepa_raw_tokens",
+        "vjepa_selected_tokens",
+        "vjepa_reduction_ratio",
+        "qwen_visual_tokens_inserted",
+        "qwen_context_tokens",
+    ):
+        lines.append(f"| {key} | {_metric(dense, 'tokens', key)} | {_metric(autogaze, 'tokens', key)} |")
+    for key in (
+        "video_metadata_read",
+        "vjepa_video_decode_resize",
+        "autogaze_selector_total",
+        "vjepa_sparse_encode",
+        "qwen_bridge_pack",
+        "qwen_generate",
+        "total",
+    ):
+        lines.append(f"| latency_ms.{key} | {_metric(dense, 'latency_ms', key)} | {_metric(autogaze, 'latency_ms', key)} |")
+    lines.extend(
+        [
+            "",
+            "## Dense Off Result",
+            "",
+            f"- status: `{dense.get('status')}`",
+            f"- answer: {dense.get('generated_text') or ''}",
+            "",
+            *_artifact_lines(dense, output_path),
+            "",
+            "## AutoGaze On Result",
+            "",
+            f"- status: `{autogaze.get('status')}`",
+            f"- answer: {autogaze.get('generated_text') or ''}",
+            "",
+            *_artifact_lines(autogaze, output_path),
+            "",
+            "## Entrypoint Verification",
+            "",
+            f"- status: `{verifier.get('status')}`",
+            f"- summary: `{json.dumps(verifier.get('summary') or {}, sort_keys=True)}`",
+            f"- verified_script_ids: `{', '.join(str(item) for item in verifier.get('verified_script_ids') or [])}`",
+            "",
+            "## Artifacts",
+            "",
+            f"- summary_json: `{paths.get('summary_json') or ''}`",
+            f"- verification_md: `{paths.get('verification_md') or str(output_path)}`",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _case_summary_row(label: str, result: dict[str, Any]) -> str:
+    tokens = result.get("tokens") or {}
+    latency = result.get("latency_ms") or {}
+    return (
+        f"| {label} | `{result.get('status')}` | {markdown_escape(str(result.get('generated_text') or ''))} | "
+        f"{_fmt(latency.get('total'))} | {_fmt(tokens.get('vjepa_selected_tokens'))} / {_fmt(tokens.get('vjepa_raw_tokens'))} | "
+        f"{_fmt(tokens.get('qwen_visual_tokens_inserted'))} | {_fmt_bytes(_peak_memory(result))} |"
+    )
+
+
+def _artifact_lines(result: dict[str, Any], output_md: Path) -> list[str]:
+    visualizations = result.get("visualizations") or {}
+    lines: list[str] = []
+    for label, key in (
+        ("selected frames", "selected_frames_grid_image"),
+        ("V-JEPA token mask", "vjepa_token_mask_image"),
+        ("AutoGaze overlay", "autogaze_overlay_image"),
+    ):
+        path = visualizations.get(key)
+        if path:
+            link = _markdown_path(path, output_md)
+            lines.append(f"### {label}")
+            lines.append("")
+            lines.append(f"![{label}]({link})")
+            lines.append("")
+            lines.append(f"`{path}`")
+            lines.append("")
+    if not lines:
+        lines.append("_No visualization artifacts recorded._")
+    return lines
+
+
+def _metric(result: dict[str, Any], section: str, key: str) -> str:
+    return _fmt((result.get(section) or {}).get(key))
+
+
+def _peak_memory(result: dict[str, Any]) -> Any:
+    memory = result.get("memory_bytes") or {}
+    return memory.get("cuda_peak_total") or max(
+        [value for value in memory.values() if isinstance(value, (int, float))],
+        default=None,
+    )
+
+
+def _fmt(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        return f"{value:.2f}"
+    return str(value)
+
+
+def _fmt_bytes(value: Any) -> str:
+    if not isinstance(value, (int, float)):
+        return ""
+    return f"{float(value) / (1024 ** 3):.3f} GiB"
+
+
+def _markdown_path(path: str, output_md: Path) -> str:
+    artifact = Path(path)
+    try:
+        return artifact.relative_to(output_md.parent).as_posix()
+    except ValueError:
+        return artifact.as_posix()
+
+
+def markdown_escape(value: str) -> str:
+    return value.replace("|", "\\|").replace("\n", " ")
 
 
 def tail(text: str, limit: int = 8000) -> str:

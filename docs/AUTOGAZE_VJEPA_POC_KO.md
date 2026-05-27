@@ -282,9 +282,12 @@ subprocess.check_call([
 summary = json.loads((out_dir / "colab_autogaze_cuda_smoke_summary.json").read_text())
 print(json.dumps(summary["summary"], indent=2))
 print(json.dumps(summary["results"], indent=2))
+print("verification md:", out_dir / "colab_verification.md")
 ```
 
 통과 기준은 `summary.passed=true`, `results.vjepa_qwen_dense_off.status=passed`, `results.autogaze_vjepa_qwen_on.status=passed`입니다. AutoGaze on 결과에서는 `tokens.vjepa_selected_tokens < tokens.vjepa_raw_tokens`와 `tokens.qwen_visual_tokens_inserted == tokens.vjepa_selected_tokens`를 확인합니다.
+
+wrapper는 기본적으로 `/content/autogaze_vjepa_outputs/colab_verification.md`도 생성합니다. 이 파일에는 같은 text query에 대한 dense/off 답변과 AutoGaze/on 답변, token/latency/memory 비교, selected-frame grid, V-JEPA token mask, AutoGaze patch overlay 이미지 링크가 들어갑니다. 이미지 산출물은 `/content/autogaze_vjepa_outputs/visualizations/` 아래에 저장됩니다. 시각화를 끄려면 `--no-write-visualizations`, 저장 위치를 바꾸려면 `--visualization-output-dir /content/somewhere`를 사용하세요.
 
 아래 셀들은 문제가 생겼을 때 단계별로 쪼개서 확인하는 용도입니다.
 

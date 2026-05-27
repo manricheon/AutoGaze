@@ -8,7 +8,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Callable
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from repro.common import resolve_device, synchronize, write_json
 from repro.hlvid_example_autogaze import read_video_metadata
@@ -113,6 +113,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-new-tokens", type=int, default=32)
     parser.add_argument("--attn-implementation", default="eager")
     parser.add_argument("--clear-cuda-cache-between-stages", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--visualization-output-dir")
+    parser.add_argument("--visualization-max-frames", type=int, default=4)
     return parser
 
 
@@ -331,6 +333,20 @@ def run_actual_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         "memory_bytes": memory_bytes,
         "generated_text": generated_text,
     }
+    if args.visualization_output_dir:
+        viz_start = time.perf_counter()
+        payload["visualizations"] = write_vjepa_qwen_visualization_artifacts(
+            frames=frames,
+            sparse_plan=sparse_plan,
+            selection=selection,
+            output_dir=Path(args.visualization_output_dir),
+            run_label=f"vjepa_qwen_{args.autogaze_mode}",
+            autogaze_mode=str(args.autogaze_mode),
+            crop_size=int(args.crop_size),
+            patch_size=int(args.patch_size),
+            max_frames=int(args.visualization_max_frames),
+        )
+        payload["visualizations"]["write_ms"] = (time.perf_counter() - viz_start) * 1000.0
     return payload
 
 
@@ -622,7 +638,158 @@ def write_markdown_summary(path: str | Path, payload: dict[str, Any]) -> None:
             "",
         ]
     )
+    visualizations = payload.get("visualizations") or {}
+    if visualizations:
+        lines.extend(["## Visualizations", ""])
+        for key in ("selected_frames_grid_image", "vjepa_token_mask_image", "autogaze_overlay_image"):
+            if visualizations.get(key):
+                lines.append(f"- {key}: `{visualizations[key]}`")
+        lines.append("")
     target.write_text("\n".join(lines))
+
+
+def write_vjepa_qwen_visualization_artifacts(
+    *,
+    frames: list[Image.Image],
+    sparse_plan: SparseSelectionPlan | None,
+    selection: VjepaTokenSelection,
+    output_dir: str | Path,
+    run_label: str,
+    autogaze_mode: str,
+    crop_size: int,
+    patch_size: int,
+    max_frames: int = 4,
+) -> dict[str, Any]:
+    target = Path(output_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    safe_label = _safe_artifact_label(run_label)
+    visible_frames = [frame.convert("RGB") for frame in frames[: max(1, int(max_frames))]]
+
+    selected_grid_path = target / f"{safe_label}_selected_frames.png"
+    _make_frame_grid(visible_frames).save(selected_grid_path)
+
+    token_mask_path = target / f"{safe_label}_vjepa_token_mask.png"
+    _make_vjepa_token_mask_image(selection, cell_size=14).save(token_mask_path)
+
+    overlay_path: Path | None = None
+    overlay_status = "skipped_autogaze_off"
+    if autogaze_mode == "on" and sparse_plan is not None and sparse_plan.selected_patches:
+        overlay_path = target / f"{safe_label}_autogaze_overlay.png"
+        _make_autogaze_overlay_grid(visible_frames, sparse_plan=sparse_plan, max_frames=max_frames).save(overlay_path)
+        overlay_status = "written"
+    elif autogaze_mode == "on":
+        overlay_status = "skipped_no_selected_patches"
+
+    return {
+        "status": "written",
+        "output_dir": str(target),
+        "selected_frames_grid_image": str(selected_grid_path),
+        "vjepa_token_mask_image": str(token_mask_path),
+        "autogaze_overlay_image": str(overlay_path) if overlay_path is not None else None,
+        "autogaze_overlay_status": overlay_status,
+        "frame_count_rendered": len(visible_frames),
+        "coordinate_space": "vjepa_crop_frame",
+        "token_mask": {
+            "grid_thw": selection.grid_thw,
+            "raw_tokens": selection.raw_token_count,
+            "selected_tokens": selection.selected_token_count,
+            "patch_size": int(patch_size),
+            "crop_size": int(crop_size),
+        },
+    }
+
+
+def _make_frame_grid(frames: list[Image.Image]) -> Image.Image:
+    if not frames:
+        return Image.new("RGB", (1, 1), color=(255, 255, 255))
+    width = max(frame.width for frame in frames)
+    height = max(frame.height for frame in frames)
+    columns = min(4, len(frames))
+    rows = (len(frames) + columns - 1) // columns
+    canvas = Image.new("RGB", (columns * width, rows * height), color=(20, 20, 20))
+    for index, frame in enumerate(frames):
+        resized = frame.resize((width, height))
+        x = (index % columns) * width
+        y = (index // columns) * height
+        canvas.paste(resized, (x, y))
+    return canvas
+
+
+def _make_autogaze_overlay_grid(
+    frames: list[Image.Image],
+    *,
+    sparse_plan: SparseSelectionPlan,
+    max_frames: int,
+) -> Image.Image:
+    overlays = []
+    selected_by_order: dict[int, list[Any]] = {}
+    for patch in sparse_plan.selected_patches:
+        selected_by_order.setdefault(int(patch.frame_order), []).append(patch)
+    colors = [
+        (255, 64, 64, 88),
+        (64, 160, 255, 88),
+        (64, 220, 120, 88),
+        (255, 190, 64, 88),
+        (190, 96, 255, 88),
+    ]
+    for order, frame in enumerate(frames[: max(1, int(max_frames))]):
+        base = frame.convert("RGBA")
+        overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay, "RGBA")
+        for patch in selected_by_order.get(order, []):
+            color = colors[int(patch.scale_id) % len(colors)]
+            bbox = _scale_bbox_to_frame(patch.bbox_resized_xyxy, sparse_plan, base.size)
+            draw.rectangle(bbox, fill=color)
+        overlays.append(Image.alpha_composite(base, overlay).convert("RGB"))
+    return _make_frame_grid(overlays)
+
+
+def _make_vjepa_token_mask_image(selection: VjepaTokenSelection, *, cell_size: int = 12) -> Image.Image:
+    grid_t, grid_h, grid_w = selection.grid_thw
+    margin = 8
+    label_h = 14
+    tile_w = grid_w * cell_size
+    tile_h = grid_h * cell_size + label_h
+    canvas = Image.new("RGB", (grid_t * (tile_w + margin) + margin, tile_h + margin * 2), color=(250, 250, 250))
+    draw = ImageDraw.Draw(canvas)
+    selected = set(int(index) for index in selection.selected_token_indices)
+    for t in range(grid_t):
+        origin_x = margin + t * (tile_w + margin)
+        origin_y = margin + label_h
+        draw.text((origin_x, margin), f"tubelet {t}", fill=(50, 50, 50))
+        for row in range(grid_h):
+            for col in range(grid_w):
+                token_index = t * grid_h * grid_w + row * grid_w + col
+                x0 = origin_x + col * cell_size
+                y0 = origin_y + row * cell_size
+                fill = (31, 119, 180) if token_index in selected else (230, 230, 230)
+                draw.rectangle([x0, y0, x0 + cell_size - 1, y0 + cell_size - 1], fill=fill)
+    return canvas
+
+
+def _scale_bbox_to_frame(bbox: list[int], sparse_plan: SparseSelectionPlan, frame_size: tuple[int, int]) -> list[int]:
+    width, height = frame_size
+    resized_w = sparse_plan.preprocess_space.resized_width or width
+    resized_h = sparse_plan.preprocess_space.resized_height or height
+    if resized_w <= 0 or resized_h <= 0:
+        resized_w, resized_h = width, height
+    x0, y0, x1, y1 = [float(value) for value in bbox]
+    return [
+        max(0, min(width, round(x0 * width / resized_w))),
+        max(0, min(height, round(y0 * height / resized_h))),
+        max(0, min(width, round(x1 * width / resized_w))),
+        max(0, min(height, round(y1 * height / resized_h))),
+    ]
+
+
+def _safe_artifact_label(label: str) -> str:
+    safe = []
+    for char in str(label):
+        if char.isalnum() or char in {"-", "_"}:
+            safe.append(char)
+        else:
+            safe.append("_")
+    return "".join(safe).strip("_") or "run"
 
 
 def main(argv: list[str] | None = None) -> int:

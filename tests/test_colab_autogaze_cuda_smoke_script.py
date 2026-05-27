@@ -5,6 +5,7 @@ from scripts.run_colab_autogaze_cuda_smoke import (
     DEFAULT_WEIGHTS_ROOT,
     build_parser,
     compact_results,
+    render_colab_verification_markdown,
     result_failures,
     run_smoke,
     vjepa_qwen_command,
@@ -158,3 +159,69 @@ def test_compact_results_exposes_entrypoint_verifier_script_matrix():
     assert verifier["status"] is True
     assert verifier["verified_script_ids"] == ["nvila_single_autogaze", "vjepa_qwen_hlvid"]
     assert verifier["dry_run_commands"] == ["download_qwen_dry_run", "vjepa_qwen_hlvid_dry_run"]
+
+
+def test_render_colab_verification_markdown_compares_answers_tokens_and_visuals(tmp_path):
+    payload = {
+        "summary": {"passed": True, "command_count": 3, "failed_count": 0, "elapsed_ms": 1234.0},
+        "paths": {
+            "repo_root": "/content/AutoGaze",
+            "output_root": str(tmp_path),
+            "weights_root": "/content/autogaze_weights",
+            "video": "inputs/example.mp4",
+        },
+        "prompt": "What is happening?",
+        "results": {
+            "vjepa_qwen_dense_off": {
+                "status": "passed",
+                "autogaze_mode": "off",
+                "generated_text": "A person is cooking.",
+                "tokens": {
+                    "vjepa_raw_tokens": 1568,
+                    "vjepa_selected_tokens": 1568,
+                    "qwen_visual_tokens_inserted": 1568,
+                },
+                "latency_ms": {"total": 100.0, "qwen_generate": 20.0},
+                "memory_bytes": {"cuda_peak_total": 1024},
+                "visualizations": {
+                    "selected_frames_grid_image": str(tmp_path / "dense_frames.png"),
+                    "vjepa_token_mask_image": str(tmp_path / "dense_mask.png"),
+                },
+            },
+            "autogaze_vjepa_qwen_on": {
+                "status": "passed",
+                "autogaze_mode": "on",
+                "generated_text": "A person prepares food.",
+                "tokens": {
+                    "autogaze_raw_patch_tokens": 4240,
+                    "autogaze_selected_patch_tokens": 16,
+                    "vjepa_raw_tokens": 1568,
+                    "vjepa_selected_tokens": 8,
+                    "qwen_visual_tokens_inserted": 8,
+                },
+                "latency_ms": {"total": 120.0, "autogaze_selector_total": 10.0, "qwen_generate": 5.0},
+                "memory_bytes": {"cuda_peak_total": 2048},
+                "visualizations": {
+                    "selected_frames_grid_image": str(tmp_path / "ag_frames.png"),
+                    "vjepa_token_mask_image": str(tmp_path / "ag_mask.png"),
+                    "autogaze_overlay_image": str(tmp_path / "ag_overlay.png"),
+                },
+            },
+            "entrypoint_verifier": {
+                "status": True,
+                "summary": {"passed": True, "command_count": 18, "check_count": 26},
+                "verified_script_ids": ["nvila_single_autogaze", "vjepa_qwen_single"],
+            },
+        },
+    }
+
+    markdown = render_colab_verification_markdown(payload, output_md=tmp_path / "colab_verification.md")
+
+    assert "# Colab Verification" in markdown
+    assert "What is happening?" in markdown
+    assert "A person is cooking." in markdown
+    assert "A person prepares food." in markdown
+    assert "1568" in markdown
+    assert "8" in markdown
+    assert "ag_overlay.png" in markdown
+    assert "nvila_single_autogaze" in markdown

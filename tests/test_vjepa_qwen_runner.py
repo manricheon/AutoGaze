@@ -1,15 +1,27 @@
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from PIL import Image
 
 from repro.plugins.autogaze_sparse_selector import AutogazeSelectorRuntimeConfig
+from repro.plugins.gaze_plan import (
+    EncoderMapping,
+    MllmMapping,
+    PatchSpace,
+    PreprocessSpace,
+    SelectedPatch,
+    SourceVideo,
+    SparseSelectionPlan,
+)
+from repro.plugins.vjepa_mapping import VjepaGridConfig, VjepaTokenSelection
 from repro.vjepa_qwen_runner import (
     _vjepa_patch_embeddings,
     build_parser,
     build_selector_config_from_args,
     pil_frames_to_vjepa_pixel_values,
     vjepa_resize_plan_from_args,
+    write_vjepa_qwen_visualization_artifacts,
 )
 
 
@@ -137,3 +149,58 @@ def test_vjepa_resize_plan_prefers_exact_crop_for_encoder_inputs():
     resize = vjepa_resize_plan_from_args(args)
 
     assert resize == {"width": 224, "height": 224, "mode": "exact"}
+
+
+def test_write_vjepa_qwen_visualization_artifacts_saves_grid_mask_and_overlay(tmp_path):
+    frames = [
+        Image.new("RGB", (64, 64), color=(255, 255, 255)),
+        Image.new("RGB", (64, 64), color=(220, 220, 220)),
+    ]
+    plan = SparseSelectionPlan(
+        selector_name="autogaze",
+        source_video=SourceVideo(path="video.mp4", sampled_frame_indices=[0, 1]),
+        preprocess_space=PreprocessSpace(resized_width=64, resized_height=64, tile_size=64),
+        patch_space=PatchSpace(autogaze_patch_size=16, encoder_patch_size=16, scale_ids=[0], scale_sizes=[64]),
+        selected_patches=[
+            SelectedPatch(
+                frame_index=0,
+                frame_order=0,
+                tile_id=0,
+                scale_id=0,
+                scale_size=64,
+                patch_index=0,
+                bbox_resized_xyxy=[0, 0, 32, 32],
+                bbox_original_xyxy=[0.0, 0.0, 32.0, 32.0],
+                autoregressive_order=0,
+            )
+        ],
+        encoder_mapping=EncoderMapping(status="mapped"),
+        mllm_mapping=MllmMapping(status="mapped"),
+        raw_patch_tokens=16,
+        selected_patch_tokens=1,
+    )
+    selection = VjepaTokenSelection(
+        status="mapped",
+        grid_config=VjepaGridConfig(frames_per_clip=2, tubelet_size=2, crop_size=64, patch_size=16),
+        selected_token_indices=[0, 1],
+        selected_tokens_by_scale={"0": 2},
+    )
+
+    artifacts = write_vjepa_qwen_visualization_artifacts(
+        frames=frames,
+        sparse_plan=plan,
+        selection=selection,
+        output_dir=tmp_path,
+        run_label="ag_on",
+        autogaze_mode="on",
+        crop_size=64,
+        patch_size=16,
+        max_frames=2,
+    )
+
+    assert artifacts["status"] == "written"
+    assert Path(artifacts["selected_frames_grid_image"]).exists()
+    assert Path(artifacts["vjepa_token_mask_image"]).exists()
+    assert Path(artifacts["autogaze_overlay_image"]).exists()
+    assert artifacts["autogaze_overlay_status"] == "written"
+    assert artifacts["token_mask"]["selected_tokens"] == 2
