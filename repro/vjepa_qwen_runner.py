@@ -153,7 +153,16 @@ def _vjepa_patch_embeddings(model: Any, pixel_values_videos: Any) -> Any:
     embeddings = getattr(encoder, "embeddings", None)
     if embeddings is None:
         raise ValueError("V-JEPA encoder does not expose embeddings")
-    return embeddings(_ensure_vjepa_video_axis_order(pixel_values_videos))
+    original_shape = list(getattr(pixel_values_videos, "shape", []) or [])
+    normalized = _ensure_vjepa_video_axis_order(pixel_values_videos)
+    normalized_shape = list(getattr(normalized, "shape", []) or [])
+    try:
+        return embeddings(normalized)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "V-JEPA embeddings failed after video axis normalization "
+            f"(original_shape={original_shape}, normalized_shape={normalized_shape})"
+        ) from exc
 
 
 def run_actual_pipeline(args: argparse.Namespace) -> dict[str, Any]:
