@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from repro.vjepa_qwen_hlvid_benchmark import build_parser, build_runner_args_for_row
+from repro.vjepa_qwen_hlvid_benchmark import build_parser, build_runner_args_for_row, resolve_modes
 
 
 def test_vjepa_qwen_hlvid_defaults_are_smoke_safe():
@@ -21,7 +21,9 @@ def test_vjepa_qwen_hlvid_defaults_are_smoke_safe():
     assert args.frames_per_clip == 16
     assert args.autogaze_tile_size == 392
     assert args.autogaze_target_scales == "56+112+196+392"
+    assert args.vjepa_qwen_modes == ""
     assert args.vjepa_selection_policies == "single_scale_union"
+    assert resolve_modes(args) == ["autogaze_single_grid"]
 
 
 def test_build_runner_args_for_row_uses_question_as_prompt(tmp_path):
@@ -37,7 +39,7 @@ def test_build_runner_args_for_row_uses_question_as_prompt(tmp_path):
         row=row,
         video_path=Path("/videos/clip.mp4"),
         output_json=output_json,
-        policy="scale_aware_multi_pass",
+        mode="autogaze_scale_aware",
         benchmark_args=build_parser().parse_args(
             [
                 "--manifest",
@@ -64,6 +66,37 @@ def test_build_runner_args_for_row_uses_question_as_prompt(tmp_path):
 
     assert argv[argv.index("--video") + 1] == "/videos/clip.mp4"
     assert argv[argv.index("--prompt") + 1] == "What is happening?"
+    assert argv[argv.index("--autogaze-mode") + 1] == "on"
     assert argv[argv.index("--vjepa-selection-policy") + 1] == "scale_aware_multi_pass"
     assert argv[argv.index("--autogaze-model") + 1] == "weights/AutoGaze"
     assert argv[argv.index("--num-video-frames") + 1] == "32"
+
+
+def test_build_runner_args_for_dense_off_disables_autogaze(tmp_path):
+    row = {
+        "question_id": "q1",
+        "video_path": "clip.mp4",
+        "question": "What is happening?",
+        "answer": "A",
+    }
+    output_json = tmp_path / "run.json"
+
+    argv = build_runner_args_for_row(
+        row=row,
+        video_path=Path("/videos/clip.mp4"),
+        output_json=output_json,
+        mode="dense_off",
+        benchmark_args=build_parser().parse_args(
+            [
+                "--manifest",
+                "manifest.jsonl",
+                "--video-root",
+                "/videos",
+                "--output-dir",
+                str(tmp_path),
+            ]
+        ),
+    )
+
+    assert argv[argv.index("--autogaze-mode") + 1] == "off"
+    assert argv[argv.index("--vjepa-selection-policy") + 1] == "single_scale_union"

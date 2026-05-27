@@ -16,6 +16,7 @@ def test_vjepa_qwen_runner_defaults_wire_actual_autogaze():
     args = build_parser().parse_args(["--video", "inputs/example.mp4"])
 
     assert args.video == "inputs/example.mp4"
+    assert args.autogaze_mode == "on"
     assert args.autogaze_model == "nvidia/AutoGaze"
     assert args.vjepa_model == "facebook/vjepa2-vitl-fpc64-256"
     assert args.qwen_model == "Qwen/Qwen2.5-VL-3B-Instruct"
@@ -26,6 +27,15 @@ def test_vjepa_qwen_runner_defaults_wire_actual_autogaze():
     assert args.autogaze_target_scales == "56+112+196+392"
     assert args.vjepa_selection_policy == "single_scale_union"
     assert args.output_json.endswith("vjepa_qwen_actual.json")
+
+
+def test_vjepa_qwen_runner_accepts_dense_off_mode_without_changing_vjepa_defaults():
+    args = build_parser().parse_args(["--video", "inputs/example.mp4", "--autogaze-mode", "off"])
+
+    assert args.autogaze_mode == "off"
+    assert args.vjepa_selection_policy == "single_scale_union"
+    assert args.frames_per_clip == 16
+    assert args.crop_size == 224
 
 
 def test_build_selector_config_from_args_matches_video_sampling_and_resize(tmp_path):

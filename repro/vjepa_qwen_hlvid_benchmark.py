@@ -26,6 +26,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--continue-on-error", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--vjepa-qwen-modes",
+        default="",
+        help=(
+            "Comma-separated run modes: dense_off, autogaze_single_grid, autogaze_scale_aware. "
+            "Use --vjepa-selection-policies for the legacy AutoGaze-only policy list."
+        ),
+    )
     parser.add_argument("--vjepa-selection-policies", default="single_scale_union")
 
     parser.add_argument("--autogaze-repo", default=".")
@@ -71,9 +79,10 @@ def build_runner_args_for_row(
     row: dict[str, Any],
     video_path: Path,
     output_json: Path,
-    policy: str,
+    mode: str,
     benchmark_args: argparse.Namespace,
 ) -> list[str]:
+    autogaze_mode, selection_policy = mode_to_runner_settings(mode)
     argv = [
         "--video",
         str(video_path),
@@ -83,6 +92,8 @@ def build_runner_args_for_row(
         str(output_json),
         "--output-md",
         str(output_json.with_suffix(".md")),
+        "--autogaze-mode",
+        autogaze_mode,
         "--autogaze-repo",
         str(benchmark_args.autogaze_repo),
         "--autogaze-model",
@@ -126,7 +137,7 @@ def build_runner_args_for_row(
         "--vjepa-overlap-threshold",
         str(benchmark_args.vjepa_overlap_threshold),
         "--vjepa-selection-policy",
-        str(policy),
+        selection_policy,
         "--max-new-tokens",
         str(benchmark_args.max_new_tokens),
         "--attn-implementation",
@@ -157,38 +168,38 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     rows = read_manifest_file(args.manifest)
     if args.limit is not None:
         rows = rows[: int(args.limit)]
-    policies = [item.strip() for item in str(args.vjepa_selection_policies).split(",") if item.strip()]
+    modes = resolve_modes(args)
     predictions: list[dict[str, Any]] = []
     runner_parser = build_runner_parser()
 
-    for policy in policies:
+    for mode in modes:
         for row_index, row in enumerate(rows):
             video_path = resolve_hlvid_video_path(args.video_root, str(row["video_path"]))
-            run_json = runs_dir / policy / f"{row_index:05d}.json"
+            run_json = runs_dir / mode / f"{row_index:05d}.json"
             runner_args = runner_parser.parse_args(
                 build_runner_args_for_row(
                     row=row,
                     video_path=video_path,
                     output_json=run_json,
-                    policy=policy,
+                    mode=mode,
                     benchmark_args=args,
                 )
             )
             try:
                 payload = run_actual_pipeline(runner_args)
             except VjepaQwenStageError as exc:
-                payload = _failure_payload(args, row, policy, exc.cause, stage=exc.stage)
+                payload = _failure_payload(args, row, mode, exc.cause, stage=exc.stage)
                 if not args.continue_on_error:
                     write_json(run_json, payload)
                     raise
             except Exception as exc:
-                payload = _failure_payload(args, row, policy, exc, stage="unknown")
+                payload = _failure_payload(args, row, mode, exc, stage="unknown")
                 if not args.continue_on_error:
                     write_json(run_json, payload)
                     raise
             write_json(run_json, payload)
             write_markdown_summary(run_json.with_suffix(".md"), payload)
-            predictions.append(_prediction_from_payload(row, video_path, policy, payload))
+            predictions.append(_prediction_from_payload(row, video_path, mode, payload))
 
     summary, scored = score_predictions(predictions)
     predictions_path = output_dir / "vjepa_qwen_hlvid_predictions.jsonl"
@@ -210,6 +221,32 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "markdown": str(report_path),
         },
     }
+
+
+def resolve_modes(args: argparse.Namespace) -> list[str]:
+    modes = [item.strip() for item in str(args.vjepa_qwen_modes or "").split(",") if item.strip()]
+    if modes:
+        return modes
+    policies = [item.strip() for item in str(args.vjepa_selection_policies).split(",") if item.strip()]
+    return [policy_to_mode(policy) for policy in policies]
+
+
+def policy_to_mode(policy: str) -> str:
+    if policy == "single_scale_union":
+        return "autogaze_single_grid"
+    if policy == "scale_aware_multi_pass":
+        return "autogaze_scale_aware"
+    raise ValueError(f"Unsupported V-JEPA selection policy: {policy}")
+
+
+def mode_to_runner_settings(mode: str) -> tuple[str, str]:
+    if mode == "dense_off":
+        return "off", "single_scale_union"
+    if mode == "autogaze_single_grid":
+        return "on", "single_scale_union"
+    if mode == "autogaze_scale_aware":
+        return "on", "scale_aware_multi_pass"
+    raise ValueError(f"Unsupported V-JEPA+Qwen mode: {mode}")
 
 
 def build_markdown_report(summary: dict[str, Any], predictions: list[dict[str, Any]]) -> str:

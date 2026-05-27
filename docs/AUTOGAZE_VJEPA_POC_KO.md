@@ -10,8 +10,9 @@
 | scale-aware mapping | AutoGaze scale별로 V-JEPA pass를 분리한 token packing 후보 검증 | 안 함 |
 | tiny sparse encoder smoke | random-weight tiny V-JEPA encoder에 selected hidden states만 통과 | 안 함 |
 | Qwen bridge smoke | selected V-JEPA feature를 Qwen visual placeholder embedding으로 삽입 | 안 함 |
-| actual single runner | 실제 video -> AutoGaze -> V-JEPA sparse encoder -> Qwen generate | 안 함 |
-| HLVid wrapper | HLVid row를 순회하며 actual single runner 실행/스코어링 | 참고용 |
+| actual single runner off | 실제 video -> dense V-JEPA keep-all -> Qwen generate | 안 함 |
+| actual single runner on | 실제 video -> AutoGaze -> V-JEPA sparse encoder -> Qwen generate | 안 함 |
+| HLVid wrapper | HLVid row를 순회하며 dense/off와 AutoGaze/on runner 실행/스코어링 | 참고용 |
 
 ## 핵심 정책
 
@@ -45,18 +46,20 @@ video frames
 
 ## 실제 비디오 전체 파이프라인
 
-`repro.vjepa_qwen_runner`는 synthetic plan을 쓰지 않고 실제 비디오에서 AutoGaze를 먼저 실행합니다. 그 다음 AutoGaze가 고른 patch bbox를 V-JEPA token index로 매핑하고, selected token embedding만 V-JEPA encoder block에 통과시킨 뒤 Qwen `inputs_embeds`에 삽입합니다.
+`repro.vjepa_qwen_runner`는 synthetic plan을 쓰지 않고 실제 비디오에서 end-to-end로 실행합니다. `--autogaze-mode off`에서는 V-JEPA token을 전부 keep-all로 통과시키고, `--autogaze-mode on`에서는 AutoGaze가 고른 patch bbox를 V-JEPA token index로 매핑한 뒤 selected token embedding만 V-JEPA encoder block에 통과시킵니다. 두 경우 모두 마지막에는 V-JEPA feature를 Qwen `inputs_embeds`에 삽입합니다.
 
 ```text
 video
   -> sampled frames / optional resize / spatial tile canvas
-  -> AutoGaze actual selector
+  -> [off] dense V-JEPA token selection
+  -> [on]  AutoGaze actual selector
        output: SparseSelectionPlan(selected multiscale patch bbox)
   -> V-JEPA frame sampler
        output: [B, T, C, H, W]
   -> V-JEPA patch embedding
-  -> selected token gather by AutoGaze bbox -> V-JEPA grid/tubelet index
-  -> sparse V-JEPA encoder
+  -> [off] all V-JEPA token indices
+  -> [on]  selected token gather by AutoGaze bbox -> V-JEPA grid/tubelet index
+  -> dense/sparse V-JEPA encoder
   -> deterministic V-JEPA-to-Qwen dim bridge
   -> Qwen generate(inputs_embeds)
 ```
@@ -69,6 +72,7 @@ video
 python -m repro.vjepa_qwen_runner \
   --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
   --prompt "Describe the video in one short sentence." \
+  --autogaze-mode on \
   --autogaze-model weight/AutoGaze \
   --vjepa-model weight/vjepa2-vitl-fpc64-256 \
   --qwen-model weight/Qwen2.5-VL-3B-Instruct \
@@ -89,11 +93,31 @@ python -m repro.vjepa_qwen_runner \
   --output-md outputs/autogaze_vjepa/vjepa_qwen_actual.md
 ```
 
+AutoGaze off dense baseline은 같은 bridge와 Qwen generate를 유지하되 AutoGaze selector를 건너뜁니다. 이 모드는 AutoGaze checkpoint 없이도 V-JEPA/Qwen 모델만 있으면 실행됩니다.
+
+```bash
+python -m repro.vjepa_qwen_runner \
+  --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
+  --prompt "Describe the video in one short sentence." \
+  --autogaze-mode off \
+  --vjepa-model weight/vjepa2-vitl-fpc64-256 \
+  --qwen-model weight/Qwen2.5-VL-3B-Instruct \
+  --device cuda \
+  --dtype float16 \
+  --frames-per-clip 16 \
+  --video-decode-strategy seek \
+  --video-resize-longest-edge 448 \
+  --max-new-tokens 32 \
+  --output-json outputs/autogaze_vjepa/vjepa_qwen_dense_off.json \
+  --output-md outputs/autogaze_vjepa/vjepa_qwen_dense_off.md
+```
+
 멀티스케일을 더 직접적으로 보고 싶으면 아래처럼 scale별 V-JEPA sparse pass를 수행합니다. 이 모드는 더 무겁지만 AutoGaze scale별 index가 V-JEPA grid에서 얼마나 줄어드는지 확인하기 좋습니다.
 
 ```bash
 python -m repro.vjepa_qwen_runner \
   --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
+  --autogaze-mode on \
   --autogaze-model weight/AutoGaze \
   --vjepa-model weight/vjepa2-vitl-fpc64-256 \
   --qwen-model weight/Qwen2.5-VL-3B-Instruct \
@@ -139,7 +163,7 @@ python -m repro.vjepa_qwen_hlvid_benchmark \
   --autogaze-target-scales 56+112+196+392 \
   --video-decode-strategy seek \
   --video-resize-longest-edge 448 \
-  --vjepa-selection-policies single_scale_union,scale_aware_multi_pass
+  --vjepa-qwen-modes dense_off,autogaze_single_grid,autogaze_scale_aware
 ```
 
 생성 파일:
@@ -148,6 +172,12 @@ python -m repro.vjepa_qwen_hlvid_benchmark \
 - `vjepa_qwen_hlvid_scored.jsonl`: HLVid answer parsing 결과
 - `vjepa_qwen_hlvid_summary.json`: aggregate summary
 - `vjepa_qwen_hlvid_report.md`: policy별 요약 markdown
+
+모드 의미:
+
+- `dense_off`: AutoGaze를 건너뛰고 V-JEPA token 전체를 Qwen bridge로 보냅니다.
+- `autogaze_single_grid`: AutoGaze multiscale bbox를 하나의 V-JEPA crop grid로 union 매핑합니다.
+- `autogaze_scale_aware`: AutoGaze scale별로 V-JEPA sparse pass를 분리해서 실행합니다.
 
 ## 로컬 실행
 
@@ -321,6 +351,7 @@ subprocess.check_call([
     "python", "-m", "repro.vjepa_qwen_runner",
     "--video", str(video),
     "--prompt", "Describe the video in one short sentence.",
+    "--autogaze-mode", "on",
     "--autogaze-model", str(weights / "nvidia__AutoGaze"),
     "--vjepa-model", str(weights / "facebook__vjepa2-vitl-fpc64-256"),
     "--qwen-model", str(weights / "Qwen__Qwen2.5-VL-3B-Instruct"),
@@ -342,10 +373,32 @@ subprocess.check_call([
 payload = json.loads((out_dir / "actual_autogaze_vjepa_qwen.json").read_text())
 print(json.dumps({
     "status": payload["status"],
+    "autogaze_mode": payload["autogaze_mode"],
     "tokens": payload["tokens"],
     "latency_ms": payload["latency_ms"],
     "generated_text": payload["generated_text"],
 }, indent=2))
+```
+
+동일 bridge에서 AutoGaze off dense baseline도 바로 비교할 수 있습니다.
+
+```python
+subprocess.check_call([
+    "python", "-m", "repro.vjepa_qwen_runner",
+    "--video", str(video),
+    "--prompt", "Describe the video in one short sentence.",
+    "--autogaze-mode", "off",
+    "--vjepa-model", str(weights / "facebook__vjepa2-vitl-fpc64-256"),
+    "--qwen-model", str(weights / "Qwen__Qwen2.5-VL-3B-Instruct"),
+    "--require-cuda",
+    "--device", "cuda",
+    "--dtype", "float16",
+    "--frames-per-clip", "16",
+    "--video-decode-strategy", "seek",
+    "--video-resize-longest-edge", "448",
+    "--output-json", str(out_dir / "actual_vjepa_qwen_dense_off.json"),
+    "--output-md", str(out_dir / "actual_vjepa_qwen_dense_off.md"),
+])
 ```
 
 ## 실제 AutoGaze output 연결
@@ -374,5 +427,5 @@ python -m repro.vjepa_poc \
 - `vjepa_sparse_encoder_smoke.status=passed`: selected hidden states와 원래 position index를 사용해 V-JEPA encoder layer 호출이 가능한 상태입니다.
 - `vjepa_qwen_bridge_smoke.status=passed`: Qwen visual placeholder에 V-JEPA feature를 삽입하는 wiring이 동작한 상태입니다.
 - `repro.vjepa_qwen_colab_smoke`의 `status=passed`: 실제 V-JEPA checkpoint와 실제 Qwen checkpoint가 CUDA에서 `generate`까지 호출된 상태입니다.
-- `repro.vjepa_qwen_runner`의 `status=passed`: 실제 AutoGaze selector output이 V-JEPA sparse encoder와 Qwen generate까지 이어진 상태입니다.
+- `repro.vjepa_qwen_runner`의 `status=passed`: `autogaze_mode=off`는 dense V-JEPA keep-all baseline, `autogaze_mode=on`은 실제 AutoGaze selector output이 V-JEPA sparse encoder와 Qwen generate까지 이어진 상태입니다.
 - 이 PoC는 Qwen 정확도를 주장하지 않습니다. 현재 bridge는 deterministic repeat/truncate projection이므로, 정확도 주장을 하려면 V-JEPA feature를 Qwen visual embedding space로 맞추는 학습 projector가 필요합니다.

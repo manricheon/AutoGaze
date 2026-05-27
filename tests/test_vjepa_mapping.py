@@ -9,6 +9,7 @@ from repro.plugins.gaze_plan import (
 )
 from repro.plugins.vjepa_mapping import (
     VjepaGridConfig,
+    dense_vjepa_token_selection,
     scale_aware_vjepa_selection_from_sparse_plan,
     vjepa_token_selection_from_sparse_plan,
 )
@@ -197,3 +198,17 @@ def test_vjepa_mapping_handles_non_square_resize_into_square_crop():
     assert selection.selected_token_count == 98
     assert selection.selected_token_indices[0] == 7
     assert selection.selected_token_indices[-1] == 195
+
+
+def test_dense_vjepa_token_selection_keeps_every_vjepa_token():
+    selection = dense_vjepa_token_selection(
+        VjepaGridConfig(frames_per_clip=4, tubelet_size=2, crop_size=224, patch_size=16)
+    )
+
+    assert selection.status == "dense_keep_all"
+    assert selection.raw_token_count == 392
+    assert selection.selected_token_count == 392
+    assert selection.reduction_ratio == 1.0
+    assert selection.selected_token_indices[0] == 0
+    assert selection.selected_token_indices[-1] == 391
+    assert selection.mapping_policy["selector"] == "off"

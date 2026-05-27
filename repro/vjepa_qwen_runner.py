@@ -22,6 +22,7 @@ from repro.plugins.gaze_plan import SparseSelectionPlan, sparse_selection_plan_f
 from repro.plugins.vjepa_mapping import (
     VjepaGridConfig,
     VjepaTokenSelection,
+    dense_vjepa_token_selection,
     scale_aware_vjepa_selection_from_sparse_plan,
     vjepa_token_selection_from_sparse_plan,
 )
@@ -61,6 +62,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-json", default=DEFAULT_OUTPUT_JSON)
     parser.add_argument("--output-md", default=DEFAULT_OUTPUT_MD)
 
+    parser.add_argument(
+        "--autogaze-mode",
+        choices=["on", "off"],
+        default="on",
+        help="Use AutoGaze sparse selection, or keep all V-JEPA tokens as the dense off baseline.",
+    )
     parser.add_argument("--autogaze-repo", default=".")
     parser.add_argument("--autogaze-model", default=DEFAULT_AUTOGAZE_MODEL)
     parser.add_argument("--autogaze-device", default="auto")
@@ -169,12 +176,6 @@ def run_actual_pipeline(args: argparse.Namespace) -> dict[str, Any]:
     if getattr(device, "type", "") == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
 
-    selector_config = build_selector_config_from_args(args)
-    selector_payload = run_stage("autogaze_selector_total", lambda: run_direct_autogaze_selector(selector_config))
-    sparse_plan = load_sparse_selection_plan(selector_payload["sparse_selection_plan_json"])
-    if args.clear_cuda_cache_between_stages:
-        clear_accelerator_cache(torch, device)
-
     video_metadata = run_stage("video_metadata_read", lambda: read_video_metadata(args.video))
     frames, vjepa_decode_stats = run_stage(
         "vjepa_video_decode_resize",
@@ -186,6 +187,16 @@ def run_actual_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         ),
     )
 
+    if args.autogaze_mode == "on":
+        selector_config = build_selector_config_from_args(args)
+        selector_payload = run_stage("autogaze_selector_total", lambda: run_direct_autogaze_selector(selector_config))
+        sparse_plan = load_sparse_selection_plan(selector_payload["sparse_selection_plan_json"])
+        if args.clear_cuda_cache_between_stages:
+            clear_accelerator_cache(torch, device)
+    else:
+        selector_payload = _autogaze_off_payload(args, video_metadata)
+        sparse_plan = None
+
     vjepa = run_stage(
         "vjepa_model_load",
         lambda: AutoModel.from_pretrained(args.vjepa_model, trust_remote_code=True, torch_dtype=dtype),
@@ -194,10 +205,11 @@ def run_actual_pipeline(args: argparse.Namespace) -> dict[str, Any]:
 
     selection, vjepa_result = run_stage(
         "vjepa_sparse_encode",
-        lambda: run_sparse_vjepa_from_plan(
-            vjepa,
-            sparse_plan,
-            frames,
+        lambda: run_vjepa_from_selector_mode(
+            vjepa=vjepa,
+            sparse_plan=sparse_plan,
+            frames=frames,
+            autogaze_mode=str(args.autogaze_mode),
             device=device,
             dtype=dtype,
             frames_per_clip=int(args.frames_per_clip),
@@ -257,6 +269,7 @@ def run_actual_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         "runner": "repro.vjepa_qwen_runner",
         "accuracy_status": "not_claimed",
         "integration_level": "autogaze_actual_to_vjepa_sparse_encoder_to_qwen_inputs_embeds_zero_shot_probe",
+        "autogaze_mode": str(args.autogaze_mode),
         "models": {
             "autogaze": str(args.autogaze_model),
             "vjepa": str(args.vjepa_model),
@@ -276,7 +289,7 @@ def run_actual_pipeline(args: argparse.Namespace) -> dict[str, Any]:
             "latency_ms": selector_payload.get("latency_ms"),
             "preprocess_video_plan": selector_payload.get("preprocess_video_plan"),
         },
-        "sparse_selection_plan_summary": sparse_selection_plan_summary(sparse_plan),
+        "sparse_selection_plan_summary": sparse_selection_plan_summary(sparse_plan) if sparse_plan is not None else None,
         "vjepa_mapping": selection.to_dict()["vjepa"],
         "vjepa_runtime": {
             "decode_stats": vjepa_decode_stats,
@@ -284,9 +297,13 @@ def run_actual_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         },
         "qwen_bridge": bridge_metadata,
         "tokens": {
-            "autogaze_raw_patch_tokens": sparse_plan.raw_patch_tokens,
-            "autogaze_selected_patch_tokens": sparse_plan.selected_patch_tokens,
-            "autogaze_reduction_ratio": _safe_ratio(sparse_plan.raw_patch_tokens, sparse_plan.selected_patch_tokens),
+            "autogaze_raw_patch_tokens": sparse_plan.raw_patch_tokens if sparse_plan is not None else None,
+            "autogaze_selected_patch_tokens": sparse_plan.selected_patch_tokens if sparse_plan is not None else None,
+            "autogaze_reduction_ratio": (
+                _safe_ratio(sparse_plan.raw_patch_tokens, sparse_plan.selected_patch_tokens)
+                if sparse_plan is not None
+                else None
+            ),
             "vjepa_raw_tokens": selection.raw_token_count,
             "vjepa_selected_tokens": selection.selected_token_count,
             "vjepa_reduction_ratio": selection.reduction_ratio,
@@ -298,6 +315,83 @@ def run_actual_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         "generated_text": generated_text,
     }
     return payload
+
+
+def run_vjepa_from_selector_mode(
+    *,
+    vjepa: Any,
+    sparse_plan: SparseSelectionPlan | None,
+    frames: list[Image.Image],
+    autogaze_mode: str,
+    device: Any,
+    dtype: Any,
+    frames_per_clip: int,
+    tubelet_size: int,
+    crop_size: int,
+    patch_size: int,
+    overlap_threshold: float,
+    selection_policy: str,
+) -> tuple[VjepaTokenSelection, dict[str, Any]]:
+    if autogaze_mode == "off":
+        return run_dense_vjepa(
+            vjepa,
+            frames,
+            device=device,
+            dtype=dtype,
+            frames_per_clip=frames_per_clip,
+            tubelet_size=tubelet_size,
+            crop_size=crop_size,
+            patch_size=patch_size,
+        )
+    if sparse_plan is None:
+        raise ValueError("sparse_plan is required when autogaze_mode=on")
+    return run_sparse_vjepa_from_plan(
+        vjepa,
+        sparse_plan,
+        frames,
+        device=device,
+        dtype=dtype,
+        frames_per_clip=frames_per_clip,
+        tubelet_size=tubelet_size,
+        crop_size=crop_size,
+        patch_size=patch_size,
+        overlap_threshold=overlap_threshold,
+        selection_policy=selection_policy,
+    )
+
+
+def run_dense_vjepa(
+    vjepa: Any,
+    frames: list[Image.Image],
+    *,
+    device: Any,
+    dtype: Any,
+    frames_per_clip: int,
+    tubelet_size: int,
+    crop_size: int,
+    patch_size: int,
+) -> tuple[VjepaTokenSelection, dict[str, Any]]:
+    grid_config = VjepaGridConfig(
+        frames_per_clip=frames_per_clip,
+        tubelet_size=tubelet_size,
+        crop_size=crop_size,
+        patch_size=patch_size,
+    )
+    selection = dense_vjepa_token_selection(grid_config)
+    pixel_values = pil_frames_to_vjepa_pixel_values(frames, crop_size=crop_size, dtype=dtype, device=device)
+    with _torch_inference():
+        patch_embeddings = _vjepa_patch_embeddings(vjepa, pixel_values)
+        result = run_vjepa_encoder_on_selected_embeddings(
+            _vjepa_encoder(vjepa),
+            patch_embeddings,
+            selected_token_indices=selection.selected_token_indices,
+        )
+    result["metrics"] = {
+        **result["metrics"],
+        "selection_policy": "dense_off",
+        "passes": 1,
+    }
+    return selection, result
 
 
 def run_sparse_vjepa_from_plan(
@@ -480,6 +574,7 @@ def write_markdown_summary(path: str | Path, payload: dict[str, Any]) -> None:
         f"- status: `{payload.get('status')}`",
         f"- accuracy_status: `{payload.get('accuracy_status')}`",
         f"- integration_level: `{payload.get('integration_level')}`",
+        f"- autogaze_mode: `{payload.get('autogaze_mode')}`",
         f"- video: `{(payload.get('source_video') or {}).get('path')}`",
         "",
         "## Token Summary",
@@ -537,6 +632,7 @@ def _failure_payload(args: argparse.Namespace, exc: BaseException, *, stage: str
         "runner": "repro.vjepa_qwen_runner",
         "accuracy_status": "not_claimed",
         "integration_level": "autogaze_actual_to_vjepa_sparse_encoder_to_qwen_inputs_embeds_zero_shot_probe",
+        "autogaze_mode": str(getattr(args, "autogaze_mode", "unknown")),
         "models": {
             "autogaze": str(getattr(args, "autogaze_model", "")),
             "vjepa": str(getattr(args, "vjepa_model", "")),
@@ -551,6 +647,28 @@ def _failure_payload(args: argparse.Namespace, exc: BaseException, *, stage: str
     }
 
 
+def _autogaze_off_payload(args: argparse.Namespace, video_metadata: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": "not_applicable",
+        "sparse_selection_plan_json": None,
+        "runtime_config": {
+            "autogaze_mode": "off",
+            "num_video_frames": int(getattr(args, "num_video_frames", 0) or 0),
+            "frames_per_clip": int(getattr(args, "frames_per_clip", 0) or 0),
+        },
+        "tokens": {
+            "raw_patch_tokens": None,
+            "selected_patch_tokens": None,
+            "reduction_ratio": None,
+        },
+        "latency_ms": {},
+        "preprocess_video_plan": {
+            "status": "skipped_autogaze_off",
+            "source_video_metadata": video_metadata,
+        },
+    }
+
+
 def _summary_for_stdout(payload: dict[str, Any]) -> dict[str, Any]:
     if payload.get("status") != "passed":
         return payload
@@ -558,6 +676,7 @@ def _summary_for_stdout(payload: dict[str, Any]) -> dict[str, Any]:
         "status": payload["status"],
         "accuracy_status": payload["accuracy_status"],
         "integration_level": payload["integration_level"],
+        "autogaze_mode": payload.get("autogaze_mode"),
         "models": payload["models"],
         "device": payload["device"],
         "tokens": payload["tokens"],

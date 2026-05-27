@@ -101,6 +101,23 @@ class VjepaTokenSelection:
         }
 
 
+def dense_vjepa_token_selection(grid_config: VjepaGridConfig) -> VjepaTokenSelection:
+    selected = list(range(grid_config.raw_token_count))
+    return VjepaTokenSelection(
+        status="dense_keep_all",
+        grid_config=grid_config,
+        selected_token_indices=selected,
+        selected_tokens_by_scale={"dense": len(selected)},
+        mapping_policy={
+            "selector": "off",
+            "temporal": "all_tubelets",
+            "spatial": "all_grid_cells",
+            "multiscale": "not_applicable",
+        },
+        reason=f"AutoGaze disabled; keeping all {len(selected)} V-JEPA tokens",
+    )
+
+
 def vjepa_token_selection_from_sparse_plan(
     plan: SparseSelectionPlan,
     grid_config: VjepaGridConfig,
