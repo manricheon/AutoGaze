@@ -118,6 +118,7 @@ def help_commands(python_executable: str) -> list[tuple[str, list[str]]]:
         ("vjepa_qwen_hlvid_help", [python_executable, "-m", "repro.vjepa_qwen_hlvid_benchmark", "--help"]),
         ("colab_cuda_smoke_help", [python_executable, "scripts/run_colab_autogaze_cuda_smoke.py", "--help"]),
         ("colab_verification_report_help", [python_executable, "-m", "repro.colab_verification_report", "--help"]),
+        ("external_cuda_notebook_help", [python_executable, "scripts/write_external_cuda_verification_notebook.py", "--help"]),
         ("markdown_report_help", [python_executable, "-m", "repro.markdown_report", "--help"]),
         ("aggregate_reports_help", [python_executable, "-m", "repro.aggregate_reports", "--help"]),
     ]
@@ -323,6 +324,7 @@ def focused_tests() -> list[str]:
         "tests/test_vjepa_qwen_colab_smoke.py",
         "tests/test_colab_autogaze_cuda_smoke_script.py",
         "tests/test_colab_verification_report.py",
+        "tests/test_external_cuda_verification_notebook.py",
         "tests/test_vjepa_poc.py",
         "tests/test_download_vjepa_qwen_checkpoints.py",
         "tests/test_autogaze_sparse_selector.py",

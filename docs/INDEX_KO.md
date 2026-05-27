@@ -27,6 +27,7 @@ AutoGaze를 실제 비디오 MLLM 파이프라인에 붙였을 때 다음을 재
 | AutoGaze + V-JEPA PoC | [AUTOGAZE_VJEPA_POC_KO.md](AUTOGAZE_VJEPA_POC_KO.md) |
 | Colab 직접 검증 계획 | [COLAB_DIRECT_VERIFICATION_PLAN_KO.md](COLAB_DIRECT_VERIFICATION_PLAN_KO.md) |
 | 외부 CUDA 플랫폼 검증 리포트 | [COLAB_VERIFICATION_REPORT_KO.md](COLAB_VERIFICATION_REPORT_KO.md) |
+| Kaggle/Colab 실행 노트북 | [../notebooks/autogaze_external_cuda_verification.ipynb](../notebooks/autogaze_external_cuda_verification.ipynb) |
 | CUDA 결과 기록 템플릿 | [CUDA_RESULTS_TEMPLATE.md](CUDA_RESULTS_TEMPLATE.md) |
 | 과거 상세 로그/긴 설명 | [temp/](temp/) |
 

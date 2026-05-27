@@ -2,21 +2,20 @@
 
 작성일: 2026-05-28  
 대상 브랜치: `codex/autogaze-repro`, `codex/autogaze-vjepa`  
-검증 커밋: `cfea645 Fix VJEPA embedding axis handling for Colab`
+검증 커밋: `d972d2e Document external CUDA verification blockers`
 
 ## 결론
 
-Colab, Kaggle, Hugging Face Jobs를 CUDA 검증 플랫폼 후보로 직접 확인했습니다. 세 플랫폼 모두 페이지/API 접근은 확인했지만, 현재 계정/런타임 상태 때문에 실제 CUDA generate 재실행은 완료하지 못했습니다.
+Colab, Kaggle, Hugging Face Jobs를 CUDA 검증 플랫폼 후보로 직접 확인했습니다. Chrome extension 재설치 이후 Kaggle notebook에서 GPU T4 x2와 Internet on을 활성화했고, `codex/autogaze-vjepa` 브랜치의 CUDA smoke를 실제로 끝까지 실행했습니다.
 
-대신 Colab에 남아 있던 CUDA 실패 로그를 확인해 실제 코드 버그를 수정했고, 로컬에서 가능한 entrypoint/dry-run/unit/full test 검증은 모두 통과했습니다. CUDA 머신, Colab quota 회복 런타임, phone-verified Kaggle 런타임, 또는 credit이 있는 HF Jobs에서는 아래 재실행 명령으로 같은 검증을 이어가면 됩니다.
+Kaggle actual smoke 결과는 `passed=true`, `failed_count=0`입니다. Colab은 GPU 사용량 제한, Hugging Face Jobs는 prepaid credit 부족으로 아직 막혀 있지만, 동일한 notebook/cell을 CUDA 머신이나 Colab quota 회복 런타임에서도 재사용할 수 있습니다.
 
 ## 외부 플랫폼 접근 상태
 
-| 플랫폼 | 접근 | CUDA 실행 상태 | 막힌 이유 |
-| --- | --- |
+| 플랫폼 | 접근 | CUDA 실행 상태 | 상태 |
+| --- | --- | --- | --- |
 | Colab | 가능 | 실패 | Colab 사용량 제한으로 GPU 백엔드 연결 불가 |
-| Kaggle `manricheon02/autogaze` | 가능 | 실패 | 계정 phone verification 전이라 GPU/Internet 기능 잠김 |
-| Kaggle `manricheon/autogaze` | 실패 | 불가 | 현재 Chrome 로그인 세션에서 해당 notebook을 찾을 수 없음 |
+| Kaggle `manricheon/autogaze` | 가능 | 성공 | GPU T4 x2, Internet on, actual CUDA smoke 통과 |
 | Hugging Face Jobs | API 접근 가능 | 실패 | 계정 pre-paid credit 부족으로 GPU job 생성 402 |
 
 Colab 증거 스크린샷:
@@ -26,6 +25,86 @@ Colab 증거 스크린샷:
 Kaggle 증거 스크린샷:
 
 ![Kaggle GPU locked](assets/kaggle_gpu_locked_2026-05-28.png)
+
+위 스크린샷은 최초 재시도 전 상태입니다. Chrome extension 재설치 후 같은 Kaggle notebook에서 GPU T4 x2 선택지가 활성화되었고, 실제 CUDA smoke를 완료했습니다.
+
+## Kaggle actual CUDA 검증 결과
+
+실행 위치:
+
+```text
+https://www.kaggle.com/code/manricheon/autogaze/edit
+```
+
+런타임:
+
+```text
+python: 3.12.13
+torch: 2.10.0+cu128
+cuda_available: True
+cuda_device: Tesla T4
+cuda_device_count: 2
+```
+
+검증 브랜치/커밋:
+
+```text
+codex/autogaze-vjepa
+d972d2e Document external CUDA verification blockers
+```
+
+Entrypoint verifier:
+
+```json
+{
+  "check_count": 26,
+  "command_count": 19,
+  "failed_check_count": 0,
+  "failed_command_count": 0,
+  "passed": true
+}
+```
+
+CUDA smoke wrapper:
+
+```json
+{
+  "command_count": 5,
+  "elapsed_ms": 298198.6757550003,
+  "failed_count": 0,
+  "passed": true
+}
+```
+
+실행된 actual cases:
+
+| case | status | answer | total ms | selected / raw tokens | Qwen visual tokens | peak memory |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| `vjepa_qwen_dense_off` | `passed` | `Describe the video in one short sentence. The video is about` | 27263.93 | 1568 / 1568 | 1568 | 7.509 GiB |
+| `autogaze_vjepa_qwen_on` | `passed` | `Describe the video in one short sentence.` | 24588.99 | 8 / 1568 V-JEPA, 16 / 4240 AutoGaze patches | 8 | 7.117 GiB |
+
+핵심 관찰:
+
+- AutoGaze on case에서 V-JEPA 입력 token은 `1568 -> 8`로 감소했습니다.
+- Qwen에 삽입된 visual token도 `1568 -> 8`로 감소했습니다.
+- Qwen generate latency는 `1440.71 ms -> 178.82 ms`로 줄었습니다.
+- V-JEPA sparse encode latency는 `1263.16 ms -> 155.82 ms`로 줄었습니다.
+- AutoGaze selector 자체는 `9629.44 ms`가 추가되었습니다. 따라서 이 smoke에서는 “후단 token/latency 이득은 확인되지만 selector cost까지 포함한 end-to-end 최적화는 추가 개선 대상”입니다.
+- 전체 peak CUDA memory는 `8062205440 -> 7641718784 bytes`로 감소했습니다.
+
+Kaggle에서 생성된 주요 artifact:
+
+```text
+/kaggle/working/autogaze_vjepa_outputs/colab_verification.md
+/kaggle/working/autogaze_vjepa_outputs/colab_autogaze_cuda_smoke_summary.json
+/kaggle/working/autogaze_vjepa_outputs/visualizations/vjepa_qwen_off_selected_frames.png
+/kaggle/working/autogaze_vjepa_outputs/visualizations/vjepa_qwen_off_vjepa_token_mask.png
+/kaggle/working/autogaze_vjepa_outputs/visualizations/vjepa_qwen_on_selected_frames.png
+/kaggle/working/autogaze_vjepa_outputs/visualizations/vjepa_qwen_on_vjepa_token_mask.png
+/kaggle/working/autogaze_vjepa_outputs/visualizations/vjepa_qwen_on_autogaze_overlay.png
+```
+
+Kaggle notebook 출력에서 selected frames, dense/off V-JEPA token mask, AutoGaze/on V-JEPA token mask, AutoGaze overlay 이미지를 확인했습니다.
 
 Hugging Face Jobs GPU smoke 요청 결과:
 
@@ -82,13 +161,30 @@ CUDA 모델 로드는 로컬 MPS/CPU 환경에서 검증 대상이 아니므로 
 | `pytest tests/test_vjepa_qwen_colab_smoke.py tests/test_vjepa_qwen_runner.py -q` | `16 passed` |
 | `pytest tests/test_vjepa_sparse_runtime.py tests/test_vjepa_poc.py tests/test_vjepa_qwen_bridge.py -q` | `11 passed` |
 | `scripts/verify_autogaze_entrypoints.py --run-pytest` | `passed=true`, `check_count=26`, `command_count=20` |
-| full pytest | `404 passed` |
+| full pytest | `406 passed` |
 | `git diff --check` | 통과 |
 | 공식/upstream 문서 diff | 없음 |
 
 ## CUDA 재검증 명령
 
 GPU 백엔드가 연결되는 Kaggle/Colab 또는 CUDA 머신에서 아래 순서로 다시 실행합니다.
+
+### 0. Notebook artifact
+
+Kaggle/Colab에서 셀 단위로 실행하려면 repo에 포함된 노트북을 사용할 수 있습니다.
+
+```text
+notebooks/autogaze_external_cuda_verification.ipynb
+```
+
+이 파일은 아래 단계를 하나의 notebook으로 묶은 artifact입니다. 다시 생성하려면:
+
+```bash
+python scripts/write_external_cuda_verification_notebook.py \
+  --output notebooks/autogaze_external_cuda_verification.ipynb \
+  --platform kaggle \
+  --branch codex/autogaze-vjepa
+```
 
 ### 1. 최신 코드 받기
 
@@ -106,7 +202,7 @@ git log --oneline -1
 기대 커밋:
 
 ```text
-cfea645 Fix VJEPA embedding axis handling for Colab
+d972d2e Document external CUDA verification blockers
 ```
 
 ### 2. 사전 검증
@@ -209,12 +305,13 @@ print("verification:", out / "colab_verification.md")
 | --- | --- |
 | Colab 접근 확인 | 완료 |
 | Colab에서 기존 실패 원인 확인 | 완료 |
-| Kaggle notebook 접근 확인 | 완료: `manricheon02/autogaze` |
-| Kaggle GPU 실행 | 미완료: phone verification 필요 |
+| Kaggle notebook 접근 확인 | 완료: `manricheon/autogaze` |
+| Kaggle GPU 실행 | 완료: GPU T4 x2 actual CUDA smoke 통과 |
 | HF Jobs GPU 실행 | 미완료: prepaid credit 부족 |
+| Kaggle/Colab 공용 실행 notebook artifact | 완료: `notebooks/autogaze_external_cuda_verification.ipynb` |
 | V-JEPA + Qwen Colab smoke 코드 수정 | 완료 |
 | 로컬 entrypoint/unit/full test 검증 | 완료 |
-| 외부 CUDA generate 재실행 | 미완료: 접근 가능한 GPU 플랫폼 필요 |
-| `colab_verification.md` 실제 CUDA 결과 생성 | 미완료: GPU 연결 필요 |
+| 외부 CUDA generate 재실행 | 완료: Kaggle |
+| `colab_verification.md` 실제 CUDA 결과 생성 | 완료: Kaggle `/kaggle/working/autogaze_vjepa_outputs/colab_verification.md` |
 
-현재 상태는 “CUDA 실행 직전까지 코드와 문서, report generator는 준비 완료”입니다. GPU 백엔드가 연결되는 환경에서는 위 명령을 그대로 실행해 실제 CUDA 결과와 visualization artifact를 생성하면 됩니다.
+현재 상태는 “Kaggle CUDA에서 V-JEPA + Qwen dense/off 및 AutoGaze/on actual smoke 통과”입니다. 다음 확장 검증은 같은 방식으로 NVILA-HD full script와 HLVid benchmark limit run을 Kaggle/H100에서 이어서 실행하면 됩니다.
