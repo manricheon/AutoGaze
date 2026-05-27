@@ -35,10 +35,10 @@ from repro.vjepa_qwen_colab_smoke import (
     DEFAULT_QWEN_MODEL,
     DEFAULT_VJEPA_MODEL,
     _device_metadata,
+    _ensure_vjepa_video_axis_order,
     _qwen_embedding_hidden_size,
     _resolve_qwen_model_class,
     _vjepa_encoder,
-    _vjepa_patch_embeddings,
 )
 
 DEFAULT_AUTOGAZE_MODEL = "nvidia/AutoGaze"
@@ -146,6 +146,14 @@ def pil_frames_to_vjepa_pixel_values(
     std = torch.tensor([0.229, 0.224, 0.225], dtype=values.dtype).view(3, 1, 1, 1)
     values = (values - mean) / std
     return values.unsqueeze(0).to(device=device, dtype=dtype)
+
+
+def _vjepa_patch_embeddings(model: Any, pixel_values_videos: Any) -> Any:
+    encoder = _vjepa_encoder(model)
+    embeddings = getattr(encoder, "embeddings", None)
+    if embeddings is None:
+        raise ValueError("V-JEPA encoder does not expose embeddings")
+    return embeddings(_ensure_vjepa_video_axis_order(pixel_values_videos))
 
 
 def run_actual_pipeline(args: argparse.Namespace) -> dict[str, Any]:
