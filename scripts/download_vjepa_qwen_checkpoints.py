@@ -8,6 +8,7 @@ from typing import Any
 from huggingface_hub import snapshot_download
 
 
+DEFAULT_AUTOGAZE_MODEL = "nvidia/AutoGaze"
 DEFAULT_VJEPA_MODEL = "facebook/vjepa2-vitl-fpc64-256"
 DEFAULT_QWEN_MODEL = "Qwen/Qwen2.5-VL-3B-Instruct"
 DEFAULT_OUTPUT_ROOT = "/content/autogaze_weights"
@@ -16,6 +17,7 @@ DEFAULT_REVISION = "main"
 
 def build_download_plan(
     *,
+    autogaze_model: str,
     vjepa_model: str,
     qwen_model: str,
     output_root: Path,
@@ -28,6 +30,10 @@ def build_download_plan(
         "output_root": str(output_root),
         "max_workers": int(max_workers),
         "models": {
+            "autogaze": {
+                "repo_id": autogaze_model,
+                "local_dir": str(output_root / _safe_local_name(autogaze_model)),
+            },
             "vjepa": {
                 "repo_id": vjepa_model,
                 "local_dir": str(output_root / _safe_local_name(vjepa_model)),
@@ -42,6 +48,7 @@ def build_download_plan(
 
 def download_checkpoints(
     *,
+    autogaze_model: str,
     vjepa_model: str,
     qwen_model: str,
     output_root: Path,
@@ -49,6 +56,7 @@ def download_checkpoints(
     max_workers: int,
 ) -> dict[str, Any]:
     plan = build_download_plan(
+        autogaze_model=autogaze_model,
         vjepa_model=vjepa_model,
         qwen_model=qwen_model,
         output_root=output_root,
@@ -70,7 +78,8 @@ def download_checkpoints(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Download V-JEPA and Qwen checkpoints for Colab smoke tests.")
+    parser = argparse.ArgumentParser(description="Download AutoGaze, V-JEPA, and Qwen checkpoints for Colab smoke tests.")
+    parser.add_argument("--autogaze-model", default=DEFAULT_AUTOGAZE_MODEL)
     parser.add_argument("--vjepa-model", default=DEFAULT_VJEPA_MODEL)
     parser.add_argument("--qwen-model", default=DEFAULT_QWEN_MODEL)
     parser.add_argument("--output-root", default=DEFAULT_OUTPUT_ROOT)
@@ -85,6 +94,7 @@ def main() -> None:
     output_root = Path(args.output_root)
     if args.dry_run:
         result = {"dry_run": True, **build_download_plan(
+            autogaze_model=args.autogaze_model,
             vjepa_model=args.vjepa_model,
             qwen_model=args.qwen_model,
             output_root=output_root,
@@ -93,6 +103,7 @@ def main() -> None:
         )}
     else:
         result = download_checkpoints(
+            autogaze_model=args.autogaze_model,
             vjepa_model=args.vjepa_model,
             qwen_model=args.qwen_model,
             output_root=output_root,

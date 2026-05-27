@@ -10,6 +10,8 @@
 | scale-aware mapping | AutoGaze scale별로 V-JEPA pass를 분리한 token packing 후보 검증 | 안 함 |
 | tiny sparse encoder smoke | random-weight tiny V-JEPA encoder에 selected hidden states만 통과 | 안 함 |
 | Qwen bridge smoke | selected V-JEPA feature를 Qwen visual placeholder embedding으로 삽입 | 안 함 |
+| actual single runner | 실제 video -> AutoGaze -> V-JEPA sparse encoder -> Qwen generate | 안 함 |
+| HLVid wrapper | HLVid row를 순회하며 actual single runner 실행/스코어링 | 참고용 |
 
 ## 핵심 정책
 
@@ -40,6 +42,109 @@ video frames
   -> concat scale-aware features with scale/frame/row/col metadata
   -> Qwen bridge candidate
 ```
+
+## 실제 비디오 전체 파이프라인
+
+`repro.vjepa_qwen_runner`는 synthetic plan을 쓰지 않고 실제 비디오에서 AutoGaze를 먼저 실행합니다. 그 다음 AutoGaze가 고른 patch bbox를 V-JEPA token index로 매핑하고, selected token embedding만 V-JEPA encoder block에 통과시킨 뒤 Qwen `inputs_embeds`에 삽입합니다.
+
+```text
+video
+  -> sampled frames / optional resize / spatial tile canvas
+  -> AutoGaze actual selector
+       output: SparseSelectionPlan(selected multiscale patch bbox)
+  -> V-JEPA frame sampler
+       output: [B, T, C, H, W]
+  -> V-JEPA patch embedding
+  -> selected token gather by AutoGaze bbox -> V-JEPA grid/tubelet index
+  -> sparse V-JEPA encoder
+  -> deterministic V-JEPA-to-Qwen dim bridge
+  -> Qwen generate(inputs_embeds)
+```
+
+중요: 마지막 bridge는 학습된 projector가 아니라 repeat/truncate 기반 wiring probe입니다. 즉 CUDA에서 end-to-end 동작과 token/latency/memory 계측은 가능하지만, 이 출력으로 모델 성능을 주장하면 안 됩니다.
+
+실행 예시:
+
+```bash
+python -m repro.vjepa_qwen_runner \
+  --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
+  --prompt "Describe the video in one short sentence." \
+  --autogaze-model weight/AutoGaze \
+  --vjepa-model weight/vjepa2-vitl-fpc64-256 \
+  --qwen-model weight/Qwen2.5-VL-3B-Instruct \
+  --device cuda \
+  --dtype float16 \
+  --num-video-frames 16 \
+  --frames-per-clip 16 \
+  --autogaze-chunk-frames 16 \
+  --max-tiles-video 1 \
+  --autogaze-target-scales 224 \
+  --autogaze-target-patch-size 16 \
+  --vjepa-selection-policy single_scale_union \
+  --video-decode-strategy seek \
+  --video-resize-longest-edge 448 \
+  --max-new-tokens 32 \
+  --output-json outputs/autogaze_vjepa/vjepa_qwen_actual.json \
+  --output-md outputs/autogaze_vjepa/vjepa_qwen_actual.md
+```
+
+멀티스케일을 더 직접적으로 보고 싶으면 아래처럼 scale별 V-JEPA sparse pass를 수행합니다. 이 모드는 더 무겁지만 AutoGaze scale별 index가 V-JEPA grid에서 얼마나 줄어드는지 확인하기 좋습니다.
+
+```bash
+python -m repro.vjepa_qwen_runner \
+  --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
+  --autogaze-model weight/AutoGaze \
+  --vjepa-model weight/vjepa2-vitl-fpc64-256 \
+  --qwen-model weight/Qwen2.5-VL-3B-Instruct \
+  --device cuda \
+  --num-video-frames 16 \
+  --frames-per-clip 16 \
+  --autogaze-target-scales 112+224 \
+  --vjepa-selection-policy scale_aware_multi_pass \
+  --output-json outputs/autogaze_vjepa/vjepa_qwen_scale_aware_actual.json
+```
+
+결과에서 우선 볼 값:
+
+- `tokens.autogaze_raw_patch_tokens`: AutoGaze가 후보로 본 multiscale patch 수
+- `tokens.autogaze_selected_patch_tokens`: AutoGaze가 실제 선택한 patch 수
+- `tokens.vjepa_raw_tokens`: V-JEPA가 dense로 처리했을 token 수
+- `tokens.vjepa_selected_tokens`: AutoGaze 선택을 V-JEPA grid/tubelet으로 옮긴 뒤 실제 sparse encoder에 들어간 token 수
+- `tokens.qwen_visual_tokens_inserted`: Qwen context에 삽입된 visual token 수
+- `latency_ms.autogaze_selector_total`, `latency_ms.vjepa_sparse_encode`, `latency_ms.qwen_generate`
+
+## HLVid Wrapper
+
+HLVid manifest와 mp4 root가 있으면 같은 runner를 여러 row에 대해 반복 실행할 수 있습니다.
+
+```bash
+python -m repro.vjepa_qwen_hlvid_benchmark \
+  --manifest /data/HLVid/test.jsonl \
+  --video-root /data/HLVid/videos \
+  --output-dir outputs/autogaze_vjepa/hlvid_limit3 \
+  --limit 3 \
+  --continue-on-error \
+  --autogaze-model weight/AutoGaze \
+  --vjepa-model weight/vjepa2-vitl-fpc64-256 \
+  --qwen-model weight/Qwen2.5-VL-3B-Instruct \
+  --device cuda \
+  --dtype float16 \
+  --num-video-frames 16 \
+  --frames-per-clip 16 \
+  --autogaze-chunk-frames 16 \
+  --max-tiles-video 1 \
+  --autogaze-target-scales 224 \
+  --video-decode-strategy seek \
+  --video-resize-longest-edge 448 \
+  --vjepa-selection-policies single_scale_union,scale_aware_multi_pass
+```
+
+생성 파일:
+
+- `vjepa_qwen_hlvid_predictions.jsonl`: row별 raw output, failure stage, token/latency
+- `vjepa_qwen_hlvid_scored.jsonl`: HLVid answer parsing 결과
+- `vjepa_qwen_hlvid_summary.json`: aggregate summary
+- `vjepa_qwen_hlvid_report.md`: policy별 요약 markdown
 
 ## 로컬 실행
 
@@ -115,6 +220,8 @@ subprocess.check_call([
     "tests/test_vjepa_poc.py",
     "tests/test_vjepa_qwen_bridge.py",
     "tests/test_vjepa_qwen_colab_smoke.py",
+    "tests/test_vjepa_qwen_runner.py",
+    "tests/test_vjepa_qwen_hlvid_benchmark.py",
     "-q",
 ])
 ```
@@ -153,7 +260,7 @@ print(json.dumps({
 }, indent=2))
 ```
 
-체크포인트를 명시적으로 다운로드합니다. 기본 모델은 `facebook/vjepa2-vitl-fpc64-256`과 `Qwen/Qwen2.5-VL-3B-Instruct`입니다.
+체크포인트를 명시적으로 다운로드합니다. 기본 모델은 `nvidia/AutoGaze`, `facebook/vjepa2-vitl-fpc64-256`, `Qwen/Qwen2.5-VL-3B-Instruct`입니다.
 
 ```python
 import json, pathlib, subprocess
@@ -162,6 +269,7 @@ weights = pathlib.Path("/content/autogaze_weights")
 subprocess.check_call([
     "python", "scripts/download_vjepa_qwen_checkpoints.py",
     "--output-root", str(weights),
+    "--autogaze-model", "nvidia/AutoGaze",
     "--vjepa-model", "facebook/vjepa2-vitl-fpc64-256",
     "--qwen-model", "Qwen/Qwen2.5-VL-3B-Instruct",
 ])
@@ -200,6 +308,45 @@ print(json.dumps({
 }, indent=2))
 ```
 
+실제 AutoGaze selector까지 포함한 end-to-end smoke는 아래 셀을 사용합니다.
+
+```python
+import json, pathlib, subprocess
+
+weights = pathlib.Path("/content/autogaze_weights")
+out_dir = pathlib.Path("/content/autogaze_vjepa_outputs")
+video = pathlib.Path("/content/AutoGaze/inputs/hlvid_example/clip_av_video_5_001.mp4")
+
+subprocess.check_call([
+    "python", "-m", "repro.vjepa_qwen_runner",
+    "--video", str(video),
+    "--prompt", "Describe the video in one short sentence.",
+    "--autogaze-model", str(weights / "nvidia__AutoGaze"),
+    "--vjepa-model", str(weights / "facebook__vjepa2-vitl-fpc64-256"),
+    "--qwen-model", str(weights / "Qwen__Qwen2.5-VL-3B-Instruct"),
+    "--require-cuda",
+    "--device", "cuda",
+    "--dtype", "float16",
+    "--num-video-frames", "16",
+    "--frames-per-clip", "16",
+    "--autogaze-chunk-frames", "16",
+    "--max-tiles-video", "1",
+    "--autogaze-target-scales", "224",
+    "--video-decode-strategy", "seek",
+    "--video-resize-longest-edge", "448",
+    "--output-json", str(out_dir / "actual_autogaze_vjepa_qwen.json"),
+    "--output-md", str(out_dir / "actual_autogaze_vjepa_qwen.md"),
+])
+
+payload = json.loads((out_dir / "actual_autogaze_vjepa_qwen.json").read_text())
+print(json.dumps({
+    "status": payload["status"],
+    "tokens": payload["tokens"],
+    "latency_ms": payload["latency_ms"],
+    "generated_text": payload["generated_text"],
+}, indent=2))
+```
+
 ## 실제 AutoGaze output 연결
 
 AutoGaze selector가 `SparseSelectionPlan` JSON을 만든 뒤에는 synthetic 대신 아래처럼 실행합니다.
@@ -226,4 +373,5 @@ python -m repro.vjepa_poc \
 - `vjepa_sparse_encoder_smoke.status=passed`: selected hidden states와 원래 position index를 사용해 V-JEPA encoder layer 호출이 가능한 상태입니다.
 - `vjepa_qwen_bridge_smoke.status=passed`: Qwen visual placeholder에 V-JEPA feature를 삽입하는 wiring이 동작한 상태입니다.
 - `repro.vjepa_qwen_colab_smoke`의 `status=passed`: 실제 V-JEPA checkpoint와 실제 Qwen checkpoint가 CUDA에서 `generate`까지 호출된 상태입니다.
+- `repro.vjepa_qwen_runner`의 `status=passed`: 실제 AutoGaze selector output이 V-JEPA sparse encoder와 Qwen generate까지 이어진 상태입니다.
 - 이 PoC는 Qwen 정확도를 주장하지 않습니다. 현재 bridge는 deterministic repeat/truncate projection이므로, 정확도 주장을 하려면 V-JEPA feature를 Qwen visual embedding space로 맞추는 학습 projector가 필요합니다.
