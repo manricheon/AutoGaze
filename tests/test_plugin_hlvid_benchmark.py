@@ -264,6 +264,18 @@ def test_build_mode_runner_args_for_qwen_vit_comparison_modes():
         "qwen_vit_chunk_frames": 16,
         "qwen_vit_max_spatial_chunks": 4,
         "autogaze_model": "/models/autogaze",
+        "device_map": "auto",
+        "dtype": "bfloat16",
+        "attn_implementation": "flash_attention_2",
+        "video_decode_strategy": "seek",
+        "autogaze_target_scales": "56+112+196+392",
+        "autogaze_target_patch_size": 14,
+        "autogaze_encoder_patch_size": 14,
+        "autogaze_tile_size": 392,
+        "autogaze_chunk_frames": 8,
+        "max_batch_size_autogaze": 4,
+        "gazing_ratio": 0.2,
+        "task_loss_requirement": 0.6,
     }
 
     full_args = build_mode_runner_args(mode="qwen_full_vit", **common)
@@ -272,6 +284,9 @@ def test_build_mode_runner_args_for_qwen_vit_comparison_modes():
 
     assert full_args[full_args.index("--qwen-vit-mode") + 1] == "qwen_full_vit"
     assert full_args[full_args.index("--token-selector-adapter") + 1] == "keep-all"
+    assert full_args[full_args.index("--video-decode-strategy") + 1] == "seek"
+    assert full_args[full_args.index("--dtype") + 1] == "bfloat16"
+    assert full_args[full_args.index("--attn-implementation") + 1] == "flash_attention_2"
     assert chunked_args[chunked_args.index("--qwen-vit-mode") + 1] == "qwen_chunked_vit"
     assert chunked_args[chunked_args.index("--qwen-vit-chunk-frames") + 1] == "16"
     assert chunked_args[chunked_args.index("--qwen-vit-max-spatial-chunks") + 1] == "4"
@@ -279,6 +294,14 @@ def test_build_mode_runner_args_for_qwen_vit_comparison_modes():
     assert sparse_args[sparse_args.index("--pre-encoder-prune-adapter") + 1] == "autogaze-sparse"
     assert sparse_args[sparse_args.index("--autogaze-model") + 1] == "/models/autogaze"
     assert sparse_args[sparse_args.index("--token-selector-path") + 1] == "/models/autogaze"
+    assert sparse_args[sparse_args.index("--autogaze-target-scales") + 1] == "56+112+196+392"
+    assert sparse_args[sparse_args.index("--autogaze-target-patch-size") + 1] == "14"
+    assert sparse_args[sparse_args.index("--autogaze-encoder-patch-size") + 1] == "14"
+    assert sparse_args[sparse_args.index("--autogaze-tile-size") + 1] == "392"
+    assert sparse_args[sparse_args.index("--autogaze-chunk-frames") + 1] == "8"
+    assert sparse_args[sparse_args.index("--max-batch-size-autogaze") + 1] == "4"
+    assert sparse_args[sparse_args.index("--gazing-ratio") + 1] == "0.2"
+    assert sparse_args[sparse_args.index("--task-loss-requirement") + 1] == "0.6"
     assert "--run-autogaze-selector" in sparse_args
     assert "--enable-qwen-prune-generate" in sparse_args
 

@@ -55,6 +55,7 @@ class MllmRunRequest:
     qwen_vit_chunk_frames: int = 16
     qwen_vit_max_spatial_chunks: int = 1
     qwen_thumbnail_mode: str = "none"
+    video_decode_strategy: str = "auto"
     video_resize_shortest_edge: int | None = None
     video_resize_longest_edge: int | None = None
     video_resize_width: int | None = None
@@ -1332,7 +1333,7 @@ def _qwen_preloaded_video_frames(request: MllmRunRequest) -> tuple[list[Any], di
         request.video,
         sample_count,
         resize,
-        decode_strategy="auto",
+        decode_strategy=request.video_decode_strategy,
     )
     sampled_indices = uniform_sample_indices(int(metadata.get("frames") or sample_count), sample_count)
     thumbnail_count = qwen_thumbnail_count(request)

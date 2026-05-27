@@ -666,6 +666,69 @@ def test_flexible_runner_passes_video_resize_to_qwen_request():
     assert request.qwen_video_nframes == 8
 
 
+def test_flexible_runner_passes_video_decode_strategy_to_qwen_request():
+    args = parse_args(
+        [
+            "--mode",
+            "single",
+            "--model-family",
+            "qwen3-vl",
+            "--model-path",
+            "weight/Qwen3-VL-8B-Instruct",
+            "--token-selector-adapter",
+            "keep-all",
+            "--vision-encoder-adapter",
+            "qwen3-vl-vision",
+            "--mllm-adapter",
+            "qwen3-vl",
+            "--autogaze-integration-level",
+            "none",
+            "--video",
+            "inputs/example.mp4",
+            "--video-decode-strategy",
+            "seek",
+        ]
+    )
+
+    from repro.flexible_runner import build_mllm_run_request
+
+    request = build_mllm_run_request(args)
+
+    assert request.video_decode_strategy == "seek"
+
+
+def test_flexible_runner_passes_video_decode_strategy_to_autogaze_runtime_config():
+    args = parse_args(
+        [
+            "--mode",
+            "single",
+            "--model-family",
+            "qwen3-vl",
+            "--model-path",
+            "weight/Qwen3-VL-8B-Instruct",
+            "--token-selector-adapter",
+            "autogaze",
+            "--vision-encoder-adapter",
+            "qwen3-vl-vision",
+            "--mllm-adapter",
+            "qwen3-vl",
+            "--autogaze-integration-level",
+            "pre_encoder_sparse",
+            "--video",
+            "inputs/example.mp4",
+            "--run-autogaze-selector",
+            "--video-decode-strategy",
+            "seek",
+        ]
+    )
+
+    from repro.plugins.autogaze_sparse_selector import runtime_config_from_args
+
+    config = runtime_config_from_args(args)
+
+    assert config.video_decode_strategy == "seek"
+
+
 def test_flexible_runner_passes_qwen_thumbnail_mode_to_request():
     args = parse_args(
         [

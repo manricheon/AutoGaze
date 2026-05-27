@@ -118,6 +118,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-video-frames", type=int, default=128)
     parser.add_argument("--num-video-frames-thumbnail", type=int, default=0)
     parser.add_argument("--max-tiles-video", type=int, default=1)
+    parser.add_argument("--video-decode-strategy", choices=["auto", "seek", "scan"], default="auto")
     parser.add_argument("--video-resize-longest-edge", type=int)
     parser.add_argument("--video-resize-shortest-edge", type=int)
     parser.add_argument("--video-resize-width", type=int)
@@ -484,6 +485,7 @@ def build_mllm_run_request(args: argparse.Namespace) -> MllmRunRequest:
         qwen_vit_chunk_frames=args.qwen_vit_chunk_frames,
         qwen_vit_max_spatial_chunks=args.qwen_vit_max_spatial_chunks,
         qwen_thumbnail_mode=args.qwen_thumbnail_mode,
+        video_decode_strategy=args.video_decode_strategy,
         video_resize_shortest_edge=args.video_resize_shortest_edge,
         video_resize_longest_edge=args.video_resize_longest_edge,
         video_resize_width=args.video_resize_width,

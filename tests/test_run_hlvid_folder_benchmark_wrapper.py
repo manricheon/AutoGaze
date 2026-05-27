@@ -46,6 +46,14 @@ def test_qwen_plugin_suite_routes_through_unified_hlvid_wrapper(monkeypatch, tmp
             "qwen3-vl=/models/qwen",
             "--autogaze-model",
             "/models/autogaze",
+            "--video-decode-strategy",
+            "seek",
+            "--autogaze-target-patch-size",
+            "14",
+            "--max-batch-size-autogaze",
+            "4",
+            "--gazing-ratio-tile",
+            "0.2",
             "--limit",
             "3",
             "--num-video-frames",
@@ -68,6 +76,10 @@ def test_qwen_plugin_suite_routes_through_unified_hlvid_wrapper(monkeypatch, tmp
     ]
     assert captured["models"] == {"qwen3-vl": "/models/qwen"}
     assert captured["autogaze_model"] == "/models/autogaze"
+    assert captured["video_decode_strategy"] == "seek"
+    assert captured["autogaze_target_patch_size"] == 14
+    assert captured["max_batch_size_autogaze"] == 4
+    assert captured["gazing_ratio"] == 0.2
     assert captured["limit"] == 3
     assert captured["num_video_frames"] == 16
     assert captured["qwen_video_nframes"] == 16

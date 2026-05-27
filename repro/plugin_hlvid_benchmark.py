@@ -52,13 +52,51 @@ def build_mode_runner_args(
     qwen_vit_max_spatial_chunks: int | None = None,
     qwen_thumbnail_mode: str = "none",
     autogaze_model: str = "weight/AutoGaze",
+    device_map: str = "auto",
+    dtype: str = "auto",
+    attn_implementation: str | None = None,
+    video_decode_strategy: str = "auto",
+    autogaze_repo: str = ".",
+    autogaze_device: str = "auto",
+    autogaze_dtype: str = "auto",
+    autogaze_target_scales: str | None = None,
+    autogaze_target_patch_size: int | None = None,
+    autogaze_encoder_patch_size: int | None = None,
+    autogaze_tile_size: int | None = None,
+    autogaze_chunk_frames: int | None = None,
+    max_batch_size_autogaze: int | None = None,
+    gazing_ratio: float | None = None,
+    task_loss_requirement: float | None = None,
+    autogaze_generate_only: bool = False,
     video_resize_shortest_edge: int | None = None,
     video_resize_longest_edge: int | None = None,
     video_resize_width: int | None = None,
     video_resize_height: int | None = None,
 ) -> list[str]:
+    common_runner_options = {
+        "device_map": device_map,
+        "dtype": dtype,
+        "attn_implementation": attn_implementation,
+        "video_decode_strategy": video_decode_strategy,
+        "autogaze_repo": autogaze_repo,
+        "autogaze_device": autogaze_device,
+        "autogaze_dtype": autogaze_dtype,
+        "autogaze_target_scales": autogaze_target_scales,
+        "autogaze_target_patch_size": autogaze_target_patch_size,
+        "autogaze_encoder_patch_size": autogaze_encoder_patch_size,
+        "autogaze_tile_size": autogaze_tile_size,
+        "autogaze_chunk_frames": autogaze_chunk_frames,
+        "max_batch_size_autogaze": max_batch_size_autogaze,
+        "gazing_ratio": gazing_ratio,
+        "task_loss_requirement": task_loss_requirement,
+        "autogaze_generate_only": autogaze_generate_only,
+    }
+
+    def with_common(args: list[str]) -> list[str]:
+        return _append_common_runner_options(args, **common_runner_options)
+
     if mode == "nvila-video-off":
-        return _base_args(
+        return with_common(_base_args(
             model_family="nvila-video-plugin",
             model_path=models.get("nvila-video", DEFAULT_MODELS["nvila-video"]),
             token_selector="keep-all",
@@ -83,9 +121,9 @@ def build_mode_runner_args(
             video_resize_longest_edge=video_resize_longest_edge,
             video_resize_width=video_resize_width,
             video_resize_height=video_resize_height,
-        )
+        ))
     if mode == "nvila-video-autogaze-probe":
-        return _base_args(
+        return with_common(_base_args(
             model_family="nvila-video-plugin",
             model_path=models.get("nvila-video", DEFAULT_MODELS["nvila-video"]),
             token_selector="autogaze",
@@ -110,9 +148,9 @@ def build_mode_runner_args(
             video_resize_longest_edge=video_resize_longest_edge,
             video_resize_width=video_resize_width,
             video_resize_height=video_resize_height,
-        )
+        ))
     if mode == "longvila-off":
-        return _base_args(
+        return with_common(_base_args(
             model_family="longvila",
             model_path=models.get("longvila", DEFAULT_MODELS["longvila"]),
             token_selector="keep-all",
@@ -137,9 +175,9 @@ def build_mode_runner_args(
             video_resize_longest_edge=video_resize_longest_edge,
             video_resize_width=video_resize_width,
             video_resize_height=video_resize_height,
-        )
+        ))
     if mode == "longvila-autogaze-probe":
-        return _base_args(
+        return with_common(_base_args(
             model_family="longvila",
             model_path=models.get("longvila", DEFAULT_MODELS["longvila"]),
             token_selector="autogaze",
@@ -164,9 +202,9 @@ def build_mode_runner_args(
             video_resize_longest_edge=video_resize_longest_edge,
             video_resize_width=video_resize_width,
             video_resize_height=video_resize_height,
-        )
+        ))
     if mode == "internvl3-off":
-        return _base_args(
+        return with_common(_base_args(
             model_family="internvl3",
             model_path=models.get("internvl3", DEFAULT_MODELS["internvl3"]),
             token_selector="keep-all",
@@ -185,9 +223,9 @@ def build_mode_runner_args(
             qwen_video_fps=qwen_video_fps,
             qwen_video_max_pixels=qwen_video_max_pixels,
             qwen_video_min_pixels=qwen_video_min_pixels,
-        )
+        ))
     if mode == "qwen3-vl-off":
-        return _base_args(
+        return with_common(_base_args(
             model_family="qwen3-vl",
             model_path=models.get("qwen3-vl", DEFAULT_MODELS["qwen3-vl"]),
             token_selector="keep-all",
@@ -212,10 +250,10 @@ def build_mode_runner_args(
             video_resize_longest_edge=video_resize_longest_edge,
             video_resize_width=video_resize_width,
             video_resize_height=video_resize_height,
-        )
+        ))
     if mode in {"qwen_full_vit", "qwen_chunked_vit", "qwen_chunked_vit_autogaze_sparse"}:
         sparse = mode == "qwen_chunked_vit_autogaze_sparse"
-        args = _base_args(
+        args = with_common(_base_args(
             model_family="qwen3-vl",
             model_path=models.get("qwen3-vl", DEFAULT_MODELS["qwen3-vl"]),
             token_selector="autogaze" if sparse else "keep-all",
@@ -243,7 +281,7 @@ def build_mode_runner_args(
             video_resize_longest_edge=video_resize_longest_edge,
             video_resize_width=video_resize_width,
             video_resize_height=video_resize_height,
-        )
+        ))
         if sparse:
             args.extend(
                 [
@@ -263,7 +301,7 @@ def build_mode_runner_args(
         "qwen3-vl-autogaze-direct-pre-vit-sparse",
     }:
         integration_level = "pre_encoder_sparse" if mode == "qwen3-vl-autogaze-direct-pre-vit-sparse" else "post_encoder_token_prune"
-        args = _base_args(
+        args = with_common(_base_args(
             model_family="qwen3-vl",
             model_path=models.get("qwen3-vl", DEFAULT_MODELS["qwen3-vl"]),
             token_selector="autogaze",
@@ -288,7 +326,7 @@ def build_mode_runner_args(
             video_resize_longest_edge=video_resize_longest_edge,
             video_resize_width=video_resize_width,
             video_resize_height=video_resize_height,
-        )
+        ))
         if mode in {"qwen3-vl-autogaze-prune-generate", "qwen3-vl-autogaze-direct-prune-generate"}:
             args.append("--enable-qwen-prune-generate")
         if mode in {"qwen3-vl-autogaze-direct-prune-generate", "qwen3-vl-autogaze-direct-pre-vit-sparse"}:
@@ -297,7 +335,7 @@ def build_mode_runner_args(
             args.extend(["--enable-qwen-prune-generate", "--pre-encoder-prune-adapter", "autogaze-sparse"])
         return args
     if mode == "qwen3-vl-pixelprune-pre-vit":
-        args = _base_args(
+        args = with_common(_base_args(
             model_family="qwen3-vl",
             model_path=models.get("qwen3-vl", DEFAULT_MODELS["qwen3-vl"]),
             token_selector="keep-all",
@@ -322,7 +360,7 @@ def build_mode_runner_args(
             video_resize_longest_edge=video_resize_longest_edge,
             video_resize_width=video_resize_width,
             video_resize_height=video_resize_height,
-        )
+        ))
         args.extend(["--pre-encoder-prune-adapter", "pixelprune"])
         return args
     raise ValueError(f"Unsupported plugin HLVid mode: {mode}")
@@ -349,6 +387,22 @@ def run_plugin_hlvid_benchmark(
     qwen_vit_max_spatial_chunks: int | None = None,
     qwen_thumbnail_mode: str = "none",
     autogaze_model: str = "weight/AutoGaze",
+    device_map: str = "auto",
+    dtype: str = "auto",
+    attn_implementation: str | None = None,
+    video_decode_strategy: str = "auto",
+    autogaze_repo: str = ".",
+    autogaze_device: str = "auto",
+    autogaze_dtype: str = "auto",
+    autogaze_target_scales: str | None = None,
+    autogaze_target_patch_size: int | None = None,
+    autogaze_encoder_patch_size: int | None = None,
+    autogaze_tile_size: int | None = None,
+    autogaze_chunk_frames: int | None = None,
+    max_batch_size_autogaze: int | None = None,
+    gazing_ratio: float | None = None,
+    task_loss_requirement: float | None = None,
+    autogaze_generate_only: bool = False,
     video_resize_shortest_edge: int | None = None,
     video_resize_longest_edge: int | None = None,
     video_resize_width: int | None = None,
@@ -385,6 +439,22 @@ def run_plugin_hlvid_benchmark(
                 qwen_vit_max_spatial_chunks=qwen_vit_max_spatial_chunks,
                 qwen_thumbnail_mode=qwen_thumbnail_mode,
                 autogaze_model=autogaze_model,
+                device_map=device_map,
+                dtype=dtype,
+                attn_implementation=attn_implementation,
+                video_decode_strategy=video_decode_strategy,
+                autogaze_repo=autogaze_repo,
+                autogaze_device=autogaze_device,
+                autogaze_dtype=autogaze_dtype,
+                autogaze_target_scales=autogaze_target_scales,
+                autogaze_target_patch_size=autogaze_target_patch_size,
+                autogaze_encoder_patch_size=autogaze_encoder_patch_size,
+                autogaze_tile_size=autogaze_tile_size,
+                autogaze_chunk_frames=autogaze_chunk_frames,
+                max_batch_size_autogaze=max_batch_size_autogaze,
+                gazing_ratio=gazing_ratio,
+                task_loss_requirement=task_loss_requirement,
+                autogaze_generate_only=autogaze_generate_only,
                 video_resize_shortest_edge=video_resize_shortest_edge,
                 video_resize_longest_edge=video_resize_longest_edge,
                 video_resize_width=video_resize_width,
@@ -719,6 +789,61 @@ def _base_args(
     return args
 
 
+def _append_common_runner_options(
+    args: list[str],
+    *,
+    device_map: str = "auto",
+    dtype: str = "auto",
+    attn_implementation: str | None = None,
+    video_decode_strategy: str = "auto",
+    autogaze_repo: str = ".",
+    autogaze_device: str = "auto",
+    autogaze_dtype: str = "auto",
+    autogaze_target_scales: str | None = None,
+    autogaze_target_patch_size: int | None = None,
+    autogaze_encoder_patch_size: int | None = None,
+    autogaze_tile_size: int | None = None,
+    autogaze_chunk_frames: int | None = None,
+    max_batch_size_autogaze: int | None = None,
+    gazing_ratio: float | None = None,
+    task_loss_requirement: float | None = None,
+    autogaze_generate_only: bool = False,
+) -> list[str]:
+    output = list(args)
+
+    def remove_value(flag: str) -> None:
+        while flag in output:
+            index = output.index(flag)
+            del output[index : index + 2]
+
+    def add_value(flag: str, value: Any, *, default: Any = None) -> None:
+        if value is not None and value != default:
+            remove_value(flag)
+            output.extend([flag, str(value)])
+
+    def add_flag(flag: str, enabled: bool) -> None:
+        if enabled and flag not in output:
+            output.append(flag)
+
+    add_value("--device-map", device_map, default="auto")
+    add_value("--dtype", dtype, default="auto")
+    add_value("--attn-implementation", attn_implementation)
+    add_value("--video-decode-strategy", video_decode_strategy, default="auto")
+    add_value("--autogaze-repo", autogaze_repo, default=".")
+    add_value("--autogaze-device", autogaze_device, default="auto")
+    add_value("--autogaze-dtype", autogaze_dtype, default="auto")
+    add_value("--autogaze-target-scales", autogaze_target_scales)
+    add_value("--autogaze-target-patch-size", autogaze_target_patch_size)
+    add_value("--autogaze-encoder-patch-size", autogaze_encoder_patch_size)
+    add_value("--autogaze-tile-size", autogaze_tile_size)
+    add_value("--autogaze-chunk-frames", autogaze_chunk_frames)
+    add_value("--max-batch-size-autogaze", max_batch_size_autogaze)
+    add_value("--gazing-ratio", gazing_ratio)
+    add_value("--task-loss-requirement", task_loss_requirement)
+    add_flag("--autogaze-generate-only", autogaze_generate_only)
+    return output
+
+
 def _prediction_status(generation_status: str | None) -> str:
     if generation_status == "oom":
         return "oom"
@@ -888,6 +1013,23 @@ def main() -> None:
     parser.add_argument("--qwen-vit-max-spatial-chunks", type=int)
     parser.add_argument("--qwen-thumbnail-mode", choices=["none", "append-video"], default="none")
     parser.add_argument("--autogaze-model", default="weight/AutoGaze")
+    parser.add_argument("--device-map", default="auto")
+    parser.add_argument("--dtype", default="auto")
+    parser.add_argument("--attn-implementation")
+    parser.add_argument("--device", choices=["cpu", "mps", "cuda"])
+    parser.add_argument("--video-decode-strategy", choices=["auto", "seek", "scan"], default="auto")
+    parser.add_argument("--autogaze-repo", default=".")
+    parser.add_argument("--autogaze-device", choices=["auto", "cpu", "mps", "cuda"])
+    parser.add_argument("--autogaze-dtype", choices=["auto", "float32", "float16", "bfloat16"], default="auto")
+    parser.add_argument("--autogaze-target-scales")
+    parser.add_argument("--autogaze-target-patch-size", type=int)
+    parser.add_argument("--autogaze-encoder-patch-size", type=int)
+    parser.add_argument("--autogaze-tile-size", type=int)
+    parser.add_argument("--autogaze-chunk-frames", type=int)
+    parser.add_argument("--max-batch-size-autogaze", type=int)
+    parser.add_argument("--gazing-ratio", "--gazing-ratio-tile", dest="gazing_ratio", type=float)
+    parser.add_argument("--task-loss-requirement", "--task-loss-requirement-tile", dest="task_loss_requirement", type=float)
+    parser.add_argument("--autogaze-generate-only", action="store_true")
     parser.add_argument("--video-resize-shortest-edge", type=int)
     parser.add_argument("--video-resize-longest-edge", type=int)
     parser.add_argument("--video-resize-width", type=int)
@@ -913,6 +1055,22 @@ def main() -> None:
         qwen_vit_max_spatial_chunks=args.qwen_vit_max_spatial_chunks,
         qwen_thumbnail_mode=args.qwen_thumbnail_mode,
         autogaze_model=args.autogaze_model,
+        device_map=args.device_map,
+        dtype=args.dtype,
+        attn_implementation=args.attn_implementation,
+        video_decode_strategy=args.video_decode_strategy,
+        autogaze_repo=args.autogaze_repo,
+        autogaze_device=args.autogaze_device or args.device or "auto",
+        autogaze_dtype=args.autogaze_dtype,
+        autogaze_target_scales=args.autogaze_target_scales,
+        autogaze_target_patch_size=args.autogaze_target_patch_size,
+        autogaze_encoder_patch_size=args.autogaze_encoder_patch_size,
+        autogaze_tile_size=args.autogaze_tile_size,
+        autogaze_chunk_frames=args.autogaze_chunk_frames,
+        max_batch_size_autogaze=args.max_batch_size_autogaze,
+        gazing_ratio=args.gazing_ratio,
+        task_loss_requirement=args.task_loss_requirement,
+        autogaze_generate_only=args.autogaze_generate_only,
         video_resize_shortest_edge=args.video_resize_shortest_edge,
         video_resize_longest_edge=args.video_resize_longest_edge,
         video_resize_width=args.video_resize_width,

@@ -58,6 +58,23 @@ def build_plugin_router_parser(*, add_help: bool = False) -> argparse.ArgumentPa
     parser.add_argument("--qwen-vit-max-spatial-chunks", type=int)
     parser.add_argument("--qwen-thumbnail-mode", choices=["none", "append-video"], default="none")
     parser.add_argument("--autogaze-model", default="weight/AutoGaze")
+    parser.add_argument("--device-map", default="auto")
+    parser.add_argument("--dtype", default="auto")
+    parser.add_argument("--attn-implementation")
+    parser.add_argument("--device", choices=["cpu", "mps", "cuda"])
+    parser.add_argument("--video-decode-strategy", choices=["auto", "seek", "scan"], default="auto")
+    parser.add_argument("--autogaze-repo", default=".")
+    parser.add_argument("--autogaze-device", choices=["auto", "cpu", "mps", "cuda"])
+    parser.add_argument("--autogaze-dtype", choices=["auto", "float32", "float16", "bfloat16"], default="auto")
+    parser.add_argument("--autogaze-target-scales")
+    parser.add_argument("--autogaze-target-patch-size", type=int)
+    parser.add_argument("--autogaze-encoder-patch-size", type=int)
+    parser.add_argument("--autogaze-tile-size", type=int)
+    parser.add_argument("--autogaze-chunk-frames", type=int)
+    parser.add_argument("--max-batch-size-autogaze", type=int)
+    parser.add_argument("--gazing-ratio", "--gazing-ratio-tile", dest="gazing_ratio", type=float)
+    parser.add_argument("--task-loss-requirement", "--task-loss-requirement-tile", dest="task_loss_requirement", type=float)
+    parser.add_argument("--autogaze-generate-only", action="store_true")
     parser.add_argument("--video-resize-shortest-edge", type=int)
     parser.add_argument("--video-resize-longest-edge", type=int)
     parser.add_argument("--video-resize-width", type=int)
@@ -128,6 +145,22 @@ def run_plugin_route(argv: list[str]) -> dict:
         qwen_vit_max_spatial_chunks=qwen_vit_max_spatial_chunks,
         qwen_thumbnail_mode=args.qwen_thumbnail_mode,
         autogaze_model=args.autogaze_model,
+        device_map=args.device_map,
+        dtype=args.dtype,
+        attn_implementation=args.attn_implementation,
+        video_decode_strategy=args.video_decode_strategy,
+        autogaze_repo=args.autogaze_repo,
+        autogaze_device=args.autogaze_device or args.device or "auto",
+        autogaze_dtype=args.autogaze_dtype,
+        autogaze_target_scales=args.autogaze_target_scales,
+        autogaze_target_patch_size=args.autogaze_target_patch_size,
+        autogaze_encoder_patch_size=args.autogaze_encoder_patch_size,
+        autogaze_tile_size=args.autogaze_tile_size,
+        autogaze_chunk_frames=args.autogaze_chunk_frames,
+        max_batch_size_autogaze=args.max_batch_size_autogaze,
+        gazing_ratio=args.gazing_ratio,
+        task_loss_requirement=args.task_loss_requirement,
+        autogaze_generate_only=args.autogaze_generate_only,
         video_resize_shortest_edge=args.video_resize_shortest_edge,
         video_resize_longest_edge=args.video_resize_longest_edge,
         video_resize_width=args.video_resize_width,

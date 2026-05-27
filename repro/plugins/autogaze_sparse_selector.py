@@ -52,6 +52,7 @@ class AutogazeSelectorRuntimeConfig:
     target_patch_size: int | None = 16
     encoder_patch_size: int | None = None
     generate_only: bool = False
+    video_decode_strategy: str = "auto"
     video_resize_shortest_edge: int | None = None
     video_resize_longest_edge: int | None = None
     video_resize_width: int | None = None
@@ -293,13 +294,13 @@ def run_direct_autogaze_selector(config: AutogazeSelectorRuntimeConfig) -> dict[
     current_indices: list[int] = []
     chunk_number = 0
 
-    if autogaze_selector_resize_enabled(config):
+    if autogaze_selector_resize_enabled(config) or config.video_decode_strategy != "auto":
         start = time.perf_counter()
         sampled_frames, decode_stats = load_sampled_video_frames(
             config.video,
             int(config.num_video_frames),
             video_plan["resize"]["effective"],
-            decode_strategy="auto",
+            decode_strategy=config.video_decode_strategy,
         )
         decode_ms += _elapsed_ms(start)
         for frame_index, image in zip(sampled_indices, sampled_frames):
@@ -514,6 +515,7 @@ def runtime_config_from_args(args: Any) -> AutogazeSelectorRuntimeConfig:
             else None
         ),
         generate_only=bool(getattr(args, "autogaze_generate_only", False)),
+        video_decode_strategy=str(getattr(args, "video_decode_strategy", "auto")),
         video_resize_shortest_edge=(
             int(getattr(args, "video_resize_shortest_edge"))
             if getattr(args, "video_resize_shortest_edge", None) is not None
