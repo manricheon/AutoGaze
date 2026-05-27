@@ -19,8 +19,8 @@ def test_vjepa_qwen_hlvid_defaults_are_smoke_safe():
     assert args.continue_on_error is True
     assert args.num_video_frames == 16
     assert args.frames_per_clip == 16
-    assert args.autogaze_tile_size == 392
-    assert args.autogaze_target_scales == "56+112+196+392"
+    assert args.autogaze_tile_size == 224
+    assert args.autogaze_target_scales == "224"
     assert args.vjepa_qwen_modes == ""
     assert args.vjepa_selection_policies == "single_scale_union"
     assert resolve_modes(args) == ["autogaze_single_grid"]

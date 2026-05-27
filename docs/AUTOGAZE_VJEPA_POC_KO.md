@@ -19,6 +19,7 @@
 - `tubelet_size=2`이면 같은 tubelet에 들어가는 두 프레임의 선택 patch를 union합니다.
 - 저해상도 AutoGaze patch는 V-JEPA grid에서 bbox overlap되는 모든 spatial cell로 확장합니다.
 - scale-aware 모드에서는 scale마다 별도 V-JEPA grid를 두므로 coarse patch가 고해상도 grid로 과도하게 펼쳐지는지 비교할 수 있습니다.
+- 기본 `nvidia/AutoGaze` checkpoint는 V-JEPA/Qwen PoC에서 `--autogaze-target-scales 224 --autogaze-tile-size 224`를 우선 사용합니다. `56+112+196+392` 같은 NVILA-HD multiscale 설정은 해당 scale 개수를 지원하는 AutoGaze checkpoint에서만 사용하세요.
 - Qwen 연결은 학습된 projector 전까지 `zero_shot_wiring_probe`로만 봅니다.
 
 ```text
@@ -82,8 +83,8 @@ python -m repro.vjepa_qwen_runner \
   --frames-per-clip 16 \
   --autogaze-chunk-frames 16 \
   --max-tiles-video 1 \
-  --autogaze-tile-size 392 \
-  --autogaze-target-scales 56+112+196+392 \
+  --autogaze-tile-size 224 \
+  --autogaze-target-scales 224 \
   --autogaze-target-patch-size 16 \
   --vjepa-selection-policy single_scale_union \
   --video-decode-strategy seek \
@@ -113,6 +114,7 @@ python -m repro.vjepa_qwen_runner \
 ```
 
 멀티스케일을 더 직접적으로 보고 싶으면 아래처럼 scale별 V-JEPA sparse pass를 수행합니다. 이 모드는 더 무겁지만 AutoGaze scale별 index가 V-JEPA grid에서 얼마나 줄어드는지 확인하기 좋습니다.
+단, `--autogaze-target-scales`의 scale 개수는 AutoGaze checkpoint의 `config.scales`와 맞아야 합니다.
 
 ```bash
 python -m repro.vjepa_qwen_runner \
@@ -124,8 +126,8 @@ python -m repro.vjepa_qwen_runner \
   --device cuda \
   --num-video-frames 16 \
   --frames-per-clip 16 \
-  --autogaze-tile-size 392 \
-  --autogaze-target-scales 56+112+196+392 \
+  --autogaze-tile-size 224 \
+  --autogaze-target-scales 224 \
   --vjepa-selection-policy scale_aware_multi_pass \
   --output-json outputs/autogaze_vjepa/vjepa_qwen_scale_aware_actual.json
 ```
@@ -159,8 +161,8 @@ python -m repro.vjepa_qwen_hlvid_benchmark \
   --frames-per-clip 16 \
   --autogaze-chunk-frames 16 \
   --max-tiles-video 1 \
-  --autogaze-tile-size 392 \
-  --autogaze-target-scales 56+112+196+392 \
+  --autogaze-tile-size 224 \
+  --autogaze-target-scales 224 \
   --video-decode-strategy seek \
   --video-resize-longest-edge 448 \
   --vjepa-qwen-modes dense_off,autogaze_single_grid,autogaze_scale_aware
@@ -362,8 +364,8 @@ subprocess.check_call([
     "--frames-per-clip", "16",
     "--autogaze-chunk-frames", "16",
     "--max-tiles-video", "1",
-    "--autogaze-tile-size", "392",
-    "--autogaze-target-scales", "56+112+196+392",
+    "--autogaze-tile-size", "224",
+    "--autogaze-target-scales", "224",
     "--video-decode-strategy", "seek",
     "--video-resize-longest-edge", "448",
     "--output-json", str(out_dir / "actual_autogaze_vjepa_qwen.json"),

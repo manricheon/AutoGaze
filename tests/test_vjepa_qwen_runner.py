@@ -23,8 +23,8 @@ def test_vjepa_qwen_runner_defaults_wire_actual_autogaze():
     assert args.frames_per_clip == 16
     assert args.num_video_frames == 16
     assert args.autogaze_chunk_frames == 16
-    assert args.autogaze_tile_size == 392
-    assert args.autogaze_target_scales == "56+112+196+392"
+    assert args.autogaze_tile_size == 224
+    assert args.autogaze_target_scales == "224"
     assert args.vjepa_selection_policy == "single_scale_union"
     assert args.output_json.endswith("vjepa_qwen_actual.json")
 
