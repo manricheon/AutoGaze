@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 
@@ -32,12 +33,12 @@ def run_vjepa_encoder_on_selected_embeddings(
     all_self_attentions = () if output_attentions else None
 
     for layer_module in vjepa_encoder.layer:
-        layer_outputs = layer_module(
-            hidden_states,
+        layer_kwargs = _vjepa_layer_kwargs(
+            layer_module,
             position_mask=position_mask,
-            head_mask=None,
             output_attentions=output_attentions,
         )
+        layer_outputs = layer_module(hidden_states, **layer_kwargs)
         hidden_states = layer_outputs[0]
         if output_attentions:
             all_self_attentions = all_self_attentions + (layer_outputs[1],)
@@ -55,3 +56,17 @@ def run_vjepa_encoder_on_selected_embeddings(
             "encoder_token_reduction_ratio": float(raw_count) / float(selected_count) if selected_count else None,
         },
     }
+
+
+def _vjepa_layer_kwargs(layer_module: Any, *, position_mask: Any, output_attentions: bool) -> dict[str, Any]:
+    parameters = inspect.signature(layer_module.forward).parameters
+    kwargs: dict[str, Any] = {}
+    if "position_mask" in parameters:
+        kwargs["position_mask"] = position_mask
+    elif "attention_mask" in parameters:
+        kwargs["attention_mask"] = position_mask
+    if "head_mask" in parameters:
+        kwargs["head_mask"] = None
+    if "output_attentions" in parameters:
+        kwargs["output_attentions"] = output_attentions
+    return kwargs
