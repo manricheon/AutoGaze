@@ -22,6 +22,7 @@
 | Markdown/chart report | 준비됨 | `python -m repro.markdown_report` |
 | aggregate trend report | 준비됨 | `python -m repro.aggregate_reports` |
 | plugin 확장 실험 | PoC/probe | `run_hlvid_folder_benchmark.py --plugin-suite qwen`, `python -m repro.flexible_runner` |
+| AutoGaze + V-JEPA + Qwen CUDA smoke | PoC | `python scripts/run_colab_autogaze_cuda_smoke.py` |
 
 HLVid 실행은 `scripts/run_hlvid_folder_benchmark.py`를 우선 사용하세요. 옵션을 주지 않으면 NVILA-HD keep-all/single-scale/autogaze 기본 경로로 가고, `--plugin-suite qwen`을 주면 Qwen/Plugin HLVid 경로로 라우팅됩니다. `repro.plugin_hlvid_benchmark`는 내부/고급 호출용으로 남겨둡니다.
 
@@ -70,6 +71,19 @@ Qwen3-VL 실험은 `qwen-vl-utils`가 필요합니다. 기본 requirements에 �
 ```
 
 `summary.passed=true`가 아니면 CUDA smoke로 넘어가지 말고, 실패한 `commands` 또는 `checks` 항목을 먼저 고칩니다.
+
+Colab/H100에서 V-JEPA+Qwen까지 실제 모델을 로드해 한 번에 확인하려면 아래 wrapper를 사용합니다. 이 명령은 `verify_autogaze_entrypoints.py`, V-JEPA+Qwen dense/off, AutoGaze+V-JEPA sparse+Qwen on generate를 순서대로 실행합니다.
+
+```bash
+python scripts/run_colab_autogaze_cuda_smoke.py \
+  --weights-root /content/autogaze_weights \
+  --output-root /content/autogaze_vjepa_outputs \
+  --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
+  --num-video-frames 16 \
+  --frames-per-clip 16 \
+  --video-resize-longest-edge 224 \
+  --max-new-tokens 4
+```
 
 ## 1. NVILA-HD Single Inference Smoke
 

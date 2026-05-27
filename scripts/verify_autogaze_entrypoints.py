@@ -116,6 +116,7 @@ def help_commands(python_executable: str) -> list[tuple[str, list[str]]]:
         ("flexible_runner_help", [python_executable, "-m", "repro.flexible_runner", "--help"]),
         ("vjepa_qwen_runner_help", [python_executable, "-m", "repro.vjepa_qwen_runner", "--help"]),
         ("vjepa_qwen_hlvid_help", [python_executable, "-m", "repro.vjepa_qwen_hlvid_benchmark", "--help"]),
+        ("colab_cuda_smoke_help", [python_executable, "scripts/run_colab_autogaze_cuda_smoke.py", "--help"]),
         ("markdown_report_help", [python_executable, "-m", "repro.markdown_report", "--help"]),
         ("aggregate_reports_help", [python_executable, "-m", "repro.aggregate_reports", "--help"]),
     ]
@@ -143,6 +144,22 @@ def dry_run_commands(python_executable: str, temp_root: Path) -> list[tuple[str,
                 str(temp_root / "qwen"),
             ],
         ),
+        (
+            "colab_cuda_smoke_dry_run",
+            [
+                python_executable,
+                "scripts/run_colab_autogaze_cuda_smoke.py",
+                "--dry-run",
+                "--python-executable",
+                python_executable,
+                "--output-root",
+                str(temp_root / "colab_outputs"),
+                "--weights-root",
+                str(temp_root / "weights"),
+                "--video",
+                "inputs/hlvid_example/clip_av_video_5_001.mp4",
+            ],
+        ),
     ]
 
 
@@ -159,6 +176,7 @@ def focused_tests() -> list[str]:
         "tests/test_vjepa_sparse_runtime.py",
         "tests/test_vjepa_qwen_bridge.py",
         "tests/test_vjepa_qwen_colab_smoke.py",
+        "tests/test_colab_autogaze_cuda_smoke_script.py",
         "tests/test_vjepa_poc.py",
         "tests/test_download_vjepa_qwen_checkpoints.py",
         "tests/test_autogaze_sparse_selector.py",
@@ -516,6 +534,14 @@ def entrypoint_matrix() -> list[dict[str, str]]:
             "vit": "V-JEPA2 dense/sparse",
             "mllm": "Qwen bridge/generate",
             "verification": "help + unit tests; actual CUDA HLVid required separately",
+        },
+        {
+            "id": "colab_cuda_smoke_wrapper",
+            "entrypoint": "python scripts/run_colab_autogaze_cuda_smoke.py",
+            "selector": "dense/off and AutoGaze/on",
+            "vit": "V-JEPA2 dense/sparse hook",
+            "mllm": "Qwen bridge/generate",
+            "verification": "help + dry-run + Colab CUDA actual smoke wrapper",
         },
     ]
 

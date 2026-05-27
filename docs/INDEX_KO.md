@@ -40,6 +40,7 @@ AutoGaze를 실제 비디오 MLLM 파이프라인에 붙였을 때 다음을 재
 | V-JEPA sparse PoC | `python -m repro.vjepa_poc --synthetic --scale-aware --tiny-encoder-smoke --qwen-bridge-smoke` | AutoGaze patch index를 V-JEPA tubelet/grid index로 매핑하고 sparse encoder hook 및 Qwen bridge를 검증 |
 | V-JEPA + Qwen actual single | `python -m repro.vjepa_qwen_runner` | 실제 비디오에서 dense/off V-JEPA baseline 또는 AutoGaze/on sparse V-JEPA를 Qwen generate까지 연결. 기본 AutoGaze pyramid는 V-JEPA 224 crop 기준 `32+64+112+224` |
 | V-JEPA + Qwen HLVid | `python -m repro.vjepa_qwen_hlvid_benchmark` | HLVid row를 순회하며 `dense_off`, `autogaze_single_grid`, `autogaze_scale_aware`의 token/latency/failure/score를 기록 |
+| Colab CUDA smoke bundle | `python scripts/run_colab_autogaze_cuda_smoke.py` | Colab/H100에서 entrypoint verifier, V-JEPA+Qwen dense/off, AutoGaze+V-JEPA+Qwen on generate를 한 번에 실행 |
 | Streaming profile | `python -m repro.nvila_runner --mode stream-profile` | LLM 없이 decode/tile/AutoGaze/SigLIP 구간 profile |
 | Streaming sweep | `python -m repro.stream_profile_sweep` | 여러 stream config 후보를 비교 |
 | Markdown report | `python -m repro.markdown_report` | 단일/benchmark JSON을 표와 SVG chart가 있는 Markdown으로 변환 |

@@ -247,6 +247,32 @@ subprocess.check_call([
 ])
 ```
 
+한 번에 검증하려면 아래 wrapper를 먼저 사용하세요. 이 명령은 missing checkpoint/video를 내려받고, 모델 로드 없는 entrypoint verifier를 실행한 뒤, 같은 비디오에서 `V-JEPA+Qwen dense/off`와 `AutoGaze+V-JEPA sparse+Qwen on` generate를 순서대로 실행합니다.
+
+```python
+import json, pathlib, subprocess
+
+out_dir = pathlib.Path("/content/autogaze_vjepa_outputs")
+subprocess.check_call([
+    "python", "scripts/run_colab_autogaze_cuda_smoke.py",
+    "--weights-root", "/content/autogaze_weights",
+    "--output-root", str(out_dir),
+    "--video", "inputs/hlvid_example/clip_av_video_5_001.mp4",
+    "--num-video-frames", "16",
+    "--frames-per-clip", "16",
+    "--video-resize-longest-edge", "224",
+    "--max-new-tokens", "4",
+])
+
+summary = json.loads((out_dir / "colab_autogaze_cuda_smoke_summary.json").read_text())
+print(json.dumps(summary["summary"], indent=2))
+print(json.dumps(summary["results"], indent=2))
+```
+
+통과 기준은 `summary.passed=true`, `results.vjepa_qwen_dense_off.status=passed`, `results.autogaze_vjepa_qwen_on.status=passed`입니다. AutoGaze on 결과에서는 `tokens.vjepa_selected_tokens < tokens.vjepa_raw_tokens`와 `tokens.qwen_visual_tokens_inserted == tokens.vjepa_selected_tokens`를 확인합니다.
+
+아래 셀들은 문제가 생겼을 때 단계별로 쪼개서 확인하는 용도입니다.
+
 ```python
 import subprocess
 

@@ -11,6 +11,7 @@ def test_entrypoint_matrix_covers_required_on_off_families():
     assert "qwen_plugin_hlvid" in ids
     assert "vjepa_qwen_single" in ids
     assert "vjepa_qwen_hlvid" in ids
+    assert "colab_cuda_smoke_wrapper" in ids
 
 
 def test_plugin_qwen_routing_check_requires_sparse_mode_to_run_autogaze():
