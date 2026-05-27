@@ -343,6 +343,9 @@ def compact_results(results: dict[str, Any]) -> dict[str, Any]:
         if payload is None:
             compact[name] = None
             continue
+        if name == "entrypoint_verifier":
+            compact[name] = compact_entrypoint_verifier_result(payload)
+            continue
         compact[name] = {
             "status": payload.get("status") or payload.get("summary", {}).get("passed"),
             "summary": payload.get("summary"),
@@ -353,6 +356,31 @@ def compact_results(results: dict[str, Any]) -> dict[str, Any]:
             "generated_text": payload.get("generated_text"),
         }
     return compact
+
+
+def compact_entrypoint_verifier_result(payload: dict[str, Any]) -> dict[str, Any]:
+    matrix = payload.get("script_matrix") or []
+    commands = payload.get("commands") or []
+    return {
+        "status": payload.get("summary", {}).get("passed"),
+        "summary": payload.get("summary"),
+        "verified_script_ids": [row.get("id") for row in matrix],
+        "verified_entrypoints": [
+            {
+                "id": row.get("id"),
+                "entrypoint": row.get("entrypoint"),
+                "selector": row.get("selector"),
+                "vit": row.get("vit"),
+                "mllm": row.get("mllm"),
+            }
+            for row in matrix
+        ],
+        "dry_run_commands": [
+            command.get("name")
+            for command in commands
+            if str(command.get("name", "")).endswith("_dry_run")
+        ],
+    }
 
 
 def command_failures(commands: list[dict[str, Any]]) -> list[dict[str, Any]]:

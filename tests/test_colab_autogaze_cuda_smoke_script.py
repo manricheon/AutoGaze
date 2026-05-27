@@ -4,6 +4,7 @@ from scripts.run_colab_autogaze_cuda_smoke import (
     DEFAULT_OUTPUT_ROOT,
     DEFAULT_WEIGHTS_ROOT,
     build_parser,
+    compact_results,
     result_failures,
     run_smoke,
     vjepa_qwen_command,
@@ -121,3 +122,39 @@ def test_result_failures_distinguishes_missing_verifier_and_pipeline_failures():
         "missing_result",
         "pipeline_failed",
     }
+
+
+def test_compact_results_exposes_entrypoint_verifier_script_matrix():
+    compact = compact_results(
+        {
+            "entrypoint_verifier": {
+                "summary": {"passed": True, "command_count": 2, "check_count": 1},
+                "script_matrix": [
+                    {
+                        "id": "nvila_single_autogaze",
+                        "entrypoint": "python -m repro.nvila_runner --mode single --gazing-mode autogaze",
+                        "selector": "AutoGaze on",
+                        "vit": "NVILA-HD SigLIP",
+                        "mllm": "NVILA-HD",
+                    },
+                    {
+                        "id": "vjepa_qwen_hlvid",
+                        "entrypoint": "python -m repro.vjepa_qwen_hlvid_benchmark",
+                        "selector": "dense_off, autogaze_single_grid",
+                        "vit": "V-JEPA2",
+                        "mllm": "Qwen bridge/generate",
+                    },
+                ],
+                "commands": [
+                    {"name": "download_qwen_dry_run"},
+                    {"name": "vjepa_qwen_hlvid_dry_run"},
+                    {"name": "nvila_runner_help"},
+                ],
+            }
+        }
+    )
+
+    verifier = compact["entrypoint_verifier"]
+    assert verifier["status"] is True
+    assert verifier["verified_script_ids"] == ["nvila_single_autogaze", "vjepa_qwen_hlvid"]
+    assert verifier["dry_run_commands"] == ["download_qwen_dry_run", "vjepa_qwen_hlvid_dry_run"]
