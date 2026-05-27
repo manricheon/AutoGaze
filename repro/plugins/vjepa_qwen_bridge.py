@@ -68,7 +68,12 @@ def build_qwen_bridge_inputs_from_vjepa_features(
         dim=1,
     )
 
-    embeddings = _qwen_input_embeddings(model)(packed_input_ids)
+    embedding_layer = _qwen_input_embeddings(model)
+    embedding_weight = getattr(embedding_layer, "weight", None)
+    if embedding_weight is not None:
+        packed_input_ids = packed_input_ids.to(embedding_weight.device)
+        packed_attention = packed_attention.to(embedding_weight.device)
+    embeddings = embedding_layer(packed_input_ids)
     features = projected_vjepa_features.to(device=embeddings.device, dtype=embeddings.dtype)
     if int(features.shape[-1]) != int(embeddings.shape[-1]):
         raise ValueError(
