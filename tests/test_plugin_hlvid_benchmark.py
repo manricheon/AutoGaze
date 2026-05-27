@@ -4,6 +4,7 @@ from pathlib import Path
 
 from repro.plugin_hlvid_benchmark import (
     _flatten_key_metrics,
+    _flatten_autogaze_selector_metrics,
     _summarize_by_mode,
     build_markdown_report,
     build_mode_runner_args,
@@ -337,6 +338,24 @@ def test_flatten_key_metrics_includes_qwen_vit_comparison_fields():
     assert flattened["qwen_vit_spatial_tiles"] == 4
 
 
+def test_flatten_autogaze_selector_metrics_includes_direct_selector_fields():
+    flattened = _flatten_autogaze_selector_metrics(
+        {
+            "status": "executed",
+            "latency_ms": {"total": 50.0, "autogaze_forward": 20.0},
+            "tokens": {"raw_patch_tokens": 1000, "selected_patch_tokens": 100, "reduction_ratio": 10.0},
+            "memory_bytes": {"tile_tensor_peak": 1234},
+        }
+    )
+
+    assert flattened["autogaze_selector_total_ms"] == 50.0
+    assert flattened["autogaze_selector_forward_ms"] == 20.0
+    assert flattened["autogaze_selector_raw_patch_tokens"] == 1000
+    assert flattened["autogaze_selector_selected_patch_tokens"] == 100
+    assert flattened["autogaze_selector_reduction_ratio"] == 10.0
+    assert flattened["autogaze_selector_tile_tensor_peak_bytes"] == 1234
+
+
 def test_plugin_hlvid_summary_surfaces_processing_budget_by_mode():
     summary = _summarize_by_mode(
         [
@@ -472,6 +491,84 @@ def test_run_plugin_hlvid_benchmark_records_oom_row_and_continues(monkeypatch, t
     assert prediction["failure"]["stage"] == "llm_prefill_or_generate"
     assert payload["summary"]["modes"]["qwen_full_vit"]["status_counts"] == {"oom": 1}
     assert (output_dir / "runs" / "qwen_full_vit" / "00000.json").is_file()
+
+
+def test_run_plugin_hlvid_benchmark_continues_after_missing_dependency_and_reaches_autogaze(monkeypatch, tmp_path):
+    manifest = tmp_path / "manifest.json"
+    video_root = tmp_path / "videos"
+    output_dir = tmp_path / "out"
+    video_root.mkdir()
+    (video_root / "clip_001.mp4").write_text("fake video")
+    manifest.write_text(
+        json.dumps(
+            [
+                {
+                    "question_id": "q1",
+                    "category": "toy",
+                    "video_path": "clip_001.mp4",
+                    "question": "Question? A. one B. two C. three D. four",
+                    "answer": "B",
+                }
+            ]
+        )
+    )
+    calls = []
+
+    def fake_run_single(args):
+        calls.append(args.qwen_vit_mode)
+        if args.qwen_vit_mode == "qwen_chunked_vit_autogaze_sparse":
+            Path(args.output_json).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.output_json).write_text(
+                json.dumps(
+                    {
+                        "runner": "flexible_runner",
+                        "mode": "single",
+                        "implementation_status": "failed_missing_dependency",
+                        "direct_autogaze_selector": {
+                            "status": "executed",
+                            "sparse_selection_plan_json": "plan.json",
+                        },
+                        "generation": {
+                            "text": None,
+                            "status": "failed_missing_dependency",
+                            "metrics": {
+                                "metric_status": {
+                                    "value": "failed_missing_dependency",
+                                    "reason": "qwen_vl_utils is missing",
+                                }
+                            },
+                        },
+                    }
+                )
+                + "\n"
+            )
+        raise RuntimeError("qwen_vl_utils is required for Qwen video processing; install with `pip install qwen-vl-utils`.")
+
+    monkeypatch.setattr("repro.plugin_hlvid_benchmark.run_single", fake_run_single)
+
+    payload = run_plugin_hlvid_benchmark(
+        manifest=manifest,
+        video_root=video_root,
+        output_dir=output_dir,
+        modes=["qwen_full_vit", "qwen_chunked_vit_autogaze_sparse"],
+        models={"qwen3-vl": "weight/Qwen3-VL"},
+        limit=1,
+        num_video_frames=16,
+        max_tiles_video=1,
+        max_new_tokens=4,
+    )
+
+    assert calls == ["qwen_full_vit", "qwen_chunked_vit_autogaze_sparse"]
+    assert len(payload["predictions"]) == 2
+    sparse_run = json.loads((output_dir / "runs" / "qwen_chunked_vit_autogaze_sparse" / "00000.json").read_text())
+    assert sparse_run["direct_autogaze_selector"]["status"] == "executed"
+    sparse_prediction = payload["predictions"][1]
+    assert sparse_prediction["autogaze_selector_status"] == "executed"
+    assert payload["summary"]["modes"]["qwen_full_vit"]["status_counts"] == {"failed_missing_dependency": 1}
+    assert payload["summary"]["modes"]["qwen_full_vit"]["next_action"] == "install_missing_runtime_dependency"
+    sparse_summary = payload["summary"]["modes"]["qwen_chunked_vit_autogaze_sparse"]
+    assert sparse_summary["autogaze_selector_counts"] == {"executed": 1}
+    assert sparse_summary["next_action"] == "install_missing_runtime_dependency_after_autogaze"
 
 
 def test_plugin_hlvid_summary_reports_probe_and_poc_statuses(tmp_path):

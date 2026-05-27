@@ -641,25 +641,20 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
             packed_inputs = build_qwen_inputs_from_video_features(model, inputs, video_features)
             metrics["latency_ms"]["qwen_vit_prepare"] = _elapsed_ms(start)
         except Exception as exc:
-            metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
-            metrics["qwen_vit"] = {
-                "mode": request.qwen_vit_mode,
-                "status": "failed_before_generate",
-                "reason": str(exc),
-            }
-            metrics["metric_status"] = {
-                "value": "failed_qwen_chunked_vit",
-                "reason": str(exc),
-            }
-            _record_cuda_memory(metrics)
-            return MllmRunResult(
-                text=None,
-                prompt=request.prompt,
-                video=request.video,
-                image=request.image,
-                adapter=self.name,
-                status="failed_qwen_chunked_vit",
+            return self._run_qwen_native_full_vit_fallback(
+                model=model,
+                processor=processor,
+                inputs=inputs,
+                request=request,
                 metrics=metrics,
+                total_start=total_start,
+                original_error=str(exc),
+                metric_value="executed_qwen_chunked_vit_fallback_full_vit",
+                fallback_status="fallback_native_full_vit_generate",
+                fallback_reason=(
+                    "Custom Qwen chunked ViT failed for this checkpoint/runtime, so the mode fell back "
+                    "to native full Qwen generate. Do not count this row as chunked ViT acceleration."
+                ),
             )
 
         feature_metadata = packed_inputs.pop("qwen_video_feature_metadata")
@@ -755,6 +750,9 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
         if model_device is not None and hasattr(inputs, "to"):
             inputs = inputs.to(model_device)
 
+        mapping = None
+        thumbnail_metadata: dict[str, Any] = {}
+        keep_indices: list[int] = []
         try:
             if not request.sparse_selection_plan_path:
                 raise ValueError(
@@ -797,6 +795,19 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
             )
             metrics["latency_ms"]["qwen_vit_prepare"] = _elapsed_ms(start)
         except Exception as exc:
+            if keep_indices:
+                return self._run_qwen_sparse_post_encoder_fallback(
+                    model=model,
+                    processor=processor,
+                    inputs=inputs,
+                    request=request,
+                    metrics=metrics,
+                    total_start=total_start,
+                    keep_indices=keep_indices,
+                    mapping=mapping,
+                    thumbnail_metadata=thumbnail_metadata,
+                    original_error=str(exc),
+                )
             metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
             metrics["qwen_vit"] = {
                 "mode": request.qwen_vit_mode,
@@ -871,6 +882,185 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
             "reason": (
                 "AutoGaze selected Qwen visual tokens, Qwen ViT ran those sparse tokens in temporal chunks, "
                 "and only matching visual placeholders were packed into the MLLM context."
+            ),
+        }
+        _record_cuda_memory(metrics)
+        return MllmRunResult(
+            text=text,
+            prompt=request.prompt,
+            video=request.video,
+            image=request.image,
+            adapter=self.name,
+            status="executed",
+            metrics=metrics,
+        )
+
+    def _run_qwen_native_full_vit_fallback(
+        self,
+        *,
+        model: Any,
+        processor: Any,
+        inputs: Any,
+        request: MllmRunRequest,
+        metrics: dict[str, Any],
+        total_start: float,
+        original_error: str,
+        metric_value: str,
+        fallback_status: str,
+        fallback_reason: str,
+    ) -> MllmRunResult:
+        metrics["qwen_vit"] = {
+            "mode": request.qwen_vit_mode,
+            "status": fallback_status,
+            "requested_chunk_frames": request.qwen_vit_chunk_frames,
+            "requested_max_spatial_chunks": request.qwen_vit_max_spatial_chunks,
+            "custom_path_error": original_error,
+            "fallback_integration_level": "native_full_vit_generate",
+            "pre_vit_chunking_applied": False,
+            "pre_vit_sparse_applied": False,
+        }
+        start = time.perf_counter()
+        try:
+            generated_ids = model.generate(**inputs, max_new_tokens=request.max_new_tokens)
+        except Exception as exc:
+            metrics["latency_ms"]["generate"] = _elapsed_ms(start)
+            metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
+            metrics["qwen_vit"]["status"] = "failed_fallback_native_full_vit_generate"
+            metrics["qwen_vit"]["fallback_reason"] = str(exc)
+            metrics["metric_status"] = {
+                "value": "failed_qwen_chunked_vit_fallback_full_vit",
+                "reason": f"Custom path failed with {original_error}; fallback generate failed with {exc}",
+            }
+            _record_cuda_memory(metrics)
+            return MllmRunResult(
+                text=None,
+                prompt=request.prompt,
+                video=request.video,
+                image=request.image,
+                adapter=self.name,
+                status="failed_qwen_chunked_vit",
+                metrics=metrics,
+            )
+        metrics["latency_ms"]["generate"] = _elapsed_ms(start)
+        input_ids = inputs.get("input_ids") if isinstance(inputs, dict) else getattr(inputs, "input_ids", None)
+        if input_ids is not None:
+            generated_ids = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(input_ids, generated_ids)]
+        text = processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+        metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
+        metrics["metric_status"] = {
+            "value": metric_value,
+            "reason": fallback_reason,
+        }
+        _record_cuda_memory(metrics)
+        return MllmRunResult(
+            text=text,
+            prompt=request.prompt,
+            video=request.video,
+            image=request.image,
+            adapter=self.name,
+            status="executed",
+            metrics=metrics,
+        )
+
+    def _run_qwen_sparse_post_encoder_fallback(
+        self,
+        *,
+        model: Any,
+        processor: Any,
+        inputs: Any,
+        request: MllmRunRequest,
+        metrics: dict[str, Any],
+        total_start: float,
+        keep_indices: list[int],
+        mapping: Any,
+        thumbnail_metadata: dict[str, Any],
+        original_error: str,
+    ) -> MllmRunResult:
+        start = time.perf_counter()
+        try:
+            pruned_inputs = build_qwen_pruned_visual_inputs(model, inputs, keep_indices)
+            metrics["latency_ms"]["qwen_vit_prepare"] = _elapsed_ms(start)
+        except Exception as exc:
+            metrics["latency_ms"]["qwen_vit_prepare"] = _elapsed_ms(start)
+            metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
+            metrics["qwen_vit"] = {
+                "mode": request.qwen_vit_mode,
+                "status": "failed_sparse_post_encoder_fallback_before_generate",
+                "custom_path_error": original_error,
+                "fallback_reason": str(exc),
+            }
+            metrics["metric_status"] = {
+                "value": "failed_qwen_chunked_vit_autogaze_sparse",
+                "reason": f"Custom sparse ViT failed with {original_error}; post-encoder fallback failed with {exc}",
+            }
+            _record_cuda_memory(metrics)
+            return MllmRunResult(
+                text=None,
+                prompt=request.prompt,
+                video=request.video,
+                image=request.image,
+                adapter=self.name,
+                status="failed_qwen_chunked_vit_autogaze_sparse",
+                metrics=metrics,
+            )
+
+        prune_metadata = pruned_inputs.pop("qwen_prune_generate_metadata")
+        metrics["qwen_vit"] = {
+            "mode": request.qwen_vit_mode,
+            "status": "fallback_post_encoder_prune_inputs_embeds_prepared",
+            "sparse_selection_plan_path": request.sparse_selection_plan_path,
+            "mllm_mapping": mapping.to_dict() if hasattr(mapping, "to_dict") else None,
+            "thumbnail_keep_all": thumbnail_metadata,
+            "custom_path_error": original_error,
+            "fallback_integration_level": "native_full_vit_then_post_encoder_token_prune",
+            "pre_vit_chunking_applied": False,
+            "pre_vit_sparse_applied": False,
+            "post_encoder_prune_applied": True,
+            **prune_metadata,
+        }
+        metrics["tokens"]["visual_tokens_before_prune"] = prune_metadata["visual_tokens_before_prune"]
+        metrics["tokens"]["visual_tokens_after_prune"] = prune_metadata["visual_tokens_after_prune"]
+        if prune_metadata["visual_tokens_after_prune"]:
+            metrics["tokens"]["visual_token_reduction_ratio"] = (
+                prune_metadata["visual_tokens_before_prune"] / prune_metadata["visual_tokens_after_prune"]
+            )
+        input_ids = pruned_inputs.get("input_ids")
+        if input_ids is not None and hasattr(input_ids, "shape"):
+            metrics["tokens"]["llm_context_tokens"] = int(input_ids.shape[-1])
+
+        start = time.perf_counter()
+        try:
+            generated_ids = model.generate(**pruned_inputs, max_new_tokens=request.max_new_tokens)
+        except Exception as exc:
+            metrics["latency_ms"]["generate"] = _elapsed_ms(start)
+            metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
+            metrics["qwen_vit"]["status"] = "failed_sparse_post_encoder_fallback_during_generate"
+            metrics["qwen_vit"]["fallback_reason"] = str(exc)
+            metrics["metric_status"] = {
+                "value": "failed_qwen_chunked_vit_autogaze_sparse",
+                "reason": f"Post-encoder fallback prepared sparse inputs, but generate failed with {exc}",
+            }
+            _record_cuda_memory(metrics)
+            return MllmRunResult(
+                text=None,
+                prompt=request.prompt,
+                video=request.video,
+                image=request.image,
+                adapter=self.name,
+                status="failed_qwen_chunked_vit_autogaze_sparse",
+                metrics=metrics,
+            )
+        metrics["latency_ms"]["generate"] = _elapsed_ms(start)
+        if input_ids is not None:
+            generated_ids = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(input_ids, generated_ids)]
+        text = processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+        metrics["latency_ms"]["total"] = _elapsed_ms(total_start)
+        metrics["metric_status"] = {
+            "value": "executed_qwen_chunked_vit_autogaze_sparse_fallback_post_encoder_prune",
+            "reason": (
+                "Custom pre-ViT sparse Qwen path failed, so the run used native full Qwen ViT and then "
+                "applied AutoGaze-selected post-encoder visual token pruning. Count this as LLM token "
+                "reduction only, not ViT compute reduction."
             ),
         }
         _record_cuda_memory(metrics)

@@ -956,6 +956,110 @@ def test_qwen_grid_adapter_routes_chunked_vit_autogaze_sparse_mode(monkeypatch):
     assert result.metrics["qwen_vit"]["mode"] == "qwen_chunked_vit_autogaze_sparse"
 
 
+def test_qwen_chunked_vit_native_fallback_marks_no_chunked_acceleration():
+    torch = __import__("torch")
+    adapter = resolve_mllm_adapter("qwen3-vl")
+
+    class FakeModel:
+        def generate(self, **kwargs):
+            return torch.tensor([[1, 2, 3]])
+
+    class FakeProcessor:
+        def batch_decode(self, generated_ids, **kwargs):
+            return ["fallback answer"]
+
+    request = make_request(qwen_vit_mode="qwen_chunked_vit")
+    metrics = build_metric_skeleton(request)
+    result = adapter._run_qwen_native_full_vit_fallback(
+        model=FakeModel(),
+        processor=FakeProcessor(),
+        inputs={"input_ids": torch.tensor([[1, 2]])},
+        request=request,
+        metrics=metrics,
+        total_start=0.0,
+        original_error="visual block signature mismatch",
+        metric_value="executed_qwen_chunked_vit_fallback_full_vit",
+        fallback_status="fallback_native_full_vit_generate",
+        fallback_reason="fallback used for test",
+    )
+
+    assert result.status == "executed"
+    assert result.text == "fallback answer"
+    assert result.metrics["qwen_vit"]["status"] == "fallback_native_full_vit_generate"
+    assert result.metrics["qwen_vit"]["pre_vit_chunking_applied"] is False
+    assert result.metrics["metric_status"]["value"] == "executed_qwen_chunked_vit_fallback_full_vit"
+
+
+def test_qwen_sparse_mode_post_encoder_fallback_keeps_autogaze_token_reduction():
+    torch = __import__("torch")
+    adapter = resolve_mllm_adapter("qwen3-vl")
+
+    class FakeQwenModel:
+        def __init__(self):
+            self.config = type("Config", (), {"video_token_id": 999})()
+            self.embedding = torch.nn.Embedding(1200, 4)
+
+        def get_input_embeddings(self):
+            return self.embedding
+
+        def get_video_features(self, pixel_values_videos=None, video_grid_thw=None):
+            return torch.tensor(
+                [
+                    [10.0, 0.0, 0.0, 0.0],
+                    [20.0, 0.0, 0.0, 0.0],
+                    [30.0, 0.0, 0.0, 0.0],
+                ]
+            )
+
+        def generate(self, **kwargs):
+            assert "inputs_embeds" in kwargs
+            return torch.tensor([[1, 999, 999, 2, 3]])
+
+    class FakeProcessor:
+        def batch_decode(self, generated_ids, **kwargs):
+            return ["sparse fallback answer"]
+
+    class FakeMapping:
+        def to_dict(self):
+            return {"status": "mapped", "visual_feature_indices": [0, 2]}
+
+    request = make_request(
+        qwen_vit_mode="qwen_chunked_vit_autogaze_sparse",
+        sparse_selection_plan_path="plan.json",
+    )
+    metrics = build_metric_skeleton(request)
+    inputs = {
+        "input_ids": torch.tensor([[1, 999, 999, 999, 2]]),
+        "attention_mask": torch.ones((1, 5), dtype=torch.long),
+        "pixel_values_videos": torch.zeros((3, 1)),
+        "video_grid_thw": torch.tensor([[1, 1, 3]]),
+    }
+
+    result = adapter._run_qwen_sparse_post_encoder_fallback(
+        model=FakeQwenModel(),
+        processor=FakeProcessor(),
+        inputs=inputs,
+        request=request,
+        metrics=metrics,
+        total_start=0.0,
+        keep_indices=[0, 2],
+        mapping=FakeMapping(),
+        thumbnail_metadata={"enabled": False},
+        original_error="custom sparse visual forward failed",
+    )
+
+    assert result.status == "executed"
+    assert result.text == "sparse fallback answer"
+    assert result.metrics["qwen_vit"]["status"] == "fallback_post_encoder_prune_inputs_embeds_prepared"
+    assert result.metrics["qwen_vit"]["pre_vit_sparse_applied"] is False
+    assert result.metrics["qwen_vit"]["post_encoder_prune_applied"] is True
+    assert result.metrics["tokens"]["visual_tokens_before_prune"] == 3
+    assert result.metrics["tokens"]["visual_tokens_after_prune"] == 2
+    assert result.metrics["metric_status"]["value"] == (
+        "executed_qwen_chunked_vit_autogaze_sparse_fallback_post_encoder_prune"
+    )
+
+
 def test_llava_onevision_adapter_uses_path_style_video_content():
     adapter = resolve_mllm_adapter("llava-onevision")
 

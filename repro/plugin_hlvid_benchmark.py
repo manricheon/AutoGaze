@@ -464,19 +464,11 @@ def run_plugin_hlvid_benchmark(
             try:
                 payload = run_single(parsed_args)
             except Exception as exc:
-                failure = classify_exception(exc, stage="mllm_generate")
-                payload = {
-                    "runner": "flexible_runner",
-                    "mode": "single",
-                    "implementation_status": failure["kind"],
-                    "failure": failure,
-                    "generation": failure_generation_payload(parsed_args, failure),
-                }
+                payload = _payload_from_runner_exception(parsed_args, run_json, exc, stage="mllm_generate")
                 write_json(run_json, payload)
-                if failure["kind"] != "oom":
-                    raise
             generation = payload.get("generation", {})
             metrics = generation.get("metrics", {})
+            direct_autogaze_selector = payload.get("direct_autogaze_selector") or {}
             prediction = {
                 "mode": mode,
                 "question_id": row.get("question_id"),
@@ -488,12 +480,16 @@ def run_plugin_hlvid_benchmark(
                 "raw_output": generation.get("text"),
                 "status": _prediction_status(generation.get("status")),
                 "runner_status": payload.get("implementation_status"),
+                "autogaze_selector_status": direct_autogaze_selector.get("status"),
+                "autogaze_selector_reason": direct_autogaze_selector.get("reason"),
+                "autogaze_selector_sparse_plan": direct_autogaze_selector.get("sparse_selection_plan_json"),
                 "failure": payload.get("failure") or generation.get("failure"),
                 "metric_status": metrics.get("metric_status"),
                 "metrics": metrics,
                 "processing_budget_summary": metrics.get("processing_budget_summary"),
             }
             prediction.update(_flatten_key_metrics(metrics))
+            prediction.update(_flatten_autogaze_selector_metrics(direct_autogaze_selector))
             predictions.append(prediction)
 
     summary = _summarize_by_mode(predictions)
@@ -524,12 +520,12 @@ def build_markdown_report(
     lines = [
         "# Plugin HLVid Limit Benchmark",
         "",
-        "| mode | total | correct | failed | parse_failed | accuracy_total | accuracy_scored | status_counts | next_action |",
-        "|---|---:|---:|---:|---:|---:|---:|---|---|",
+        "| mode | total | correct | failed | parse_failed | accuracy_total | accuracy_scored | status_counts | autogaze_selector_counts | next_action |",
+        "|---|---:|---:|---:|---:|---:|---:|---|---|---|",
     ]
     for mode, mode_summary in summary["modes"].items():
         lines.append(
-            "| {mode} | {total} | {correct} | {failed} | {parse_failed} | {accuracy_total:.4f} | {accuracy_scored:.4f} | {status_counts} | {next_action} |".format(
+            "| {mode} | {total} | {correct} | {failed} | {parse_failed} | {accuracy_total:.4f} | {accuracy_scored:.4f} | {status_counts} | {autogaze_selector_counts} | {next_action} |".format(
                 mode=mode,
                 total=mode_summary["total"],
                 correct=mode_summary["correct"],
@@ -538,6 +534,7 @@ def build_markdown_report(
                 accuracy_total=mode_summary["accuracy_total"],
                 accuracy_scored=mode_summary["accuracy_scored"],
                 status_counts=json.dumps(mode_summary.get("status_counts", {}), sort_keys=True),
+                autogaze_selector_counts=json.dumps(mode_summary.get("autogaze_selector_counts", {}), sort_keys=True),
                 next_action=mode_summary.get("next_action"),
             )
         )
@@ -852,6 +849,44 @@ def _prediction_status(generation_status: str | None) -> str:
     return "failed"
 
 
+def _payload_from_runner_exception(args: argparse.Namespace, run_json: Path, exc: Exception, *, stage: str) -> dict[str, Any]:
+    failure = classify_exception(exc, stage=stage)
+    if run_json.exists():
+        try:
+            payload = json.loads(run_json.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        if isinstance(payload, dict) and payload:
+            payload.setdefault("runner", "flexible_runner")
+            payload.setdefault("mode", "single")
+            payload.setdefault("implementation_status", failure["kind"])
+            payload.setdefault("failure", failure)
+            generation = payload.get("generation")
+            if not isinstance(generation, dict):
+                payload["generation"] = failure_generation_payload(args, failure)
+            else:
+                generation.setdefault("failure", failure)
+                generation.setdefault("status", failure["kind"])
+                metrics = generation.setdefault("metrics", {})
+                if isinstance(metrics, dict):
+                    metrics.setdefault("failure", failure)
+                    metrics.setdefault(
+                        "metric_status",
+                        {
+                            "value": failure["kind"],
+                            "reason": f"{failure['exception_type']}: {failure['message']}",
+                        },
+                    )
+            return payload
+    return {
+        "runner": "flexible_runner",
+        "mode": "single",
+        "implementation_status": failure["kind"],
+        "failure": failure,
+        "generation": failure_generation_payload(args, failure),
+    }
+
+
 def _flatten_key_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     latency = metrics.get("latency_ms", {})
     memory = metrics.get("memory_bytes", {})
@@ -877,6 +912,22 @@ def _flatten_key_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _flatten_autogaze_selector_metrics(selector: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(selector, dict):
+        return {}
+    latency = selector.get("latency_ms") if isinstance(selector.get("latency_ms"), dict) else {}
+    tokens = selector.get("tokens") if isinstance(selector.get("tokens"), dict) else {}
+    memory = selector.get("memory_bytes") if isinstance(selector.get("memory_bytes"), dict) else {}
+    return {
+        "autogaze_selector_total_ms": latency.get("total"),
+        "autogaze_selector_forward_ms": latency.get("autogaze_forward"),
+        "autogaze_selector_raw_patch_tokens": tokens.get("raw_patch_tokens"),
+        "autogaze_selector_selected_patch_tokens": tokens.get("selected_patch_tokens"),
+        "autogaze_selector_reduction_ratio": tokens.get("reduction_ratio"),
+        "autogaze_selector_tile_tensor_peak_bytes": memory.get("tile_tensor_peak"),
+    }
+
+
 def _summarize_by_mode(predictions: list[dict[str, Any]]) -> dict[str, Any]:
     modes = sorted({row["mode"] for row in predictions})
     summaries: dict[str, Any] = {}
@@ -884,6 +935,7 @@ def _summarize_by_mode(predictions: list[dict[str, Any]]) -> dict[str, Any]:
         rows = [row for row in predictions if row["mode"] == mode]
         summary, _ = score_predictions(rows)
         summary["status_counts"] = _status_counts(rows)
+        summary["autogaze_selector_counts"] = _autogaze_selector_counts(rows)
         summary["next_action"] = _next_action_for_mode(mode, rows)
         summary["processing_budget_summary"] = _summarize_processing_budget_by_mode(rows)
         summaries[mode] = summary
@@ -961,12 +1013,35 @@ def _status_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
+def _autogaze_selector_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        status = row.get("autogaze_selector_status")
+        if not status:
+            continue
+        status = str(status)
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
 def _next_action_for_mode(mode: str, rows: list[dict[str, Any]]) -> str:
     statuses = _status_counts(rows)
+    selector_statuses = _autogaze_selector_counts(rows)
     if mode in {"nvila-video-autogaze-probe", "longvila-autogaze-probe"}:
         if statuses.get("probe_collected"):
             return "instrument_vila_remote_code_feature_packing"
         return "run_vila_feature_packing_probe"
+    if mode == "qwen_chunked_vit_autogaze_sparse":
+        if selector_statuses.get("failed"):
+            return "inspect_autogaze_selector_failure"
+        if not selector_statuses.get("executed"):
+            return "inspect_qwen_sparse_mode_args"
+        if statuses.get("failed_missing_dependency"):
+            return "install_missing_runtime_dependency_after_autogaze"
+        if any(status.startswith("failed") for status in statuses):
+            return "inspect_qwen_sparse_generate_failure_after_autogaze"
+        if statuses.get("executed"):
+            return "score_and_compare_metrics"
     if mode == "qwen3-vl-autogaze-prune-generate":
         if statuses.get("executed"):
             return "score_qwen_pruned_generation"
@@ -975,6 +1050,12 @@ def _next_action_for_mode(mode: str, rows: list[dict[str, Any]]) -> str:
         return "implement_qwen_visual_feature_prune_generate"
     if mode == "qwen3-vl-pixelprune-pre-vit" and statuses.get("failed_missing_dependency"):
         return "install_pixelprune_and_rerun"
+    if statuses.get("failed_autogaze_selector"):
+        return "inspect_autogaze_selector_failure"
+    if statuses.get("failed_missing_dependency"):
+        return "install_missing_runtime_dependency"
+    if statuses.get("exception"):
+        return "inspect_runtime_exception"
     if any(status.startswith("failed") for status in statuses):
         return "fix_failed_runtime_dependency"
     if statuses.get("executed"):

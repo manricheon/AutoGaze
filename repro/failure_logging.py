@@ -19,11 +19,25 @@ OOM_MARKERS = (
     "memory allocation",
 )
 
+DEPENDENCY_MARKERS = (
+    "modulenotfounderror",
+    "importerror",
+    "no module named",
+    "pip install",
+    "missing dependency",
+    "is required for",
+)
+
 
 def classify_exception(exc: BaseException, *, stage: str = "unknown") -> dict[str, Any]:
     message = str(exc)
     lower = f"{type(exc).__name__} {message}".lower()
-    kind = "oom" if any(marker in lower for marker in OOM_MARKERS) else "exception"
+    if any(marker in lower for marker in OOM_MARKERS):
+        kind = "oom"
+    elif any(marker in lower for marker in DEPENDENCY_MARKERS):
+        kind = "failed_missing_dependency"
+    else:
+        kind = "exception"
     return {
         "kind": kind,
         "stage": infer_failure_stage(lower, fallback=stage),
@@ -36,6 +50,8 @@ def classify_exception(exc: BaseException, *, stage: str = "unknown") -> dict[st
 
 def infer_failure_stage(text: str, *, fallback: str = "unknown") -> str:
     lower = text.lower()
+    if "qwen_vl_utils" in lower or "qwen video" in lower:
+        return "qwen_video_input_build"
     if "qwen_vit" in lower or "qwen vit" in lower:
         return "qwen_vit_prepare"
     if "autogaze" in lower or "gaze" in lower:
