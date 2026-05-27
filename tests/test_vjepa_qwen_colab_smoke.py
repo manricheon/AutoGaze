@@ -62,4 +62,4 @@ def test_synthetic_vjepa_pixel_values_use_transformers_video_axis_order():
         device="cpu",
     )
 
-    assert list(values.shape) == [1, 4, 3, 224, 224]
+    assert list(values.shape) == [1, 3, 4, 224, 224]

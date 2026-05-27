@@ -50,8 +50,9 @@ def qwen_model_class_candidates() -> list[tuple[str, str]]:
 def synthetic_vjepa_pixel_values(*, frames_per_clip: int, crop_size: int, dtype: Any, device: Any) -> Any:
     import torch
 
+    # Transformers V-JEPA patch embedding expects video tensors as B, C, T, H, W.
     return torch.zeros(
-        (1, int(frames_per_clip), 3, int(crop_size), int(crop_size)),
+        (1, 3, int(frames_per_clip), int(crop_size), int(crop_size)),
         dtype=dtype,
         device=device,
     )

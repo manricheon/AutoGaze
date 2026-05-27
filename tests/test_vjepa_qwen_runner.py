@@ -98,7 +98,7 @@ def test_pil_frames_to_vjepa_pixel_values_shape_and_dtype():
         device="cpu",
     )
 
-    assert list(values.shape) == [1, 2, 3, 16, 16]
+    assert list(values.shape) == [1, 3, 2, 16, 16]
     assert values.dtype == torch.float32
     assert values.device.type == "cpu"
 
