@@ -202,11 +202,8 @@ import subprocess
 
 subprocess.check_call([
     "python", "-m", "pip", "install", "-q",
+    "-r", "requirements-repro.txt",
     "transformers>=4.57.0",
-    "accelerate",
-    "huggingface_hub",
-    "qwen-vl-utils",
-    "av",
 ])
 ```
 

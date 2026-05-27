@@ -7,6 +7,7 @@ from repro.plugins.autogaze_sparse_selector import (
     AutogazeSelectorRuntimeConfig,
     build_autogaze_selector_video_plan,
     build_sparse_selection_plan_from_autogaze_outputs,
+    ensure_transformers_tied_weight_compat,
     runtime_config_from_args,
 )
 from repro.plugins.gaze_plan import qwen_visual_indices_from_sparse_plan
@@ -171,3 +172,13 @@ def test_autogaze_selector_video_plan_uses_source_dimensions_without_resize():
     assert plan["resize"]["enabled"] is False
     assert plan["resize"]["effective"] == {"width": 3840, "height": 2160, "mode": "none"}
     assert plan["grid"] == spatial_tile_grid(width=3840, height=2160, max_tiles_video=8, image_size=224)
+
+
+def test_ensure_transformers_tied_weight_compat_adds_newer_transformers_attrs():
+    class LegacyAutoGaze:
+        pass
+
+    ensure_transformers_tied_weight_compat(LegacyAutoGaze)
+
+    assert LegacyAutoGaze.all_tied_weights_keys == []
+    assert LegacyAutoGaze._tied_weights_keys == []

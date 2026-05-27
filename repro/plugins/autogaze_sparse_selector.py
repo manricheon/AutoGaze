@@ -247,6 +247,7 @@ def run_direct_autogaze_selector(config: AutogazeSelectorRuntimeConfig) -> dict[
     from autogaze.datasets.video_utils import transform_video_for_pytorch
     from autogaze.models.autogaze import AutoGaze, AutoGazeImageProcessor
 
+    ensure_transformers_tied_weight_compat(AutoGaze)
     target_scales = config.target_scales or [config.tile_size]
     target_patch_size = int(config.target_patch_size or 16)
     tile_size = int(config.tile_size or target_scales[-1])
@@ -483,6 +484,14 @@ def run_direct_autogaze_selector(config: AutogazeSelectorRuntimeConfig) -> dict[
         },
         "temporal_chunk_summaries": chunk_summaries,
     }
+
+
+def ensure_transformers_tied_weight_compat(model_cls: Any) -> None:
+    """Patch older local AutoGaze classes for newer Transformers loaders."""
+    if not hasattr(model_cls, "all_tied_weights_keys"):
+        model_cls.all_tied_weights_keys = []
+    if not hasattr(model_cls, "_tied_weights_keys"):
+        model_cls._tied_weights_keys = []
 
 
 def runtime_config_from_args(args: Any) -> AutogazeSelectorRuntimeConfig:
