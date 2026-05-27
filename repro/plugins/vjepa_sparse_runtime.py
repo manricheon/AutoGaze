@@ -34,9 +34,9 @@ def run_vjepa_encoder_on_selected_embeddings(
     for layer_module in vjepa_encoder.layer:
         layer_outputs = layer_module(
             hidden_states,
-            position_mask,
-            None,
-            output_attentions,
+            position_mask=position_mask,
+            head_mask=None,
+            output_attentions=output_attentions,
         )
         hidden_states = layer_outputs[0]
         if output_attentions:
