@@ -17,6 +17,11 @@ def test_build_notebook_contains_kaggle_cuda_verification_steps():
     assert "codex/autogaze-vjepa" in source
     assert "scripts/verify_autogaze_entrypoints.py" in source
     assert "scripts/run_colab_autogaze_cuda_smoke.py" in source
+    assert "RUN_NVILA_SINGLE = True" in source
+    assert "RUN_NVILA_HLVID_MINI = True" in source
+    assert "repro.nvila_runner" in source
+    assert "scripts/run_hlvid_folder_benchmark.py" in source
+    assert "--dtype" in source
     assert "repro.colab_verification_report" in source
     assert "/kaggle/working/autogaze_vjepa_outputs/colab_verification.md" in source
     assert "torch.cuda.is_available()" in source
@@ -32,3 +37,4 @@ def test_notebook_cli_writes_valid_ipynb(tmp_path):
     assert payload["nbformat"] == 4
     assert "codex/autogaze-repro" in source
     assert "/content/autogaze_vjepa_outputs" in source
+    assert "nvidia/NVILA-8B-HD-Video" in source

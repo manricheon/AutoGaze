@@ -2,20 +2,23 @@
 
 작성일: 2026-05-28  
 대상 브랜치: `codex/autogaze-repro`, `codex/autogaze-vjepa`  
-검증 커밋: `d972d2e Document external CUDA verification blockers`
+검증 커밋:
+
+- V-JEPA + Qwen actual CUDA smoke: `d972d2e Document external CUDA verification blockers`
+- NVILA-HD actual CUDA smoke / HLVid mini smoke: `236924a Fix NVILA CUDA compatibility`
 
 ## 결론
 
-Colab, Kaggle, Hugging Face Jobs를 CUDA 검증 플랫폼 후보로 직접 확인했습니다. Chrome extension 재설치 이후 Kaggle notebook에서 GPU T4 x2와 Internet on을 활성화했고, `codex/autogaze-vjepa` 브랜치의 CUDA smoke를 실제로 끝까지 실행했습니다.
+Colab, Kaggle, Hugging Face Jobs를 CUDA 검증 플랫폼 후보로 직접 확인했습니다. Chrome extension 재설치 이후 Kaggle notebook에서 GPU T4 x2와 Internet on을 활성화했고, V-JEPA + Qwen 및 NVILA-HD CUDA smoke를 실제로 실행했습니다.
 
-Kaggle actual smoke 결과는 `passed=true`, `failed_count=0`입니다. Colab은 GPU 사용량 제한, Hugging Face Jobs는 prepaid credit 부족으로 아직 막혀 있지만, 동일한 notebook/cell을 CUDA 머신이나 Colab quota 회복 런타임에서도 재사용할 수 있습니다.
+Kaggle actual smoke 결과는 V-JEPA + Qwen wrapper 기준 `passed=true`, `failed_count=0`이고, NVILA-HD single 및 HLVid mini benchmark도 report artifact 생성까지 확인했습니다. Colab은 GPU 사용량 제한, Hugging Face Jobs는 prepaid credit 부족으로 아직 막혀 있지만, 동일한 notebook/cell을 CUDA 머신이나 Colab quota 회복 런타임에서도 재사용할 수 있습니다.
 
 ## 외부 플랫폼 접근 상태
 
 | 플랫폼 | 접근 | CUDA 실행 상태 | 상태 |
 | --- | --- | --- | --- |
 | Colab | 가능 | 실패 | Colab 사용량 제한으로 GPU 백엔드 연결 불가 |
-| Kaggle `manricheon/autogaze` | 가능 | 성공 | GPU T4 x2, Internet on, actual CUDA smoke 통과 |
+| Kaggle `manricheon/autogaze` | 가능 | 성공 | GPU T4 x2, Internet on, V-JEPA+Qwen 및 NVILA-HD smoke 통과 |
 | Hugging Face Jobs | API 접근 가능 | 실패 | 계정 pre-paid credit 부족으로 GPU job 생성 402 |
 
 Colab 증거 스크린샷:
@@ -230,8 +233,8 @@ expected input[1, 4, 3, 224, 224] to have 3 channels, but got 4 channels instead
 
 | 브랜치 | 상태 |
 | --- | --- |
-| `codex/autogaze-repro` | push 완료 |
-| `codex/autogaze-vjepa` | push 완료 |
+| `codex/autogaze-repro` | V-JEPA + Qwen smoke 코드와 NVILA-HD 호환성 수정 포함 |
+| `codex/autogaze-vjepa` | V-JEPA + Qwen PoC 기준 브랜치 |
 
 ## 로컬 검증 결과
 
@@ -242,7 +245,7 @@ CUDA 모델 로드는 로컬 MPS/CPU 환경에서 검증 대상이 아니므로 
 | `pytest tests/test_vjepa_qwen_colab_smoke.py tests/test_vjepa_qwen_runner.py -q` | `16 passed` |
 | `pytest tests/test_vjepa_sparse_runtime.py tests/test_vjepa_poc.py tests/test_vjepa_qwen_bridge.py -q` | `11 passed` |
 | `scripts/verify_autogaze_entrypoints.py --run-pytest` | `passed=true`, `check_count=26`, `command_count=20` |
-| full pytest | `406 passed` |
+| focused CUDA/repro tests | `143 passed` |
 | `git diff --check` | 통과 |
 | 공식/upstream 문서 diff | 없음 |
 
@@ -264,7 +267,7 @@ notebooks/autogaze_external_cuda_verification.ipynb
 python scripts/write_external_cuda_verification_notebook.py \
   --output notebooks/autogaze_external_cuda_verification.ipynb \
   --platform kaggle \
-  --branch codex/autogaze-vjepa
+  --branch codex/autogaze-repro
 ```
 
 ### 1. 최신 코드 받기
@@ -272,18 +275,18 @@ python scripts/write_external_cuda_verification_notebook.py \
 ```bash
 cd /kaggle/working  # Kaggle
 # cd /content       # Colab
-test -d AutoGaze || git clone --branch codex/autogaze-vjepa https://github.com/manricheon/AutoGaze.git AutoGaze
+test -d AutoGaze || git clone --branch codex/autogaze-repro https://github.com/manricheon/AutoGaze.git AutoGaze
 cd AutoGaze
 git fetch origin codex/autogaze-vjepa codex/autogaze-repro
-git checkout codex/autogaze-vjepa
-git pull --ff-only origin codex/autogaze-vjepa
+git checkout codex/autogaze-repro
+git pull --ff-only origin codex/autogaze-repro
 git log --oneline -1
 ```
 
-기대 커밋:
+기대:
 
 ```text
-d972d2e Document external CUDA verification blockers
+최신 `codex/autogaze-repro` 커밋이 표시되어야 합니다.
 ```
 
 ### 2. 사전 검증
@@ -324,7 +327,82 @@ python scripts/run_colab_autogaze_cuda_smoke.py \
 - `/kaggle/working/autogaze_vjepa_outputs/colab_verification.md` 생성
 - `/kaggle/working/autogaze_vjepa_outputs/visualizations/` 아래 selected frame, V-JEPA mask, AutoGaze overlay 생성
 
-### 4. 직접 실행 결과를 묶어 리포트 생성
+### 4. NVILA-HD single smoke
+
+V-JEPA + Qwen smoke가 AutoGaze checkpoint와 예시 비디오를 받아둔 뒤, NVILA-HD도 같은 입력으로 확인합니다.
+
+```bash
+python -m repro.nvila_runner \
+  --mode single \
+  --model-path nvidia/NVILA-8B-HD-Video \
+  --autogaze-model /kaggle/working/autogaze_weights/nvidia__AutoGaze \
+  --device cuda --device-map auto --dtype float16 \
+  --video inputs/hlvid_example/clip_av_video_5_001.mp4 \
+  --prompt "Describe the video in one short sentence." \
+  --num-video-frames 16 \
+  --num-video-frames-thumbnail 16 \
+  --max-tiles-video 1 \
+  --video-resize-longest-edge 224 \
+  --video-decode-strategy seek \
+  --max-batch-size-autogaze 2 \
+  --max-batch-size-siglip 1 \
+  --max-new-tokens 1 \
+  --gazing-mode autogaze \
+  --output-json /kaggle/working/autogaze_vjepa_outputs/nvila_single_smoke/autogaze.json
+```
+
+### 5. NVILA-HD HLVid mini benchmark
+
+`scripts/run_hlvid_folder_benchmark.py`도 같은 CUDA 환경에서 mini manifest로 확인할 수 있습니다. full HLVid는 같은 명령에서 `--manifest`, `--video-root`, `--limit`만 실제 데이터셋으로 바꾸면 됩니다.
+
+```bash
+mkdir -p /kaggle/working/autogaze_vjepa_outputs/hlvid_mini_dataset
+python - <<'PY'
+import json
+from pathlib import Path
+path = Path("/kaggle/working/autogaze_vjepa_outputs/hlvid_mini_dataset/manifest.jsonl")
+path.write_text(json.dumps({
+    "question_id": "kaggle_smoke_001",
+    "category": "smoke",
+    "video_path": "clip_av_video_5_001.mp4",
+    "question": "What does the white text on the green road sign say?\nA. Hampden St\nB. Hampden Ave\nC. HampdenBlvd\nD. Hampden Rd\nPlease answer directly with the letter of the correct answer.",
+    "answer": "B",
+}) + "\n", encoding="utf-8")
+PY
+
+python scripts/run_hlvid_folder_benchmark.py \
+  --dataset-dir /kaggle/working/autogaze_vjepa_outputs/hlvid_mini_dataset \
+  --manifest /kaggle/working/autogaze_vjepa_outputs/hlvid_mini_dataset/manifest.jsonl \
+  --video-root inputs/hlvid_example \
+  --output-dir /kaggle/working/autogaze_vjepa_outputs/nvila_hlvid_mini \
+  --model-path nvidia/NVILA-8B-HD-Video \
+  --autogaze-model /kaggle/working/autogaze_weights/nvidia__AutoGaze \
+  --device cuda --device-map auto --dtype float16 \
+  --num-video-frames 16 \
+  --num-video-frames-thumbnail 16 \
+  --max-tiles-video 1 \
+  --video-resize-longest-edge 224 \
+  --video-decode-strategy seek \
+  --max-batch-size-autogaze 2 \
+  --max-batch-size-siglip 1 \
+  --max-new-tokens 1 \
+  --limit 1 \
+  --continue-on-error \
+  --skip-keep-all
+```
+
+기대 artifact:
+
+```text
+hlvid_autogaze_gain_report.json
+hlvid_autogaze_gain_report.csv
+hlvid_single_scale_dense_summary.json
+hlvid_autogaze_summary.json
+hlvid_single_scale_dense_predictions.jsonl
+hlvid_autogaze_predictions.jsonl
+```
+
+### 6. 직접 실행 결과를 묶어 리포트 생성
 
 wrapper 대신 기존 runner를 직접 실행했다면 마지막에 아래 명령으로 `colab_verification.md`를 생성합니다.
 
@@ -339,9 +417,9 @@ python -m repro.colab_verification_report \
   --case autogaze_vjepa_qwen_on=/kaggle/working/autogaze_vjepa_outputs/autogaze_vjepa_qwen_on_cuda_smoke.json
 ```
 
-### 5. Kaggle notebook cell
+### 7. Kaggle notebook cell
 
-Kaggle notebook에는 아래 셀 하나를 넣고 Run All을 누르면 됩니다. 단, 우측 `Session options`에서 phone verification 이후 GPU와 Internet이 활성화되어 있어야 합니다.
+Kaggle notebook에는 repo의 `notebooks/autogaze_external_cuda_verification.ipynb`를 사용하면 됩니다. 직접 셀 하나로 실행하려면 아래 최소 셀을 사용할 수 있습니다. 단, 우측 `Session options`에서 phone verification 이후 GPU와 Internet이 활성화되어 있어야 합니다.
 
 ```python
 import os, pathlib, subprocess, sys, json
@@ -357,11 +435,11 @@ weights = root / "autogaze_weights"
 out.mkdir(parents=True, exist_ok=True)
 
 if not repo.exists():
-    run(["git", "clone", "--branch", "codex/autogaze-vjepa", "https://github.com/manricheon/AutoGaze.git", repo])
+    run(["git", "clone", "--branch", "codex/autogaze-repro", "https://github.com/manricheon/AutoGaze.git", repo])
 os.chdir(repo)
-run(["git", "fetch", "origin", "codex/autogaze-vjepa"])
-run(["git", "checkout", "codex/autogaze-vjepa"])
-run(["git", "pull", "--ff-only", "origin", "codex/autogaze-vjepa"])
+run(["git", "fetch", "origin", "codex/autogaze-repro"])
+run(["git", "checkout", "codex/autogaze-repro"])
+run(["git", "pull", "--ff-only", "origin", "codex/autogaze-repro"])
 run([sys.executable, "-m", "pip", "install", "-q", "-r", "requirements-repro.txt", "transformers>=4.57.0", "qwen-vl-utils", "av", "pytest"])
 run([sys.executable, "scripts/verify_autogaze_entrypoints.py", "--output-json", out / "entrypoint_verification.json", "--output-md", out / "entrypoint_verification.md"])
 run([
@@ -391,8 +469,10 @@ print("verification:", out / "colab_verification.md")
 | HF Jobs GPU 실행 | 미완료: prepaid credit 부족 |
 | Kaggle/Colab 공용 실행 notebook artifact | 완료: `notebooks/autogaze_external_cuda_verification.ipynb` |
 | V-JEPA + Qwen Colab smoke 코드 수정 | 완료 |
-| 로컬 entrypoint/unit/full test 검증 | 완료 |
+| NVILA-HD single smoke | 완료: Kaggle T4 x2 |
+| NVILA-HD HLVid mini benchmark | 완료: Kaggle T4 x2, gain report 생성 |
+| 로컬 entrypoint/focused unit test 검증 | 완료 |
 | 외부 CUDA generate 재실행 | 완료: Kaggle |
 | `colab_verification.md` 실제 CUDA 결과 생성 | 완료: Kaggle `/kaggle/working/autogaze_vjepa_outputs/colab_verification.md` |
 
-현재 상태는 “Kaggle CUDA에서 V-JEPA + Qwen dense/off 및 AutoGaze/on actual smoke 통과”입니다. 다음 확장 검증은 같은 방식으로 NVILA-HD full script와 HLVid benchmark limit run을 Kaggle/H100에서 이어서 실행하면 됩니다.
+현재 상태는 “Kaggle CUDA에서 V-JEPA + Qwen dense/off 및 AutoGaze/on actual smoke 통과, NVILA-HD single 및 HLVid mini benchmark 실행 확인”입니다. 다음 확장 검증은 같은 방식으로 full HLVid limit run과 Qwen plugin HLVid suite를 H100에서 이어서 실행하면 됩니다.
