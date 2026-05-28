@@ -154,6 +154,9 @@ Qwen/LongVILA/NVILA-Video 등 확장 조합을 같은 manifest row로 비교할 
   --qwen-vit-max-spatial-chunks 4 \
   --qwen-thumbnail-mode append-video \
   --video-resize-longest-edge 448 \
+  --autogaze-target-scales 112+224+336+448 \
+  --autogaze-target-patch-size 16 \
+  --autogaze-tile-size 448 \
   --max-new-tokens 8
 ```
 
@@ -164,6 +167,8 @@ qwen_full_vit
 qwen_chunked_vit
 qwen_chunked_vit_autogaze_sparse
 ```
+
+`qwen_chunked_vit_autogaze_sparse`는 AutoGaze checkpoint의 4-scale decoder 제약 때문에 AutoGaze target scale도 4개여야 합니다. wrapper는 값을 생략하면 `--video-resize-longest-edge` 기준으로 `112+224+336+448` 같은 patch16 호환 scale을 자동 주입합니다. 실험 재현성을 위해 CUDA benchmark command에는 명시하는 것을 권장합니다.
 
 세부 mode를 직접 지정하려면 `--plugin-modes`를 사용합니다.
 

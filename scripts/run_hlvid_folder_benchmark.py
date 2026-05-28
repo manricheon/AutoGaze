@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -21,6 +22,9 @@ PLUGIN_SUITE_MODES = {
         "qwen_chunked_vit_autogaze_sparse",
     ],
 }
+
+QWEN_SPARSE_DEFAULT_AUTOGAZE_TARGET_PATCH_SIZE = 16
+QWEN_SPARSE_DEFAULT_AUTOGAZE_TILE_SIZE = 224
 
 
 def build_plugin_router_parser(*, add_help: bool = False) -> argparse.ArgumentParser:
@@ -95,6 +99,35 @@ def _plugin_modes(args: argparse.Namespace) -> list[str]:
     raise SystemExit("--plugin-modes is required when --plugin-suite custom is used.")
 
 
+def _qwen_sparse_default_largest_scale(args: argparse.Namespace) -> int:
+    candidates = [
+        getattr(args, "autogaze_tile_size", None),
+        (
+            getattr(args, "video_resize_width", None)
+            if getattr(args, "video_resize_width", None) == getattr(args, "video_resize_height", None)
+            else None
+        ),
+        getattr(args, "video_resize_longest_edge", None),
+        QWEN_SPARSE_DEFAULT_AUTOGAZE_TILE_SIZE,
+    ]
+    for value in candidates:
+        if value is None:
+            continue
+        scale = int(value)
+        if scale > 0 and scale % QWEN_SPARSE_DEFAULT_AUTOGAZE_TARGET_PATCH_SIZE == 0:
+            return scale
+    return QWEN_SPARSE_DEFAULT_AUTOGAZE_TILE_SIZE
+
+
+def _qwen_sparse_default_target_scales(args: argparse.Namespace) -> str:
+    largest = _qwen_sparse_default_largest_scale(args)
+    patch = QWEN_SPARSE_DEFAULT_AUTOGAZE_TARGET_PATCH_SIZE
+    step = max(patch, math.ceil(largest / 4 / patch) * patch)
+    scales = [min(largest, step * index) for index in range(1, 5)]
+    scales[-1] = largest
+    return "+".join(str(scale) for scale in scales)
+
+
 def _resolve_plugin_layout(args: argparse.Namespace) -> tuple[str, str]:
     if args.manifest and args.video_root:
         return args.manifest, args.video_root
@@ -118,6 +151,7 @@ def run_plugin_route(argv: list[str]) -> dict:
             + ". Use the NVILA route without --plugin-suite, or add the option to the plugin wrapper."
         )
     manifest, video_root = _resolve_plugin_layout(args)
+    modes = _plugin_modes(args)
     output_dir = args.output_dir or f"outputs/autogaze_repro/plugin_hlvid_{args.plugin_suite or 'custom'}"
     qwen_video_nframes = args.qwen_video_nframes
     if args.plugin_suite == "qwen" and qwen_video_nframes is None:
@@ -125,11 +159,21 @@ def run_plugin_route(argv: list[str]) -> dict:
     qwen_vit_max_spatial_chunks = args.qwen_vit_max_spatial_chunks
     if args.plugin_suite == "qwen" and qwen_vit_max_spatial_chunks is None:
         qwen_vit_max_spatial_chunks = args.max_tiles_video
+    autogaze_target_scales = args.autogaze_target_scales
+    autogaze_target_patch_size = args.autogaze_target_patch_size
+    autogaze_tile_size = args.autogaze_tile_size
+    if args.plugin_suite == "qwen" and "qwen_chunked_vit_autogaze_sparse" in modes:
+        if autogaze_target_scales is None:
+            autogaze_target_scales = _qwen_sparse_default_target_scales(args)
+        if autogaze_target_patch_size is None:
+            autogaze_target_patch_size = QWEN_SPARSE_DEFAULT_AUTOGAZE_TARGET_PATCH_SIZE
+        if autogaze_tile_size is None:
+            autogaze_tile_size = _qwen_sparse_default_largest_scale(args)
     return run_plugin_hlvid_benchmark(
         manifest=manifest,
         video_root=video_root,
         output_dir=output_dir,
-        modes=_plugin_modes(args),
+        modes=modes,
         models=parse_model_overrides(args.plugin_model),
         external_mllm_command=args.plugin_external_mllm_command,
         limit=args.limit,
@@ -152,10 +196,10 @@ def run_plugin_route(argv: list[str]) -> dict:
         autogaze_repo=args.autogaze_repo,
         autogaze_device=args.autogaze_device or args.device or "auto",
         autogaze_dtype=args.autogaze_dtype,
-        autogaze_target_scales=args.autogaze_target_scales,
-        autogaze_target_patch_size=args.autogaze_target_patch_size,
+        autogaze_target_scales=autogaze_target_scales,
+        autogaze_target_patch_size=autogaze_target_patch_size,
         autogaze_encoder_patch_size=args.autogaze_encoder_patch_size,
-        autogaze_tile_size=args.autogaze_tile_size,
+        autogaze_tile_size=autogaze_tile_size,
         autogaze_chunk_frames=args.autogaze_chunk_frames,
         max_batch_size_autogaze=args.max_batch_size_autogaze,
         gazing_ratio=args.gazing_ratio,

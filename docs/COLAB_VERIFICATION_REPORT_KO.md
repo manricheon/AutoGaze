@@ -6,19 +6,20 @@
 
 - V-JEPA + Qwen actual CUDA smoke: `d972d2e Document external CUDA verification blockers`
 - NVILA-HD actual CUDA smoke / HLVid mini smoke: `236924a Fix NVILA CUDA compatibility`
+- Direct Qwen plugin HLVid mini smoke: `944bf73 Expand external CUDA verification notebook`
 
 ## 결론
 
-Colab, Kaggle, Hugging Face Jobs를 CUDA 검증 플랫폼 후보로 직접 확인했습니다. Chrome extension 재설치 이후 Kaggle notebook에서 GPU T4 x2와 Internet on을 활성화했고, V-JEPA + Qwen 및 NVILA-HD CUDA smoke를 실제로 실행했습니다.
+Colab, Kaggle, Hugging Face Jobs를 CUDA 검증 플랫폼 후보로 직접 확인했습니다. Chrome extension 재설치 이후 Kaggle notebook에서 GPU T4 x2와 Internet on을 활성화했고, V-JEPA + Qwen, NVILA-HD, direct Qwen plugin HLVid smoke를 실제로 실행했습니다.
 
-Kaggle actual smoke 결과는 V-JEPA + Qwen wrapper 기준 `passed=true`, `failed_count=0`이고, NVILA-HD single 및 HLVid mini benchmark도 report artifact 생성까지 확인했습니다. Colab은 GPU 사용량 제한, Hugging Face Jobs는 prepaid credit 부족으로 아직 막혀 있지만, 동일한 notebook/cell을 CUDA 머신이나 Colab quota 회복 런타임에서도 재사용할 수 있습니다.
+Kaggle actual smoke 결과는 V-JEPA + Qwen wrapper 기준 `passed=true`, `failed_count=0`이고, NVILA-HD single/HLVid mini 및 direct Qwen plugin mini benchmark도 report artifact 생성까지 확인했습니다. Colab은 GPU 사용량 제한, Hugging Face Jobs는 prepaid credit 부족으로 아직 막혀 있지만, 동일한 notebook/cell을 CUDA 머신이나 Colab quota 회복 런타임에서도 재사용할 수 있습니다.
 
 ## 외부 플랫폼 접근 상태
 
 | 플랫폼 | 접근 | CUDA 실행 상태 | 상태 |
 | --- | --- | --- | --- |
 | Colab | 가능 | 실패 | Colab 사용량 제한으로 GPU 백엔드 연결 불가 |
-| Kaggle `manricheon/autogaze` | 가능 | 성공 | GPU T4 x2, Internet on, V-JEPA+Qwen 및 NVILA-HD smoke 통과 |
+| Kaggle `manricheon/autogaze` | 가능 | 성공 | GPU T4 x2, Internet on, V-JEPA+Qwen, NVILA-HD, direct Qwen plugin smoke 통과 |
 | Hugging Face Jobs | API 접근 가능 | 실패 | 계정 pre-paid credit 부족으로 GPU job 생성 402 |
 
 Colab 증거 스크린샷:
@@ -189,6 +190,42 @@ siglip attention MACs reduction ratio: 17.00x
 mllm prefill attention pair reduction ratio: 3.78x
 mllm KV cache reduction ratio: 1.94x
 ```
+
+## Kaggle direct Qwen plugin CUDA 검증 결과
+
+같은 Kaggle T4 x2 runtime에서 `scripts/run_hlvid_folder_benchmark.py --plugin-suite qwen` 경로도 mini HLVid 1개 샘플로 확인했습니다. 이 경로는 NVILA native runner가 아니라 plugin runner를 통해 Qwen full ViT, Qwen chunked ViT, Qwen chunked ViT + AutoGaze sparse를 비교합니다.
+
+검증 조건:
+
+```text
+model override: qwen3-vl=/kaggle/working/autogaze_weights/Qwen__Qwen2.5-VL-3B-Instruct
+AutoGaze checkpoint: /kaggle/working/autogaze_weights/nvidia__AutoGaze
+device: cuda, device_map: auto, dtype: float16, attn_implementation: eager
+frames: 16
+thumbnail frames: 0
+video_resize_longest_edge: 224
+max_tiles_video: 1
+qwen_vit_chunk_frames: 16
+qwen_vit_max_spatial_chunks: 1
+AutoGaze sparse scales: 64+128+192+224
+AutoGaze patch size: 16
+max_new_tokens: 1
+```
+
+결과:
+
+| mode | implementation | generation | answer | total ms | input build ms | Qwen ViT prepare ms | generate ms | visual tokens after/before | context tokens |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `qwen_full_vit` | `executed` | `executed` | `A` | 41001.01 | 5024.32 | n/a | 2598.17 | n/a | 325 |
+| `qwen_chunked_vit` | `executed` | `executed` | `A` | 15728.37 | 6101.83 | 283.69 | 160.55 | 256 / 256 | 325 |
+| `qwen_chunked_vit_autogaze_sparse` | `executed` | `executed` | `A` | 12722.54 | 4623.53 | 183.13 | 251.05 | 140 / 256 | 209 |
+
+핵심 관찰:
+
+- Qwen chunked ViT는 native full path보다 smoke latency가 크게 낮았습니다. 이 결과는 T4 x2, 16프레임, 224 리사이즈의 smoke 수치입니다.
+- AutoGaze sparse mode는 Qwen visual token을 `256 -> 140`으로 줄였고, LLM context도 `325 -> 209`로 줄였습니다.
+- 처음 시도한 `56+112+224`, `64+128+224`는 각각 patch divisibility/4-scale decoder 제약 때문에 실패했습니다. AutoGaze checkpoint가 4-scale gaze decoder를 쓰므로 Qwen 224 smoke에서는 `64+128+192+224`, patch size `16`, tile size `224`가 안정 조합입니다.
+- 이 발견을 반영해 Qwen plugin suite wrapper는 sparse mode가 포함되고 사용자가 AutoGaze scale을 명시하지 않으면 `64+128+192+224 / patch 16 / tile 224`를 기본값으로 사용합니다.
 
 Hugging Face Jobs GPU smoke 요청 결과:
 
@@ -402,7 +439,46 @@ hlvid_single_scale_dense_predictions.jsonl
 hlvid_autogaze_predictions.jsonl
 ```
 
-### 6. 직접 실행 결과를 묶어 리포트 생성
+### 6. Direct Qwen plugin HLVid mini benchmark
+
+Qwen plugin 경로는 full/chunked/sparse 세 모드를 같은 mini manifest에서 실행합니다. `--plugin-suite qwen`은 sparse mode가 포함될 때 Qwen 224 smoke용 AutoGaze 기본값 `64+128+192+224 / patch 16 / tile 224`를 자동으로 채웁니다. 아래처럼 명시해도 됩니다.
+
+```bash
+python scripts/run_hlvid_folder_benchmark.py \
+  --plugin-suite qwen \
+  --dataset-dir /kaggle/working/autogaze_vjepa_outputs/hlvid_mini_dataset \
+  --manifest /kaggle/working/autogaze_vjepa_outputs/hlvid_mini_dataset/manifest.jsonl \
+  --video-root inputs/hlvid_example \
+  --output-dir /kaggle/working/autogaze_vjepa_outputs/qwen_plugin_hlvid_mini \
+  --plugin-model qwen3-vl=/kaggle/working/autogaze_weights/Qwen__Qwen2.5-VL-3B-Instruct \
+  --autogaze-model /kaggle/working/autogaze_weights/nvidia__AutoGaze \
+  --device cuda --device-map auto --dtype float16 \
+  --attn-implementation eager \
+  --num-video-frames 16 \
+  --num-video-frames-thumbnail 0 \
+  --max-tiles-video 1 \
+  --video-resize-longest-edge 224 \
+  --video-decode-strategy seek \
+  --qwen-vit-chunk-frames 16 \
+  --qwen-vit-max-spatial-chunks 1 \
+  --autogaze-target-scales 64+128+192+224 \
+  --autogaze-target-patch-size 16 \
+  --autogaze-tile-size 224 \
+  --max-batch-size-autogaze 2 \
+  --max-new-tokens 1 \
+  --limit 1 \
+  --continue-on-error
+```
+
+기대:
+
+- `runs/qwen_full_vit/00000.json` 생성 및 `implementation_status=executed`
+- `runs/qwen_chunked_vit/00000.json` 생성 및 `implementation_status=executed`
+- `runs/qwen_chunked_vit_autogaze_sparse/00000.json` 생성 및 `implementation_status=executed`
+- sparse mode에서 `direct_autogaze_selector.status=executed`
+- sparse mode에서 `tokens.visual_tokens_after_prune < tokens.visual_tokens_before_prune`
+
+### 7. 직접 실행 결과를 묶어 리포트 생성
 
 wrapper 대신 기존 runner를 직접 실행했다면 마지막에 아래 명령으로 `colab_verification.md`를 생성합니다.
 
@@ -417,7 +493,7 @@ python -m repro.colab_verification_report \
   --case autogaze_vjepa_qwen_on=/kaggle/working/autogaze_vjepa_outputs/autogaze_vjepa_qwen_on_cuda_smoke.json
 ```
 
-### 7. Kaggle notebook cell
+### 8. Kaggle notebook cell
 
 Kaggle notebook에는 repo의 `notebooks/autogaze_external_cuda_verification.ipynb`를 사용하면 됩니다. 직접 셀 하나로 실행하려면 아래 최소 셀을 사용할 수 있습니다. 단, 우측 `Session options`에서 phone verification 이후 GPU와 Internet이 활성화되어 있어야 합니다.
 
@@ -471,8 +547,9 @@ print("verification:", out / "colab_verification.md")
 | V-JEPA + Qwen Colab smoke 코드 수정 | 완료 |
 | NVILA-HD single smoke | 완료: Kaggle T4 x2 |
 | NVILA-HD HLVid mini benchmark | 완료: Kaggle T4 x2, gain report 생성 |
+| Direct Qwen plugin HLVid mini benchmark | 완료: Kaggle T4 x2, full/chunked/sparse 실행 |
 | 로컬 entrypoint/focused unit test 검증 | 완료 |
 | 외부 CUDA generate 재실행 | 완료: Kaggle |
 | `colab_verification.md` 실제 CUDA 결과 생성 | 완료: Kaggle `/kaggle/working/autogaze_vjepa_outputs/colab_verification.md` |
 
-현재 상태는 “Kaggle CUDA에서 V-JEPA + Qwen dense/off 및 AutoGaze/on actual smoke 통과, NVILA-HD single 및 HLVid mini benchmark 실행 확인”입니다. 다음 확장 검증은 같은 방식으로 full HLVid limit run과 Qwen plugin HLVid suite를 H100에서 이어서 실행하면 됩니다.
+현재 상태는 “Kaggle CUDA에서 V-JEPA + Qwen dense/off 및 AutoGaze/on actual smoke 통과, NVILA-HD single/HLVid mini benchmark 실행 확인, direct Qwen plugin full/chunked/sparse mini HLVid 실행 확인”입니다. 다음 확장 검증은 같은 방식으로 full HLVid limit run을 H100에서 이어서 실행하면 됩니다.

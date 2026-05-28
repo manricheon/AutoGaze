@@ -19,8 +19,11 @@ def test_build_notebook_contains_kaggle_cuda_verification_steps():
     assert "scripts/run_colab_autogaze_cuda_smoke.py" in source
     assert "RUN_NVILA_SINGLE = True" in source
     assert "RUN_NVILA_HLVID_MINI = True" in source
+    assert "RUN_QWEN_PLUGIN_HLVID_MINI = True" in source
     assert "repro.nvila_runner" in source
     assert "scripts/run_hlvid_folder_benchmark.py" in source
+    assert "--plugin-suite" in source
+    assert "64+128+192+224" in source
     assert "--dtype" in source
     assert "repro.colab_verification_report" in source
     assert "/kaggle/working/autogaze_vjepa_outputs/colab_verification.md" in source

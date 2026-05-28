@@ -190,6 +190,9 @@ def test_plugin_hlvid_qwen_vit_limit3_config_defines_matched_qwen_modes():
     assert args.video_resize_longest_edge == 448
     assert args.qwen_vit_chunk_frames == 16
     assert args.qwen_vit_max_spatial_chunks == 4
+    assert args.autogaze_target_scales == "112+224+336+448"
+    assert args.autogaze_target_patch_size == 16
+    assert args.autogaze_tile_size == 448
 
 
 def test_autogaze_priority_validation_config_lists_four_tracks():

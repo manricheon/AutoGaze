@@ -26,6 +26,9 @@ plugin_hlvid_benchmark:
     max_tiles_video: 4
     qwen_vit_chunk_frames: 16
     qwen_vit_max_spatial_chunks: 4
+    autogaze_target_scales: 112+224+336+448
+    autogaze_target_patch_size: 16
+    autogaze_tile_size: 448
     max_new_tokens: 8
 
 outputs:
@@ -37,4 +40,5 @@ notes:
   - qwen_full_vit uses native Qwen video feature extraction.
   - qwen_chunked_vit keeps all visual tokens but splits Qwen ViT work into temporal/spatial chunks.
   - qwen_chunked_vit_autogaze_sparse runs the direct AutoGaze selector first and applies sparse pre-ViT pruning.
+  - AutoGaze sparse scales must keep four scales for the checkpoint gaze decoder; 448px smoke uses 112+224+336+448 with patch size 16.
   - qwen_thumbnail_mode append-video is an experiment-mode approximation, not a native Qwen thumbnail stream.

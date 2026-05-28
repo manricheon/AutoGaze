@@ -154,10 +154,13 @@ Use the same HLVid wrapper with `--plugin-suite qwen` for Qwen extension experim
   --qwen-vit-max-spatial-chunks 4 \
   --qwen-thumbnail-mode append-video \
   --video-resize-longest-edge 448 \
+  --autogaze-target-scales 112+224+336+448 \
+  --autogaze-target-patch-size 16 \
+  --autogaze-tile-size 448 \
   --max-new-tokens 8
 ```
 
-`--plugin-suite qwen` defaults to `qwen_full_vit,qwen_chunked_vit,qwen_chunked_vit_autogaze_sparse`. Use `--plugin-suite custom --plugin-modes ...` for narrower comparisons.
+`--plugin-suite qwen` defaults to `qwen_full_vit,qwen_chunked_vit,qwen_chunked_vit_autogaze_sparse`. Sparse mode needs four AutoGaze scales because the checkpoint uses a four-scale gaze decoder. The wrapper auto-fills compatible scales from `--video-resize-longest-edge` when you do not pass them explicitly, but logging them in scripts makes experiments easier to audit. Use `--plugin-suite custom --plugin-modes ...` for narrower comparisons.
 
 ## 6. Stream Profile / H100 Preflight
 

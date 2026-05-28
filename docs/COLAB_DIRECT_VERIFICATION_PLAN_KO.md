@@ -120,8 +120,9 @@ python scripts/run_hlvid_folder_benchmark.py \
   --autogaze-model /content/autogaze_weights/nvidia__AutoGaze \
   --autogaze-device cuda \
   --autogaze-dtype float16 \
-  --autogaze-target-scales 32+64+112+224 \
+  --autogaze-target-scales 64+128+192+224 \
   --autogaze-target-patch-size 16 \
+  --autogaze-tile-size 224 \
   --max-batch-size-autogaze 4
 ```
 

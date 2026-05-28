@@ -120,6 +120,67 @@ def test_unified_hlvid_wrapper_uses_explicit_plugin_modes(monkeypatch, tmp_path)
     assert captured["qwen_vit_max_spatial_chunks"] == 2
 
 
+def test_qwen_plugin_suite_defaults_autogaze_sparse_to_four_scales(monkeypatch, tmp_path):
+    dataset = tmp_path / "hlvid"
+    write_minimal_hlvid_dataset(dataset)
+    captured = {}
+
+    def fake_run_plugin_hlvid_benchmark(**kwargs):
+        captured.update(kwargs)
+        return {"summary": {"ok": True}}
+
+    monkeypatch.setattr(wrapper, "run_plugin_hlvid_benchmark", fake_run_plugin_hlvid_benchmark)
+
+    wrapper.main(
+        [
+            "--dataset-dir",
+            str(dataset),
+            "--plugin-suite",
+            "qwen",
+            "--num-video-frames",
+            "16",
+            "--video-resize-longest-edge",
+            "224",
+        ]
+    )
+
+    assert captured["modes"] == [
+        "qwen_full_vit",
+        "qwen_chunked_vit",
+        "qwen_chunked_vit_autogaze_sparse",
+    ]
+    assert captured["autogaze_target_scales"] == "64+128+192+224"
+    assert captured["autogaze_target_patch_size"] == 16
+    assert captured["autogaze_tile_size"] == 224
+
+
+def test_qwen_plugin_suite_scales_follow_resize_longest_edge(monkeypatch, tmp_path):
+    dataset = tmp_path / "hlvid"
+    write_minimal_hlvid_dataset(dataset)
+    captured = {}
+
+    def fake_run_plugin_hlvid_benchmark(**kwargs):
+        captured.update(kwargs)
+        return {"summary": {"ok": True}}
+
+    monkeypatch.setattr(wrapper, "run_plugin_hlvid_benchmark", fake_run_plugin_hlvid_benchmark)
+
+    wrapper.main(
+        [
+            "--dataset-dir",
+            str(dataset),
+            "--plugin-suite",
+            "qwen",
+            "--video-resize-longest-edge",
+            "448",
+        ]
+    )
+
+    assert captured["autogaze_target_scales"] == "112+224+336+448"
+    assert captured["autogaze_target_patch_size"] == 16
+    assert captured["autogaze_tile_size"] == 448
+
+
 def test_unified_hlvid_wrapper_keeps_nvila_default_path(monkeypatch):
     called = {}
 
