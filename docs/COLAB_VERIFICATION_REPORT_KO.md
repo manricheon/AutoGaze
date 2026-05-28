@@ -106,6 +106,87 @@ Kaggle에서 생성된 주요 artifact:
 
 Kaggle notebook 출력에서 selected frames, dense/off V-JEPA token mask, AutoGaze/on V-JEPA token mask, AutoGaze overlay 이미지를 확인했습니다.
 
+## Kaggle NVILA-HD CUDA 검증 결과
+
+Chrome extension 재설치 후 같은 Kaggle notebook에서 `repro.nvila_runner`와 HLVid wrapper도 CUDA smoke로 확인했습니다.
+
+실행 조건:
+
+```text
+model: nvidia/NVILA-8B-HD-Video
+AutoGaze checkpoint: /kaggle/working/autogaze_weights/nvidia__AutoGaze
+device: cuda, device_map: auto, dtype: float16
+GPU: Tesla T4 x2
+video: inputs/hlvid_example/clip_av_video_5_001.mp4
+frames: 16
+thumbnail frames: 16 for AutoGaze smoke, 1 for keep-all-single smoke
+max_tiles_video: 1
+video_resize_longest_edge: 224
+video_decode_strategy: seek
+max_new_tokens: 1
+```
+
+### 확인한 호환성 이슈와 수정
+
+Kaggle의 최신 `torch 2.10.0+cu128` / 최신 Transformers 조합에서 NVILA remote code가 아래 호환성 문제를 순서대로 드러냈습니다.
+
+| 단계 | 증상 | 수정 |
+| --- | --- | --- |
+| AutoGaze processor load | `AutoGaze`에 `all_tied_weights_keys`가 없음 | `ensure_transformers_all_tied_weights_keys_compat()` 추가 |
+| Llama model init | read-only property 때문에 `property ... has no setter` | setter 있는 compatibility property로 수정 |
+| NVILA SigLIP remote import | `_trunc_normal_`, `trunc_normal_tf_` 등 private helper import 실패 | `ensure_siglip_private_init_compat()` 추가 |
+| AutoGaze gaze decoder generate | `inputs_embeds` generate에서 0-length reshape RuntimeError | `patch_processor_autogaze_inputs_embeds_generate_compat()` 추가 |
+| HLVid wrapper | `--dtype float16` unsupported | `repro.hlvid_batch_benchmark` parser/runner command에 `--dtype` forwarding 추가 |
+
+이 수정 뒤 NVILA-HD single smoke와 HLVid mini benchmark가 Kaggle CUDA에서 실행됐습니다.
+
+### NVILA-HD single smoke
+
+| mode | answer | total ms | preprocess(no AG) ms | AutoGaze ms | vision encoder ms | generate ms | LLM forward ms | encoder selected/raw tokens | LLM visual tokens | peak memory |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| single-scale dense | `The` | 17934.13 | 11673.03 | 9.83 | 4215.24 | 6251.27 | 1738.17 | 13328 / 13328 | 1496 | 12.44 GiB |
+| AutoGaze | `The` | 10828.00 | 5083.49 | 1591.90 | 1831.84 | 4152.61 | 2075.46 | 17024 / 33920 | 1904 | 7.85 GiB |
+
+해석:
+
+- Kaggle T4 x2 smoke에서는 AutoGaze 적용 후 peak memory가 `12.44 GiB -> 7.85 GiB` 수준으로 줄었습니다.
+- Vision encoder latency도 `4215 ms -> 1832 ms`로 줄었습니다.
+- AutoGaze selector cost는 약 `1592 ms`였습니다.
+- 이 smoke는 `max_tiles_video=1`, `resize_longest_edge=224`라 논문 셋업 성능 주장이 아니라 “CUDA 실행/계측 경로 검증”입니다.
+
+### NVILA-HD HLVid mini benchmark
+
+`scripts/run_hlvid_folder_benchmark.py`를 통해 mini HLVid manifest 1개 샘플을 실행했습니다.
+
+생성 artifact:
+
+```text
+/kaggle/working/autogaze_vjepa_outputs/nvila_hlvid_mini_dtype_generate_fix/hlvid_autogaze_gain_report.json
+/kaggle/working/autogaze_vjepa_outputs/nvila_hlvid_mini_dtype_generate_fix/hlvid_autogaze_gain_report.csv
+/kaggle/working/autogaze_vjepa_outputs/nvila_hlvid_mini_dtype_generate_fix/hlvid_single_scale_dense_predictions.jsonl
+/kaggle/working/autogaze_vjepa_outputs/nvila_hlvid_mini_dtype_generate_fix/hlvid_single_scale_dense_summary.json
+/kaggle/working/autogaze_vjepa_outputs/nvila_hlvid_mini_dtype_generate_fix/hlvid_autogaze_predictions.jsonl
+/kaggle/working/autogaze_vjepa_outputs/nvila_hlvid_mini_dtype_generate_fix/hlvid_autogaze_summary.json
+```
+
+요약:
+
+| mode | failed | parse_failed | accuracy_total | generated answer | total ms | AutoGaze ms | vision encoder ms | generate ms | LLM forward ms |
+| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| single-scale dense | 0 | 0 | 0.0 | `A` | 14348.84 | 0.84 | 4825.15 | 9146.74 | 3861.17 |
+| AutoGaze | 0 | 0 | 0.0 | `A` | 10914.60 | 1256.77 | 1762.68 | 4149.63 | 2137.80 |
+
+Mini benchmark에서 정답은 `B`였고 두 모드 모두 `A`를 출력했기 때문에 accuracy는 `0.0`입니다. 이 결과는 정확도 검증용 샘플이 아니라 wrapper가 prediction/summary/gain report를 생성하고 실패 없이 계속 실행되는지 확인한 smoke입니다.
+
+AutoGaze mini benchmark의 주요 reduction:
+
+```text
+siglip total MACs reduction ratio: 4.06x
+siglip attention MACs reduction ratio: 17.00x
+mllm prefill attention pair reduction ratio: 3.78x
+mllm KV cache reduction ratio: 1.94x
+```
+
 Hugging Face Jobs GPU smoke 요청 결과:
 
 ```text

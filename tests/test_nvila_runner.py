@@ -30,10 +30,13 @@ from repro.nvila_runner import (
     estimate_siglip_encoder_compute,
     effective_gazing_ratio_tile,
     effective_stream_gazing_ratio,
+    ensure_transformers_all_tied_weights_keys_compat,
+    ensure_siglip_private_init_compat,
     estimate_h100_preflight_config,
     h100_risk_band,
     estimate_nvila_preflight,
     estimate_stream_profile_plan,
+    load_model_and_processor,
     model_load_kwargs,
     extract_gaze_metrics,
     MODEL_FAMILY_HD_AUTOGAZE,
@@ -310,6 +313,89 @@ def test_apply_processor_autogaze_generate_only_injects_forward_kwarg():
     assert processor.autogaze_generate_only is True
     assert processor._autogaze_model.seen_kwargs["generate_only"] is True
     assert processor._autogaze_model.seen_kwargs["gazing_ratio"] == 0.5
+
+
+def test_load_model_and_processor_patches_autogaze_inputs_embeds_generate(monkeypatch):
+    class FakeDecoder:
+        def generate(self, *args, **kwargs):
+            return argparse.Namespace(sequences=torch.zeros((1, 1), dtype=torch.long))
+
+    class FakeAutoGaze:
+        def __init__(self):
+            self.gazing_model = argparse.Namespace(gaze_decoder=FakeDecoder())
+
+    class FakeProcessor:
+        def __init__(self):
+            self._autogaze_model = FakeAutoGaze()
+
+    class FakeModel:
+        def eval(self):
+            return self
+
+    processor = FakeProcessor()
+
+    monkeypatch.setattr("repro.nvila_runner.AutoProcessor.from_pretrained", lambda *args, **kwargs: processor)
+    monkeypatch.setattr("repro.nvila_runner.AutoModel.from_pretrained", lambda *args, **kwargs: FakeModel())
+    monkeypatch.setattr("repro.nvila_runner.ensure_siglip_private_init_compat", lambda: False)
+    monkeypatch.setattr("repro.nvila_runner.ensure_transformers_all_tied_weights_keys_compat", lambda: False)
+
+    model, loaded_processor = load_model_and_processor(make_args())
+
+    assert isinstance(model, FakeModel)
+    assert loaded_processor is processor
+    assert processor._autogaze_model.gazing_model.gaze_decoder._autogaze_inputs_embeds_generate_compat is True
+
+
+def test_ensure_transformers_all_tied_weights_keys_compat_adds_property_for_legacy_models():
+    class LegacyPreTrainedModel:
+        pass
+
+    patched = ensure_transformers_all_tied_weights_keys_compat(LegacyPreTrainedModel)
+    legacy = LegacyPreTrainedModel()
+    legacy._tied_weights_keys = ["decoder.embed_tokens.weight", "lm_head.weight"]
+
+    assert patched is True
+    assert sorted(legacy.all_tied_weights_keys.keys()) == [
+        "decoder.embed_tokens.weight",
+        "lm_head.weight",
+    ]
+    assert ensure_transformers_all_tied_weights_keys_compat(LegacyPreTrainedModel) is False
+
+
+def test_ensure_transformers_all_tied_weights_keys_compat_keeps_newer_model_assignment_working():
+    class LegacyPreTrainedModel:
+        pass
+
+    ensure_transformers_all_tied_weights_keys_compat(LegacyPreTrainedModel)
+    legacy = LegacyPreTrainedModel()
+
+    legacy.all_tied_weights_keys = {"lm_head.weight": None}
+
+    assert legacy.all_tied_weights_keys == {"lm_head.weight": None}
+
+
+def test_ensure_siglip_private_init_compat_adds_removed_trunc_normal_alias():
+    class SiglipModule:
+        pass
+
+    patched = ensure_siglip_private_init_compat(SiglipModule)
+    tensor = torch.empty(2, 2)
+
+    result = SiglipModule._trunc_normal_(tensor, 0.0, 1.0, -2.0, 2.0)
+
+    assert patched is True
+    for name in (
+        "_trunc_normal_",
+        "trunc_normal_tf_",
+        "variance_scaling_",
+        "lecun_normal_",
+        "default_flax_embed_init",
+    ):
+        assert callable(getattr(SiglipModule, name))
+    assert result is tensor
+    assert torch.all(tensor >= -2.0)
+    assert torch.all(tensor <= 2.0)
+    assert ensure_siglip_private_init_compat(SiglipModule) is False
 
 
 def test_processor_kwargs_accepts_sequence_gazing_ratio_tile():

@@ -138,6 +138,7 @@ def test_build_runner_command_includes_local_manifest_and_measurement_flags(tmp_
         autogaze_model="local-autogaze",
         device="cuda",
         device_map="auto",
+        dtype="float16",
         num_video_frames=128,
         num_video_frames_thumbnail=64,
         max_tiles_video=8,
@@ -207,6 +208,7 @@ def test_build_runner_command_includes_local_manifest_and_measurement_flags(tmp_
     assert "nvila-hd" in command
     assert "--mllm-name" in command
     assert "local-nvila-hd" in command
+    assert command[command.index("--dtype") + 1] == "float16"
 
 
 def test_build_runner_command_forwards_model_family_and_paper_preset(tmp_path: Path):

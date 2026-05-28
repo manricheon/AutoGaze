@@ -967,6 +967,8 @@ def build_runner_command(
         "--scored-predictions",
         str(scored_predictions),
     ]
+    if getattr(args, "dtype", None) is not None:
+        command.extend(["--dtype", str(args.dtype)])
     if getattr(args, "mllm_path", None) is not None:
         command.extend(["--mllm-path", str(args.mllm_path)])
     component_options = (
@@ -2049,6 +2051,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--autogaze-model", default="nvidia/AutoGaze")
     parser.add_argument("--device", default="cuda", choices=["cpu", "mps", "cuda"])
     parser.add_argument("--device-map", default="auto")
+    parser.add_argument("--dtype", choices=["auto", "float32", "float16", "bfloat16"], default=None)
     parser.add_argument("--num-video-frames", type=int, default=1024)
     parser.add_argument("--num-video-frames-thumbnail", type=int, default=128)
     parser.add_argument("--max-tiles-video", type=int, default=48)

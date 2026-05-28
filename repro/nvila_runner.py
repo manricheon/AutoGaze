@@ -4,6 +4,7 @@ import argparse
 from bisect import bisect_right
 from collections import Counter, defaultdict
 from contextlib import contextmanager
+from functools import wraps
 from fractions import Fraction
 import json
 import math
@@ -3094,6 +3095,116 @@ def requested_torch_dtype(args: argparse.Namespace) -> torch.dtype | None:
     raise ValueError(f"Unsupported dtype: {value}")
 
 
+def ensure_transformers_all_tied_weights_keys_compat(model_cls: type[Any] | None = None) -> bool:
+    """Provide the newer Transformers tied-weight API for older remote model classes."""
+    if model_cls is None:
+        from transformers.modeling_utils import PreTrainedModel
+
+        model_cls = PreTrainedModel
+    if hasattr(model_cls, "all_tied_weights_keys"):
+        return False
+
+    def get_all_tied_weights_keys(self: Any) -> dict[str, None]:
+        stored = getattr(self, "__dict__", {}).get("all_tied_weights_keys")
+        if stored is not None:
+            return stored
+        keys = getattr(self, "_tied_weights_keys", None)
+        if isinstance(keys, dict):
+            return keys
+        if keys is None:
+            return {}
+        return {str(key): None for key in keys}
+
+    def set_all_tied_weights_keys(self: Any, value: Any) -> None:
+        self.__dict__["all_tied_weights_keys"] = value
+
+    model_cls.all_tied_weights_keys = property(  # type: ignore[attr-defined]
+        get_all_tied_weights_keys,
+        set_all_tied_weights_keys,
+    )
+    return True
+
+
+def ensure_siglip_private_init_compat(siglip_module: Any | None = None) -> bool:
+    """Restore private SigLIP init aliases expected by older NVILA remote code."""
+    if siglip_module is None:
+        import transformers.models.siglip.modeling_siglip as siglip_module
+
+    patched = False
+
+    if not hasattr(siglip_module, "_trunc_normal_"):
+        def _trunc_normal_(tensor: torch.Tensor, mean: float, std: float, a: float, b: float) -> torch.Tensor:
+            return torch.nn.init.trunc_normal_(tensor, mean=mean, std=std, a=a, b=b)
+
+        siglip_module._trunc_normal_ = _trunc_normal_
+        patched = True
+
+    if not hasattr(siglip_module, "trunc_normal_tf_"):
+        def trunc_normal_tf_(
+            tensor: torch.Tensor,
+            mean: float = 0.0,
+            std: float = 1.0,
+            a: float = -2.0,
+            b: float = 2.0,
+        ) -> torch.Tensor:
+            with torch.no_grad():
+                siglip_module._trunc_normal_(tensor, 0, 1.0, a, b)
+                tensor.mul_(std).add_(mean)
+            return tensor
+
+        siglip_module.trunc_normal_tf_ = trunc_normal_tf_
+        patched = True
+
+    if not hasattr(siglip_module, "variance_scaling_"):
+        def variance_scaling_(
+            tensor: torch.Tensor,
+            scale: float = 1.0,
+            mode: str = "fan_in",
+            distribution: str = "normal",
+        ) -> torch.Tensor:
+            fan_in, fan_out = torch.nn.init._calculate_fan_in_and_fan_out(tensor)
+            if mode == "fan_in":
+                denom = fan_in
+            elif mode == "fan_out":
+                denom = fan_out
+            elif mode == "fan_avg":
+                denom = (fan_in + fan_out) / 2
+            else:
+                raise ValueError(f"invalid mode {mode}")
+            variance = scale / denom
+            if distribution == "truncated_normal":
+                siglip_module.trunc_normal_tf_(tensor, std=math.sqrt(variance) / 0.87962566103423978)
+            elif distribution == "normal":
+                with torch.no_grad():
+                    tensor.normal_(std=math.sqrt(variance))
+            elif distribution == "uniform":
+                bound = math.sqrt(3 * variance)
+                with torch.no_grad():
+                    tensor.uniform_(-bound, bound)
+            else:
+                raise ValueError(f"invalid distribution {distribution}")
+            return tensor
+
+        siglip_module.variance_scaling_ = variance_scaling_
+        patched = True
+
+    if not hasattr(siglip_module, "lecun_normal_"):
+        def lecun_normal_(tensor: torch.Tensor) -> torch.Tensor:
+            return siglip_module.variance_scaling_(tensor, mode="fan_in", distribution="truncated_normal")
+
+        siglip_module.lecun_normal_ = lecun_normal_
+        patched = True
+
+    if not hasattr(siglip_module, "default_flax_embed_init"):
+        def default_flax_embed_init(tensor: torch.Tensor) -> torch.Tensor:
+            return siglip_module.variance_scaling_(tensor, mode="fan_in", distribution="normal")
+
+        siglip_module.default_flax_embed_init = default_flax_embed_init
+        patched = True
+
+    return patched
+
+
 def apply_processor_autogaze_generate_only(processor: Any, *, enabled: bool) -> bool:
     setattr(processor, "autogaze_generate_only", bool(enabled))
     if not enabled:
@@ -3116,8 +3227,45 @@ def apply_processor_autogaze_generate_only(processor: Any, *, enabled: bool) -> 
     return True
 
 
+def patch_processor_autogaze_inputs_embeds_generate_compat(processor: Any) -> bool:
+    autogaze_model = getattr(processor, "_autogaze_model", None)
+    gaze_decoder = getattr(getattr(autogaze_model, "gazing_model", None), "gaze_decoder", None)
+    if gaze_decoder is None or getattr(gaze_decoder, "_autogaze_inputs_embeds_generate_compat", False):
+        return False
+    original_generate = gaze_decoder.generate
+
+    @wraps(original_generate)
+    def generate_with_inputs_embeds_prefix(*args: Any, **kwargs: Any) -> Any:
+        inputs_embeds = kwargs.get("inputs_embeds")
+        if inputs_embeds is None or kwargs.get("input_ids") is not None:
+            return original_generate(*args, **kwargs)
+        prefix_len = int(inputs_embeds.shape[1])
+        if prefix_len <= 0:
+            return original_generate(*args, **kwargs)
+        max_new_tokens = kwargs.get("max_new_tokens")
+        kwargs["input_ids"] = torch.zeros(
+            (int(inputs_embeds.shape[0]), prefix_len),
+            dtype=torch.long,
+            device=inputs_embeds.device,
+        )
+        if max_new_tokens is not None:
+            kwargs["max_new_tokens"] = prefix_len + int(max_new_tokens)
+        output = original_generate(*args, **kwargs)
+        sequences = getattr(output, "sequences", None)
+        if sequences is not None and int(sequences.shape[1]) >= prefix_len:
+            output.sequences = sequences[:, prefix_len:]
+        return output
+
+    gaze_decoder.generate = generate_with_inputs_embeds_prefix
+    gaze_decoder._autogaze_inputs_embeds_generate_compat = True
+    return True
+
+
 def load_model_and_processor(args: argparse.Namespace):
+    ensure_transformers_all_tied_weights_keys_compat()
+    ensure_siglip_private_init_compat()
     processor = AutoProcessor.from_pretrained(args.model_path, **processor_kwargs(args))
+    patch_processor_autogaze_inputs_embeds_generate_compat(processor)
     apply_processor_autogaze_generate_only(
         processor,
         enabled=bool(getattr(args, "autogaze_generate_only", False)),
