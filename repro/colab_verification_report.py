@@ -7,6 +7,7 @@ from typing import Any, Iterable
 
 
 DEFAULT_TITLE = "Colab Verification"
+SUCCESS_STATUSES = {"passed", "executed", "ok", "success", True}
 
 PREFERRED_TOKEN_KEYS = [
     "autogaze_raw_patch_tokens",
@@ -52,6 +53,12 @@ VISUALIZATION_KEYS = [
     ("V-JEPA token mask", "vjepa_token_mask_image"),
     ("resized selected frames", "resized_selected_frames_grid_image"),
     ("resized AutoGaze overlay", "resized_autogaze_overlay_image"),
+    ("NVILA selected frames video", "selected_frames_video"),
+    ("NVILA AutoGaze overlay video", "overlay_video"),
+    ("NVILA processor frames video", "processor_frames_video"),
+    ("NVILA processor overlay video", "processor_overlay_video"),
+    ("gazing info JSON", "gazing_info_json"),
+    ("AutoGaze sparse plan JSON", "sparse_selection_plan_json"),
 ]
 
 
@@ -122,12 +129,13 @@ def build_colab_verification_payload(
     for name, path in cases:
         case = load_case_result(name, path)
         results[name] = case
-        if case.get("status") not in ("passed", True):
+        if case.get("status") not in SUCCESS_STATUSES:
+            failure = case.get("failure") or {}
             failures.append(
                 {
-                    "kind": case.get("failure", {}).get("kind") or "case_failed",
+                    "kind": failure.get("kind") or "case_failed",
                     "name": name,
-                    "stage": (case.get("failure") or {}).get("stage"),
+                    "stage": failure.get("stage"),
                     "source_json": case.get("source_json"),
                 }
             )
@@ -223,18 +231,56 @@ def load_entrypoint_verification(path: Path) -> dict[str, Any]:
 
 
 def normalize_case_result(name: str, path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    generation = payload.get("generation") if isinstance(payload.get("generation"), dict) else {}
     return {
         "case": name,
         "source_json": str(path),
         "status": normalize_status(payload),
         "autogaze_mode": first_present(payload, [["autogaze_mode"], ["run_identity", "autogaze_mode"], ["config", "autogaze_mode"]]),
         "generated_text": extract_answer(payload),
-        "tokens": extract_mapping(payload, [["tokens"], ["token_metrics"], ["token_counts"], ["metrics", "tokens"], ["summary", "tokens"]]),
-        "latency_ms": extract_mapping(payload, [["latency_ms"], ["timing", "latency_ms"], ["metrics", "latency_ms"], ["summary", "latency_ms"]]),
-        "memory_bytes": extract_mapping(payload, [["memory_bytes"], ["memory"], ["metrics", "memory_bytes"], ["summary", "memory_bytes"]]),
-        "visualizations": extract_mapping(payload, [["visualizations"], ["visualization"], ["artifacts", "visualizations"], ["result", "visualizations"]]),
+        "tokens": extract_mapping(
+            payload,
+            [
+                ["tokens"],
+                ["token_metrics"],
+                ["token_counts"],
+                ["metrics", "tokens"],
+                ["summary", "tokens"],
+                ["result", "token_metrics"],
+                ["generation", "metrics", "tokens"],
+            ],
+        ),
+        "latency_ms": extract_mapping(
+            payload,
+            [
+                ["latency_ms"],
+                ["timing", "latency_ms"],
+                ["metrics", "latency_ms"],
+                ["summary", "latency_ms"],
+                ["result", "latency_ms"],
+                ["generation", "metrics", "latency_ms"],
+            ],
+        ),
+        "memory_bytes": extract_mapping(
+            payload,
+            [
+                ["memory_bytes"],
+                ["memory"],
+                ["metrics", "memory_bytes"],
+                ["summary", "memory_bytes"],
+                ["result", "memory_bytes"],
+                ["generation", "metrics", "memory_bytes"],
+            ],
+        ),
+        "visualizations": extract_visualizations(payload),
         "failure": first_present(payload, [["failure"], ["error"], ["summary", "failure"]]),
-        "summary": payload.get("summary"),
+        "summary": summary or payload.get("summary"),
+        "pipeline": infer_pipeline(name, payload),
+        "execution_kind": infer_execution_kind(name, payload),
+        "implementation_status": payload.get("implementation_status") or generation.get("status") or result.get("status"),
+        "artifact_status": artifact_status(extract_visualizations(payload)),
     }
 
 
@@ -244,11 +290,19 @@ def normalize_status(payload: dict[str, Any]) -> str:
         return "passed" if status else "failed"
     if isinstance(status, str) and status:
         return status
+    generation = payload.get("generation")
+    if isinstance(generation, dict) and generation.get("status"):
+        return str(generation.get("status"))
+    summary = payload.get("summary")
+    if isinstance(summary, dict) and summary.get("status"):
+        return str(summary.get("status"))
     passed = (payload.get("summary") or {}).get("passed")
     if isinstance(passed, bool):
         return "passed" if passed else "failed"
     if payload.get("failure") or payload.get("error"):
         return "failed"
+    if isinstance(payload.get("result"), dict) or isinstance(payload.get("generation"), dict):
+        return "passed"
     return "unknown"
 
 
@@ -264,7 +318,10 @@ def extract_answer(payload: dict[str, Any]) -> str:
             ["result", "generated_text"],
             ["result", "answer"],
             ["result", "prediction"],
+            ["result", "raw_output"],
             ["summary", "generated_text"],
+            ["summary", "answer"],
+            ["generation", "text"],
         ],
     )
     return "" if value is None else str(value)
@@ -273,6 +330,32 @@ def extract_answer(payload: dict[str, Any]) -> str:
 def extract_mapping(payload: dict[str, Any], paths: list[list[str]]) -> dict[str, Any]:
     value = first_present(payload, paths)
     return value if isinstance(value, dict) else {}
+
+
+def extract_visualizations(payload: dict[str, Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for path in (
+        ["visualizations"],
+        ["visualization"],
+        ["artifacts", "visualizations"],
+        ["result", "visualizations"],
+        ["result", "visualization"],
+        ["generation", "metrics", "visualizations"],
+    ):
+        value = first_present(payload, [path])
+        if isinstance(value, dict):
+            merged.update(value)
+    sparse_plan = first_present(
+        payload,
+        [
+            ["direct_autogaze_selector", "sparse_selection_plan_json"],
+            ["autogaze_selector", "sparse_selection_plan_json"],
+            ["generation", "metrics", "sparse_selection_plan_json"],
+        ],
+    )
+    if sparse_plan:
+        merged.setdefault("sparse_selection_plan_json", sparse_plan)
+    return merged
 
 
 def first_present(payload: dict[str, Any], paths: list[list[str]]) -> Any:
@@ -324,6 +407,7 @@ def render_colab_verification_markdown(payload: dict[str, Any], *, output_md: st
         lines.extend(_case_summary_row(name, result) for name, result in cases)
     else:
         lines.append("| _none_ |  |  |  |  |  |  |")
+    lines.extend(render_v2_evidence_matrix(cases))
     lines.extend(
         [
             "",
@@ -352,6 +436,35 @@ def render_colab_verification_markdown(payload: dict[str, Any], *, output_md: st
         ]
     )
     return "\n".join(lines)
+
+
+def render_v2_evidence_matrix(cases: list[tuple[str, dict[str, Any]]]) -> list[str]:
+    lines = [
+        "",
+        "## V2 Pipeline Evidence Matrix",
+        "",
+        "| pipeline | case | kind | status | AutoGaze | selected / raw | visual artifacts | source |",
+        "|---|---|---|---|---|---:|---|---|",
+    ]
+    if not cases:
+        return lines + ["| _none_ |  |  |  |  |  |  |  |", ""]
+    for name, result in cases:
+        tokens = result.get("tokens") or {}
+        visuals = result.get("visualizations") or {}
+        lines.append(
+            "| {pipeline} | {case} | {kind} | `{status}` | `{autogaze}` | {selected} / {raw} | {visuals} | `{source}` |".format(
+                pipeline=markdown_escape(str(result.get("pipeline") or infer_pipeline(name, result))),
+                case=markdown_escape(name),
+                kind=markdown_escape(str(result.get("execution_kind") or infer_execution_kind(name, result))),
+                status=markdown_escape(str(result.get("status") or "")),
+                autogaze=markdown_escape(str(result.get("autogaze_mode") or autogaze_state_from_name(name))),
+                selected=fmt(selected_token_value(tokens)),
+                raw=fmt(raw_token_value(tokens)),
+                visuals=markdown_escape(str(artifact_status(visuals))),
+                source=markdown_escape(str(result.get("source_json") or "")),
+            )
+        )
+    return lines + [""]
 
 
 def _case_summary_row(name: str, result: dict[str, Any]) -> str:
@@ -393,6 +506,57 @@ def raw_token_value(tokens: dict[str, Any]) -> Any:
 
 def visual_token_value(tokens: dict[str, Any]) -> Any:
     return first_existing_key(tokens, ["llm_visual_tokens", "qwen_visual_tokens_inserted", "visual_tokens_after_prune"])
+
+
+def infer_pipeline(name: str, payload: dict[str, Any]) -> str:
+    text = " ".join(
+        str(value)
+        for value in [
+            name,
+            payload.get("runner"),
+            payload.get("model_path"),
+            payload.get("case"),
+            payload.get("integration_level"),
+            payload.get("implementation_status"),
+        ]
+    ).lower()
+    generation = payload.get("generation") if isinstance(payload.get("generation"), dict) else {}
+    adapter = str(generation.get("adapter") or "").lower()
+    if "vjepa" in text:
+        return "V-JEPA2 + Qwen"
+    if "nvila" in text:
+        return "NVILA-HD"
+    if "qwen" in text or "qwen" in adapter:
+        return "Qwen"
+    return "unknown"
+
+
+def infer_execution_kind(name: str, payload: dict[str, Any]) -> str:
+    text = f"{name} {payload.get('source_json') or ''}".lower()
+    if "hlvid" in text or "benchmark" in text:
+        return "benchmark"
+    return "single"
+
+
+def autogaze_state_from_name(name: str) -> str:
+    lower = name.lower()
+    if "autogaze" in lower or "sparse" in lower or lower.endswith("_on"):
+        return "on"
+    if "off" in lower or "keep" in lower or "dense" in lower or "full" in lower:
+        return "off"
+    return "unknown"
+
+
+def artifact_status(visualizations: dict[str, Any]) -> str:
+    if not isinstance(visualizations, dict) or not visualizations:
+        return "missing"
+    present = [key for key, value in visualizations.items() if value not in (None, "", [])]
+    if not present:
+        return "missing"
+    frame_count = visualizations.get("frame_count_rendered") or visualizations.get("sampled_frame_count")
+    if frame_count:
+        return f"recorded:{len(present)} artifacts, frames={frame_count}"
+    return f"recorded:{len(present)} artifacts"
 
 
 def first_existing_key(mapping: dict[str, Any], keys: list[str]) -> Any:
@@ -456,13 +620,33 @@ def render_visualization_sections(cases: list[tuple[str, dict[str, Any]]], outpu
                 continue
             any_visuals = True
             link = markdown_path(str(path), output_md)
-            case_lines.extend([f"### {name}: {label}", "", f"![{markdown_escape(label)}]({link})", "", f"`{path}`", ""])
+            case_lines.extend([f"### {name}: {label}", ""])
+            if _looks_like_inline_media(path):
+                case_lines.extend([f"![{markdown_escape(label)}]({link})", ""])
+            else:
+                case_lines.extend([f"[{markdown_escape(label)}]({link})", ""])
+            case_lines.extend([f"`{path}`", ""])
         if case_lines:
+            metadata = {
+                key: value
+                for key, value in visualizations.items()
+                if key not in {artifact_key for _, artifact_key in VISUALIZATION_KEYS}
+            }
+            if metadata:
+                case_lines.extend(["| visualization metadata | value |", "|---|---|"])
+                for key, value in metadata.items():
+                    case_lines.append(f"| {markdown_escape(str(key))} | `{markdown_escape(str(value))}` |")
+                case_lines.append("")
             lines.extend(case_lines)
     if not any_visuals:
         lines.append("_No visualization artifacts recorded._")
         lines.append("")
     return lines
+
+
+def _looks_like_inline_media(path: Any) -> bool:
+    suffix = Path(str(path)).suffix.lower()
+    return suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".mov", ".webm"}
 
 
 def render_entrypoint_verification(verifier: dict[str, Any]) -> list[str]:

@@ -18,14 +18,20 @@ def test_build_notebook_contains_kaggle_cuda_verification_steps():
     assert "scripts/verify_autogaze_entrypoints.py" in source
     assert "scripts/run_colab_autogaze_cuda_smoke.py" in source
     assert "RUN_NVILA_SINGLE = True" in source
+    assert "RUN_QWEN_SINGLE = True" in source
     assert "RUN_NVILA_HLVID_MINI = True" in source
     assert "RUN_QWEN_PLUGIN_HLVID_MINI = True" in source
+    assert "RUN_VJEPA_QWEN_HLVID_MINI = True" in source
     assert "repro.nvila_runner" in source
+    assert "repro.flexible_runner" in source
     assert "scripts/run_hlvid_folder_benchmark.py" in source
     assert "--plugin-suite" in source
     assert "64+128+192+224" in source
+    assert "--visualization-output-dir" in source
+    assert "--visualization-max-frames', '16'" in source
     assert "--dtype" in source
     assert "repro.colab_verification_report" in source
+    assert "repro.vjepa_qwen_hlvid_benchmark" in source
     assert "/kaggle/working/autogaze_vjepa_outputs/colab_verification.md" in source
     assert "torch.cuda.is_available()" in source
 

@@ -1,0 +1,27 @@
+{
+  "autogaze_overlay_image": "docs/assets/colab_v2/qwen_autogaze_sparse_overlay_16f.png",
+  "autogaze_overlay_status": "written",
+  "autogaze_raw_patch_tokens": 4240,
+  "autogaze_selected_patch_tokens": 80,
+  "decode_stats": {
+    "decode_frames_read": 124,
+    "decode_keyframes_indexed": 750,
+    "decode_packets_scanned_for_keyframes": 8992,
+    "decode_seek_groups": 16,
+    "decode_strategy": "seek",
+    "decode_strategy_fallback_error": null,
+    "requested_decode_strategy": "seek"
+  },
+  "num_video_frames": 16,
+  "selected_frames_grid_image": "docs/assets/colab_v2/hlvid_example_16f_selected_frames.png",
+  "source_metadata": {
+    "codec": "mpeg4",
+    "duration_seconds": 299.73333333333335,
+    "fps": 30.0,
+    "frames": 8992,
+    "height": 2160,
+    "width": 3840
+  },
+  "sparse_plan_json": "outputs/autogaze_repro/qwen_modes_smoke/qwen_chunked_vit_autogaze_sparse_actual_cpu_224_g002_autogaze_sparse_plan.json",
+  "video": "inputs/hlvid_example/clip_av_video_5_001.mp4"
+}

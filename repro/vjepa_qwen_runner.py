@@ -114,7 +114,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--attn-implementation", default="eager")
     parser.add_argument("--clear-cuda-cache-between-stages", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--visualization-output-dir")
-    parser.add_argument("--visualization-max-frames", type=int, default=4)
+    parser.add_argument("--visualization-max-frames", type=int, default=16)
     return parser
 
 

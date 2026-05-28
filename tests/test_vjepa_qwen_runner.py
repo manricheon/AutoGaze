@@ -39,6 +39,7 @@ def test_vjepa_qwen_runner_defaults_wire_actual_autogaze():
     assert args.autogaze_tile_size == 224
     assert args.autogaze_target_scales == "32+64+112+224"
     assert args.vjepa_selection_policy == "single_scale_union"
+    assert args.visualization_max_frames == 16
     assert args.output_json.endswith("vjepa_qwen_actual.json")
 
 

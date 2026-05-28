@@ -76,6 +76,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-new-tokens", type=int, default=32)
     parser.add_argument("--attn-implementation", default="eager")
     parser.add_argument("--clear-cuda-cache-between-stages", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--visualization-output-dir")
+    parser.add_argument("--visualization-max-frames", type=int, default=16)
     return parser
 
 
@@ -147,6 +149,14 @@ def build_runner_args_for_row(
         str(benchmark_args.max_new_tokens),
         "--attn-implementation",
         str(benchmark_args.attn_implementation),
+        "--visualization-output-dir",
+        str(
+            Path(benchmark_args.visualization_output_dir)
+            if benchmark_args.visualization_output_dir
+            else output_json.parent / "visualizations"
+        ),
+        "--visualization-max-frames",
+        str(benchmark_args.visualization_max_frames),
     ]
     _append_optional(argv, "--gazing-ratio", benchmark_args.gazing_ratio)
     _append_optional(argv, "--task-loss-requirement", benchmark_args.task_loss_requirement)

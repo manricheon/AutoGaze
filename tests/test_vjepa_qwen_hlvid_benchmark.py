@@ -25,6 +25,7 @@ def test_vjepa_qwen_hlvid_defaults_are_smoke_safe():
     assert args.autogaze_target_scales == "32+64+112+224"
     assert args.vjepa_qwen_modes == ""
     assert args.vjepa_selection_policies == "single_scale_union"
+    assert args.visualization_max_frames == 16
     assert resolve_modes(args) == ["autogaze_single_grid"]
 
 
@@ -72,6 +73,7 @@ def test_build_runner_args_for_row_uses_question_as_prompt(tmp_path):
     assert argv[argv.index("--vjepa-selection-policy") + 1] == "scale_aware_multi_pass"
     assert argv[argv.index("--autogaze-model") + 1] == "weights/AutoGaze"
     assert argv[argv.index("--num-video-frames") + 1] == "32"
+    assert argv[argv.index("--visualization-max-frames") + 1] == "16"
 
 
 def test_build_runner_args_for_dense_off_disables_autogaze(tmp_path):

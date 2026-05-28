@@ -97,6 +97,7 @@ def test_build_payload_reads_direct_runner_jsons_and_missing_artifacts(tmp_path)
     assert "8" in markdown
     assert "autogaze_overlay.png" in markdown
     assert "nvila_single_autogaze" in markdown
+    assert "## V2 Pipeline Evidence Matrix" in markdown
 
 
 def test_colab_verification_report_cli_writes_markdown(tmp_path):
@@ -133,3 +134,105 @@ def test_colab_verification_report_cli_writes_markdown(tmp_path):
     assert "# CLI Report" in markdown
     assert "nvila_keep_all_single" in markdown
     assert "A vehicle moves down the road." in markdown
+
+
+def test_colab_report_normalizes_nvila_single_payload_with_nested_visualization(tmp_path):
+    selected = tmp_path / "nvila_selected.mp4"
+    overlay = tmp_path / "nvila_overlay.mp4"
+    case_json = tmp_path / "nvila.json"
+    case_json.write_text(
+        json.dumps(
+            {
+                "gazing_mode": "autogaze",
+                "summary": {
+                    "answer": "The road sign says Hampden Ave.",
+                    "tokens": {
+                        "encoder_raw_patch_tokens": 33920,
+                        "encoder_selected_patch_tokens": 17024,
+                        "llm_actual_visual_tokens": 1904,
+                    },
+                    "latency_ms": {
+                        "total_median": 10828.0,
+                        "autogaze_total_median": 1591.9,
+                        "vision_encoder_median": 1831.84,
+                    },
+                    "memory_bytes": {"overall_peak_median": 8428875776},
+                },
+                "result": {
+                    "visualization": {
+                        "selected_frames_video": str(selected),
+                        "overlay_video": str(overlay),
+                        "sampled_frame_count": 16,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = build_colab_verification_payload(
+        title="V2",
+        cases=[("nvila_hd_autogaze_single", case_json)],
+        output_md=tmp_path / "report.md",
+    )
+    result = payload["results"]["nvila_hd_autogaze_single"]
+    markdown = render_colab_verification_markdown(payload, output_md=tmp_path / "report.md")
+
+    assert result["status"] == "passed"
+    assert result["generated_text"] == "The road sign says Hampden Ave."
+    assert result["tokens"]["encoder_raw_patch_tokens"] == 33920
+    assert result["latency_ms"]["vision_encoder_median"] == 1831.84
+    assert result["visualizations"]["selected_frames_video"] == str(selected)
+    assert "NVILA-HD" in markdown
+    assert "nvila_selected.mp4" in markdown
+    assert "sampled_frame_count" in markdown
+
+
+def test_colab_report_normalizes_qwen_plugin_run_payload_and_sparse_plan(tmp_path):
+    plan = tmp_path / "qwen_sparse_plan.json"
+    case_json = tmp_path / "qwen_run.json"
+    case_json.write_text(
+        json.dumps(
+            {
+                "implementation_status": "executed",
+                "direct_autogaze_selector": {
+                    "status": "executed",
+                    "sparse_selection_plan_json": str(plan),
+                },
+                "generation": {
+                    "status": "executed",
+                    "text": "A",
+                    "metrics": {
+                        "tokens": {
+                            "visual_tokens_before_prune": 256,
+                            "visual_tokens_after_prune": 140,
+                            "qwen_context_tokens": 209,
+                        },
+                        "latency_ms": {
+                            "total": 12722.54,
+                            "qwen_vit_prepare": 183.13,
+                            "generate": 251.05,
+                        },
+                        "memory_bytes": {"peak_cuda_allocated": 1234},
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = build_colab_verification_payload(
+        title="V2",
+        cases=[("qwen_chunked_vit_autogaze_sparse", case_json)],
+        output_md=tmp_path / "report.md",
+    )
+    result = payload["results"]["qwen_chunked_vit_autogaze_sparse"]
+    markdown = render_colab_verification_markdown(payload, output_md=tmp_path / "report.md")
+
+    assert result["status"] == "executed"
+    assert result["generated_text"] == "A"
+    assert result["tokens"]["visual_tokens_after_prune"] == 140
+    assert result["latency_ms"]["qwen_vit_prepare"] == 183.13
+    assert result["visualizations"]["sparse_selection_plan_json"] == str(plan)
+    assert "Qwen" in markdown
+    assert "qwen_sparse_plan.json" in markdown

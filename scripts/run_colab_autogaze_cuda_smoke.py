@@ -58,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--verification-md", default=None)
     parser.add_argument("--write-visualizations", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--visualization-output-dir")
-    parser.add_argument("--visualization-max-frames", type=int, default=4)
+    parser.add_argument("--visualization-max-frames", type=int, default=16)
     return parser
 
 

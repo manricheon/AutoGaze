@@ -23,6 +23,7 @@ def test_colab_cuda_smoke_defaults_are_cuda_actual_smoke_oriented():
     assert args.run_dense_off is True
     assert args.run_autogaze_on is True
     assert args.autogaze_target_scales == "32+64+112+224"
+    assert args.visualization_max_frames == 16
 
 
 def test_colab_cuda_smoke_dry_run_builds_verifier_dense_and_autogaze_commands(tmp_path):
@@ -78,6 +79,7 @@ def test_vjepa_qwen_dense_command_uses_off_without_autogaze_model(tmp_path):
     assert command[command.index("--autogaze-mode") + 1] == "off"
     assert "--autogaze-model" not in command
     assert "--require-cuda" in command
+    assert command[command.index("--visualization-max-frames") + 1] == "16"
 
 
 def test_vjepa_qwen_autogaze_command_forwards_selector_options(tmp_path):
