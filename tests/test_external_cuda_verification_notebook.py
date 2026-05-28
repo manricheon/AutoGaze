@@ -29,6 +29,7 @@ def test_build_notebook_contains_kaggle_cuda_verification_steps():
     assert "64+128+192+224" in source
     assert "--visualization-output-dir" in source
     assert "--visualization-max-frames', '16'" in source
+    assert "--gazing-ratio', '0.1'" in source
     assert "--dtype" in source
     assert "repro.colab_verification_report" in source
     assert "repro.vjepa_qwen_hlvid_benchmark" in source

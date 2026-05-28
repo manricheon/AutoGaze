@@ -5,6 +5,7 @@ import torch
 
 from repro.plugins.autogaze_sparse_selector import (
     AutogazeSelectorRuntimeConfig,
+    autogaze_selection_policy_summary,
     build_autogaze_selector_video_plan,
     build_sparse_selection_plan_from_autogaze_outputs,
     ensure_transformers_tied_weight_compat,
@@ -146,6 +147,35 @@ def test_runtime_config_keeps_gazing_ratio_none_for_checkpoint_default():
     )
 
     assert config.gazing_ratio is None
+
+
+def test_autogaze_selection_policy_explains_checkpoint_default_task_loss():
+    class FakeModel:
+        gazing_ratio_config = {"fixed": {"gazing_ratio": 0.75}}
+        has_task_loss_requirement_during_inference = True
+        task_loss_requirement_config = {"fixed": {"task_loss_requirement": 0.7}}
+
+    summary = autogaze_selection_policy_summary(
+        requested_gazing_ratio=None,
+        requested_task_loss_requirement=None,
+        model=FakeModel(),
+    )
+
+    assert summary["policy"] == "model_default"
+    assert summary["model_gazing_ratio_config"]["fixed"]["gazing_ratio"] == 0.75
+    assert summary["model_has_task_loss_requirement_during_inference"] is True
+    assert "task-loss early stop" in summary["note"]
+
+
+def test_autogaze_selection_policy_explains_explicit_ratio_disables_task_loss():
+    summary = autogaze_selection_policy_summary(
+        requested_gazing_ratio=0.1,
+        requested_task_loss_requirement=None,
+    )
+
+    assert summary["policy"] == "fixed_ratio_no_task_loss"
+    assert summary["requested_gazing_ratio"] == 0.1
+    assert "disables task-loss" in summary["note"]
 
 
 def test_autogaze_selector_video_plan_uses_resized_dimensions_for_tile_grid():

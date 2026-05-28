@@ -273,6 +273,8 @@ Qwen/LongVILA/NVILA-Video 등 다른 token selector / ViT / MLLM 조합을 HLVid
 | `qwen_chunked_vit` | Qwen ViT를 temporal/spatial chunk로 나눠 실행하되 AutoGaze off |
 | `qwen_chunked_vit_autogaze_sparse` | AutoGaze selected token만 Qwen ViT/MLLM context에 통과시키는 실험 경로 |
 
+Qwen/V-JEPA 같은 direct selector 경로는 `--gazing-ratio`를 명시해서 비교하세요. `nvidia/AutoGaze` 체크포인트 기본 config는 fixed ratio 0.75와 task-loss early stop 0.7을 함께 켤 수 있어서, 작은 smoke video에서는 프레임당 1개 patch만 남는 식의 극단적인 결과가 나올 수 있습니다. 90% 내외 token reduction을 보는 smoke/PoC에서는 `--gazing-ratio 0.1`처럼 명시하고 `--task-loss-requirement`는 비워두는 것을 기본 비교값으로 둡니다.
+
 ## 6. Stream Profile과 H100 Preflight
 
 긴 4K 비디오에서 LLM을 로드하기 전에 decode/tile/AutoGaze/SigLIP 구간을 확인하려면 stream-profile을 사용합니다.

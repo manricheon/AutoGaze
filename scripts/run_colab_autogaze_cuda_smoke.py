@@ -53,6 +53,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--autogaze-tile-size", type=int, default=224)
     parser.add_argument("--autogaze-target-scales", default="32+64+112+224")
     parser.add_argument("--autogaze-target-patch-size", type=int, default=16)
+    parser.add_argument(
+        "--gazing-ratio",
+        type=float,
+        default=0.1,
+        help=(
+            "Explicit AutoGaze ratio for CUDA smoke. Keeping this explicit avoids the checkpoint "
+            "default task-loss early-stop path, which can select only one patch per frame on tiny smoke videos."
+        ),
+    )
+    parser.add_argument("--task-loss-requirement", type=float)
     parser.add_argument("--prompt", default="Describe the video in one short sentence.")
     parser.add_argument("--summary-json", default=None)
     parser.add_argument("--verification-md", default=None)
@@ -290,6 +300,10 @@ def vjepa_qwen_command(
                 str(args.autogaze_target_patch_size),
             ]
         )
+        if args.gazing_ratio is not None:
+            command.extend(["--gazing-ratio", str(args.gazing_ratio)])
+        if args.task_loss_requirement is not None:
+            command.extend(["--task-loss-requirement", str(args.task_loss_requirement)])
     if getattr(args, "write_visualizations", False):
         viz_root = Path(args.visualization_output_dir) if args.visualization_output_dir else Path(args.output_root) / "visualizations"
         command.extend(

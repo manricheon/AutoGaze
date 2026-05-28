@@ -60,6 +60,50 @@ class AutogazeSelectorRuntimeConfig:
     video_resize_height: int | None = None
 
 
+def autogaze_selection_policy_summary(
+    *,
+    requested_gazing_ratio: float | None,
+    requested_task_loss_requirement: float | None,
+    model: Any | None = None,
+) -> dict[str, Any]:
+    if requested_gazing_ratio is None and requested_task_loss_requirement is None:
+        policy = "model_default"
+        note = (
+            "AutoGaze checkpoint config controls both gazing ratio and task-loss early stop. "
+            "When task-loss inference is enabled, selection can stop much earlier than the "
+            "checkpoint's fixed gazing ratio alone would imply."
+        )
+    elif requested_gazing_ratio is not None and requested_task_loss_requirement is None:
+        policy = "fixed_ratio_no_task_loss"
+        note = "Explicit gazing_ratio disables task-loss early stop in AutoGaze.forward."
+    elif requested_gazing_ratio is None and requested_task_loss_requirement is not None:
+        policy = "task_loss_only"
+        note = "Explicit task_loss_requirement removes the ratio cap and lets task-loss early stop decide length."
+    else:
+        policy = "fixed_ratio_with_task_loss"
+        note = "Explicit gazing_ratio is the max budget; explicit task_loss_requirement may stop earlier."
+
+    summary: dict[str, Any] = {
+        "policy": policy,
+        "requested_gazing_ratio": requested_gazing_ratio,
+        "requested_task_loss_requirement": requested_task_loss_requirement,
+        "note": note,
+    }
+    if model is not None:
+        summary.update(
+            {
+                "model_gazing_ratio_config": getattr(model, "gazing_ratio_config", None),
+                "model_has_task_loss_requirement_during_inference": getattr(
+                    model,
+                    "has_task_loss_requirement_during_inference",
+                    None,
+                ),
+                "model_task_loss_requirement_config": getattr(model, "task_loss_requirement_config", None),
+            }
+        )
+    return summary
+
+
 def autogaze_selector_resize_enabled(config: AutogazeSelectorRuntimeConfig) -> bool:
     return any(
         value is not None
@@ -280,6 +324,11 @@ def run_direct_autogaze_selector(config: AutogazeSelectorRuntimeConfig) -> dict[
     patch_autogaze_inputs_embeds_generate_compat(model)
     model.eval()
     model_load_ms = _elapsed_ms(start)
+    selection_policy = autogaze_selection_policy_summary(
+        requested_gazing_ratio=config.gazing_ratio,
+        requested_task_loss_requirement=config.task_loss_requirement,
+        model=model,
+    )
 
     decode_ms = 0.0
     tile_build_ms = 0.0
@@ -438,6 +487,7 @@ def run_direct_autogaze_selector(config: AutogazeSelectorRuntimeConfig) -> dict[
             "spatial_tiles": int(grid["tiles"]),
             "generate_only": bool(config.generate_only),
             "runner_resize": video_plan["resize"],
+            "selection_policy": selection_policy,
         },
     )
     write_json(config.output_json, plan.to_dict())
@@ -460,6 +510,7 @@ def run_direct_autogaze_selector(config: AutogazeSelectorRuntimeConfig) -> dict[
             "max_batch_size": int(config.max_batch_size),
             "gazing_ratio": config.gazing_ratio,
             "task_loss_requirement": config.task_loss_requirement,
+            "selection_policy": selection_policy,
             "generate_only": bool(config.generate_only),
             "video_resize": video_plan["resize"],
         },

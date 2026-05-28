@@ -23,6 +23,7 @@ def test_colab_cuda_smoke_defaults_are_cuda_actual_smoke_oriented():
     assert args.run_dense_off is True
     assert args.run_autogaze_on is True
     assert args.autogaze_target_scales == "32+64+112+224"
+    assert args.gazing_ratio == 0.1
     assert args.visualization_max_frames == 16
 
 
@@ -109,6 +110,7 @@ def test_vjepa_qwen_autogaze_command_forwards_selector_options(tmp_path):
     assert command[command.index("--autogaze-model") + 1].endswith("nvidia__AutoGaze")
     assert command[command.index("--autogaze-target-scales") + 1] == "32+64+112+224"
     assert command[command.index("--max-batch-size-autogaze") + 1] == "4"
+    assert command[command.index("--gazing-ratio") + 1] == "0.1"
 
 
 def test_result_failures_distinguishes_missing_verifier_and_pipeline_failures():
