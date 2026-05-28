@@ -2,7 +2,7 @@
 
 작성일: 2026-05-28  
 대상 브랜치: `codex/autogaze-repro`  
-기준 커밋: `d80408d Verify Qwen plugin CUDA smoke` 이후 V2 보강 작업
+기준 커밋: `bc293ce Add Colab verification V2 report` 기반 Kaggle CUDA 재검증
 
 ## 결론
 
@@ -10,20 +10,33 @@ V2 기준으로 확인해야 하는 축은 세 가지입니다.
 
 | 축 | single inference | HLVid mini benchmark | AutoGaze on/off 비교 | 16프레임 시각화 |
 |---|---|---|---|---|
-| NVILA-HD native | CUDA smoke 확인됨 | CUDA smoke 확인됨 | `keep-all-single` vs `autogaze` | notebook 명령에 반영, 재실행 필요 |
-| Qwen plugin | V2 notebook에 single 3모드 추가 | CUDA smoke 확인됨 | `qwen_full_vit`, `qwen_chunked_vit`, `qwen_chunked_vit_autogaze_sparse` | sparse plan/16프레임 로컬 예시 생성 |
-| V-JEPA2 + Qwen | CUDA smoke 확인됨 | V2 notebook에 HLVid mini 추가 | `dense_off` vs `autogaze_single_grid` | 기본 16프레임 생성으로 변경 |
+| NVILA-HD native | CUDA smoke 확인됨 | CUDA smoke 확인됨 | `keep-all-single` vs `autogaze` | Kaggle artifact 생성 확인 |
+| Qwen plugin | single 3모드 CUDA 확인됨 | CUDA smoke 확인됨 | `qwen_full_vit`, `qwen_chunked_vit`, `qwen_chunked_vit_autogaze_sparse` | sparse plan 기반 16프레임 overlay 생성 |
+| V-JEPA2 + Qwen | CUDA smoke 확인됨 | CUDA HLVid mini 확인됨 | `dense_off` vs `autogaze_single_grid` | 16프레임 selected/overlay/mask 생성 확인 |
 
 현재 조사 결론은 이렇습니다.
 
 - NVILA-HD native 경로는 가장 안정적입니다. AutoGaze가 processor 내부에서 실제로 적용되고, SigLIP/Vision encoder/LLM latency와 token/memory 지표가 함께 기록됩니다.
 - Qwen plugin sparse 경로는 동작합니다. 다만 AutoGaze checkpoint가 4-scale gaze decoder를 사용하므로 224 smoke에서는 `64+128+192+224`, patch size `16`, tile size `224`가 안정 조합입니다.
 - V-JEPA2 + Qwen은 “동작 smoke / zero-shot bridge”로는 확인됐지만, Qwen에 맞춰 학습된 projector가 아니므로 accuracy 성능 주장은 아직 하면 안 됩니다. token/latency/memory plumbing 검증 용도로만 해석해야 합니다.
-- 16프레임 시각화는 V2부터 기본값을 `16`으로 올렸습니다. 기존 Kaggle 실행의 remote artifact는 로컬에 복사되어 있지 않으므로, V2 notebook 재실행 시 생성되는 원격 artifact와 별도로 로컬 문서용 16프레임 예시 이미지를 저장했습니다.
+- 16프레임 시각화는 V2부터 기본값을 `16`으로 올렸고, Kaggle CUDA 실행에서 NVILA/Qwen/V-JEPA artifact 생성을 확인했습니다. 아래에는 원격 artifact를 축소해 만든 요약 이미지와 로컬 fallback asset을 함께 둡니다.
 
 ## 16프레임 시각화
 
-아래 이미지는 로컬 `inputs/hlvid_example/clip_av_video_5_001.mp4`에서 16프레임을 uniform sampling해 만든 문서용 확인 asset입니다. CUDA 실제 실행 artifact와 구분하기 위해 `docs/assets/colab_v2/` 아래에 저장했습니다.
+아래 첫 이미지는 Kaggle CUDA 실행 산출물을 축소해 만든 요약 이미지입니다. NVILA는 overlay MP4의 첫 프레임 preview, Qwen/V-JEPA는 실제 16프레임 PNG artifact를 사용했습니다.
+
+![Kaggle CUDA V2 visualization summary](assets/colab_v2/kaggle_cuda_v2_visual_summary.jpg)
+
+원격 artifact 예시:
+
+```text
+/kaggle/working/autogaze_v2_outputs/nvila_single_smoke/visualizations/single_clip_av_video_5_001_autogaze_processor_autogaze_overlay.mp4
+/kaggle/working/autogaze_v2_outputs/qwen_single_visualizations/qwen_autogaze_sparse_overlay_16f.png
+/kaggle/working/autogaze_v2_outputs/visualizations/vjepa_qwen_on_autogaze_overlay.png
+/kaggle/working/autogaze_v2_outputs/visualizations/vjepa_qwen_on_vjepa_token_mask.png
+```
+
+아래 이미지는 로컬 `inputs/hlvid_example/clip_av_video_5_001.mp4`에서 16프레임을 uniform sampling해 만든 문서용 fallback 확인 asset입니다. CUDA artifact와 구분하기 위해 `docs/assets/colab_v2/` 아래에 저장했습니다.
 
 ### 선택 프레임 16장
 
@@ -41,7 +54,7 @@ V2 기준으로 확인해야 하는 축은 세 가지입니다.
 docs/assets/colab_v2/manifest.json
 ```
 
-주의: 이 이미지는 “시각화 코드가 16프레임과 sparse patch overlay를 제대로 그리는지” 확인하는 로컬 asset입니다. Kaggle/Colab CUDA 재실행 후에는 아래 원격 artifact가 별도로 생성되어야 합니다.
+주의: 로컬 fallback 이미지는 “시각화 코드가 16프레임과 sparse patch overlay를 제대로 그리는지” 확인하는 asset입니다. CUDA 실제 artifact 기준 해석은 위 Kaggle 요약 이미지와 원격 artifact 경로를 우선합니다.
 
 ## CUDA 실행 증거 요약
 
@@ -62,14 +75,14 @@ decode_strategy: seek
 
 | mode | answer | total ms | preprocess(no AG) ms | AutoGaze ms | vision encoder ms | generate ms | LLM forward ms | encoder selected/raw | LLM visual tokens | peak memory |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `keep-all-single` | `The` | 17934.13 | 11673.03 | 9.83 | 4215.24 | 6251.27 | 1738.17 | 13328 / 13328 | 1496 | 12.44 GiB |
-| `autogaze` | `The` | 10828.00 | 5083.49 | 1591.90 | 1831.84 | 4152.61 | 2075.46 | 17024 / 33920 | 1904 | 7.85 GiB |
+| `keep-all-single` | `The` | 21149.79 | 11425.44 | 0.69 | 5331.11 | 9723.66 | 3944.30 | 25088 / 25088 | 2816 | 12.48 GiB |
+| `autogaze` | `The` | 11269.76 | 5348.55 | 1516.32 | 1939.79 | 4404.90 | 2209.53 | 17024 / 33920 | 1904 | 7.85 GiB |
 
 해석:
 
 - AutoGaze는 selector cost를 추가하지만, 이 smoke에서는 vision encoder latency와 peak memory가 감소했습니다.
 - 이 수치는 `224`, `1 tile`, `16 frames` smoke이므로 논문 HLVid 성능값을 대체하지 않습니다.
-- V2 notebook에는 `--visualization-output-dir OUTPUT_ROOT / 'nvila_single_visualizations'`가 추가됐습니다. 기존 Kaggle 실행은 이 플래그 적용 전이므로 NVILA 영상 overlay artifact는 재실행 후 확인해야 합니다.
+- V2 재실행에서 `overlay_frame_count=16`, processor input preview `224x126`, 원본 selected frame preview `3840x2160` artifact가 생성됐습니다.
 
 ### NVILA-HD HLVid mini benchmark
 
@@ -84,13 +97,13 @@ decode_strategy: seek
 
 ### Qwen single inference
 
-V2 notebook에 아래 세 single mode가 추가되었습니다.
+V2 notebook의 세 single mode 모두 Kaggle CUDA에서 실행됐습니다.
 
-| mode | selector | ViT path | MLLM path | 상태 |
-|---|---|---|---|---|
-| `qwen_full_vit` | off/keep-all | native full Qwen ViT | Qwen generate | V2 notebook 재실행 대상 |
-| `qwen_chunked_vit` | off/keep-all | chunked Qwen ViT | Qwen generate | V2 notebook 재실행 대상 |
-| `qwen_chunked_vit_autogaze_sparse` | AutoGaze on | AutoGaze-selected sparse chunked Qwen ViT | pruned Qwen visual context | Kaggle HLVid mini에서 실제 실행 확인 |
+| mode | selector | ViT path | answer | total ms | input build ms | Qwen ViT prepare ms | generate ms | visual tokens after/before | context tokens | peak memory |
+|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|
+| `qwen_full_vit` | off/keep-all | native full Qwen ViT | `The` | 14184.03 | 4521.35 | n/a | 2432.78 | n/a | 285 | 3.47 GiB |
+| `qwen_chunked_vit` | off/keep-all | chunked Qwen ViT | `A` | 12455.29 | 4101.64 | 738.31 | 438.45 | 256 / 256 | 285 | 8.40 GiB |
+| `qwen_chunked_vit_autogaze_sparse` | AutoGaze on | sparse chunked Qwen ViT | `The` | 11433.45 | 4309.19 | 100.35 | 189.71 | 16 / 256 | 45 | 4.28 GiB |
 
 V2 single 명령은 `repro.flexible_runner --mode single`을 직접 사용합니다. Qwen2.5 weight를 `qwen3-vl` adapter override로 사용한 smoke 조합은 이전 Kaggle 검증과 동일합니다.
 
@@ -100,9 +113,9 @@ Kaggle T4 x2에서 `scripts/run_hlvid_folder_benchmark.py --plugin-suite qwen`�
 
 | mode | implementation | generation | answer | total ms | input build ms | Qwen ViT prepare ms | generate ms | visual tokens after/before | context tokens |
 |---|---|---|---|---:|---:|---:|---:|---:|---:|
-| `qwen_full_vit` | `executed` | `executed` | `A` | 41001.01 | 5024.32 | n/a | 2598.17 | n/a | 325 |
-| `qwen_chunked_vit` | `executed` | `executed` | `A` | 15728.37 | 6101.83 | 283.69 | 160.55 | 256 / 256 | 325 |
-| `qwen_chunked_vit_autogaze_sparse` | `executed` | `executed` | `A` | 12722.54 | 4623.53 | 183.13 | 251.05 | 140 / 256 | 209 |
+| `qwen_full_vit` | `executed` | `executed` | `A` | 12897.17 | 4502.15 | n/a | 1180.23 | n/a | 325 |
+| `qwen_chunked_vit` | `executed` | `executed` | `A` | 11050.25 | 4167.38 | 245.38 | 165.07 | 256 / 256 | 325 |
+| `qwen_chunked_vit_autogaze_sparse` | `executed` | `executed` | `A` | 10884.60 | 4321.95 | 151.72 | 97.44 | 140 / 256 | 209 |
 
 조사 결과:
 
@@ -119,19 +132,19 @@ Kaggle actual smoke 결과:
 
 | case | status | answer | total ms | V-JEPA selected/raw | AutoGaze selected/raw | Qwen visual tokens | peak memory |
 |---|---|---|---:|---:|---:|---:|---:|
-| `vjepa_qwen_dense_off` | `passed` | `Describe the video in one short sentence. The video is about` | 27263.93 | 1568 / 1568 | n/a | 1568 | 7.509 GiB |
-| `autogaze_vjepa_qwen_on` | `passed` | `Describe the video in one short sentence.` | 24588.99 | 8 / 1568 | 16 / 4240 | 8 | 7.117 GiB |
+| `vjepa_qwen_dense_off` | `passed` | `Describe the video in one short sentence. The video is about` | 22396.73 | 1568 / 1568 | n/a | 1568 | 7.51 GiB |
+| `autogaze_vjepa_qwen_on` | `passed` | `Describe the video in one short sentence.` | 23871.06 | 8 / 1568 | 16 / 4240 | 8 | 7.12 GiB |
 
 해석:
 
 - V-JEPA token은 `1568 -> 8`, Qwen visual token도 `1568 -> 8`로 감소했습니다.
 - Qwen generate latency와 V-JEPA sparse encode latency는 줄었습니다.
-- AutoGaze selector cost가 약 `9629 ms` 추가되어 end-to-end 속도 최적화는 별도 개선 과제입니다.
+- AutoGaze selector cost가 약 `9799 ms` 추가되어 end-to-end 속도 최적화는 별도 개선 과제입니다.
 - zero-shot bridge는 projector 학습 없이 `inputs_embeds`로 연결하는 구조라서 답변 품질을 성능 주장으로 쓰면 안 됩니다.
 
 ### HLVid mini benchmark
 
-V2 notebook에는 `repro.vjepa_qwen_hlvid_benchmark` 실행 셀이 추가되었습니다.
+V2 notebook의 `repro.vjepa_qwen_hlvid_benchmark` mini run도 Kaggle CUDA에서 실행됐습니다.
 
 ```text
 RUN_VJEPA_QWEN_HLVID_MINI = True
@@ -139,14 +152,20 @@ RUN_VJEPA_QWEN_HLVID_MINI = True
 --visualization-max-frames 16
 ```
 
-이 셀은 V2 수정 후 아직 재실행하지 않았습니다. 재실행 후 기대 artifact:
+| mode | status | answer suffix | total ms | V-JEPA selected/raw | AutoGaze selected/raw | Qwen visual tokens | visualization |
+|---|---|---|---:|---:|---:|---:|---|
+| `dense_off` | `passed` | `D` | 14692.97 | 1568 / 1568 | n/a | 1568 | 16 frames, overlay skipped |
+| `autogaze_single_grid` | `passed` | `D` | 19279.96 | 8 / 1568 | 16 / 4240 | 8 | 16 frames, overlay written |
+
+정답은 `B`였고 두 모드 모두 최종 답변 suffix가 `D`였습니다. 이 run도 성능 주장이 아니라 V-JEPA sparse bridge와 HLVid wrapper artifact 생성을 확인하는 smoke입니다.
+
+생성 artifact:
 
 ```text
-/kaggle/working/autogaze_vjepa_outputs/vjepa_qwen_hlvid_mini/vjepa_qwen_hlvid_summary.json
-/kaggle/working/autogaze_vjepa_outputs/vjepa_qwen_hlvid_mini/vjepa_qwen_hlvid_report.md
-/kaggle/working/autogaze_vjepa_outputs/vjepa_qwen_hlvid_mini/runs/dense_off/00000.json
-/kaggle/working/autogaze_vjepa_outputs/vjepa_qwen_hlvid_mini/runs/autogaze_single_grid/00000.json
-/kaggle/working/autogaze_vjepa_outputs/vjepa_qwen_hlvid_mini/runs/*/visualizations/*.png
+/kaggle/working/autogaze_v2_outputs/vjepa_qwen_hlvid_mini/vjepa_qwen_hlvid_summary.json
+/kaggle/working/autogaze_v2_outputs/vjepa_qwen_hlvid_mini/runs/dense_off/00000.json
+/kaggle/working/autogaze_v2_outputs/vjepa_qwen_hlvid_mini/runs/autogaze_single_grid/00000.json
+/kaggle/working/autogaze_v2_outputs/vjepa_qwen_hlvid_mini/runs/*/visualizations/*.png
 ```
 
 ## V2에서 반영한 코드 변경
@@ -189,6 +208,6 @@ Kaggle 또는 Colab CUDA 런타임에서 [notebooks/autogaze_external_cuda_verif
 | full HLVid accuracy 재현 | 미완료 | 현재는 limit 1 smoke 중심 |
 | V-JEPA2+Qwen accuracy 주장 | 금지 | zero-shot bridge라 semantic alignment 없음 |
 | NVILA/Qwen/V-JEPA 동일 조건 속도 비교 | 부분 가능 | single smoke 조건은 맞췄지만 모델 구조가 달라 해석 범위 제한 필요 |
-| 원격 visualization artifact 로컬 복사 | 미완료 | Kaggle runtime artifact를 아직 로컬 repo asset으로 복사하지 못함 |
+| 원격 visualization artifact 로컬 복사 | 부분 완료 | 축소 요약 이미지는 로컬 asset으로 복사했고, 원본 MP4/PNG는 Kaggle 경로를 기록 |
 
-따라서 V2의 정확한 결론은 “세 파이프라인의 single/benchmark 실행 경로와 주요 token/latency/memory 계측 경로는 준비됐고, NVILA/Qwen/V-JEPA2+Qwen의 CUDA smoke 증거가 있다. 다만 V2 notebook에서 새로 추가된 Qwen single, V-JEPA HLVid mini, NVILA 16프레임 visualization은 CUDA에서 한 번 더 재실행해야 최종 보고서 artifact로 닫힌다”입니다.
+따라서 V2의 정확한 결론은 “NVILA-HD native, Qwen plugin, V-JEPA2+Qwen 세 파이프라인의 single/benchmark 실행 경로와 token/latency/memory/visualization 계측 경로가 Kaggle CUDA에서 확인됐다”입니다. 다만 full HLVid accuracy 재현과 V-JEPA2+Qwen의 의미 있는 semantic 성능 평가는 별도 과제로 남습니다.
