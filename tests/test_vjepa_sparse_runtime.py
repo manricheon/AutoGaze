@@ -45,8 +45,18 @@ def test_run_vjepa_encoder_on_selected_embeddings_runs_tiny_encoder():
 
     assert result["last_hidden_state"].shape == (1, 2, 72)
     assert result["position_mask"].tolist() == [[0, 3]]
-    assert result["metrics"] == {
-        "raw_token_count": 4,
-        "selected_token_count": 2,
-        "encoder_token_reduction_ratio": 2.0,
+    assert result["metrics"]["raw_token_count"] == 4
+    assert result["metrics"]["selected_token_count"] == 2
+    assert result["metrics"]["encoder_token_reduction_ratio"] == 2.0
+    timings = result["metrics"]["stage_timings_ms"]
+    assert set(timings) >= {
+        "gather_selected_embeddings",
+        "encoder_layers_total",
+        "layernorm",
+        "encoder_total",
+    }
+    assert result["metrics"]["sparse_execution_policy"] == {
+        "patch_embedding_scope": "dense_all_vjepa_tokens",
+        "encoder_scope": "selected_vjepa_tokens_only",
+        "position_policy": "original_vjepa_position_mask",
     }

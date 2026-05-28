@@ -849,6 +849,21 @@ def test_qwen_chunked_video_features_runs_dense_and_sparse_chunks():
     assert sparse_features.flatten().tolist() == [18.0, 106.0]
     assert sparse_metadata["executed_chunk_count"] == 2
     assert sparse_metadata["visual_tokens_after_prune"] == 2
+    timings = sparse_metadata["stage_timings_ms"]
+    assert set(timings) >= {
+        "chunk_slice_total",
+        "visual_forward_total",
+        "patch_embed_total",
+        "position_embedding_total",
+        "token_gather_total",
+        "transformer_blocks_total",
+        "merger_total",
+    }
+    assert sparse_metadata["execution_policy"] == {
+        "patch_embedding_scope": "selected_raw_patch_tokens",
+        "encoder_scope": "selected_merged_visual_tokens_only",
+        "position_policy": "full_video_rotary_position_embedding_gathered_by_raw_token_indices",
+    }
 
 
 def test_qwen_chunked_video_features_runs_spatial_tiles_after_processor():

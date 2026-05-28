@@ -209,6 +209,11 @@ def run_actual_pipeline(args: argparse.Namespace) -> dict[str, Any]:
     if args.autogaze_mode == "on":
         selector_config = build_selector_config_from_args(args)
         selector_payload = run_stage("autogaze_selector_total", lambda: run_direct_autogaze_selector(selector_config))
+        _flatten_prefixed_timings(
+            latency_ms,
+            "autogaze_selector",
+            selector_payload.get("latency_ms") if isinstance(selector_payload, dict) else None,
+        )
         sparse_plan = load_sparse_selection_plan(selector_payload["sparse_selection_plan_json"])
         if args.clear_cuda_cache_between_stages:
             clear_accelerator_cache(torch, device)
@@ -241,6 +246,12 @@ def run_actual_pipeline(args: argparse.Namespace) -> dict[str, Any]:
     )
     vjepa_features_cpu = vjepa_result["last_hidden_state"].detach().cpu()
     vjepa_runtime_metrics = vjepa_result["metrics"]
+    _flatten_prefixed_timings(latency_ms, "vjepa", vjepa_runtime_metrics.get("latency_ms"))
+    _flatten_prefixed_timings(
+        latency_ms,
+        "vjepa_encoder",
+        vjepa_runtime_metrics.get("stage_timings_ms"),
+    )
     del vjepa, vjepa_result
     if args.clear_cuda_cache_between_stages:
         clear_accelerator_cache(torch, device)
@@ -269,6 +280,7 @@ def run_actual_pipeline(args: argparse.Namespace) -> dict[str, Any]:
             qwen_hidden_size=int(_qwen_embedding_hidden_size(qwen)),
         ),
     )
+    _flatten_prefixed_timings(latency_ms, "qwen_bridge", bridge_metadata.get("latency_ms"))
     generate_inputs = {key: value.to(device) if hasattr(value, "to") else value for key, value in bridge_inputs.items()}
 
     generated_ids = run_stage(
@@ -404,6 +416,8 @@ def run_dense_vjepa(
     crop_size: int,
     patch_size: int,
 ) -> tuple[VjepaTokenSelection, dict[str, Any]]:
+    total_start = time.perf_counter()
+    stage_timings: dict[str, float] = {}
     grid_config = VjepaGridConfig(
         frames_per_clip=frames_per_clip,
         tubelet_size=tubelet_size,
@@ -411,18 +425,33 @@ def run_dense_vjepa(
         patch_size=patch_size,
     )
     selection = dense_vjepa_token_selection(grid_config)
+    start = time.perf_counter()
     pixel_values = pil_frames_to_vjepa_pixel_values(frames, crop_size=crop_size, dtype=dtype, device=device)
+    _sync_value(pixel_values)
+    stage_timings["pixel_tensorize"] = _elapsed_ms(start)
     with _torch_inference():
+        start = time.perf_counter()
         patch_embeddings = _vjepa_patch_embeddings(vjepa, pixel_values)
+        _sync_value(patch_embeddings)
+        stage_timings["patch_embedding"] = _elapsed_ms(start)
         result = run_vjepa_encoder_on_selected_embeddings(
             _vjepa_encoder(vjepa),
             patch_embeddings,
             selected_token_indices=selection.selected_token_indices,
         )
+    encoder_timings = (result.get("metrics") or {}).get("stage_timings_ms") or {}
     result["metrics"] = {
         **result["metrics"],
         "selection_policy": "dense_off",
         "passes": 1,
+        "patch_embedding_scope": "dense_all_vjepa_tokens",
+        "encoder_scope": "selected_vjepa_tokens_only",
+        "latency_ms": {
+            **stage_timings,
+            "encoder_total": encoder_timings.get("encoder_total"),
+            "encoder_layers_total": encoder_timings.get("encoder_layers_total"),
+            "total": _elapsed_ms(total_start),
+        },
     }
     return selection, result
 
@@ -441,6 +470,8 @@ def run_sparse_vjepa_from_plan(
     overlap_threshold: float,
     selection_policy: str,
 ) -> tuple[VjepaTokenSelection, dict[str, Any]]:
+    total_start = time.perf_counter()
+    stage_timings: dict[str, float] = {}
     if selection_policy == "scale_aware_multi_pass":
         return run_scale_aware_sparse_vjepa_from_plan(
             vjepa,
@@ -459,25 +490,42 @@ def run_sparse_vjepa_from_plan(
         crop_size=crop_size,
         patch_size=patch_size,
     )
+    start = time.perf_counter()
     selection = vjepa_token_selection_from_sparse_plan(
         sparse_plan,
         grid_config,
         overlap_threshold=overlap_threshold,
     )
+    stage_timings["selection_mapping"] = _elapsed_ms(start)
     if not selection.selected_token_indices:
         raise ValueError("AutoGaze selected no V-JEPA tokens for single_scale_union policy")
+    start = time.perf_counter()
     pixel_values = pil_frames_to_vjepa_pixel_values(frames, crop_size=crop_size, dtype=dtype, device=device)
+    _sync_value(pixel_values)
+    stage_timings["pixel_tensorize"] = _elapsed_ms(start)
     with _torch_inference():
+        start = time.perf_counter()
         patch_embeddings = _vjepa_patch_embeddings(vjepa, pixel_values)
+        _sync_value(patch_embeddings)
+        stage_timings["patch_embedding"] = _elapsed_ms(start)
         result = run_vjepa_encoder_on_selected_embeddings(
             _vjepa_encoder(vjepa),
             patch_embeddings,
             selected_token_indices=selection.selected_token_indices,
         )
+    encoder_timings = (result.get("metrics") or {}).get("stage_timings_ms") or {}
     result["metrics"] = {
         **result["metrics"],
         "selection_policy": selection_policy,
         "passes": 1,
+        "patch_embedding_scope": "dense_all_vjepa_tokens",
+        "encoder_scope": "selected_vjepa_tokens_only",
+        "latency_ms": {
+            **stage_timings,
+            "encoder_total": encoder_timings.get("encoder_total"),
+            "encoder_layers_total": encoder_timings.get("encoder_layers_total"),
+            "total": _elapsed_ms(total_start),
+        },
     }
     return selection, result
 
@@ -496,6 +544,9 @@ def run_scale_aware_sparse_vjepa_from_plan(
 ) -> tuple[VjepaTokenSelection, dict[str, Any]]:
     import torch
 
+    total_start = time.perf_counter()
+    stage_timings: dict[str, float] = {}
+    start = time.perf_counter()
     selection = scale_aware_vjepa_selection_from_sparse_plan(
         sparse_plan,
         frames_per_clip=frames_per_clip,
@@ -503,6 +554,7 @@ def run_scale_aware_sparse_vjepa_from_plan(
         patch_size=patch_size,
         overlap_threshold=overlap_threshold,
     )
+    stage_timings["selection_mapping"] = _elapsed_ms(start)
     if not selection.selected_token_indices:
         raise ValueError("AutoGaze selected no V-JEPA tokens for scale_aware_multi_pass policy")
 
@@ -513,20 +565,37 @@ def run_scale_aware_sparse_vjepa_from_plan(
         if not local_indices:
             continue
         scale_size = int(pass_info["scale_size"])
+        pass_total_start = time.perf_counter()
+        pass_stage_timings: dict[str, float] = {}
+        start = time.perf_counter()
         pixel_values = pil_frames_to_vjepa_pixel_values(frames, crop_size=scale_size, dtype=dtype, device=device)
+        _sync_value(pixel_values)
+        pass_stage_timings["pixel_tensorize"] = _elapsed_ms(start)
         with _torch_inference():
+            start = time.perf_counter()
             patch_embeddings = _vjepa_patch_embeddings(vjepa, pixel_values)
+            _sync_value(patch_embeddings)
+            pass_stage_timings["patch_embedding"] = _elapsed_ms(start)
             result = run_vjepa_encoder_on_selected_embeddings(
                 _vjepa_encoder(vjepa),
                 patch_embeddings,
                 selected_token_indices=local_indices,
             )
+        encoder_timings = (result.get("metrics") or {}).get("stage_timings_ms") or {}
+        pass_stage_timings["encoder_total"] = encoder_timings.get("encoder_total")
+        pass_stage_timings["encoder_layers_total"] = encoder_timings.get("encoder_layers_total")
+        pass_stage_timings["total"] = _elapsed_ms(pass_total_start)
         pass_outputs.append(result["last_hidden_state"])
         pass_metrics[str(scale_key)] = {
             **result["metrics"],
             "scale_size": scale_size,
             "local_selected_token_count": len(local_indices),
+            "latency_ms": pass_stage_timings,
         }
+        _accumulate_stage_timing(stage_timings, "pixel_tensorize", pass_stage_timings.get("pixel_tensorize"))
+        _accumulate_stage_timing(stage_timings, "patch_embedding", pass_stage_timings.get("patch_embedding"))
+        _accumulate_stage_timing(stage_timings, "encoder_total", pass_stage_timings.get("encoder_total"))
+        _accumulate_stage_timing(stage_timings, "encoder_layers_total", pass_stage_timings.get("encoder_layers_total"))
 
     if not pass_outputs:
         raise ValueError("scale_aware_multi_pass produced no V-JEPA pass outputs")
@@ -544,6 +613,12 @@ def run_scale_aware_sparse_vjepa_from_plan(
             "selection_policy": "scale_aware_multi_pass",
             "passes": len(pass_outputs),
             "pass_metrics": pass_metrics,
+            "patch_embedding_scope": "dense_all_vjepa_tokens_per_scale_pass",
+            "encoder_scope": "selected_vjepa_tokens_only",
+            "latency_ms": {
+                **stage_timings,
+                "total": _elapsed_ms(total_start),
+            },
         },
     }
     return selection, result
@@ -558,15 +633,25 @@ def build_qwen_inputs_from_vjepa_cpu_features(
     device: Any,
     qwen_hidden_size: int,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    project_start = time.perf_counter()
     vjepa_features = vjepa_features_cpu.to(device=device)
     projected = project_vjepa_features_to_qwen_dim(vjepa_features, qwen_hidden_size=qwen_hidden_size)
+    _sync_value(projected)
+    project_ms = _elapsed_ms(project_start)
+    pack_start = time.perf_counter()
     bridge_inputs = build_qwen_bridge_inputs_from_vjepa_features(
         qwen,
         tokenizer,
         prompt=prompt,
         projected_vjepa_features=projected,
     )
+    pack_ms = _elapsed_ms(pack_start)
     bridge_metadata = bridge_inputs.pop("vjepa_qwen_bridge_metadata")
+    bridge_metadata["latency_ms"] = {
+        "project_vjepa_to_qwen_dim": project_ms,
+        "build_qwen_inputs_embeds": pack_ms,
+        "total": project_ms + pack_ms,
+    }
     return bridge_inputs, bridge_metadata
 
 
@@ -900,6 +985,32 @@ def clear_accelerator_cache(torch_module: Any, device: Any) -> None:
         torch_module.cuda.reset_peak_memory_stats(device)
     elif getattr(device, "type", "") == "mps" and hasattr(torch_module, "mps"):
         torch_module.mps.empty_cache()
+
+
+def _elapsed_ms(start: float) -> float:
+    return (time.perf_counter() - start) * 1000.0
+
+
+def _sync_value(value: Any) -> None:
+    device = getattr(value, "device", None)
+    if getattr(device, "type", None) == "cuda":
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(device)
+
+
+def _accumulate_stage_timing(target: dict[str, float], key: str, value: Any) -> None:
+    if isinstance(value, (int, float)):
+        target[key] = float(target.get(key, 0.0)) + float(value)
+
+
+def _flatten_prefixed_timings(target: dict[str, float], prefix: str, timings: Any) -> None:
+    if not isinstance(timings, dict):
+        return
+    for key, value in timings.items():
+        if isinstance(value, (int, float)):
+            target[f"{prefix}_{key}"] = float(value)
 
 
 def _safe_ratio(numerator: int | None, denominator: int | None) -> float | None:

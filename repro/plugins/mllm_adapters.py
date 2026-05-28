@@ -573,8 +573,10 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
         metrics["latency_ms"]["processor_load"] = _elapsed_ms(start)
         messages = self.build_messages(request)
         start = time.perf_counter()
-        inputs = _build_qwen_grid_inputs(processor, messages, request)
+        input_profile: dict[str, Any] = {}
+        inputs = _build_qwen_grid_inputs(processor, messages, request, profile=input_profile)
         metrics["latency_ms"]["input_build"] = _elapsed_ms(start)
+        _record_qwen_input_profile(metrics, input_profile)
         _record_input_token_metrics(metrics, inputs)
         model_device = getattr(model, "device", None)
         if model_device is not None and hasattr(inputs, "to"):
@@ -623,8 +625,10 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
         metrics["latency_ms"]["processor_load"] = _elapsed_ms(start)
         messages = self.build_messages(request)
         start = time.perf_counter()
-        inputs = _build_qwen_grid_inputs(processor, messages, request)
+        input_profile: dict[str, Any] = {}
+        inputs = _build_qwen_grid_inputs(processor, messages, request, profile=input_profile)
         metrics["latency_ms"]["input_build"] = _elapsed_ms(start)
+        _record_qwen_input_profile(metrics, input_profile)
         _record_input_token_metrics(metrics, inputs)
         model_device = getattr(model, "device", None)
         if model_device is not None and hasattr(inputs, "to"):
@@ -664,6 +668,7 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
             **chunk_metadata,
             **feature_metadata,
         }
+        _record_qwen_vit_stage_latency(metrics, chunk_metadata)
         metrics["tokens"]["visual_tokens_before_prune"] = feature_metadata["visual_tokens_before_prune"]
         metrics["tokens"]["visual_tokens_after_prune"] = feature_metadata["visual_tokens_after_prune"]
         metrics["tokens"]["visual_token_reduction_ratio"] = 1.0
@@ -743,8 +748,10 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
         metrics["latency_ms"]["processor_load"] = _elapsed_ms(start)
         messages = self.build_messages(request)
         start = time.perf_counter()
-        inputs = _build_qwen_grid_inputs(processor, messages, request)
+        input_profile: dict[str, Any] = {}
+        inputs = _build_qwen_grid_inputs(processor, messages, request, profile=input_profile)
         metrics["latency_ms"]["input_build"] = _elapsed_ms(start)
+        _record_qwen_input_profile(metrics, input_profile)
         _record_input_token_metrics(metrics, inputs)
         model_device = getattr(model, "device", None)
         if model_device is not None and hasattr(inputs, "to"):
@@ -839,6 +846,7 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
             **chunk_metadata,
             **feature_metadata,
         }
+        _record_qwen_vit_stage_latency(metrics, chunk_metadata)
         metrics["tokens"]["visual_tokens_before_prune"] = feature_metadata["visual_tokens_before_prune"]
         metrics["tokens"]["visual_tokens_after_prune"] = feature_metadata["visual_tokens_after_prune"]
         if feature_metadata["visual_tokens_after_prune"]:
@@ -1100,8 +1108,10 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
         metrics["latency_ms"]["processor_load"] = _elapsed_ms(start)
         messages = self.build_messages(request)
         start = time.perf_counter()
-        inputs = _build_qwen_grid_inputs(processor, messages, request)
+        input_profile: dict[str, Any] = {}
+        inputs = _build_qwen_grid_inputs(processor, messages, request, profile=input_profile)
         metrics["latency_ms"]["input_build"] = _elapsed_ms(start)
+        _record_qwen_input_profile(metrics, input_profile)
         _record_input_token_metrics(metrics, inputs)
         model_device = getattr(model, "device", None)
         if model_device is not None and hasattr(inputs, "to"):
@@ -1246,8 +1256,10 @@ class QwenGridMllmAdapter(BaseMllmAdapter):
         metrics["latency_ms"]["processor_load"] = _elapsed_ms(start)
         messages = self.build_messages(request)
         start = time.perf_counter()
-        inputs = _build_qwen_grid_inputs(processor, messages, request)
+        input_profile: dict[str, Any] = {}
+        inputs = _build_qwen_grid_inputs(processor, messages, request, profile=input_profile)
         metrics["latency_ms"]["input_build"] = _elapsed_ms(start)
+        _record_qwen_input_profile(metrics, input_profile)
         _record_input_token_metrics(metrics, inputs)
         model_device = getattr(model, "device", None)
         if model_device is not None and hasattr(inputs, "to"):
@@ -1553,12 +1565,29 @@ def qwen_thumbnail_frame_positions(main_count: int, thumbnail_count: int) -> lis
     return list(range(main_count))
 
 
-def _build_qwen_grid_inputs(processor: Any, messages: list[dict[str, Any]], request: MllmRunRequest) -> Any:
+def _build_qwen_grid_inputs(
+    processor: Any,
+    messages: list[dict[str, Any]],
+    request: MllmRunRequest,
+    *,
+    profile: dict[str, Any] | None = None,
+) -> Any:
+    total_start = time.perf_counter()
     if request.video:
         if qwen_runner_resize_enabled(request) or qwen_thumbnail_count(request):
+            start = time.perf_counter()
             text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            _profile_stage(profile, "prompt_template_ms", start)
             try:
+                start = time.perf_counter()
                 frames, metadata = _qwen_preloaded_video_frames(request)
+                _profile_stage(profile, "runner_video_decode_resize_ms", start)
+                if profile is not None:
+                    profile["runner_video_decode_stats"] = metadata.get("decode")
+                    profile["runner_resize"] = metadata.get("resize")
+                    profile["source_metadata"] = metadata.get("source_metadata")
+                    profile["sampled_frame_indices"] = metadata.get("sampled_frame_indices")
+                    profile["thumbnail_frame_indices"] = metadata.get("thumbnail_frame_indices")
             except Exception as exc:
                 raise RuntimeError(
                     "Qwen runner-side video resize/decode failed before processor tokenization. "
@@ -1578,7 +1607,11 @@ def _build_qwen_grid_inputs(processor: Any, messages: list[dict[str, Any]], requ
             if request.qwen_video_fps is not None:
                 processor_kwargs["fps"] = float(request.qwen_video_fps)
             try:
-                return processor(**processor_kwargs)
+                start = time.perf_counter()
+                result = processor(**processor_kwargs)
+                _profile_stage(profile, "qwen_processor_call_ms", start)
+                _profile_stage(profile, "input_build_total_ms", total_start)
+                return result
             except Exception as exc:
                 raise RuntimeError(
                     "Qwen processor failed after runner-side video resize/decode. "
@@ -1593,9 +1626,13 @@ def _build_qwen_grid_inputs(processor: Any, messages: list[dict[str, Any]], requ
                 "Install it with `.venv/bin/python -m pip install qwen-vl-utils` "
                 "or rerun `.venv/bin/python -m pip install -r requirements-repro.txt`."
             ) from exc
+        start = time.perf_counter()
         text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        _profile_stage(profile, "prompt_template_ms", start)
         try:
+            start = time.perf_counter()
             images, videos, video_kwargs = process_vision_info(messages, return_video_kwargs=True)
+            _profile_stage(profile, "qwen_process_vision_info_ms", start)
         except Exception as exc:
             raise RuntimeError(
                 "Qwen video decode/preprocess failed before processor tokenization. "
@@ -1604,13 +1641,17 @@ def _build_qwen_grid_inputs(processor: Any, messages: list[dict[str, Any]], requ
                 "--qwen-video-max-pixels to cap per-frame resolution."
             ) from exc
         try:
-            return processor(
+            start = time.perf_counter()
+            result = processor(
                 text=[text],
                 images=images,
                 videos=videos,
                 return_tensors="pt",
                 **video_kwargs,
             )
+            _profile_stage(profile, "qwen_processor_call_ms", start)
+            _profile_stage(profile, "input_build_total_ms", total_start)
+            return result
         except Exception as exc:
             raise RuntimeError(
                 "Qwen processor failed after video decode/preprocess. "
@@ -1618,13 +1659,17 @@ def _build_qwen_grid_inputs(processor: Any, messages: list[dict[str, Any]], requ
                 "Check that the processor/model family matches the checkpoint and that video frame/resolution "
                 "limits are set for large inputs."
             ) from exc
-    return processor.apply_chat_template(
+    start = time.perf_counter()
+    result = processor.apply_chat_template(
         messages,
         tokenize=True,
         add_generation_prompt=True,
         return_dict=True,
         return_tensors="pt",
     )
+    _profile_stage(profile, "text_only_prompt_tokenize_ms", start)
+    _profile_stage(profile, "input_build_total_ms", total_start)
+    return result
 
 
 def _qwen_video_debug_context(request: MllmRunRequest) -> str:
@@ -2199,6 +2244,15 @@ def qwen_chunked_video_features(
         keep = [int(index) for index in dict.fromkeys(keep_indices)]
     feature_parts: list[Any] = []
     chunk_records: list[dict[str, Any]] = []
+    stage_timings: dict[str, float] = {
+        "chunk_slice_total": 0.0,
+        "visual_forward_total": 0.0,
+        "patch_embed_total": 0.0,
+        "position_embedding_total": 0.0,
+        "token_gather_total": 0.0,
+        "transformer_blocks_total": 0.0,
+        "merger_total": 0.0,
+    }
     for chunk in chunks:
         merged_token_indices = [int(index) for index in chunk["merged_token_indices"]]
         merged_token_raw_indices = chunk["merged_token_raw_indices"]
@@ -2220,16 +2274,20 @@ def qwen_chunked_video_features(
             for local_index in local_keep
             for raw_index in merged_token_raw_indices[local_index]
         ]
+        start = time.perf_counter()
         chunk_pixels = _slice_qwen_video_pixel_values_by_indices(
             pixel_values_videos,
             selected_raw_token_indices,
         )
+        chunk_slice_ms = _elapsed_ms(start)
+        stage_timings["chunk_slice_total"] += chunk_slice_ms
         chunk_grid = _make_qwen_grid_like(
             video_grid_thw,
             t=chunk["t"],
             h=chunk["h"],
             w=chunk["w"],
         )
+        forward_timings: dict[str, float] = {}
         features = _qwen_sparse_visual_forward(
             visual,
             chunk_pixels,
@@ -2237,9 +2295,32 @@ def qwen_chunked_video_features(
             list(range(len(local_keep))),
             full_video_grid_thw=video_grid_thw,
             raw_token_indices=selected_raw_token_indices,
+            stage_timings=forward_timings,
         )
+        for key, value in forward_timings.items():
+            if key == "total":
+                stage_timings["visual_forward_total"] += float(value)
+            elif key in {
+                "patch_embed",
+                "position_embedding",
+                "token_gather",
+                "transformer_blocks",
+                "merger",
+            }:
+                stage_timings[f"{key}_total"] += float(value)
         feature_parts.append(features)
-        chunk_records.append({**chunk, "selected_merged_tokens": len(local_keep), "status": "executed"})
+        chunk_records.append(
+            {
+                **chunk,
+                "selected_merged_tokens": len(local_keep),
+                "selected_raw_patch_tokens": len(selected_raw_token_indices),
+                "status": "executed",
+                "stage_timings_ms": {
+                    "chunk_slice": chunk_slice_ms,
+                    **forward_timings,
+                },
+            }
+        )
 
     if not feature_parts:
         raise ValueError("Qwen chunked ViT produced no features; check AutoGaze sparse keep indices")
@@ -2267,6 +2348,12 @@ def qwen_chunked_video_features(
             },
         },
         "position_policy": "full_video_rotary_position_embedding_gathered_by_raw_token_indices",
+        "execution_policy": {
+            "patch_embedding_scope": "selected_raw_patch_tokens",
+            "encoder_scope": "selected_merged_visual_tokens_only",
+            "position_policy": "full_video_rotary_position_embedding_gathered_by_raw_token_indices",
+        },
+        "stage_timings_ms": stage_timings,
         "chunks": chunk_records,
     }
     return merged_features, metadata
@@ -2410,6 +2497,7 @@ def _qwen_sparse_visual_forward(
     full_video_grid_thw: Any | None = None,
     raw_token_offset: int = 0,
     raw_token_indices: list[int] | None = None,
+    stage_timings: dict[str, float] | None = None,
 ) -> Any:
     try:
         import torch
@@ -2424,7 +2512,11 @@ def _qwen_sparse_visual_forward(
     target_dtype = getattr(visual, "dtype", None)
     if target_dtype is not None and hasattr(pixel_values_videos, "type"):
         pixel_values_videos = pixel_values_videos.type(target_dtype)
+    total_start = time.perf_counter()
+    start = time.perf_counter()
     hidden_states = visual.patch_embed(pixel_values_videos)
+    _sync_tensor_for_timing(hidden_states)
+    _record_stage_timing(stage_timings, "patch_embed", start)
     seq_len, _ = hidden_states.size()
     spatial_merge_unit = int(visual.spatial_merge_unit)
     if seq_len % spatial_merge_unit != 0:
@@ -2437,14 +2529,19 @@ def _qwen_sparse_visual_forward(
         keep = [0]
     keep_tensor = torch.tensor(keep, device=hidden_states.device, dtype=torch.long)
 
+    start = time.perf_counter()
     rotary_grid = full_video_grid_thw if full_video_grid_thw is not None else video_grid_thw
     rotary_pos_emb = visual.rot_pos_emb(rotary_grid).to(hidden_states.device)
     if raw_token_indices is not None:
         rotary_index = torch.tensor(raw_token_indices, device=hidden_states.device, dtype=torch.long)
         rotary_pos_emb = rotary_pos_emb.index_select(0, rotary_index)
     elif full_video_grid_thw is not None or raw_token_offset:
-        start = int(raw_token_offset)
-        rotary_pos_emb = rotary_pos_emb[start : start + seq_len]
+        offset_start = int(raw_token_offset)
+        rotary_pos_emb = rotary_pos_emb[offset_start : offset_start + seq_len]
+    _sync_tensor_for_timing(rotary_pos_emb)
+    _record_stage_timing(stage_timings, "position_embedding", start)
+
+    start = time.perf_counter()
     hidden_states = hidden_states.reshape(total_merged_tokens, spatial_merge_unit, -1)[keep_tensor]
     hidden_states = hidden_states.reshape(len(keep) * spatial_merge_unit, -1)
     rotary_pos_emb = rotary_pos_emb.reshape(total_merged_tokens, spatial_merge_unit, -1)[keep_tensor]
@@ -2452,15 +2549,26 @@ def _qwen_sparse_visual_forward(
     emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
     position_embeddings = (emb.cos(), emb.sin())
     cu_seqlens = torch.tensor([0, hidden_states.shape[0]], device=hidden_states.device, dtype=torch.int32)
+    _sync_tensor_for_timing(hidden_states)
+    _record_stage_timing(stage_timings, "token_gather", start)
 
+    start = time.perf_counter()
     for blk in visual.blocks:
         hidden_states = blk(
             hidden_states,
             cu_seqlens=cu_seqlens,
             position_embeddings=position_embeddings,
         )
+    _sync_tensor_for_timing(hidden_states)
+    _record_stage_timing(stage_timings, "transformer_blocks", start)
 
-    return visual.merger(hidden_states)
+    start = time.perf_counter()
+    output = visual.merger(hidden_states)
+    _sync_tensor_for_timing(output)
+    _record_stage_timing(stage_timings, "merger", start)
+    if stage_timings is not None:
+        stage_timings["total"] = _elapsed_ms(total_start)
+    return output
 
 
 def _first_tensor_like(value: Any) -> Any:
@@ -2856,6 +2964,65 @@ def _vila_feature_probe_command(adapter_name: str, request: MllmRunRequest) -> d
 
 def _elapsed_ms(start: float) -> float:
     return (time.perf_counter() - start) * 1000.0
+
+
+def _profile_stage(profile: dict[str, Any] | None, key: str, start: float) -> None:
+    if profile is not None:
+        profile[key] = _elapsed_ms(start)
+
+
+def _record_qwen_input_profile(metrics: dict[str, Any], profile: dict[str, Any]) -> None:
+    if not profile:
+        return
+    metrics["qwen_input_profile"] = profile
+    latency = metrics.setdefault("latency_ms", {})
+    for source_key, target_key in (
+        ("prompt_template_ms", "qwen_prompt_template"),
+        ("runner_video_decode_resize_ms", "video_decode_read"),
+        ("qwen_process_vision_info_ms", "qwen_process_vision_info"),
+        ("qwen_processor_call_ms", "qwen_processor_call"),
+        ("text_only_prompt_tokenize_ms", "qwen_text_prompt_tokenize"),
+    ):
+        value = profile.get(source_key)
+        if isinstance(value, (int, float)):
+            latency[target_key] = float(value)
+
+
+def _record_qwen_vit_stage_latency(metrics: dict[str, Any], metadata: dict[str, Any]) -> None:
+    timings = metadata.get("stage_timings_ms") if isinstance(metadata, dict) else None
+    if not isinstance(timings, dict):
+        return
+    latency = metrics.setdefault("latency_ms", {})
+    mapping = {
+        "chunk_slice_total": "qwen_vit_chunk_slice",
+        "visual_forward_total": "qwen_vit_visual_forward",
+        "patch_embed_total": "qwen_vit_patch_embed",
+        "position_embedding_total": "qwen_vit_position_embedding",
+        "token_gather_total": "qwen_vit_token_gather",
+        "transformer_blocks_total": "qwen_vit_transformer_blocks",
+        "merger_total": "qwen_vit_merger",
+    }
+    for source_key, target_key in mapping.items():
+        value = timings.get(source_key)
+        if isinstance(value, (int, float)):
+            latency[target_key] = float(value)
+
+
+def _record_stage_timing(target: dict[str, float] | None, key: str, start: float) -> None:
+    if target is not None:
+        target[key] = _elapsed_ms(start)
+
+
+def _sync_tensor_for_timing(value: Any) -> None:
+    device = getattr(value, "device", None)
+    if getattr(device, "type", None) == "cuda":
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(device)
+        except ModuleNotFoundError:
+            return
 
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")

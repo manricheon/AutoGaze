@@ -20,6 +20,7 @@ from repro.vjepa_qwen_runner import (
     build_parser,
     build_selector_config_from_args,
     pil_frames_to_vjepa_pixel_values,
+    run_dense_vjepa,
     vjepa_resize_plan_from_args,
     write_vjepa_qwen_visualization_artifacts,
 )
@@ -159,6 +160,46 @@ def test_runner_vjepa_patch_embedding_boundary_supports_direct_patch_embeddings(
 
     assert embeddings.seen_shape == [1, 3, 16, 8, 8]
     assert list(output.shape) == [1, 3, 16, 8, 8]
+
+
+def test_run_dense_vjepa_reports_dense_patch_embed_and_sparse_encoder_policy():
+    torch = pytest.importorskip("torch")
+
+    class FakeEmbeddings:
+        def __call__(self, values):
+            return torch.randn(1, 1, 4)
+
+    class FakeEncoder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embeddings = FakeEmbeddings()
+            self.layer = torch.nn.ModuleList([])
+            self.layernorm = torch.nn.Identity()
+
+    class FakeVjepa:
+        encoder = FakeEncoder()
+
+    frames = [Image.new("RGB", (16, 16), color=(255, 255, 255)) for _ in range(2)]
+
+    _selection, result = run_dense_vjepa(
+        FakeVjepa(),
+        frames,
+        device="cpu",
+        dtype=torch.float32,
+        frames_per_clip=2,
+        tubelet_size=2,
+        crop_size=16,
+        patch_size=16,
+    )
+
+    assert result["metrics"]["patch_embedding_scope"] == "dense_all_vjepa_tokens"
+    assert result["metrics"]["encoder_scope"] == "selected_vjepa_tokens_only"
+    assert set(result["metrics"]["latency_ms"]) >= {
+        "pixel_tensorize",
+        "patch_embedding",
+        "encoder_total",
+        "total",
+    }
 
 
 def test_vjepa_resize_plan_prefers_exact_crop_for_encoder_inputs():

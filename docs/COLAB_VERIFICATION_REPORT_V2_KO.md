@@ -17,9 +17,19 @@ V2 기준으로 확인해야 하는 축은 세 가지입니다.
 현재 조사 결론은 이렇습니다.
 
 - NVILA-HD native 경로는 가장 안정적입니다. AutoGaze가 processor 내부에서 실제로 적용되고, SigLIP/Vision encoder/LLM latency와 token/memory 지표가 함께 기록됩니다.
-- Qwen plugin sparse 경로는 동작합니다. 다만 AutoGaze checkpoint가 4-scale gaze decoder를 사용하므로 224 smoke에서는 `64+128+192+224`, patch size `16`, tile size `224`가 안정 조합입니다.
+- Qwen plugin sparse 경로는 generate까지 동작합니다. 단, 출력 품질이 아직 안정적이라고 보기는 어렵고 HLVid mini에서도 정답을 맞추지 못했으므로, 현재 주장은 “pre-ViT sparse/token 감소 경로가 실제 실행됐다”까지만 해야 합니다.
 - V-JEPA2 + Qwen은 “동작 smoke / zero-shot bridge”로는 확인됐지만, Qwen에 맞춰 학습된 projector가 아니므로 accuracy 성능 주장은 아직 하면 안 됩니다. token/latency/memory plumbing 검증 용도로만 해석해야 합니다.
 - 16프레임 시각화는 V2부터 기본값을 `16`으로 올렸고, Kaggle CUDA 실행에서 NVILA/Qwen/V-JEPA artifact 생성을 확인했습니다. 아래에는 원격 artifact를 축소해 만든 요약 이미지와 로컬 fallback asset을 함께 둡니다.
+
+## 정확성 해석
+
+| 경로 | 실행 정확성 | 성능/정답 주장 가능 여부 | 이유 |
+|---|---|---|---|
+| NVILA-HD + AutoGaze | 높음 | HLVid full run 이후 가능 | official NVILA-HD processor 내부 AutoGaze/SigLIP/MLLM 경로를 사용 |
+| Qwen + AutoGaze sparse | 중간 | 아직 제한 | AutoGaze index를 Qwen grid/rotary position에 매핑해 sparse ViT/generate는 실행되지만, 논문 학습 조합이 아니고 mini run 정답률은 아직 0 |
+| V-JEPA2 + Qwen | 낮음, PoC | 금지 | V-JEPA feature를 Qwen embedding 차원에 deterministic repeat/truncate로 연결한 zero-shot bridge이며 학습된 projector가 없음 |
+
+따라서 Qwen/V-JEPA 결과가 “정확하게 답을 맞추는 모델”처럼 보이지 않는 것은 맞습니다. 다만 이것은 runner가 죽거나 selector가 무시된 실패라기보다, 아직 semantic alignment가 없는 PoC 경로라는 의미입니다.
 
 ## 16프레임 시각화
 
@@ -141,6 +151,7 @@ Kaggle actual smoke 결과:
 - Qwen generate latency와 V-JEPA sparse encode latency는 줄었습니다.
 - AutoGaze selector cost가 약 `9799 ms` 추가되어 end-to-end 속도 최적화는 별도 개선 과제입니다.
 - zero-shot bridge는 projector 학습 없이 `inputs_embeds`로 연결하는 구조라서 답변 품질을 성능 주장으로 쓰면 안 됩니다.
+- 현재 V-JEPA sparse 정책은 `patch_embedding_scope=dense_all_vjepa_tokens`, `encoder_scope=selected_vjepa_tokens_only`입니다. 즉 3D conv/patch embedding은 전체 crop/tubelet에 적용하고, transformer encoder 입력부터 AutoGaze가 선택한 V-JEPA token index만 사용합니다.
 
 ### HLVid mini benchmark
 
@@ -179,6 +190,18 @@ RUN_VJEPA_QWEN_HLVID_MINI = True
 | V-JEPA benchmark notebook | `repro.vjepa_qwen_hlvid_benchmark` mini benchmark 셀 추가 |
 | V2 report normalizer | NVILA nested summary, Qwen generation metrics, sparse plan artifact path를 공통 report로 normalize |
 | 로컬 문서 asset | `scripts/build_colab_v2_visualization_assets.py`로 16프레임 selected/overlay PNG 생성 |
+
+## 다음 CUDA 재실행에서 추가되는 세부 profiling
+
+이 커밋 이후 Qwen/V-JEPA 경로도 NVILA처럼 stage를 더 잘게 기록합니다. 기존 Kaggle 수치는 이 필드 추가 전 실행값이므로, 같은 notebook을 다시 돌리면 아래 항목이 JSON/Markdown report에 추가됩니다.
+
+| 경로 | 새 latency field | 의미 |
+|---|---|---|
+| Qwen input | `qwen_prompt_template`, `video_decode_read`, `qwen_processor_call`, `qwen_process_vision_info` | prompt template, runner-side decode/resize, Qwen processor 호출 분리 |
+| Qwen ViT | `qwen_vit_chunk_slice`, `qwen_vit_patch_embed`, `qwen_vit_position_embedding`, `qwen_vit_token_gather`, `qwen_vit_transformer_blocks`, `qwen_vit_merger` | chunk/sparse Qwen visual path의 patch embed, position, block, merger 분리 |
+| V-JEPA | `vjepa_pixel_tensorize`, `vjepa_patch_embedding`, `vjepa_encoder_total`, `vjepa_encoder_encoder_layers_total` | V-JEPA dense patch embedding과 sparse encoder 구간 분리 |
+| V-JEPA bridge | `qwen_bridge_project_vjepa_to_qwen_dim`, `qwen_bridge_build_qwen_inputs_embeds` | V-JEPA feature를 Qwen inputs_embeds로 붙이는 zero-shot bridge 비용 |
+| AutoGaze selector | `autogaze_selector_*` | direct AutoGaze selector 내부 decode/tile/tensorize/forward 세부 시간 |
 
 ## 재실행 체크리스트
 
