@@ -143,7 +143,7 @@ def test_qwen_visual_mapping_uses_exact_frame_grid_patch_order():
     assert mapping.reason == "mapped 2 AutoGaze patches to 2 Qwen visual feature indices"
 
 
-def test_qwen_visual_mapping_uses_bbox_centers_when_patch_spaces_differ():
+def test_qwen_visual_mapping_expands_bbox_overlap_when_patch_spaces_differ():
     plan = SparseSelectionPlan(
         selector_name="autogaze",
         source_video=SourceVideo(path="inputs/example.mp4", sampled_frame_indices=[0]),
@@ -162,8 +162,8 @@ def test_qwen_visual_mapping_uses_bbox_centers_when_patch_spaces_differ():
                 scale_id=0,
                 scale_size=64,
                 patch_index=5,
-                bbox_resized_xyxy=[16, 16, 32, 32],
-                bbox_original_xyxy=[16.0, 16.0, 32.0, 32.0],
+                bbox_resized_xyxy=[0, 0, 32, 32],
+                bbox_original_xyxy=[0.0, 0.0, 32.0, 32.0],
                 autoregressive_order=1,
             )
         ],
@@ -174,8 +174,8 @@ def test_qwen_visual_mapping_uses_bbox_centers_when_patch_spaces_differ():
     mapping = qwen_visual_indices_from_sparse_plan(plan, video_grid_thw=[1, 4, 4])
 
     assert mapping.status == "approximate_bbox"
-    assert mapping.visual_feature_indices == [5]
-    assert "bbox center" in mapping.reason
+    assert mapping.visual_feature_indices == [0, 1, 4, 5]
+    assert "bbox overlap" in mapping.reason
 
 
 def test_sparse_selection_plan_round_trips_from_dict_for_qwen_mapping():

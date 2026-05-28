@@ -222,16 +222,16 @@ def qwen_visual_indices_from_sparse_plan(
     statuses: set[str] = set()
     for patch in sorted(plan.selected_patches, key=lambda item: item.autoregressive_order):
         frame_order = _map_frame_order_to_qwen_temporal_index(plan, int(patch.frame_order), t)
-        row_col_status = _qwen_row_col_for_patch(plan, patch, h=h, w=w)
-        if row_col_status is None:
+        row_col_statuses = _qwen_row_cols_for_patch(plan, patch, h=h, w=w)
+        if not row_col_statuses:
             continue
-        row, col, status = row_col_status
-        statuses.add(status)
-        merged_row = min(max(row // merge, 0), merged_h - 1)
-        merged_col = min(max(col // merge, 0), merged_w - 1)
-        index = frame_order * merged_h * merged_w + merged_row * merged_w + merged_col
-        if index not in indices:
-            indices.append(index)
+        for row, col, status in row_col_statuses:
+            statuses.add(status)
+            merged_row = min(max(row // merge, 0), merged_h - 1)
+            merged_col = min(max(col // merge, 0), merged_w - 1)
+            index = frame_order * merged_h * merged_w + merged_row * merged_w + merged_col
+            if index not in indices:
+                indices.append(index)
     if not indices:
         return MllmMapping(
             status="mapping_failed",
@@ -245,7 +245,7 @@ def qwen_visual_indices_from_sparse_plan(
         status = "approximate_bbox"
         reason = (
             f"mapped {len(plan.selected_patches)} AutoGaze patches to {len(indices)} Qwen visual feature "
-            "indices using bbox center overlap"
+            "indices using bbox overlap union"
         )
     else:
         status = "approximate_grid"
@@ -262,13 +262,13 @@ def _map_frame_order_to_qwen_temporal_index(plan: SparseSelectionPlan, frame_ord
     return min(max(int(frame_order), 0), qwen_t - 1)
 
 
-def _qwen_row_col_for_patch(
+def _qwen_row_cols_for_patch(
     plan: SparseSelectionPlan,
     patch: SelectedPatch,
     *,
     h: int,
     w: int,
-) -> tuple[int, int, str] | None:
+) -> list[tuple[int, int, str]]:
     autogaze_patch_size = plan.patch_space.autogaze_patch_size
     scale_size = patch.scale_size or _first_or_none(plan.patch_space.scale_sizes)
     if autogaze_patch_size and scale_size:
@@ -285,32 +285,48 @@ def _qwen_row_col_for_patch(
             )
         )
         if grid == h and grid == w and patch_size_mismatch is not True:
-            return min(patch_row, h - 1), min(patch_col, w - 1), "exact_grid"
+            return [(min(patch_row, h - 1), min(patch_col, w - 1), "exact_grid")]
+        if _has_resized_bbox(plan, patch):
+            return [(row, col, "approximate_bbox") for row, col in _qwen_cells_from_bbox(plan, patch, h=h, w=w)]
         mapped_row = min(max(int((patch_row + 0.5) * h / grid), 0), h - 1)
         mapped_col = min(max(int((patch_col + 0.5) * w / grid), 0), w - 1)
-        if _has_resized_bbox(plan, patch):
-            return _qwen_row_col_from_bbox(plan, patch, h=h, w=w)
-        return mapped_row, mapped_col, "approximate_grid"
+        return [(mapped_row, mapped_col, "approximate_grid")]
     if _has_resized_bbox(plan, patch):
-        return _qwen_row_col_from_bbox(plan, patch, h=h, w=w)
-    return None
+        return [(row, col, "approximate_bbox") for row, col in _qwen_cells_from_bbox(plan, patch, h=h, w=w)]
+    return []
 
 
-def _qwen_row_col_from_bbox(
+def _qwen_cells_from_bbox(
     plan: SparseSelectionPlan,
     patch: SelectedPatch,
     *,
     h: int,
     w: int,
-) -> tuple[int, int, str]:
+) -> list[tuple[int, int]]:
     width = max(float(plan.preprocess_space.resized_width or 1), 1.0)
     height = max(float(plan.preprocess_space.resized_height or 1), 1.0)
     x1, y1, x2, y2 = [float(value) for value in patch.bbox_resized_xyxy]
-    center_x = (x1 + x2) / 2.0
-    center_y = (y1 + y2) / 2.0
-    col = min(max(int(center_x / width * w), 0), w - 1)
-    row = min(max(int(center_y / height * h), 0), h - 1)
-    return row, col, "approximate_bbox"
+    bbox = [
+        _clamp_float(x1, 0.0, width),
+        _clamp_float(y1, 0.0, height),
+        _clamp_float(x2, 0.0, width),
+        _clamp_float(y2, 0.0, height),
+    ]
+    if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+        return []
+
+    cell_w = width / max(1, int(w))
+    cell_h = height / max(1, int(h))
+    cells: list[tuple[int, int]] = []
+    for row in range(h):
+        cy1 = row * cell_h
+        cy2 = cy1 + cell_h
+        for col in range(w):
+            cx1 = col * cell_w
+            cx2 = cx1 + cell_w
+            if _intersection_area(bbox, [cx1, cy1, cx2, cy2]) > 0:
+                cells.append((row, col))
+    return cells
 
 
 def _grid_thw(value: Any) -> tuple[int, int, int]:
@@ -335,6 +351,20 @@ def _has_resized_bbox(plan: SparseSelectionPlan, patch: SelectedPatch) -> bool:
 
 def _first_or_none(values: list[int]) -> int | None:
     return values[0] if values else None
+
+
+def _intersection_area(a: list[float], b: list[float]) -> float:
+    x1 = max(a[0], b[0])
+    y1 = max(a[1], b[1])
+    x2 = min(a[2], b[2])
+    y2 = min(a[3], b[3])
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+    return float((x2 - x1) * (y2 - y1))
+
+
+def _clamp_float(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(value, upper))
 
 
 def _source_video_kwargs(payload: dict[str, Any]) -> dict[str, Any]:
