@@ -4,6 +4,7 @@ torch = pytest.importorskip("torch")
 
 from repro.plugins.vjepa_qwen_bridge import (
     build_qwen_bridge_inputs_from_vjepa_features,
+    decode_qwen_new_tokens,
     project_vjepa_features_to_qwen_dim,
     run_fake_qwen_bridge_smoke,
 )
@@ -73,6 +74,19 @@ def test_build_qwen_bridge_inputs_inserts_projected_vjepa_features():
         "projection": "deterministic_repeat_or_truncate_untrained",
         "accuracy_status": "not_claimed",
     }
+
+
+def test_decode_qwen_new_tokens_removes_prompt_prefix():
+    class TokenPrinter:
+        def batch_decode(self, token_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False):
+            return [" ".join(str(int(token)) for token in token_ids[0])]
+
+    prompt_ids = torch.tensor([[101, 999, 999, 102, 103]], dtype=torch.long)
+    generated_ids = torch.tensor([[101, 999, 999, 102, 103, 7, 8]], dtype=torch.long)
+
+    text = decode_qwen_new_tokens(TokenPrinter(), generated_ids, prompt_ids)
+
+    assert text == "7 8"
 
 
 def test_run_fake_qwen_bridge_smoke_calls_generate():

@@ -10,6 +10,7 @@ from repro.common import write_json
 from repro.plugins.vjepa_mapping import VjepaGridConfig, vjepa_token_selection_from_sparse_plan
 from repro.plugins.vjepa_qwen_bridge import (
     build_qwen_bridge_inputs_from_vjepa_features,
+    decode_qwen_new_tokens,
     project_vjepa_features_to_qwen_dim,
 )
 from repro.plugins.vjepa_sparse_runtime import run_vjepa_encoder_on_selected_embeddings
@@ -131,11 +132,7 @@ def run_colab_smoke(args: argparse.Namespace) -> dict[str, Any]:
         generated_ids = qwen.generate(**generate_inputs, max_new_tokens=int(args.max_new_tokens))
     if device.type == "cuda":
         torch.cuda.synchronize(device)
-    generated_text = tokenizer.batch_decode(
-        generated_ids,
-        skip_special_tokens=True,
-        clean_up_tokenization_spaces=False,
-    )[0]
+    generated_text = decode_qwen_new_tokens(tokenizer, generated_ids, generate_inputs.get("input_ids"))
 
     return {
         "status": "passed",

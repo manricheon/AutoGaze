@@ -28,6 +28,7 @@ from repro.plugins.vjepa_mapping import (
 )
 from repro.plugins.vjepa_qwen_bridge import (
     build_qwen_bridge_inputs_from_vjepa_features,
+    decode_qwen_new_tokens,
     project_vjepa_features_to_qwen_dim,
 )
 from repro.plugins.vjepa_sparse_runtime import run_vjepa_encoder_on_selected_embeddings
@@ -287,11 +288,7 @@ def run_actual_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         "qwen_generate",
         lambda: qwen.generate(**generate_inputs, max_new_tokens=int(args.max_new_tokens)),
     )
-    generated_text = tokenizer.batch_decode(
-        generated_ids,
-        skip_special_tokens=True,
-        clean_up_tokenization_spaces=False,
-    )[0]
+    generated_text = decode_qwen_new_tokens(tokenizer, generated_ids, generate_inputs.get("input_ids"))
     latency_ms["total"] = (time.perf_counter() - total_start) * 1000.0
     memory_bytes["cuda_peak_total"] = _cuda_peak_memory(torch, device)
 

@@ -98,6 +98,27 @@ def build_qwen_bridge_inputs_from_vjepa_features(
     }
 
 
+def decode_qwen_new_tokens(
+    tokenizer: Any,
+    generated_ids: Any,
+    input_ids: Any | None,
+) -> str:
+    if input_ids is not None and hasattr(input_ids, "shape"):
+        prompt_len = int(input_ids.shape[-1])
+        if hasattr(generated_ids, "shape") and len(generated_ids.shape) >= 2 and int(generated_ids.shape[-1]) >= prompt_len:
+            generated_ids = generated_ids[:, prompt_len:]
+        else:
+            generated_ids = [
+                out_ids[prompt_len:] if hasattr(out_ids, "__len__") and len(out_ids) >= prompt_len else out_ids
+                for out_ids in generated_ids
+            ]
+    return tokenizer.batch_decode(
+        generated_ids,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )[0]
+
+
 def run_fake_qwen_bridge_smoke(
     *,
     selected_token_count: int,
@@ -155,11 +176,7 @@ def run_fake_qwen_bridge_smoke(
     )
     metadata = packed.pop("vjepa_qwen_bridge_metadata")
     generated_ids = model.generate(**packed)
-    generated_text = tokenizer.batch_decode(
-        generated_ids,
-        skip_special_tokens=True,
-        clean_up_tokenization_spaces=False,
-    )[0]
+    generated_text = decode_qwen_new_tokens(tokenizer, generated_ids, packed.get("input_ids"))
     generate_kwargs = model.generate_calls[-1]
 
     return {
