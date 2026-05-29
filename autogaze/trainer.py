@@ -24,6 +24,176 @@ from autogaze.utils import get_scheduled_temperature, move_inputs_to_cuda, unwra
 from autogaze.train import seed_everything
 
 
+def _parse_scales(scales):
+    if scales is None:
+        return []
+    if isinstance(scales, str):
+        return [int(scale) for scale in scales.split("+") if str(scale).strip()]
+    return [int(scale) for scale in scales]
+
+
+def _tokens_each_scale(scales, num_vision_tokens):
+    total_area = sum(scale**2 for scale in scales)
+    return [int(scale**2 / total_area * num_vision_tokens) for scale in scales]
+
+
+def _scale_indices(source_scales, target_scales):
+    source_lookup = {scale: idx for idx, scale in enumerate(source_scales)}
+    if any(scale not in source_lookup for scale in target_scales):
+        return None
+    return [source_lookup[scale] for scale in target_scales]
+
+
+def _selected_token_indices(source_scales, target_scales, source_num_vision_tokens, target_num_vision_tokens):
+    source_tokens = _tokens_each_scale(source_scales, source_num_vision_tokens)
+    target_indices = _scale_indices(source_scales, target_scales)
+    if target_indices is None:
+        return None
+
+    source_offsets = [sum(source_tokens[:idx]) for idx in range(len(source_tokens))]
+    selected = []
+    for idx in target_indices:
+        selected.extend(range(source_offsets[idx], source_offsets[idx] + source_tokens[idx]))
+    if len(selected) != target_num_vision_tokens:
+        return None
+    return torch.tensor(selected, dtype=torch.long)
+
+
+def _adapt_token_embedding(source_tensor, target_tensor, token_indices):
+    if source_tensor.ndim != 2 or target_tensor.ndim != 2:
+        return None
+    source_vocab, hidden = source_tensor.shape
+    target_vocab, target_hidden = target_tensor.shape
+    if hidden != target_hidden or len(token_indices) != target_vocab - 1:
+        return None
+
+    adapted = target_tensor.clone()
+    adapted[:-1] = source_tensor[token_indices.to(source_tensor.device)].to(adapted.device)
+    adapted[-1] = source_tensor[source_vocab - 1].to(adapted.device)
+    return adapted
+
+
+def _adapt_lm_head(source_tensor, target_tensor, source_vocab, target_vocab, token_indices):
+    if source_tensor.ndim != 2 or target_tensor.ndim != 2:
+        return None
+    if source_tensor.shape[1] != target_tensor.shape[1]:
+        return None
+    if source_tensor.shape[0] % source_vocab != 0 or target_tensor.shape[0] % target_vocab != 0:
+        return None
+
+    source_num_multi_token_pred = source_tensor.shape[0] // source_vocab
+    target_num_multi_token_pred = target_tensor.shape[0] // target_vocab
+    if source_num_multi_token_pred != target_num_multi_token_pred:
+        return None
+
+    adapted = target_tensor.clone()
+    for pred_idx in range(target_num_multi_token_pred):
+        source_offset = pred_idx * source_vocab
+        target_offset = pred_idx * target_vocab
+        adapted[target_offset : target_offset + target_vocab - 1] = source_tensor[
+            source_offset + token_indices.to(source_tensor.device)
+        ].to(adapted.device)
+        adapted[target_offset + target_vocab - 1] = source_tensor[source_offset + source_vocab - 1].to(adapted.device)
+    return adapted
+
+
+def _empty_adaptation_report():
+    return {
+        "adapted_keys": [],
+        "skipped_shape_mismatch_keys": [],
+    }
+
+
+def adapt_autogaze_state_dict_for_partial_load(
+    source_state,
+    target_state,
+    source_scales,
+    target_scales,
+    source_num_vision_tokens,
+    target_num_vision_tokens,
+):
+    report = _empty_adaptation_report()
+    source_scales = _parse_scales(source_scales)
+    target_scales = _parse_scales(target_scales)
+    token_indices = _selected_token_indices(
+        source_scales,
+        target_scales,
+        source_num_vision_tokens,
+        target_num_vision_tokens,
+    )
+    source_vocab = source_num_vision_tokens + 1
+    target_vocab = target_num_vision_tokens + 1
+    adapted_state = {}
+
+    embed_key = "gazing_model.gaze_decoder.model.embed_tokens.weight"
+    lm_head_key = "gazing_model.gaze_decoder.lm_head.weight"
+
+    for key, value in source_state.items():
+        if key not in target_state:
+            continue
+        if value.shape == target_state[key].shape:
+            adapted_state[key] = value
+            continue
+
+        adapted_value = None
+        if token_indices is not None and key == embed_key:
+            adapted_value = _adapt_token_embedding(value, target_state[key], token_indices)
+        elif token_indices is not None and key == lm_head_key:
+            adapted_value = _adapt_lm_head(value, target_state[key], source_vocab, target_vocab, token_indices)
+
+        if adapted_value is None:
+            report["skipped_shape_mismatch_keys"].append(key)
+        else:
+            adapted_state[key] = adapted_value
+            report["adapted_keys"].append(key)
+
+    return adapted_state, report
+
+
+def _infer_source_scales_from_scale_embed(source_tensor):
+    if source_tensor.ndim == 2 and source_tensor.shape[0] == 4:
+        return [32, 64, 112, 224]
+    return None
+
+
+def _adapt_scale_embedding(source_tensor, target_tensor, target_scales):
+    source_scales = _infer_source_scales_from_scale_embed(source_tensor)
+    if source_scales is None or source_tensor.ndim != 2 or target_tensor.ndim != 2:
+        return None
+    if source_tensor.shape[1] != target_tensor.shape[1]:
+        return None
+
+    indices = _scale_indices(source_scales, target_scales)
+    if indices is None or len(indices) != target_tensor.shape[0]:
+        return None
+    return source_tensor[torch.tensor(indices, dtype=torch.long, device=source_tensor.device)].to(target_tensor.device)
+
+
+def adapt_task_state_dict_for_partial_load(source_state, target_state, target_scales):
+    report = _empty_adaptation_report()
+    target_scales = _parse_scales(target_scales)
+    adapted_state = {}
+
+    for key, value in source_state.items():
+        if key not in target_state:
+            continue
+        if value.shape == target_state[key].shape:
+            adapted_state[key] = value
+            continue
+
+        adapted_value = None
+        if key.endswith("scale_embed") or key.endswith("decoder_scale_embed"):
+            adapted_value = _adapt_scale_embedding(value, target_state[key], target_scales)
+
+        if adapted_value is None:
+            report["skipped_shape_mismatch_keys"].append(key)
+        else:
+            adapted_state[key] = adapted_value
+            report["adapted_keys"].append(key)
+
+    return adapted_state, report
+
+
 class Trainer:
     def __init__(self, gaze_model, task, algorithm, train_loader, val_loader, optimizer, n_epochs, temp_schedule_args, 
                  train_gaze=True, train_task=True, detach_task=False, val_nsteps=100, save_nsteps=300, save_dir=None, grad_acc_steps=1, resume=False, gaze_weights=None, task_weights=None, 
@@ -176,14 +346,44 @@ class Trainer:
         else:
             if gaze_model_path is not None:
                 logger.info(f"Loading gaze model from {gaze_model_path}")
+                target_gaze_model = unwrap_model(self.gaze_model)
                 gaze_ckpt = unwrap_model(self.gaze_model).from_pretrained(gaze_model_path)
-                missing_keys, unexpected_keys = unwrap_model(self.gaze_model).load_state_dict(gaze_ckpt.state_dict(), strict=False)
+                gaze_state, adaptation_report = adapt_autogaze_state_dict_for_partial_load(
+                    gaze_ckpt.state_dict(),
+                    target_gaze_model.state_dict(),
+                    source_scales=gaze_ckpt.config.scales,
+                    target_scales=target_gaze_model.config.scales,
+                    source_num_vision_tokens=gaze_ckpt.config.num_vision_tokens_each_frame,
+                    target_num_vision_tokens=target_gaze_model.config.num_vision_tokens_each_frame,
+                )
+                if adaptation_report["adapted_keys"]:
+                    logger.info(f"Adapted gaze checkpoint keys: {adaptation_report['adapted_keys']}")
+                if adaptation_report["skipped_shape_mismatch_keys"]:
+                    logger.info(
+                        f"Skipped gaze checkpoint shape mismatches: {adaptation_report['skipped_shape_mismatch_keys']}"
+                    )
+                missing_keys, unexpected_keys = target_gaze_model.load_state_dict(gaze_state, strict=False)
                 logger.info(f"Missing keys: {missing_keys}")
                 logger.info(f"Unexpected keys: {unexpected_keys}")
             if task_path is not None:
                 logger.info(f"Loading task model from {task_path}")
                 task_ckpt = torch.load(task_path, map_location='cpu')
-                missing_keys, unexpected_keys = self.task.load_state_dict(task_ckpt, strict=False)
+                target_task = getattr(self.task, "module", self.task)
+                target_task_scales = getattr(target_task, "scales", None)
+                if target_task_scales is None and hasattr(target_task, "mae"):
+                    target_task_scales = target_task.mae.config.scales
+                task_state, adaptation_report = adapt_task_state_dict_for_partial_load(
+                    task_ckpt,
+                    self.task.state_dict(),
+                    target_scales=target_task_scales,
+                )
+                if adaptation_report["adapted_keys"]:
+                    logger.info(f"Adapted task checkpoint keys: {adaptation_report['adapted_keys']}")
+                if adaptation_report["skipped_shape_mismatch_keys"]:
+                    logger.info(
+                        f"Skipped task checkpoint shape mismatches: {adaptation_report['skipped_shape_mismatch_keys']}"
+                    )
+                missing_keys, unexpected_keys = self.task.load_state_dict(task_state, strict=False)
                 logger.info(f"Missing keys: {missing_keys}")
                 logger.info(f"Unexpected keys: {unexpected_keys}")
     
