@@ -132,6 +132,146 @@ legacy training path. See `pyproject.toml`.
 - A real V-JEPA2/Qwen attachment (Phase 2/3) — `adapters.to_vjepa2` is a
   documented stub for the expected call shape, not a working integration.
 
+## Mobile readiness review (2026-07-14, before starting Phase 2)
+
+Borissal-signal has zero learned parameters, so its "burden" isn't FLOPs
+(negligible next to any vision encoder) — it's **operator support and shape
+behavior on mobile inference runtimes** (CoreML / TFLite / NNAPI / delegates).
+This review is empirical, not just theoretical: it measured actual latency
+and actually attempted to trace the model, rather than reasoning from op
+names alone.
+
+### Latency (measured on this Mac; `scripts/borissal_benchmark.py`)
+
+Clip shape `(B=1, T=16, C=3, H=384, W=384)`, 10 warmup + 50 measured iters,
+`Borissal.select()` only (excludes video decode):
+
+| device | gazing_ratio | allocation | mean (ms) | median (ms) | clips/sec |
+|---|---|---|---|---|---|
+| cpu | 0.5 | uniform | 11.6 | 9.5 | 86 |
+| cpu | 0.5 | proportional | 6.7 | 6.5 | 150 |
+| cpu | 0.25 | uniform | 7.4 | 6.9 | 136 |
+| cpu | 0.25 | proportional | 8.8 | 8.9 | 114 |
+| mps | 0.5 | uniform | 207.7 | 174.6 | 4.8 |
+| mps | 0.5 | proportional | 165.0 | 152.7 | 6.1 |
+| mps | 0.25 | uniform | 154.4 | 152.2 | 6.5 |
+| mps | 0.25 | proportional | 175.5 | 169.4 | 5.7 |
+
+Full data: `outputs/borissal/benchmark/latency_{cpu,mps}.json` (gitignored,
+regenerate with the script above).
+
+**CPU is faster than MPS here** (a few ms vs ~150-200ms) — a known MPS-backend
+quirk where per-op GPU dispatch overhead dominates for many small tensor ops
+on small tensors, not a reflection of real mobile SoC behavior. Neither number
+is a substitute for an actual on-device (phone CPU delegate / NPU) measurement,
+which should happen once real mobile export tooling is used (Phase 3+). Taken
+at face value, though, ~6-12ms/clip on a laptop CPU is already utterly
+negligible next to any vision-encoder forward pass, and Borissal has no
+learned weights to speed up further — the entire cost is in ordinary
+elementwise/reduction/pooling arithmetic over the raw pixel grid.
+
+### Operator inventory (`torch.profiler`, CPU, ratio=0.5/uniform; full table in `outputs/borissal/benchmark/profiler_cpu.txt`)
+
+Dominant self-CPU-time contributors: `aten::sum` (26%), `aten::avg_pool2d`
+(14%), `aten::fill_`/`aten::div_`/`aten::copy_`/`aten::sub`/`aten::add`/`aten::mul`
+(elementwise, ~35% combined), `aten::sqrt`/`aten::abs` (~4.5%), `aten::min`/`aten::max`
+(~2%). All of these are standard, universally-supported ops on any mobile
+backend. Separately, `aten::mean` (used once, for the initial per-frame luma
+`gray = video.mean(dim=2)` over the *full-resolution* pixel grid) accounts for
+the single largest chunk of total (non-self) CPU time (~35%) because it
+operates on the largest tensor in the whole pipeline (before any patch
+pooling shrinks things) — expected and not a concern, just worth knowing
+where the time actually goes if this needs future optimization.
+
+**Sort-family ops are now minor**: `aten::sort` (2.9% self-time, 1 call/iter —
+this is the reused `autogaze/utils.py::get_gazing_pos_from_gazing_mask`
+packer's stable argsort) and `aten::topk` (2.8% self-time, 1 call/iter — the
+selector's own top-k, see next section). Combined, sort/topk is under 6% of
+self CPU time and operates on modest tensor sizes (`L=4608` elements at
+default config).
+
+### Fix applied: argsort-rank top-k → `torch.topk`
+
+`Borissal`'s own top-k step originally used a double-`argsort` rank trick
+(`order = scores.argsort(...); rank = order.argsort(...); mask = rank < k`).
+This round replaced it with `torch.topk(k_max, dim=-1)` + a boolean
+rank-within-topk compare + `scatter_`, keeping identical selection semantics
+(both pick exactly the top-k highest-scoring patches per tubelet; only
+exact-tie ordering can differ, which this application never depends on —
+confirmed by the full `tests/test_borissal.py` suite still passing, 7/7,
+plus a dedicated invariant re-check across ratio/allocation combinations).
+Rationale: `torch.topk` is a first-class op on TFLite (`TopKV2`) and CoreML
+(`top_k`), unlike general `sort`/`argsort`, which have much patchier mobile
+support. The one remaining `argsort` (in the reused legacy
+`autogaze/utils.py` packer) was deliberately left untouched — it's a single
+O(L log L) op on a modest vector, a shared/legacy utility, and Phase 1's own
+tests depend on its exact tie-order behavior; revisit only if/when Borissal
+itself goes through a real mobile export pass.
+
+### Empirical trace check: `torch.jit.trace`, a real bug found and fixed
+
+Rather than reasoning abstractly about export-readiness, this round actually
+ran `torch.jit.trace` against `Borissal.select` (wrapped to return plain
+tensors). Two concrete findings:
+
+1. **Bug found and fixed**: tracing initially **failed outright**
+   (`TypeError: type Tensor doesn't define __round__ method`), because
+   `B, T, C, H, W = video.shape` doesn't yield plain Python ints under
+   `torch.jit.trace` in this torch version — the components come back as
+   trace-time symbolic wrappers, and later code calls Python's `round()` on
+   an expression derived from them (`round(ratio * N_pf)`), which only
+   `float`/`int` support. **Fixed** with a one-line, behavior-preserving
+   change in `modeling_borissal.py`: `B, T, C, H, W = (int(x) for x in
+   video.shape)`. Verified: all 7 existing tests still pass (eager-mode
+   behavior is identical — `int()` on an already-int-valued eager tensor
+   dimension is a no-op), and the traced graph's output now exactly matches
+   fresh `select()` calls on new random inputs of the same shape, for
+   `per_frame_allocation="uniform"`, across repeated trials.
+2. **Real correctness trap, "proportional" allocation only**: because
+   `per_frame_allocation="proportional"` computes `k_per_frame` from the
+   *actual saliency energy of the traced input*, a naive `torch.jit.trace`
+   freezes that data-dependent per-tubelet split as a constant. Verified
+   empirically: tracing with one video, then feeding the traced graph a
+   **different** video of the identical shape, produces a silently-wrong,
+   stale result (`num_keep=2293` from the traced graph vs. the correct,
+   freshly-computed `num_keep=2304` from eager `select()` on that same new
+   input). `"uniform"` allocation has no such issue — `k_per_frame` there is
+   purely config/shape-derived, not data-dependent, so the same experiment
+   (fresh random content, same traced graph) reproduced the exact eager
+   result every time.
+
+Both TracerWarnings ("Converting a tensor to a Python boolean/integer... will
+be treated as a constant") are expected and, for a mobile-export context,
+actually describe the *intended* contract: a production export should target
+one fixed clip shape per exported artifact (standard practice for
+CoreML/TFLite anyway), so baking `T`/`H`/`W`/`patch_size`/`tubelet_size`-derived
+constants into the graph is fine. Freezing a *data-dependent* value
+(`proportional`'s per-tubelet split) is not fine, and is a correctness bug,
+not a shape-genericity nicety.
+
+### Conclusions / constraints carried into Phase 2
+
+- No FLOP/parameter burden concern — confirmed negligible vs. any encoder.
+- **Prefer `torch.topk`/bounded-selection over general sort/argsort** in any
+  new learned selector code, for the same mobile-op-support reason. Already
+  applied to Borissal-signal's own top-k step.
+- **Treat `"uniform"`-style (data-independent) per-frame/per-tubelet
+  allocation as the mobile-export-safe default.** If Phase 2/3 need a
+  data-dependent allocation policy on-device, it cannot be naively
+  `torch.jit.trace`d — it needs a genuinely dynamic export path (e.g.
+  `torch.export` with explicit dynamic-shape/control-flow handling) or must
+  be recomputed natively outside any traced/exported subgraph. Don't
+  silently reuse a traced graph across different inputs for a data-dependent
+  allocation policy.
+- **Export one artifact per fixed input shape** (clip length, resolution,
+  patch/tubelet size) rather than assuming shape-genericity — consistent with
+  how `int()`-casting shape components behaves, and normal for mobile export
+  toolchains regardless.
+- Real on-device (phone CPU/NPU) latency is still unmeasured — the CPU/MPS
+  numbers above are a rough proxy at best (MPS in particular is not
+  representative). Get an actual on-device number once mobile export tooling
+  is in place (Phase 3+), not before.
+
 ## Open items for Phase 2/3 (tracked here so they aren't lost)
 
 - Confirm the exact V-JEPA2.1L checkpoint/repo id and its native token flatten

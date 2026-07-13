@@ -142,7 +142,11 @@ class Borissal(nn.Module):
         alloc = per_frame_allocation or cfg.per_frame_allocation
         eps = cfg.eps
 
-        B, T, C, H, W = video.shape
+        # Explicit int() casts: under torch.jit.trace / torch.export, .shape components
+        # can otherwise come back as trace-time symbolic wrappers that break plain
+        # Python int arithmetic (e.g. round(), %) used below -- see the "Mobile
+        # readiness review" section of docs/borissal/design.md. Harmless in eager mode.
+        B, T, C, H, W = (int(x) for x in video.shape)
         if T % tubelet_size != 0:
             raise ValueError(f"num_frames ({T}) must be divisible by tubelet_size ({tubelet_size})")
         if H % patch_size != 0 or W % patch_size != 0:
@@ -203,11 +207,17 @@ class Borissal(nn.Module):
         else:
             raise ValueError(f"unknown per_frame_allocation: {alloc}")
 
-        # Top-k -> keep mask (fully vectorized via rank).
+        # Top-k -> keep mask, via torch.topk (bounded by k_max, not a full O(N) sort) --
+        # more mobile-runtime-friendly (TFLite TopKV2 / CoreML top_k are first-class ops,
+        # unlike general sort/argsort). For "uniform" allocation k_max == k for every
+        # tubelet, so this reduces to a single topk(k) + scatter with no extra compare.
         scores_flat = S.reshape(B, T_grid, N_pf)
-        order = scores_flat.argsort(dim=-1, descending=True)
-        rank = order.argsort(dim=-1)
-        keep_mask_grid = rank < k_per_frame.unsqueeze(-1)  # (B, T_grid, N_pf) bool
+        k_max = int(k_per_frame.max().item())
+        _, topk_idx = scores_flat.topk(k_max, dim=-1)  # (B, T_grid, k_max), sorted descending
+        within_topk_rank = torch.arange(k_max, device=device).view(1, 1, k_max).expand(B, T_grid, k_max)
+        keep_within_topk = within_topk_rank < k_per_frame.unsqueeze(-1)  # (B, T_grid, k_max) bool
+        keep_mask_grid = torch.zeros(B, T_grid, N_pf, dtype=torch.bool, device=device)
+        keep_mask_grid.scatter_(-1, topk_idx, keep_within_topk)  # (B, T_grid, N_pf) bool
 
         per_frame_keep = keep_mask_grid.sum(dim=-1)  # (B, T_grid)
         num_keep = per_frame_keep.sum(dim=-1)        # (B,)

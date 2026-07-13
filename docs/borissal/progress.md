@@ -99,6 +99,87 @@ design.md's "Open items for Phase 2/3".
 
 ---
 
+## 2026-07-14 (same day) — ratio 0.5/0.25 examples, real latency benchmark, mobile readiness gate
+
+Pre-Phase-2 checkpoint requested by the user: show 0.5/0.25 ratio examples,
+measure actual speed, and review operator/burden concerns for the eventual
+mobile target — all **before** starting Phase 2. See design.md's new
+"Mobile readiness review" section for the full write-up; this entry is the
+session log / numbers.
+
+**What was done:**
+- Regenerated `outputs/borissal/{r50_m50_grad_uniform,r25_m50_grad_uniform}/`
+  via the existing `scripts/borissal_dump_outputs.py` (no script changes
+  needed). `num_keep` scaled exactly with ratio: 2304 (r=0.5) vs 1152
+  (r=0.25) out of L=4608 — precisely half, as expected. Overlay comparison
+  confirms r=0.25 stays concentrated on the same high-saliency regions
+  (subtitle bar, diagram edges) just more sparsely.
+- New `scripts/borissal_benchmark.py`: measures `Borissal.select()` latency
+  (B=1,T=16,384x384 clip, no video decode) across
+  device×gazing_ratio×per_frame_allocation, plus a `torch.profiler` op
+  breakdown. Results land in `outputs/borissal/benchmark/` (gitignored):
+  `latency_cpu.json`, `latency_mps.json`, `profiler_cpu.txt`.
+  - CPU: 6.7-11.6ms mean per clip (86-150 clips/sec).
+  - MPS: 150-210ms mean (4.8-6.5 clips/sec) — **slower than CPU**, a known
+    MPS per-op-dispatch-overhead quirk for small tensors, not representative
+    of real mobile hardware.
+  - Profiler: sort-family ops (`aten::sort` + `aten::topk` combined) are now
+    under 6% of self-CPU-time; dominant cost is ordinary
+    elementwise/reduction/pooling arithmetic over the raw pixel grid
+    (`aten::mean`, `aten::sum`, `aten::avg_pool2d`, etc.) — all
+    universally mobile-supported ops.
+- `autogaze/models/borissal/modeling_borissal.py` — two fixes, both
+  behavior-preserving for eager execution (all 7 tests still pass):
+  1. Replaced the selector's own double-`argsort` rank-based top-k with
+     `torch.topk(k_max) + scatter_` (`torch.topk` has first-class mobile
+     support — TFLite `TopKV2`, CoreML `top_k` — general `sort`/`argsort`
+     does not). Verified semantically equivalent (both select exactly the
+     top-k highest-scoring patches per tubelet).
+  2. Fixed a **real `torch.jit.trace` failure**: `B, T, C, H, W =
+     video.shape` unpacking didn't yield plain Python ints under tracing,
+     breaking `round()` calls downstream. Fixed with an explicit
+     `int(x) for x in video.shape` cast — one line, no eager-mode behavior
+     change.
+- Empirically traced the full model (not just reasoned about it) and found
+  a **real correctness trap**: `per_frame_allocation="proportional"` bakes
+  its data-dependent per-tubelet split into the traced graph, so re-running
+  the same traced graph on different video content of the same shape gives
+  a silently wrong, stale result (verified: `num_keep=2293` traced vs.
+  correct `2304` fresh eager, on new random content). `"uniform"` allocation
+  has no such issue (config/shape-derived, not data-dependent) — verified
+  correct across repeated trials with fresh content.
+- `docs/borissal/design.md`: added "## Mobile readiness review" section
+  with the full latency table, profiler summary, the two fixes, the trace
+  findings, and concrete constraints carried into Phase 2 (prefer
+  `topk`-style ops; treat data-independent allocation as the mobile-export
+  -safe default; export one artifact per fixed input shape; real on-device
+  latency still needs measuring once mobile export tooling exists).
+
+**Verified (commands):**
+```
+uv run pytest tests/test_borissal.py -q                     # 7 passed (before and after both fixes)
+uv run python scripts/borissal_dump_outputs.py --video assets/example_input.mp4 --gazing-ratio 0.25 --motion-weight 0.5
+uv run python scripts/borissal_benchmark.py                 # latency + profiler, see numbers above
+git status --short                                           # outputs/ still fully untracked
+```
+
+**Not done / explicitly out of scope this round:** no ONNX/CoreML export
+attempt (used `torch.jit.trace` only — zero extra dependencies, already
+installed with torch); no on-device (phone) latency measurement; the
+"proportional" trace-correctness trap was found and documented but NOT
+fixed (fixing it would mean either forcing "uniform"-only for any traced/
+exported path, or adding a genuinely dynamic export mechanism — deferred as
+a Phase 2/3 design decision, not a Phase 1 blocker since Phase 1 itself is
+never traced/exported, only Python-called).
+
+**Next up (Phase 2, unchanged):** learned selector (TSM or conv3d backbone +
+scoring head + straight-through top-k). New mobile-readiness constraints to
+carry in: prefer topk-style ops, keep allocation policy mobile-export-safe
+(or explicitly scope data-dependent allocation out of any traced/exported
+path), export against a fixed input shape.
+
+---
+
 ## 2026-07-14 (same day) — Branch renamed to feat/borissal; stage-by-stage outputs/ dump
 
 **Branch**: `feat/selector` renamed in place to **`feat/borissal`**
