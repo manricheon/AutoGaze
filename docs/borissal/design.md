@@ -84,8 +84,11 @@ per_frame_keep: (B, T_grid) long  -- kept count per tubelet
      tubelets proportional to per-tubelet energy, via largest-remainder
      (Hamilton's method) rounding so counts sum exactly to the budget (mod
      per-tubelet `[1, N_pf]` clamping).
-8. Top-k → `keep_mask` via a fully vectorized rank comparison (`argsort` twice),
-   no Python loops over batch/frame.
+8. Top-k → `keep_mask` via `torch.topk` (bounded by the per-tubelet budget) +
+   a boolean rank compare + `scatter_`, no Python loops over batch/frame.
+   (Originally a fully vectorized `argsort`-twice rank comparison; swapped to
+   `torch.topk` for mobile-op-support reasons — see "Mobile readiness review"
+   below.)
 9. Packing to `keep_index`/padding reuses
    `autogaze/utils.py::get_gazing_pos_from_gazing_mask` (stable ones-first
    sort) applied to the flattened `(B, L)` mask — this is the one piece of
@@ -115,6 +118,17 @@ per_frame_keep: (B, T_grid) long  -- kept count per tubelet
   validity/no-duplicates, `per_frame_keep.sum() == num_keep`, coords ↔ flat
   index consistency, ratio controls budget, motion_weight changes selection,
   CPU/MPS parity).
+- `autogaze/models/borissal/viz.py` — shared rendering helpers (frame strip,
+  overlay, heatmap grid, allocation bar chart) used by both eval scripts below.
+- `scripts/borissal_dump_outputs.py` — stage-by-stage dump (input frames,
+  motion/spatial/score heatmaps, overlay, allocation bar chart, summary.json)
+  to `outputs/borissal/<run>/` (gitignored). Uses
+  `Borissal.select_with_intermediates(...)`, which returns the pre-top-k
+  motion/spatial/score maps alongside the normal `Selection`.
+- `scripts/borissal_benchmark.py` — latency benchmark + `torch.profiler`
+  op-breakdown, feeding the "Mobile readiness review" below.
+- `docs/borissal/reference.md` — a concise "what and why" reference (algorithm,
+  config knobs, output schema) distinct from this file's dev-log rationale.
 
 ## Environment
 

@@ -263,3 +263,66 @@ id still unconfirmed (unchanged open item from the previous entry).
 session's generated runs live only on this machine — if you need them again,
 just re-run the four commands above (they're deterministic given the same
 `assets/example_input.mp4` and config).
+
+---
+
+## 2026-07-14 (same day) — Reference doc added; content-adaptive auto-tuning scoped then deferred
+
+Follow-up to the mobile-readiness round: the user clarified that Borissal's
+selected patches feed a **description task** downstream (patch → encoder →
+LLM → description), and asked for (a) a polished, non-verbose reference doc
+on the selector's operations/policies framed around that, and (b) an
+"auto"-tuning option for the various knobs, prioritized speed > exact
+`gazing_ratio` compliance > fit-for-purpose selection.
+
+**What was done:**
+- New `docs/borissal/reference.md` — a concise "what and why" reference,
+  deliberately distinct from this file's dev-log and `design.md`'s
+  decision-rationale style. Sections: (1) **Why saliency** — the core
+  motivation, framed around the description-task pipeline and a
+  video-codec analogy (codecs encode what *changed*/is salient rather than
+  every pixel; Borissal approximates that directly on decoded frames
+  instead of using real motion vectors), plus why feed-forward/single-scale/
+  top-k was chosen over AutoGaze's autoregressive/multi-scale approach; (2)
+  algorithm walkthrough; (3) config-knob table with defaults + rationale;
+  (4) `Selection` output schema; (5) a pointer-only performance/mobile
+  summary (no duplication of design.md's numbers); (6) a "not yet built"
+  note for deferred auto-tuning.
+- **Scoped, then explicitly deferred**: investigated auto-tuning the
+  selector's knobs. Finding: `spatial_op="grad"`, `pooling="avg"`, and
+  `per_frame_allocation="uniform"` are *already* the fast+exact-ratio-safe
+  preset (confirmed against the current `BorissalConfig` defaults), so the
+  only knob whose optimal value genuinely varies per-clip is `motion_weight`
+  (fixed at 0.5). Designed a concrete, cheap, non-learned approach —
+  `motion_weight="auto"` computing `motion_energy / (motion_energy +
+  spatial_energy)` from the already-computed `motion_p`/`spatial_p` tensors
+  (near-zero added cost) — but the user then said to **hold off**: "추후 더
+  고도화해보자. 학습 기반 모델도 추가로 있을 거니까" (revisit alongside/after
+  the learned selector, Phase 2). **No code was changed for this** — it's a
+  deliberate deferral, not an oversight; don't re-propose the plain
+  energy-ratio version without checking whether Phase 2's learned selector
+  changes what "auto" should mean.
+- Follow-up consistency check (user asked to read `reference.md` against
+  the rest of the docs): found and fixed two real staleness issues in
+  `design.md` — (1) its own "Saliency algorithm" section still described
+  the pre-swap `argsort`-twice top-k, contradicting its own later "Mobile
+  readiness review" section (which correctly describes the `torch.topk`
+  swap) and the actual code; fixed to describe `torch.topk`, pointing to
+  the Mobile readiness review section for detail. (2) its "Files" list
+  hadn't been updated since Phase 1's initial commit — added `viz.py`,
+  `scripts/borissal_dump_outputs.py`, `scripts/borissal_benchmark.py`, and
+  `docs/borissal/reference.md`. `reference.md` itself was accurate — it was
+  `design.md` that had drifted.
+
+**Verified:** re-read both `design.md` sections after the edit to confirm
+they no longer contradict each other; no code/tests touched this round, so
+no need to re-run `pytest`.
+
+**Not done / explicitly out of scope this round:** `motion_weight="auto"`
+implementation itself (deliberately deferred, see above); any other
+auto-tuning knob.
+
+**Next up (Phase 2, unchanged):** learned selector. When it lands, revisit
+whether/how to auto-tune `motion_weight` (or fold it into the learned
+scoring head entirely, making the question moot) — this is an open design
+question for Phase 2, not a Phase 1 task.
