@@ -93,6 +93,47 @@ class Borissal(nn.Module):
         patch_size: Optional[int] = None,
     ) -> Selection:
         """video: (B, T, C, H, W) float, already resized/normalized."""
+        selection, _ = self._select_impl(
+            video, gazing_ratio, motion_weight, per_frame_allocation, tubelet_size, patch_size,
+            want_intermediates=False,
+        )
+        return selection
+
+    @torch.no_grad()
+    def select_with_intermediates(
+        self,
+        video: torch.Tensor,
+        gazing_ratio: Optional[float] = None,
+        motion_weight: Optional[float] = None,
+        per_frame_allocation: Optional[str] = None,
+        tubelet_size: Optional[int] = None,
+        patch_size: Optional[int] = None,
+    ):
+        """Same as `select`, but also returns the intermediate (pre-top-k) saliency
+        maps -- useful for visualizing the motion/spatial/combined-score stages,
+        e.g. in scripts/borissal_dump_outputs.py. Does not change `select`'s
+        output or recompute anything differently.
+
+        Returns (Selection, intermediates) where intermediates is a dict with:
+            motion_norm  (B, T_grid, H_grid, W_grid) float -- normalized motion map
+            spatial_norm (B, T_grid, H_grid, W_grid) float -- normalized spatial map
+            score        (B, T_grid, H_grid, W_grid) float -- combined score S (pre-top-k)
+        """
+        return self._select_impl(
+            video, gazing_ratio, motion_weight, per_frame_allocation, tubelet_size, patch_size,
+            want_intermediates=True,
+        )
+
+    def _select_impl(
+        self,
+        video: torch.Tensor,
+        gazing_ratio: Optional[float],
+        motion_weight: Optional[float],
+        per_frame_allocation: Optional[str],
+        tubelet_size: Optional[int],
+        patch_size: Optional[int],
+        want_intermediates: bool,
+    ):
         cfg = self.config
         tubelet_size = tubelet_size or cfg.tubelet_size
         patch_size = patch_size or cfg.patch_size
@@ -185,7 +226,7 @@ class Borissal(nn.Module):
         grid_thw = torch.tensor([T_grid, H_grid, W_grid], dtype=torch.long, device=device)
         grid_thw = grid_thw.unsqueeze(0).expand(B, 3).clone()
 
-        return Selection(
+        selection = Selection(
             grid_thw=grid_thw,
             scores=scores_flat.reshape(B, L),
             keep_mask=keep_mask,
@@ -194,3 +235,11 @@ class Borissal(nn.Module):
             num_keep=num_keep,
             per_frame_keep=per_frame_keep,
         )
+        intermediates = None
+        if want_intermediates:
+            intermediates = {
+                "motion_norm": motion_n,
+                "spatial_norm": spatial_n,
+                "score": S,
+            }
+        return selection, intermediates
