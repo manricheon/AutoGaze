@@ -15,8 +15,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from autogaze.utils import get_gazing_pos_from_gazing_mask
-
 from .configuration_borissal import BorissalConfig
 
 
@@ -62,6 +60,37 @@ def _largest_remainder(raw: torch.Tensor, total_budget: int, min_val: int, max_v
     add = (rank < deficit.unsqueeze(-1)).long()
     counts = base + add
     return counts.clamp(min=min_val, max=max_val)
+
+
+def _pack_gazing_mask(gazing_mask: torch.Tensor):
+    """Pack a (B, N) boolean/0-1 mask into (kept_index, is_padded), both (B, K),
+    K = max ones-count over the batch. Kept indices come first in each row, in
+    their original ascending order (stable sort), padded with -1.
+
+    Inlined from autogaze/utils.py::get_gazing_pos_from_gazing_mask (same
+    logic, ported verbatim) so this module has no dependency outside `torch` --
+    see docs/borissal/reference.md's "Standalone" section.
+    """
+    gazing_mask = gazing_mask.to(torch.long)
+    B, N = gazing_mask.shape
+
+    idx = torch.arange(N, device=gazing_mask.device).expand(B, N)
+    key = (1 - gazing_mask) * N + idx
+    order = key.argsort(dim=1, stable=True)
+    sorted_idx = idx.gather(1, order)
+
+    counts = gazing_mask.sum(dim=1)
+    K = int(counts.max().item())
+    if K == 0:
+        empty = sorted_idx[:, :0]
+        return empty, empty.to(torch.bool)
+
+    topk = sorted_idx[:, :K]
+    pos = torch.arange(K, device=gazing_mask.device).expand(B, K)
+    mask = pos < counts.unsqueeze(1)
+    kept_index = topk.masked_fill(~mask, -1)
+    is_padded = kept_index == -1
+    return kept_index, is_padded
 
 
 class Borissal(nn.Module):
@@ -223,7 +252,7 @@ class Borissal(nn.Module):
         num_keep = per_frame_keep.sum(dim=-1)        # (B,)
 
         keep_mask = keep_mask_grid.reshape(B, L)
-        keep_index, is_padded = get_gazing_pos_from_gazing_mask(keep_mask)  # (B, K) each
+        keep_index, is_padded = _pack_gazing_mask(keep_mask)  # (B, K) each
 
         idx_safe = keep_index.clamp(min=0)
         t_coord = idx_safe // N_pf

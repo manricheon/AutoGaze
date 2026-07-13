@@ -24,9 +24,7 @@ import argparse
 import json
 from pathlib import Path
 
-import torch
-
-from autogaze.models.borissal import Borissal, BorissalConfig
+from autogaze.models.borissal import Borissal, BorissalConfig, resolve_device
 from autogaze.models.borissal.video_io import load_video, unnormalize
 from autogaze.models.borissal.viz import (
     render_allocation_bar,
@@ -54,16 +52,6 @@ def parse_args():
     p.add_argument("--pooling", choices=["avg", "max"], default="avg")
     p.add_argument("--device", default="auto", choices=["auto", "cpu", "mps", "cuda"])
     return p.parse_args()
-
-
-def resolve_device(name: str) -> torch.device:
-    if name != "auto":
-        return torch.device(name)
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
 
 
 def default_run_name(args) -> str:

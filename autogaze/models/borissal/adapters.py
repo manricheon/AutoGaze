@@ -16,6 +16,33 @@ import torch
 from .modeling_borissal import Selection
 
 
+def to_canonical_keep_indices(selection: Selection) -> list:
+    """Bridge to the canonical `idx = t*N + n` (n = row*W_grid + col) flat
+    keep-index-per-video convention used downstream (e.g. a
+    `result["keep_indices_per_video"] = [...]` processor step feeding a
+    V-JEPA2/Qwen-VL-style sparse encoder). That convention requires each
+    video's list to be sorted ascending by (frame, row, col) -- i.e. strictly
+    ascending `idx` -- since the encoder's mask-gather + RoPE position
+    recovery depends on that order to map each kept token back to its
+    original (t, row, col).
+
+    Borissal's `Selection.keep_index` already satisfies this: its flatten
+    order is t-major then row-major (`t*(H_grid*W_grid) + h*W_grid + w`,
+    exactly the `t*N + n` formula), and the packer that builds it
+    (`_pack_gazing_mask`) preserves ascending order among kept indices. So
+    this adapter does no reordering -- it only strips the batch's `-1`
+    padding, per video, since the downstream convention is a plain
+    variable-length list rather than a padded tensor.
+
+    Returns a list of length B, each element a 1-D ascending `LongTensor`
+    (length `num_keep[b]`) of that video's kept flat indices.
+    """
+    return [
+        selection.keep_index[b][selection.keep_index[b] >= 0]
+        for b in range(selection.keep_index.shape[0])
+    ]
+
+
 def to_vjepa2(selection: Selection) -> dict:
     """Minimal bridge for a V-JEPA2-style encoder that gathers tokens by flat index
     right after the conv3d tubelet embedding and before the transformer.

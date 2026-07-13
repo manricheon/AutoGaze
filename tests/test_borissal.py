@@ -1,6 +1,7 @@
 import torch
 
 from autogaze.models.borissal import Borissal, BorissalConfig
+from autogaze.models.borissal.adapters import to_canonical_keep_indices
 
 
 def _make_video(B=2, T=16, C=3, H=384, W=384, seed=0):
@@ -93,6 +94,34 @@ def test_motion_weight_changes_selection():
     spatial_mask = spatial_only.keep_mask[0]
     # the two extremes should not select an identical set of patches
     assert not torch.equal(motion_mask, spatial_mask)
+
+
+def test_keep_index_is_ascending_per_row():
+    # Locks down the canonical downstream contract: valid (non-padded)
+    # keep_index entries must be strictly ascending idx = t*N + n per video,
+    # for both allocation policies -- a downstream consumer (mask-gather +
+    # RoPE position recovery) depends on this order.
+    for alloc in ["uniform", "proportional"]:
+        cfg = BorissalConfig(per_frame_allocation=alloc, gazing_ratio=0.37)
+        video = _make_video(B=4, seed=1)
+        sel = Borissal(cfg).select(video)
+        for b in range(sel.keep_index.shape[0]):
+            valid = sel.keep_index[b][sel.keep_index[b] >= 0]
+            assert (valid[1:] > valid[:-1]).all(), f"not ascending for alloc={alloc}, b={b}"
+
+
+def test_to_canonical_keep_indices():
+    cfg = BorissalConfig(per_frame_allocation="proportional", gazing_ratio=0.37)
+    video = _make_video(B=3, seed=2)
+    sel = Borissal(cfg).select(video)
+
+    per_video = to_canonical_keep_indices(sel)
+    assert len(per_video) == 3
+    for b, indices in enumerate(per_video):
+        assert indices.dim() == 1
+        assert indices.numel() == sel.num_keep[b].item()
+        assert (indices >= 0).all()
+        assert (indices[1:] > indices[:-1]).all()
 
 
 def test_mps_matches_cpu_grid_and_counts():

@@ -71,8 +71,8 @@ Given a clip `(B, T, C, H, W)`:
    sort/argsort-based rank, which has weaker mobile-runtime operator
    support), producing a boolean keep mask.
 9. **Pack to global indices** — flatten to `keep_index`/`keep_coords` in
-   `(t, h, w)` grid_thw space, reusing `autogaze/utils.py`'s stable-sort
-   packer for the padding logic.
+   `(t, h, w)` grid_thw space via a stable-sort packer (`_pack_gazing_mask`,
+   self-contained — see §6) that also guarantees ascending order (§5).
 
 ## 3. Config knobs
 
@@ -92,7 +92,7 @@ were each chosen as the faster and/or ratio-safer of their alternatives —
 together they're already the fast+exact-budget preset. `motion_weight` is
 the one knob whose best value genuinely depends on the clip's content
 (static talking-head vs. high-motion footage); it isn't auto-tuned yet (see
-§6).
+§8).
 
 ## 4. Output: `Selection`
 
@@ -111,11 +111,44 @@ grid_thw-native, not AutoGaze's `gazing_pos` dict contract — see
 | `per_frame_keep` | `(B, T_grid)` | Kept count per tubelet |
 
 `autogaze/models/borissal/adapters.py` bridges this to a V-JEPA2-style
-gather point (`to_vjepa2`) or, optionally, to the legacy AutoGaze dict
-contract for sanity-checking against the existing VideoMAE task
+gather point (`to_vjepa2`), a canonical flat keep-index-per-video list
+(`to_canonical_keep_indices`, see §5), or, optionally, to the legacy AutoGaze
+dict contract for sanity-checking against the existing VideoMAE task
 (`to_autogaze_gazing_info`).
 
-## 5. Performance & mobile
+## 5. Canonical downstream interface
+
+A real downstream pipeline (Qwen-VL-style sparse encoder over V-JEPA2)
+expects, per video, a flat list of kept patch indices — `idx = t*N + n`
+(`N` = patches per frame, `n` = row-major within-frame index) — **sorted
+ascending by (frame, row, col)**, since the encoder's mask-gather step and
+its RoPE position recovery both depend on that order to map each surviving
+token back to its true `(t, row, col)`.
+
+Borissal's `keep_index` already satisfies this exactly: its native flatten
+order (`t*(H_grid*W_grid) + h*W_grid + w`) *is* that formula, and the
+packer that builds it preserves ascending order among kept entries — no
+reordering needed (locked down by
+`tests/test_borissal.py::test_keep_index_is_ascending_per_row`). Use
+`adapters.to_canonical_keep_indices(selection) -> list[Tensor]` to get it in
+the exact shape a `keep_indices_per_video`-style handoff expects: one
+1-D ascending `LongTensor` per video, `-1` padding stripped.
+
+## 6. Standalone
+
+The core — `configuration_borissal.py`, `modeling_borissal.py`,
+`adapters.py`, `device.py` — depends on **`torch` only** (no `autogaze.*`
+imports); the one packing routine it used to borrow from
+`autogaze/utils.py` is now inlined. Copy `autogaze/models/borissal/` into
+another project as-is and it works unchanged; drop `video_io.py`
+(PyAV) and `viz.py` (matplotlib) if you don't need this repo's demo
+scripts. All ops are standard PyTorch (`mean`, `avg_pool2d`/`max_pool2d`,
+`conv2d`, `topk`, `argsort`, …) with no custom CUDA/C++ extensions, so it
+runs on a Linux/CUDA machine with no code changes — just `.to("cuda")`.
+`device.py::resolve_device(mode="auto")` picks `cuda` when available,
+otherwise `cpu` (not `mps` — see §7, CPU measured faster for this workload).
+
+## 7. Performance & mobile
 
 Non-learned, so the cost is arithmetic, not FLOPs-vs-an-encoder. Measured
 on a Mac: **~7-12ms/clip on CPU**, ~85-150 clips/sec (16 frames, 384×384).
@@ -130,7 +163,7 @@ Phase 2 are in
 [`design.md`](./design.md#mobile-readiness-review-2026-07-14-before-starting-phase-2) —
 not duplicated here.
 
-## 6. Not yet built
+## 8. Not yet built
 
 Content-adaptive auto-tuning (starting with `motion_weight`) was scoped and
 designed but deliberately deferred — it'll be revisited alongside or after

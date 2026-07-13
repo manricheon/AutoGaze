@@ -19,7 +19,7 @@ from pathlib import Path
 
 import torch
 
-from autogaze.models.borissal import Borissal, BorissalConfig
+from autogaze.models.borissal import Borissal, BorissalConfig, available_devices
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = REPO_ROOT / "outputs" / "borissal" / "benchmark"
@@ -29,15 +29,6 @@ WARMUP = 10
 ITERS = 50
 RATIOS = [0.5, 0.25]
 ALLOCATIONS = ["uniform", "proportional"]
-
-
-def available_devices():
-    devices = ["cpu"]
-    if torch.backends.mps.is_available():
-        devices.append("mps")
-    if torch.cuda.is_available():
-        devices.append("cuda")
-    return devices
 
 
 def bench_one(device: torch.device, ratio: float, alloc: str):

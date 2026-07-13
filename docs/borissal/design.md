@@ -34,7 +34,8 @@ The full effort is split into three phases, each its own spec/branch:
 
 | Decision | Rationale |
 |---|---|
-| Output is **grid_thw-native**, not AutoGaze's `gazing_pos` dict contract | The intended downstream encoders (V-JEPA2, Qwen-VL-style models) already think natively in `(t, h, w)` token grids with flat/gather-based sparsity. Conforming to AutoGaze's dict (`gazing_pos`, `if_padded_gazing`, `gazing_mask` per scale, ...) would have made the *first* integration easy but every *subsequent* encoder integration harder. An optional adapter (`adapters.to_autogaze_gazing_info`) bridges back to the legacy contract for sanity-checking against the existing VideoMAE task, but it is not the native format and only supports uniform per-frame allocation. |
+| Output is **grid_thw-native**, not AutoGaze's `gazing_pos` dict contract | The intended downstream encoders (V-JEPA2, Qwen-VL-style models) already think natively in `(t, h, w)` token grids with flat/gather-based sparsity. Conforming to AutoGaze's dict (`gazing_pos`, `if_padded_gazing`, `gazing_mask` per scale, ...) would have made the *first* integration easy but every *subsequent* encoder integration harder. `adapters.to_canonical_keep_indices` is the real bridge to a verified downstream convention (see "Canonical downstream interface" below); `adapters.to_autogaze_gazing_info` is a separate, optional bridge back to the legacy contract for sanity-checking against the existing VideoMAE task (only supports uniform per-frame allocation). |
+| Core package is **`torch`-only, standalone-portable** | `configuration_borissal.py` + `modeling_borissal.py` + `adapters.py` + `device.py` have zero `autogaze.*` imports (the one packer function they used to borrow from `autogaze/utils.py` is now inlined) — the directory can be copied into another project and just works, including unchanged on Linux/CUDA (`device.py::resolve_device`, `cuda` > `cpu`, deliberately not `mps` — see "Mobile readiness review"). `video_io.py`/`viz.py` stay separate, dev-tooling-only, not needed by the model itself. |
 | `transformers>=5.5,<6` (repo-wide pin change), not `~=4.51` | Forward-looking: Borissal's own code does not depend on the legacy AutoGaze modeling classes at all, and using a current transformers avoids re-litigating this later when Phase 3 attaches V-JEPA2/Qwen. **Trade-off accepted knowingly**: this pin change is repo-wide (`pyproject.toml`), so the *legacy* AutoGaze custom modeling code (`autogaze/models/autogaze/*`, `autogaze/vision_encoders/siglip/*`, `autogaze/tasks/video_mae_reconstruction/*`) may no longer import cleanly under 5.5.x (large API jump from 4.51). Borissal does not import any of those modules, so this doesn't block Phase 1. Migrating the legacy training path to 5.5.x is out of scope unless/until someone needs to run it again. |
 | `flash_attn` moved to an optional `cuda` extra | It doesn't build on macOS. Nothing in Borissal imports it; the legacy AutoGaze code only loads it lazily via `attn_implementation="flash_attention_2"`, which defaults to `sdpa` off anyway. |
 | Default grid `scale=384, patch_size=16, tubelet_size=2` → **grid_thw = (8, 24, 24)** | Matches V-JEPA2's native input convention (the intended downstream encoder), and matches the original 24×24×8 framing from the initial brainstorm. All three are config knobs. |
@@ -89,11 +90,42 @@ per_frame_keep: (B, T_grid) long  -- kept count per tubelet
    (Originally a fully vectorized `argsort`-twice rank comparison; swapped to
    `torch.topk` for mobile-op-support reasons — see "Mobile readiness review"
    below.)
-9. Packing to `keep_index`/padding reuses
-   `autogaze/utils.py::get_gazing_pos_from_gazing_mask` (stable ones-first
-   sort) applied to the flattened `(B, L)` mask — this is the one piece of
-   legacy AutoGaze code Borissal imports, and it has no transformers/legacy-model
-   dependency (verified: only `torch`/`numpy`/`omegaconf`/`loguru`/`wandb`).
+9. Packing to `keep_index`/padding uses `_pack_gazing_mask` (stable
+   ones-first sort) applied to the flattened `(B, L)` mask. Originally
+   imported from `autogaze/utils.py::get_gazing_pos_from_gazing_mask`
+   (verified to have no transformers/legacy-model dependency); **inlined
+   verbatim into `modeling_borissal.py`** so the package has zero
+   `autogaze.*` imports — see "Standalone" below. A pleasant side effect:
+   this packer's stable sort keeps kept indices in ascending order, which
+   turned out to be exactly the ordering a real downstream consumer needs
+   — see "Canonical downstream interface" below.
+
+## Canonical downstream interface (2026-07-14)
+
+The user investigated the actual downstream pipeline (a Qwen-VL-style sparse
+encoder over V-JEPA2) and reported back its canonical selector-output
+convention: a flat, per-video, ascending list of kept patch indices,
+`idx = t*N + n` (`N` = patches/frame, `n` = row-major within-frame),
+sorted by (frame, row, col) — required because the encoder's mask-gather
+and RoPE position recovery both walk that list assuming that order.
+
+**Checked against `Selection.keep_index` and confirmed to already match,
+with zero algorithm changes needed**: Borissal's flatten order (step 9
+above) already *is* `t*N+n`, and `_pack_gazing_mask`'s stable sort already
+preserves ascending order among kept entries (empirically verified across
+`uniform`/`proportional` allocation and a batch of instances before writing
+any code). Locked down as an explicit test
+(`test_keep_index_is_ascending_per_row`) so a future change to the top-k
+mechanism can't silently break it. `adapters.to_canonical_keep_indices`
+exposes it in the exact shape the downstream `keep_indices_per_video`
+handoff expects (list of 1-D ascending tensors, `-1` padding stripped). See
+`docs/borissal/reference.md`'s "Canonical downstream interface" section for
+the consumer-facing version of this.
+
+Everything past the selector (processor/model/encoder/LLM internals,
+steps 3-6 of what the user's investigation described) is out of scope for
+Borissal — that's the downstream pipeline's responsibility, not addressed
+here.
 
 ## Files
 
@@ -103,10 +135,17 @@ per_frame_keep: (B, T_grid) long  -- kept count per tubelet
 - `autogaze/models/borissal/modeling_borissal.py` — `Borissal(nn.Module)` +
   `Selection` dataclass + the algorithm above.
 - `autogaze/models/borissal/adapters.py` — `to_vjepa2` (passthrough/rename for
-  a V-JEPA2-style gather-before-transformer attach point) and
-  `to_autogaze_gazing_info` (optional bridge to the legacy dict contract, for
-  running Borissal through the existing VideoMAE task as a sanity check;
-  requires uniform per-frame allocation).
+  a V-JEPA2-style gather-before-transformer attach point),
+  `to_canonical_keep_indices` (per-video ascending flat-index list matching a
+  real downstream `keep_indices_per_video` convention — see "Canonical
+  downstream interface" below), and `to_autogaze_gazing_info` (optional
+  bridge to the legacy dict contract, for running Borissal through the
+  existing VideoMAE task as a sanity check; requires uniform per-frame
+  allocation).
+- `autogaze/models/borissal/device.py` — `resolve_device(mode="auto")`
+  (`cuda` > `cpu`, deliberately not preferring `mps` — see "Mobile readiness
+  review") and `available_devices()` (enumeration, used by the benchmark
+  script to test every device present rather than pick one).
 - `autogaze/models/borissal/video_io.py` — PyAV decode + uniform frame
   sampling + normalize, no transformers video processor dependency.
 - `scripts/eval_borissal_qualitative.py` — standalone Mac/CPU/MPS qualitative
@@ -198,11 +237,11 @@ pooling shrinks things) — expected and not a concern, just worth knowing
 where the time actually goes if this needs future optimization.
 
 **Sort-family ops are now minor**: `aten::sort` (2.9% self-time, 1 call/iter —
-this is the reused `autogaze/utils.py::get_gazing_pos_from_gazing_mask`
-packer's stable argsort) and `aten::topk` (2.8% self-time, 1 call/iter — the
-selector's own top-k, see next section). Combined, sort/topk is under 6% of
-self CPU time and operates on modest tensor sizes (`L=4608` elements at
-default config).
+this is `_pack_gazing_mask`'s stable argsort, inlined from the originally-
+borrowed `autogaze/utils.py::get_gazing_pos_from_gazing_mask`) and
+`aten::topk` (2.8% self-time, 1 call/iter — the selector's own top-k, see
+next section). Combined, sort/topk is under 6% of self CPU time and
+operates on modest tensor sizes (`L=4608` elements at default config).
 
 ### Fix applied: argsort-rank top-k → `torch.topk`
 
@@ -216,11 +255,14 @@ confirmed by the full `tests/test_borissal.py` suite still passing, 7/7,
 plus a dedicated invariant re-check across ratio/allocation combinations).
 Rationale: `torch.topk` is a first-class op on TFLite (`TopKV2`) and CoreML
 (`top_k`), unlike general `sort`/`argsort`, which have much patchier mobile
-support. The one remaining `argsort` (in the reused legacy
-`autogaze/utils.py` packer) was deliberately left untouched — it's a single
-O(L log L) op on a modest vector, a shared/legacy utility, and Phase 1's own
-tests depend on its exact tie-order behavior; revisit only if/when Borissal
-itself goes through a real mobile export pass.
+support. The one remaining `argsort` (then in the reused legacy
+`autogaze/utils.py` packer) was deliberately left algorithmically untouched
+at the time — it's a single O(L log L) op on a modest vector, and Phase 1's
+own tests depend on its exact tie-order behavior. (It was later inlined verbatim, unchanged, into `modeling_borissal.py` as
+`_pack_gazing_mask` for standalone-portability reasons — see the "Core
+package is `torch`-only, standalone-portable" row above and the "Canonical
+downstream interface" section below; that move didn't touch this
+sort/mobile-support tradeoff.)
 
 ### Empirical trace check: `torch.jit.trace`, a real bug found and fixed
 
