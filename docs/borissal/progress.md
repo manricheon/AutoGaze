@@ -326,3 +326,101 @@ auto-tuning knob.
 whether/how to auto-tune `motion_weight` (or fold it into the learned
 scoring head entirely, making the question moot) — this is an open design
 question for Phase 2, not a Phase 1 task.
+
+---
+
+## 2026-07-14 (same day) — Standalone core, device auto-select, canonical keep-index interface verified
+
+User asked three things: (1) confirm the model is mostly/entirely standard
+PyTorch ops and will "just work" on a Linux/CUDA box, (2) add an option to
+auto-pick the fastest device per machine, (3) make the model implementation
+standalone-portable. Also, mid-round, the user pasted back a canonical
+selector-output interface spec from another agent's investigation of the
+real downstream pipeline (Qwen-VL-style sparse encoder over V-JEPA2) and
+asked to check Borissal's output against it.
+
+**(1) Answered (no code needed), verified by grep, not just recalled:**
+confirmed the entire `autogaze/models/borissal/` package had exactly one
+`autogaze.*` import (`autogaze.utils.get_gazing_pos_from_gazing_mask`),
+zero custom CUDA/C++ extensions, zero `torch.jit.script`, zero hardcoded
+`"cpu"`/`"mps"`/`"cuda"` branches — every op used (mean/abs/sub/pad/sqrt/
+avg_pool2d/max_pool2d/conv2d/topk/arange/scatter_/clamp/floor/argsort) is
+standard `aten` with existing CUDA kernels. Conclusion: runs on Linux/CUDA
+with zero code changes, just `.to("cuda")`.
+
+**(2) Device auto-select** — asked the user to pick a mechanism (static
+priority vs. live self-benchmark); they chose static. New
+`autogaze/models/borissal/device.py`:
+`resolve_device(mode="auto")` → `cuda` if available, else `cpu` (**not**
+`mps` — this session's own benchmark data showed mps slower than cpu for
+Borissal's small-tensor workload; `mps` is still usable via
+`mode="mps"`), and `available_devices()` (enumeration, for
+`borissal_benchmark.py`'s "test every device" use case, which is a
+different job from "pick one" and was kept separate rather than forced
+into `resolve_device`). Replaced three near-identical local
+`resolve_device`/`available_devices` copies in
+`eval_borissal_qualitative.py`, `borissal_dump_outputs.py`, and
+`borissal_benchmark.py` with imports from the new module. Re-ran all
+three scripts to confirm identical behavior.
+
+**(3) Standalone** — inlined the one remaining `autogaze.utils` import
+(`get_gazing_pos_from_gazing_mask`, verbatim, ported as `_pack_gazing_mask`
+inside `modeling_borissal.py`). Result: `configuration_borissal.py` +
+`modeling_borissal.py` + `adapters.py` + `device.py` now depend on
+**`torch` only** — confirmed via `grep` (zero `autogaze.*` imports
+remaining). `video_io.py`/`viz.py` stay as-is (already had no
+cross-dependency on the core files; they're this repo's dev-tooling, not
+needed by the model). `docs/borissal/reference.md` gained a "Standalone"
+section (§6) documenting exactly this.
+
+**(Canonical downstream interface, added mid-round)** — user's pasted spec:
+selector output must be a flat, per-video, ascending list of kept patch
+indices, `idx = t*N + n` (`n` = row-major within-frame), sorted by
+(frame, row, col), because the real downstream encoder's mask-gather +
+RoPE position recovery depends on that exact order. **Checked this against
+`Selection.keep_index` before writing any code** (a quick in-memory
+verification script, batch of 4, both `uniform` and `proportional`
+allocation) and found it **already matches exactly** — Borissal's native
+flatten order (`t*(H_grid*W_grid)+h*W_grid+w`) *is* `t*N+n`, and the
+packer's stable sort already preserves ascending order among kept entries.
+No algorithm change was needed. What *was* added: a new
+`adapters.to_canonical_keep_indices(selection) -> list[Tensor]` (per-video
+1-D ascending tensor, `-1` padding stripped — the exact shape a
+`keep_indices_per_video`-style handoff expects), and two new tests
+(`test_keep_index_is_ascending_per_row`, `test_to_canonical_keep_indices`)
+to lock this contract down so a future top-k change can't silently break
+it. Steps 3-6 of the user's pasted spec (processor/model/encoder/LLM
+internals) are explicitly out of scope for Borissal — noted, not
+implemented.
+
+**Verified (commands):**
+```
+uv run pytest tests/test_borissal.py -v          # 9 passed (7 previous + 2 new)
+grep -rln "^from autogaze\|^import autogaze" autogaze/models/borissal/{configuration_borissal,modeling_borissal,adapters,device}.py
+                                                   # -> no matches (standalone confirmed)
+uv run python scripts/eval_borissal_qualitative.py --video assets/example_input.mp4 ...
+uv run python scripts/borissal_dump_outputs.py --video assets/example_input.mp4 ...
+uv run python scripts/borissal_benchmark.py       # all three re-verified after the device.py refactor
+```
+Also spot-checked `to_canonical_keep_indices` against the real
+`assets/example_input.mp4` clip (not just synthetic tensors): ascending,
+correct length, matches `num_keep`.
+
+**Docs touched:** `design.md` — new "Canonical downstream interface"
+section, a new "Key design decisions" row for standalone-portability, and
+fixed several now-inaccurate "reused legacy `autogaze/utils.py`" phrasings
+left over from before the inlining (found while updating, not left for
+later). `reference.md` — new "Canonical downstream interface" (§5) and
+"Standalone" (§6) sections; renumbered §6→§8 ("Not yet built") and fixed
+its internal cross-reference.
+
+**Not done / explicitly out of scope:** the actual processor/model/
+encoder/LLM integration code (steps 3-6 of the user's pasted spec) —
+Borissal only needed to satisfy the *selector's* half of the contract,
+confirmed done. No ONNX/CoreML export attempted this round either (still
+just `torch.jit.trace`, from the previous round).
+
+**Next up (Phase 2, unchanged):** learned selector — carries forward all
+prior mobile-readiness constraints, plus: keep the canonical ascending
+`idx=t*N+n` output contract intact regardless of how the scoring/top-k
+mechanism changes (there's now a test guarding it).
