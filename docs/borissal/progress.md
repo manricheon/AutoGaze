@@ -795,3 +795,59 @@ before the end-of-run save; --save-every defaulted to 0). The trainer now
 writes an overwritten `checkpoint_last.pt` at every log point, so any
 interrupted run keeps its latest weights. Verified: rolling checkpoint
 saves and reloads; 37/37 tests green.
+
+---
+
+## 2026-07-14 (same day) — theory-driven upgrade: WP-A/B/C landed
+
+User asked for model-level improvements and a more principled training
+design, backed by literature research. Two parallel surveys (token
+selection / differentiable top-k; SSL informative masking / selector
+training mechanics) were mapped onto the three measured pathologies —
+P1 scatter bias, P2 score saturation, P3 edge/band drift. Headline
+finding: **P1/P3 are the coverage objective's provable optimum**
+(facility-location/D-optimal equivalence; I-JEPA scattered-17.6 vs
+blocks-54.2; REAL-X off-distribution prior exploitation), so the
+objective — not the training tricks — had to change. Full notes:
+design.md "Theory notes", training.md §8.
+
+**WP-A — anti-saturation bundle (P2, published numbers):**
+- `router_z_loss` (ST-MoE, coeff 1e-3) — default ON (`--w-zloss`).
+- Cosine score head with learnable temperature (X-MoE) —
+  `cosine_scores=True` default; |logit| ≤ temp by construction.
+- ST path upgraded to the CANONICAL ST-Gumbel-softmax (soft path from the
+  same noised logits, τ = 2/3 fixed — `gumbel_tau` semantics changed from
+  noise scale to softmax temperature). `probs` output stays clean
+  (noise-free) so entropy monitoring semantics are preserved.
+- Score head + temperature on lower lr (`--head-lr-scale 0.1`);
+  `--entropy-anneal-steps` optional decay.
+- Smoke: grad-reach stratification improved (unsel/low-decile within the
+  same order as selected vs ~30x gap before).
+
+**WP-B — objective inversion + block geometry (P1/P3):**
+- `predictor_coverage_loss(floor=...)`: coverage as a CONSTRAINT
+  (`relu(mse − floor)`, `--coverage-floor`), zero scatter pressure below
+  the floor; uniqueness (`--w-uniqueness`) promoted to primary in the §8
+  recipe.
+- `hardness_rank_loss` (HPM): score head ranks REST tokens by per-token
+  predictor error — pairwise BCE, reuses the coverage pass (free);
+  `--w-hardness`, experimental.
+- `train_block_size=2`: block-structured ST selection in `forward_train`
+  (block-mean logits → block Gumbel-top-k → gate expanded; budget snapped
+  to whole blocks). Inference `select()` untouched.
+
+**WP-C — RLOO/REINFORCE phase (AdaMAE precedent):**
+- `--rl-after-step N --rl-samples 4 --rl-cov-weight 1.0`: hard
+  Gumbel-top-k sampling, reward = uniqueness − λ·relu(coverage − floor)
+  computed fully under no_grad (no teacher backward ⇒ lower peak memory),
+  Kool leave-one-out baseline, Plackett-Luce surrogate logp. Verified in
+  smoke: clean phase handover at step N, NaN-free, REINFORCE gradient
+  reaches ~100% of logits.
+
+Surveyed-and-rejected list (DPP diversity, SIMPLE/perturbed top-k,
+GradNorm, SemMAE/AutoMAE machinery) recorded with reasons in design.md;
+REAL-X calibration / EVAL-X audit / Frame-Voyager model selection deferred
+to Linux compute (training.md §7.7). Tests 37 → **43 green** (z-loss,
+cosine bound, coverage floor gating, hardness direction, block ST
+contract, RLOO smoke). Old-checkpoint compat: dump script defaults
+`cosine_scores=False` for pre-upgrade checkpoints.

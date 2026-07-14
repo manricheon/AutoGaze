@@ -486,11 +486,80 @@ gate's pass line; combination-optimization beyond that is v1's job
 task analysis: cross-tubelet variation isn't harmful for whole-clip
 description; a streaming-UI concern only).
 
+## Theory notes (2026-07-14): what the literature says about our measured pathologies
+
+Two parallel surveys (① token selection / differentiable top-k;
+② SSL informative masking / selector training mechanics) mapped onto the
+three pathologies measured locally: **P1** scatter bias (random beat every
+saliency config on coverage MSE), **P2** score saturation (entropy
+5.0→2.64 over 40 steps, grad_norm → ~0), **P3** edge/band drift in the
+trained selection.
+
+**P1/P3 are the coverage objective's PROVABLE OPTIMUM, not training bugs.**
+- Coverage minimization ≡ soft facility-location / column-subset-selection
+  / D-optimal design; reconstruction-optimal subsets are space-filling and
+  boundary-heavy (DPP-CSS, JMLR 2020 arXiv:1812.09771; leverage-score
+  sampling, arXiv:2302.11474; D-optimal design selects extreme points —
+  our P3 exactly). Interpolation error scales with fill distance,
+  minimized by grid/blue-noise layouts — our P1 exactly.
+- Experimentally reproduced across SSL: UM-MAE (arXiv:2205.10063) — evenly
+  scattered visible anchors are a low-level interpolation shortcut
+  (pretrain loss ↓ while transfer ↓); I-JEPA ablation (arXiv:2301.08243) —
+  scattered context 17.6 vs multi-block 54.2 (IN-1k 1% linear); V-JEPA
+  ablation — multi-block 72.9 K400 vs random-tube 51.5.
+- REAL-X (AISTATS 2021, arXiv:2103.01890) supplies the gradient mechanics:
+  a selector trained against a FROZEN evaluator optimizes the evaluator's
+  off-distribution inductive bias unless the evaluator was calibrated on
+  the selector's mask distribution. The 2.1 predictor was trained at ~90%
+  multi-block masking; our 15–75%-keep scattered contexts are deep
+  off-distribution, so the coverage gradient points into its interpolation
+  prior.
+- Consequence adopted in code: coverage demoted to a CONSTRAINT
+  (`--coverage-floor`), uniqueness promoted to primary, block-structured
+  training selection (`train_block_size`) removes the scatter shortcut by
+  construction AND moves the predictor back on-distribution.
+
+**P2 is the MoE-router "rich-get-richer" pathology, with published fixes.**
+ST-MoE (arXiv:2202.08906): z-loss 1e-3 stabilized 3/3 unstable runs with
+a quality gain → adopted as default. X-MoE (arXiv:2204.09179): cosine
+routing bounds the logit norm by construction → adopted as the v1 score
+head. Concrete/Gumbel-softmax literature: τ = 2/3 canonical, τ < 0.5 =
+gradient-variance blowup → fixed, no annealing. β-DARTS (arXiv:2203.01665)
+notes plain L2 on logits is the WRONG regularizer (post-softmax/logsumexp
+targets are right) — why z-loss, not weight decay on the head.
+
+**Closest published analogue to our whole setup:** AdaMAE (CVPR 2023,
+arXiv:2211.09120) — a tiny selector trained by REINFORCE against a frozen
+reconstruction teacher, reward detached from the teacher graph; foreground
+saliency EMERGES. Adopted as the optional RL phase (with Kool et al. 2019
+leave-one-out baseline). Notably, NO published work trains a token
+selector against a frozen JEPA predictor — our measured scatter-bias
+result, which matches the facility-location theory exactly, is itself a
+citable negative finding for the eventual paper.
+
+**Surveyed and deliberately NOT adopted:**
+- DPP / diversity regularizers (CDPruner etc.): our objective is already
+  over-spread; diversity pressure is the wrong direction until
+  uniqueness-primary training over-concentrates (revisit then).
+- SIMPLE (ICLR 2023) / perturbed top-k (Berthet 2020, Cordonnier 2021):
+  lower-bias k-subset estimators, but the saturation bundle + RL phase
+  cover the same failure modes; SIMPLE's O(nk) DP is heavy at n=4608.
+- GradNorm / uncertainty weighting: fixed, coarsely-tuned weights match or
+  beat adaptive balancers head-to-head (arXiv:2201.04122).
+- SemMAE part-learning / AutoMAE GAN prior: block sampling achieves the
+  contiguity prior directly, without the machinery.
+- Deferred to Linux compute (training.md §7.7): REAL-X predictor
+  calibration adapter, EVAL-X audit gap, Frame-Voyager caption-loss
+  model selection.
+
 ## Open items (updated)
 
 - torch.hub V-JEPA2.1-L/B teacher adapter (three wrapper methods) — when
   large-scale training moves to Linux/CUDA and the team's existing 2.1
   checkpoints should be the teacher.
 - Which loss combination / input_mode wins — experiment matrix in
-  `training.md` §3, to be run at scale.
+  `training.md` §3, to be run at scale; §8 phased recipe
+  (warmup → ST uniqueness-primary → optional RL) is the default plan.
 - Predictor fine-tuning (currently frozen) as a later option.
+- Inference-side block selection for v1 `select()` if the block-trained
+  selector wins the eval gate (training-side only for now).

@@ -143,12 +143,32 @@ class BorissalV1Config:
     # score = v0_score + f_theta(...) instead of score = f_theta(...).
     residual_scoring: bool = False
 
+    # Cosine score head (X-MoE, arXiv:2204.09179): logits = normalized-feature
+    # dot normalized-weight, scaled by a LEARNABLE temperature -- bounds logit
+    # magnitude by construction, preventing the logit-norm arms race behind
+    # score saturation (P2). False = plain 1x1-conv head (pre-WP-A behavior).
+    cosine_scores: bool = True
+
     gazing_ratio: float = 0.5
     per_frame_allocation: Literal["uniform", "proportional", "global"] = "uniform"
     min_keep_per_frame_ratio: float = 0.25  # global mode floor (mirrors BorissalConfig)
 
-    # Gumbel noise scale for the straight-through training path (0 disables noise).
-    gumbel_tau: float = 1.0
+    # Training-time block-structured selection (WP-B): b > 1 selects at
+    # b x b spatial-block granularity in forward_train (block-mean logits,
+    # block-level Gumbel-top-k, gate expanded back to tokens). Rationale:
+    # scattered per-token selection is the provable optimum of coverage-style
+    # objectives AND deep off-distribution for the multi-block-trained
+    # V-JEPA predictor (I-JEPA ablation: scattered 17.6 vs blocks 54.2) --
+    # block geometry removes the scatter shortcut by construction. Inference
+    # `select()` is unaffected (v0.2's coarse-to-fine gate covers that side).
+    train_block_size: int = 1
+
+    # Softmax temperature of the straight-through Gumbel-top-k training path
+    # (the canonical Concrete/Gumbel-softmax tau; 2/3 is the literature default
+    # -- Maddison et al. 2017 -- and values below 0.5 are the documented
+    # gradient-variance blowup zone, so no annealing). 0 disables Gumbel noise
+    # AND the temperature (plain softmax backward).
+    gumbel_tau: float = 2.0 / 3.0
 
     eps: float = 1e-6
 

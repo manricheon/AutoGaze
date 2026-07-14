@@ -36,7 +36,9 @@ from autogaze.models.borissal.losses import (
     LossWeights,
     combine_losses,
     dense_sparse_match_loss,
+    hardness_rank_loss,
     predictor_coverage_loss,
+    router_z_loss,
     score_entropy_loss,
     uniqueness_reward_loss,
     v0_distill_loss,
@@ -73,11 +75,37 @@ def parse_args():
     # ~0 within 30 steps (score-head saturation kills the ST soft path) --
     # a small entropy term counteracts that. Set 0 to disable.
     p.add_argument("--w-entropy", type=float, default=0.01)
+    p.add_argument("--entropy-anneal-steps", type=int, default=0,
+                   help="linearly decay w-entropy to 0 over this many steps (0 = constant)")
+    # ST-MoE z-loss on selector logits, published coefficient (arXiv:2202.08906)
+    p.add_argument("--w-zloss", type=float, default=1e-3)
+    p.add_argument("--head-lr-scale", type=float, default=0.1,
+                   help="lr multiplier for the score head (router-style lower lr)")
     p.add_argument("--w-v0-distill", type=float, default=0.0)
     p.add_argument("--v0-distill-warmup-steps", type=int, default=0)
     # anti-scatter reward (design.md "Borissal v0.2" Finding 1); costs one
     # extra predictor pass per step when nonzero.
     p.add_argument("--w-uniqueness", type=float, default=0.0)
+    # coverage as a CONSTRAINT instead of a maximized objective:
+    # relu(mse - floor). Set to the matched-ratio random baseline from
+    # scripts/eval_borissal_coverage.py (~8.25 at ratio 0.25 for vjepa2.1b).
+    # 0 = pre-WP-B behavior (pure minimization).
+    p.add_argument("--coverage-floor", type=float, default=0.0)
+    # HPM-style hardness ranking auxiliary (reuses the coverage pass's
+    # per-token errors -- no extra teacher cost). Experimental, default off.
+    p.add_argument("--w-hardness", type=float, default=0.0)
+    # training-time block-structured selection (see BorissalV1Config.train_block_size)
+    p.add_argument("--train-block-size", type=int, default=1)
+    # RLOO/REINFORCE phase (AdaMAE-style, arXiv:2211.09120 + Kool et al. 2019
+    # leave-one-out baseline): from this step on, replace the ST path with
+    # hard Gumbel-top-k SAMPLING -- reward = uniqueness - rl-cov-weight *
+    # relu(coverage - coverage-floor), computed entirely under no_grad (no
+    # teacher backward => LOWER peak memory than ST; cost = 2*rl-samples
+    # forward predictor passes). Unbiased gradients immune to softmax
+    # saturation. 0 = never (pure ST training).
+    p.add_argument("--rl-after-step", type=int, default=0)
+    p.add_argument("--rl-samples", type=int, default=4)
+    p.add_argument("--rl-cov-weight", type=float, default=1.0)
     p.add_argument("--input-v0-preset", choices=["v0.1", "v0.2"], default="v0.2",
                    help="which non-learned signal preset feeds the learned scorer")
     p.add_argument("--out-dir", default=str(REPO_ROOT / "weights" / "borissal_v1"))
@@ -129,6 +157,89 @@ def complement_indices(hard_keep: torch.Tensor) -> torch.Tensor:
     comp, pad = _pack_gazing_mask(~flat)
     assert not pad.any(), "complement should be unpadded under uniform allocation"
     return comp
+
+
+def rl_microbatch(model, teacher, hub_teacher, video, ratio, args, weights):
+    """One REINFORCE micro-batch (WP-C, AdaMAE pattern + Kool et al. LOO
+    baseline). Samples --rl-samples hard Gumbel-top-k selections from the
+    score policy; each is scored by a NO-GRAD reward (uniqueness minus
+    coverage-floor violation); the policy gradient flows only through the
+    Plackett-Luce surrogate log-prob of each sampled subset. Immune to
+    softmax saturation (no ST relaxation involved) and needs no teacher
+    backward graph. Returns (out, total, logs) shaped like the ST path so
+    the shared logging/diagnostics code works unchanged."""
+    device = video.device
+    S = model.scores(video)
+    B, T_grid, H_grid, W_grid = S.shape
+    N_pf = H_grid * W_grid
+    L = T_grid * N_pf
+    logits = S.reshape(B, T_grid, N_pf)
+    if logits.requires_grad:
+        logits.retain_grad()
+    tau = model.config.gumbel_tau if model.config.gumbel_tau > 0 else 1.0
+    logp_map = (logits / tau).log_softmax(dim=-1)  # policy consistent with the ST phase
+    k = min(max(1, round(ratio * N_pf)), N_pf)
+
+    rewards, hard_masks = [], []
+    keep_idx = None
+    with torch.no_grad():
+        teacher_dense = teacher.dense_features(video)
+        all_idx = torch.arange(L, device=device).unsqueeze(0).expand(B, -1)
+
+        def targets_at(idx):
+            # oracle-reference targets for hub (2.1) teachers (training.md §5)
+            if hub_teacher:
+                return teacher.predict(teacher_dense, all_idx, idx, num_tokens=L)
+            return torch.gather(teacher_dense, 1, idx.unsqueeze(-1).expand(-1, -1, teacher_dense.size(-1)))
+
+        for _ in range(args.rl_samples):
+            u = torch.rand_like(logits).clamp_(1e-9, 1.0 - 1e-7)
+            noised = logits + (-torch.log(-torch.log(u)))
+            _, topk_idx = noised.topk(k, dim=-1)
+            hard = torch.zeros_like(logits, dtype=torch.bool)
+            hard.scatter_(-1, topk_idx, True)
+            keep_idx, _ = _pack_gazing_mask(hard.reshape(B, L))
+            tgt_idx = complement_indices(hard)
+            hard_masks.append(hard)
+
+            # uniqueness: how badly the REST predicts the selection (higher = better)
+            rest_sparse = teacher.sparse_features(video, tgt_idx)
+            pred_sel = teacher.predict(rest_sparse, tgt_idx, keep_idx, num_tokens=L)
+            uniq = (pred_sel - targets_at(keep_idx)).pow(2).mean(dim=(1, 2))  # (B,)
+            # coverage as a CONSTRAINT: penalize only above the floor
+            sel_sparse = teacher.sparse_features(video, keep_idx)
+            pred_rest = teacher.predict(sel_sparse, keep_idx, tgt_idx, num_tokens=L)
+            cov = (pred_rest - targets_at(tgt_idx)).pow(2).mean(dim=(1, 2))  # (B,)
+            rewards.append(uniq - args.rl_cov_weight * torch.relu(cov - args.coverage_floor))
+
+    R = torch.stack(rewards, dim=1)                                   # (B, S)
+    baseline = (R.sum(dim=1, keepdim=True) - R) / (args.rl_samples - 1)  # leave-one-out
+    adv = R - baseline
+    logp = torch.stack(
+        [(logp_map * h.to(logp_map.dtype)).sum(dim=(1, 2)) for h in hard_masks], dim=1
+    )  # (B, S)
+    pg = -(adv * logp).mean()
+
+    probs = logits.softmax(dim=-1)
+    total = pg
+    logs = {
+        "rl_pg": pg.detach().item(),
+        "rl_reward_mean": R.mean().item(),
+        "rl_adv_std": adv.std().item(),
+    }
+    if weights.score_entropy:
+        e = score_entropy_loss(probs)
+        total = total + weights.score_entropy * e
+        logs["score_entropy"] = e.detach().item()
+    if weights.z_loss:
+        z = router_z_loss(logits)
+        total = total + weights.z_loss * z
+        logs["z_loss"] = z.detach().item()
+    logs["total"] = total.detach().item()
+
+    out = {"scores": S, "logits": logits, "probs": probs,
+           "hard_keep": hard_masks[-1], "keep_index": keep_idx, "k": k}
+    return out, total, logs
 
 
 def main():
@@ -184,12 +295,31 @@ def main():
         input_mode=args.input_mode,
         residual_scoring=args.residual_scoring,
         v0_preset=args.input_v0_preset,
+        train_block_size=args.train_block_size,
     )
+    if args.rl_after_step > 0 and args.rl_samples < 2:
+        raise SystemExit("--rl-samples must be >= 2 (leave-one-out baseline needs peers)")
+    if args.rl_after_step > 0 and args.train_block_size > 1 and is_main:
+        print("WARNING: the RL phase samples per-token; train_block_size only shapes the ST phase")
+
     model = BorissalV1(config).to(device)
     model.train()
     wrapped = DDP(model, device_ids=[local_rank] if device.type == "cuda" else None) if distributed else model
 
-    optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), lr=args.lr)
+    # Score head on a lower lr (ST-MoE-style router treatment): the head sets
+    # the selection distribution directly, and a fast head outruns the trunk
+    # into saturation. The learnable cosine temperature belongs to the same
+    # group -- it IS the logit scale.
+    head_param_ids = {id(p) for p in model.head.parameters()}
+    head_params = list(model.head.parameters())
+    if hasattr(model, "log_score_temp"):
+        head_param_ids.add(id(model.log_score_temp))
+        head_params.append(model.log_score_temp)
+    trunk_params = [p for p in model.parameters() if p.requires_grad and id(p) not in head_param_ids]
+    optimizer = torch.optim.AdamW([
+        {"params": trunk_params, "lr": args.lr},
+        {"params": head_params, "lr": args.lr * args.head_lr_scale},
+    ])
     weights = LossWeights(
         predictor_coverage=args.w_pred,
         dense_sparse_match=args.w_match,
@@ -197,6 +327,8 @@ def main():
         v0_distill=args.w_v0_distill,
         v0_distill_warmup_steps=args.v0_distill_warmup_steps,
         uniqueness_reward=args.w_uniqueness,
+        z_loss=args.w_zloss,
+        hardness_rank=args.w_hardness,
     )
 
     # Collapse probe: a FIXED clip + fixed ratio, re-selected in eval mode at
@@ -232,9 +364,21 @@ def main():
             video = video.to(device)
 
             ratio = sample_ratio(args, step, device, distributed)
-            out = (wrapped.module if distributed else wrapped).forward_train(video, gazing_ratio=ratio)
-
+            model_ref = wrapped.module if distributed else wrapped
             B = video.shape[0]
+
+            if args.rl_after_step > 0 and step >= args.rl_after_step:
+                # REINFORCE phase (WP-C): unbiased hard-sample gradients,
+                # no teacher backward graph. Skips the whole ST body.
+                out, total, logs = rl_microbatch(
+                    model_ref, teacher, hub_teacher, video, ratio, args, weights)
+                hard = out["hard_keep"]
+                (total / args.grad_accum).backward()
+                accum_logs = logs
+                continue
+
+            out = model_ref.forward_train(video, gazing_ratio=ratio)
+
             hard = out["hard_keep"]                    # (B, T_grid, N_pf)
             keep_idx = out["keep_index"]               # (B, K) ascending, unpadded
             tgt_idx = complement_indices(hard)         # (B, L-K)
@@ -285,14 +429,29 @@ def main():
                     )
                 return uniqueness_reward_loss(pred_sel, sel_targets)
 
+            def hardness_term():
+                # HPM ranking auxiliary: the per-token predictor errors at the
+                # REST positions fall out of the coverage pass for free; the
+                # score head learns to rank tokens by that difficulty (a
+                # direct score-supervision channel that bypasses the ST gate).
+                per_tok_err = (predicted - teacher_targets).pow(2).mean(dim=-1)  # (B, L-K)
+                scores_rest = torch.gather(out["logits"].reshape(B, L), 1, tgt_idx)
+                return hardness_rank_loss(scores_rest, per_tok_err)
+
+            if args.entropy_anneal_steps > 0:
+                weights.score_entropy = args.w_entropy * max(0.0, 1.0 - step / args.entropy_anneal_steps)
+
             total, logs = combine_losses(weights, step, {
-                "predictor_coverage": lambda: predictor_coverage_loss(predicted, teacher_targets),
+                "predictor_coverage": lambda: predictor_coverage_loss(
+                    predicted, teacher_targets, floor=args.coverage_floor),
                 "dense_sparse_match": lambda: dense_sparse_match_loss(sparse, teacher_dense, keep_idx),
                 "score_entropy": lambda: score_entropy_loss(out["probs"]),
+                "z_loss": lambda: router_z_loss(out["logits"]),
                 "v0_distill": lambda: v0_distill_loss(
                     out["scores"].reshape(B, hard.shape[1], hard.shape[2]), v0_scores_flat
                 ),
                 "uniqueness_reward": uniqueness_term,
+                "hardness_rank": hardness_term,
             })
             (total / args.grad_accum).backward()
             accum_logs = logs  # keep the last micro-batch's numbers

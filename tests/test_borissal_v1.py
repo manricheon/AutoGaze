@@ -219,6 +219,110 @@ def test_combine_losses_weights_and_warmup_decay():
     assert "dense_sparse_match" not in logs0  # zero-weight terms skipped
 
 
+def test_v1_block_st_selection():
+    video = _make_video(B=2, seed=50)
+    model = BorissalV1(BorissalV1Config(train_block_size=2)).train()
+    out = model.forward_train(video, gazing_ratio=0.3)
+    B, T_grid, N_pf = out["hard_keep"].shape
+    k = out["k"]
+    assert k % 4 == 0, "budget must snap to whole 2x2 blocks"
+    assert out["hard_keep"].sum(dim=-1).eq(k).all()
+    # every selected token arrives as a FULL 2x2 block (no scatter by construction)
+    m = out["hard_keep"].reshape(B, T_grid, 12, 2, 12, 2)
+    assert torch.equal(m.any(dim=5).any(dim=3), m.all(dim=5).all(dim=3))
+    assert torch.equal(out["st_gate"] > 0.5, out["hard_keep"])
+    # gradients reach every parameter through the block pooling
+    loss = (out["st_gate"] * torch.randn_like(out["st_gate"])).sum()
+    loss.backward()
+    n_with_grad = sum(1 for p in model.parameters() if p.grad is not None and p.grad.abs().sum() > 0)
+    assert n_with_grad == sum(1 for _ in model.parameters())
+    # canonical ascending keep_index, eval determinism
+    for bb in range(B):
+        valid = out["keep_index"][bb][out["keep_index"][bb] >= 0]
+        assert (valid[1:] > valid[:-1]).all()
+    model.eval()
+    a = model.forward_train(video, gazing_ratio=0.3)["hard_keep"]
+    c = model.forward_train(video, gazing_ratio=0.3)["hard_keep"]
+    assert torch.equal(a, c)
+
+
+def test_router_z_loss_penalizes_logit_magnitude():
+    from autogaze.models.borissal.losses import router_z_loss
+
+    logits = torch.randn(2, 8, 576)
+    assert router_z_loss(logits + 5.0) > router_z_loss(logits)  # shift grows logsumexp^2
+    l = logits.clone().requires_grad_(True)
+    router_z_loss(l).backward()
+    assert (l.grad.abs() > 0).float().mean() > 0.99  # reaches (essentially) all logits
+
+
+def test_cosine_head_bounds_logits():
+    video = _make_video(B=1, seed=40)
+    model = BorissalV1(BorissalV1Config()).eval()  # cosine_scores default on
+    s = model.scores(video)
+    temp = model.log_score_temp.exp().clamp(max=100.0).item()
+    assert s.abs().max().item() <= temp + 1e-4, "cosine head must bound |logit| by its temperature"
+    # plain-conv head path (pre-WP-A behavior) still satisfies the contract
+    m2 = BorissalV1(BorissalV1Config(cosine_scores=False)).eval()
+    sel = m2.select(video, gazing_ratio=0.3)
+    assert sel.grid_thw[0].tolist() == [8, 24, 24]
+
+
+def test_coverage_floor_gates_gradient():
+    pred = torch.randn(1, 4, 8, requires_grad=True)
+    tgt = (pred + 0.01).detach()  # mse ~1e-4, far below floor
+    loss = predictor_coverage_loss(pred, tgt, floor=1.0)
+    assert loss.item() == 0.0
+    loss.backward()
+    assert pred.grad.abs().sum().item() == 0.0, "below the floor, coverage must exert no pressure"
+    # floor=0 keeps the original pure-minimization behavior
+    assert predictor_coverage_loss(pred, tgt, floor=0.0).item() > 0.0
+
+
+def test_hardness_rank_loss_direction():
+    from autogaze.models.borissal.losses import hardness_rank_loss
+
+    errors = torch.rand(2, 64)
+    torch.manual_seed(1)
+    aligned = hardness_rank_loss(errors * 4.0, errors)   # scores rank exactly like errors
+    torch.manual_seed(1)
+    opposed = hardness_rank_loss(-errors * 4.0, errors)  # anti-ranked
+    assert aligned < opposed
+    scores = (errors * 4.0).clone().requires_grad_(True)
+    hardness_rank_loss(scores, errors).backward()
+    assert scores.grad is not None and scores.grad.abs().sum() > 0
+
+
+def test_rloo_microbatch_smoke():
+    # WP-C: REINFORCE with leave-one-out baseline against a tiny teacher.
+    import importlib.util
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    script = Path(__file__).resolve().parent.parent / "scripts" / "train_borissal_v1.py"
+    spec = importlib.util.spec_from_file_location("_train_borissal_v1", script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    teacher = VJEPA2Teacher.tiny_random(crop_size=128, frames_per_clip=16)
+    model = BorissalV1(BorissalV1Config(scale=128)).train()
+    video = _make_video(B=1, H=128, W=128, seed=60)
+    args = SimpleNamespace(rl_samples=3, rl_cov_weight=1.0, coverage_floor=0.0)
+    weights = LossWeights(score_entropy=0.01)
+
+    out, total, logs = mod.rl_microbatch(model, teacher, False, video, 0.4, args, weights)
+    assert not torch.isnan(total)
+    for key in ("rl_pg", "rl_reward_mean", "rl_adv_std", "total"):
+        assert key in logs
+    total.backward()
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in model.parameters()), \
+        "policy gradient must reach the selector"
+    assert all(p.grad is None for p in teacher.parameters()), "teacher must stay out of the RL graph"
+    # REINFORCE reaches ALL logits (log-softmax coupling), selected or not
+    g = out["logits"].grad.abs()
+    assert (g > 0).float().mean() > 0.99
+
+
 def test_entropy_and_distill_losses_basic():
     probs_uniform = torch.full((1, 2, 8), 1 / 8)
     probs_peaky = torch.tensor([[[0.99] + [0.01 / 7] * 7] * 2])

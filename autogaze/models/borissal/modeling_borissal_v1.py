@@ -160,7 +160,15 @@ class BorissalV1(nn.Module):
         self.blocks = nn.ModuleList(
             [_TSMBlock(config.hidden_channels, config.shift_fraction) for _ in range(config.num_blocks)]
         )
-        self.head = nn.Conv2d(config.hidden_channels, 1, kernel_size=1)
+        if config.cosine_scores:
+            # Cosine score head (X-MoE): logit = <feat/|feat|, w/|w|> * temp
+            # with a learnable temperature. |logit| <= temp by construction,
+            # so the score head CANNOT run the logit-norm arms race that
+            # saturates the softmax (P2). Bias-free: cosine has no origin.
+            self.head = nn.Conv2d(config.hidden_channels, 1, kernel_size=1, bias=False)
+            self.log_score_temp = nn.Parameter(torch.tensor(2.302585))  # ln(10): temp starts at 10
+        else:
+            self.head = nn.Conv2d(config.hidden_channels, 1, kernel_size=1)
 
         # Non-learned v0 signal provider (maps input / residual scoring). Not
         # registered parameters; buffers only (sobel kernels), negligible cost.
@@ -236,7 +244,13 @@ class BorissalV1(nn.Module):
         h = self.stem(x.reshape(B * T, C, H, W)).view(B, T, -1, H, W)
         for block in self.blocks:
             h = block(h)
-        s = self.head(h.reshape(B * T, -1, H, W)).view(B, T, H, W)
+        h_flat = h.reshape(B * T, -1, H, W)
+        if self.config.cosine_scores:
+            temp = self.log_score_temp.exp().clamp(max=100.0)
+            s = F.conv2d(F.normalize(h_flat, dim=1), F.normalize(self.head.weight, dim=1)) * temp
+            s = s.view(B, T, H, W)
+        else:
+            s = self.head(h_flat).view(B, T, H, W)
         if self.config.residual_scoring:
             s = s + v0_score
         return s
@@ -290,31 +304,71 @@ class BorissalV1(nn.Module):
             # (returned as out["logits"]; read .grad after loss.backward()).
             logits.retain_grad()
 
-        k = min(max(1, round(ratio * N_pf)), N_pf)
+        # Selection unit: single tokens (default) or b x b spatial blocks
+        # (train_block_size > 1 -- see BorissalV1Config for the rationale:
+        # block geometry removes the scatter shortcut by construction).
+        # Block logits are the mean of their member-token logits, so token
+        # gradients flow through the pooling.
+        b = cfg.train_block_size
+        if b > 1:
+            if H_grid % b or W_grid % b:
+                raise ValueError(f"train_block_size={b} must divide the grid ({H_grid}x{W_grid})")
+            unit_logits = F.avg_pool2d(
+                S.reshape(B * T_grid, 1, H_grid, W_grid), b
+            ).reshape(B, T_grid, -1)
+            n_units = unit_logits.shape[-1]
+            k_units = min(max(1, round(ratio * N_pf / (b * b))), n_units)
+            k = k_units * b * b  # budget snapped to whole blocks
+        else:
+            unit_logits = logits
+            n_units = N_pf
+            k_units = k = min(max(1, round(ratio * N_pf)), N_pf)
 
         if self.training and cfg.gumbel_tau > 0:
             # Gumbel(0,1) = -log(-log(U)), U ~ Uniform(0,1) clamped away from
             # both endpoints so neither log can hit 0/inf. (Parenthesization
             # matters: `-torch.log(x).clamp_min(c)` would clamp BEFORE the
             # unary minus and silently produce NaNs -- caught in smoke.)
-            u = torch.rand_like(logits).clamp_(1e-9, 1.0 - 1e-7)
+            u = torch.rand_like(unit_logits).clamp_(1e-9, 1.0 - 1e-7)
             gumbel = -torch.log(-torch.log(u))
-            noised = logits + cfg.gumbel_tau * gumbel
+            noised = unit_logits + gumbel
         else:
-            noised = logits
+            noised = unit_logits
 
-        _, topk_idx = noised.topk(k, dim=-1)
-        hard_keep = torch.zeros_like(logits, dtype=torch.bool)
-        hard_keep.scatter_(-1, topk_idx, True)
+        _, topk_idx = noised.topk(k_units, dim=-1)
+        hard_units = torch.zeros_like(unit_logits, dtype=torch.bool)
+        hard_units.scatter_(-1, topk_idx, True)
 
+        # Backward relaxation: canonical ST-Gumbel-softmax -- the soft path
+        # comes from the SAME noised logits at temperature tau, so the
+        # backward gradient corresponds to the selection that was actually
+        # sampled (the estimator ReinMax/RB-ST analyze). tau = 2/3 is the
+        # Concrete default; eval (no noise) stays deterministic.
+        tau = cfg.gumbel_tau if cfg.gumbel_tau > 0 else 1.0
+        relaxed = (noised / tau).softmax(dim=-1)
+        # `probs` stays the CLEAN, noise-free TOKEN-level score distribution:
+        # it feeds the entropy regularizer, saturation monitoring, and
+        # low-decile gradient diagnostics, whose semantics must not be
+        # polluted by per-sample Gumbel sharpness (noised entropy has a
+        # stochastic floor that hides real score collapse).
         probs = logits.softmax(dim=-1)
+
+        if b > 1:
+            def _expand(x):  # (B, T_grid, n_units) -> (B, T_grid, N_pf) block-constant
+                x = x.reshape(B, T_grid, H_grid // b, W_grid // b)
+                x = x.repeat_interleave(b, dim=2).repeat_interleave(b, dim=3)
+                return x.reshape(B, T_grid, N_pf)
+            hard_keep = _expand(hard_units)
+            soft = _expand(relaxed * n_units)  # O(1) backward magnitude, as below
+        else:
+            hard_keep = hard_units
+            # Straight-through gate. The soft path is scaled by N_pf so its
+            # backward magnitude is O(1) regardless of grid size (raw softmax
+            # probs average 1/N_pf, which would shrink selector gradients by
+            # ~3 orders of magnitude at the default 24x24 grid). Forward value
+            # is exactly hard_f either way (the correction term is zero-valued).
+            soft = relaxed * N_pf
         hard_f = hard_keep.to(logits.dtype)
-        # Straight-through gate. The soft path is scaled by N_pf so its
-        # backward magnitude is O(1) regardless of grid size (raw softmax
-        # probs average 1/N_pf, which would shrink selector gradients by
-        # ~3 orders of magnitude at the default 24x24 grid). Forward value
-        # is exactly hard_f either way (the correction term is zero-valued).
-        soft = probs * N_pf
         st_gate = hard_f + soft - soft.detach()
 
         keep_index, _ = _pack_gazing_mask(hard_keep.reshape(B, T_grid * N_pf))

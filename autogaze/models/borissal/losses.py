@@ -31,16 +31,38 @@ class LossWeights:
     # information the REST cannot reconstruct. Costs one extra predictor pass
     # when nonzero.
     uniqueness_reward: float = 0.0
+    # ST-MoE router z-loss (arXiv:2202.08906): penalizes logit MAGNITUDE at
+    # the source, preventing the softmax saturation / "rich-get-richer"
+    # lock-in observed in local trend runs (entropy 5.0 -> 2.6, dying grads).
+    # 1e-3 is the published coefficient (3/3 unstable runs stabilized WITH a
+    # quality gain in the ST-MoE ablation).
+    z_loss: float = 1e-3
+    # HPM-style hardness ranking (arXiv:2304.05919): score head learns to
+    # RANK unselected tokens by the predictor's per-token error (pairwise
+    # BCE -- ranking, not absolute MSE, is immune to loss-scale drift).
+    hardness_rank: float = 0.0
 
 
 def predictor_coverage_loss(
     predicted_targets: torch.Tensor,  # (B, K_t, D) predictor output at unselected positions
     teacher_targets: torch.Tensor,    # (B, K_t, D) dense-teacher features at those positions
+    floor: float = 0.0,
 ) -> torch.Tensor:
     """Information-coverage objective: the selected patches, and only them,
     must suffice to reconstruct the features of everything NOT selected.
-    Lower = the selection covers the clip's information better."""
-    return F.mse_loss(predicted_targets, teacher_targets)
+    Lower = the selection covers the clip's information better.
+
+    floor > 0 turns this from a MAXIMIZED objective into a CONSTRAINT:
+    relu(mse - floor) -- zero loss (and zero gradient) once coverage is good
+    enough. Rationale (design.md theory notes): coverage MINIMIZATION is a
+    facility-location objective whose optimum is uniform scatter + boundary
+    anchors -- exactly the measured P1/P3 pathologies -- so below the floor
+    the scatter pressure must be switched off and another term (uniqueness /
+    hardness) should drive selection."""
+    mse = F.mse_loss(predicted_targets, teacher_targets)
+    if floor > 0:
+        mse = F.relu(mse - floor)
+    return mse
 
 
 def dense_sparse_match_loss(
@@ -75,6 +97,35 @@ def uniqueness_reward_loss(
     (rest-unexplainable) information the selection holds. Capped so the
     reward cannot diverge by selecting degenerate/unpredictable content."""
     return -torch.clamp(F.mse_loss(rest_predicted_selected, teacher_selected), max=cap)
+
+
+def router_z_loss(logits: torch.Tensor) -> torch.Tensor:
+    """ST-MoE z-loss (arXiv:2202.08906, eq. 5): mean over softmax instances of
+    logsumexp(logits)^2. Softmax is shift-invariant but its SATURATION is not:
+    once logits grow large the distribution peaks and every soft-path gradient
+    dies (the P2 pathology). This term shrinks logit magnitude at the source
+    without touching relative preferences near the origin.
+    logits: (B, T_grid, N_pf) -- one softmax instance per tubelet."""
+    return torch.logsumexp(logits, dim=-1).pow(2).mean()
+
+
+def hardness_rank_loss(
+    scores_rest: torch.Tensor,  # (B, R) selector logits at UNSELECTED positions
+    errors_rest: torch.Tensor,  # (B, R) per-token predictor error at those positions (detached)
+) -> torch.Tensor:
+    """HPM-style auxiliary (CVPR 2023, arXiv:2304.05919): the score head
+    learns to rank tokens by how HARD the predictor finds them -- hard-to-
+    predict = discriminative content worth selecting. Pairwise BCE against a
+    random within-batch pairing; ranking (not absolute regression) because
+    the predictor's error scale drifts over training. Free signal: the
+    per-token errors fall out of the coverage pass."""
+    errors = errors_rest.detach()
+    perm = torch.randperm(scores_rest.shape[-1], device=scores_rest.device)
+    margin = scores_rest - scores_rest[:, perm]
+    target = (errors > errors[:, perm]).to(scores_rest.dtype)
+    per_pair = F.binary_cross_entropy_with_logits(margin, target, reduction="none")
+    valid = (errors != errors[:, perm]).to(scores_rest.dtype)  # skip exact ties
+    return (per_pair * valid).sum() / valid.sum().clamp_min(1.0)
 
 
 def v0_distill_loss(

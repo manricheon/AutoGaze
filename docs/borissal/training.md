@@ -44,17 +44,39 @@ selector. It's available as an optional small-weight auxiliary
 Inference is hard top-k (mobile-safe, exact budget). Training needs
 gradients through "which tokens were kept":
 
-- **Gumbel-perturbed top-k**: per-tubelet scores get Gumbel(0,1)·τ noise
-  (`gumbel_tau`, default 1.0) before the hard top-k, so different
-  selections get explored across steps. Eval mode is noise-free and
-  deterministic (tested).
-- **Straight-through gate**: the kept tokens' embeddings are multiplied by
-  `gate = hard + softmax(scores)·N_pf − (softmax(scores)·N_pf).detach()` —
-  forward value exactly 1.0 (selection unchanged), backward routes
-  `∂L/∂gate` into the score head. The `·N_pf` rescale keeps gradient
-  magnitude O(1) regardless of grid size (raw softmax probs average
-  `1/N_pf` ≈ 0.0017 at the 24×24 grid, which would starve the selector of
-  gradient — found empirically during smoke).
+- **Gumbel-perturbed top-k**: per-tubelet scores get Gumbel(0,1) noise
+  before the hard top-k, so different selections get explored across
+  steps. Eval mode is noise-free and deterministic (tested).
+- **Straight-through gate** (canonical ST-Gumbel-softmax since the
+  2026-07 theory upgrade, §8): the kept tokens' embeddings are multiplied
+  by `gate = hard + soft·N_pf − (soft·N_pf).detach()` with
+  `soft = softmax((scores + gumbel)/τ)` — the soft path comes from the
+  SAME noised logits that produced the hard selection, at temperature
+  `gumbel_tau` (default **2/3**, the Concrete/Gumbel-softmax canonical
+  value; τ < 0.5 is the documented gradient-variance blowup zone, so no
+  annealing). Forward value exactly 1.0 (selection unchanged), backward
+  routes `∂L/∂gate` into the score head. The `·N_pf` rescale keeps
+  gradient magnitude O(1) regardless of grid size (raw softmax probs
+  average `1/N_pf` ≈ 0.0017 at the 24×24 grid, which would starve the
+  selector of gradient — found empirically during smoke). The returned
+  `probs` stays the CLEAN `softmax(scores)` so the entropy loss and
+  saturation monitoring are not polluted by per-sample Gumbel sharpness.
+- **Cosine score head** (`cosine_scores`, default on since §8): logits =
+  normalized-feature · normalized-weight × learnable temperature (X-MoE,
+  arXiv:2204.09179) — |logit| ≤ temp by construction, so the score head
+  cannot run the logit-norm arms race behind saturation. The trainer also
+  puts the head (+ its temperature) on a lower lr (`--head-lr-scale`,
+  default 0.1 — router-style treatment).
+- **Block-structured training selection** (`train_block_size` /
+  `--train-block-size`, default 1 = per-token): b > 1 selects b×b spatial
+  BLOCKS in `forward_train` (block-mean logits → block Gumbel-top-k →
+  gate expanded to tokens; budget snapped to whole blocks). Why: scattered
+  per-token selection is both the provable optimum of coverage-style
+  objectives and deep off-distribution for the multi-block-trained V-JEPA
+  predictor (I-JEPA ablation: scattered 17.6 vs multi-block 54.2 IN-1k 1%
+  linear) — blocks remove the scatter shortcut by construction and move
+  the frozen predictor back onto its training distribution. Inference
+  `select()` is unaffected (v0.2's coarse-to-fine gate covers that side).
 - Training always uses **uniform per-tubelet allocation** (exact k,
   data-independent K) — matching the mobile-export-safe inference default.
 
@@ -84,7 +106,8 @@ overfitting to a single ratio.
 
 ## 3. Loss combinations
 
-`L = w_pred·L_pred + w_match·L_match + w_ent·L_entropy + w_v0·L_v0_distill`
+`L = w_pred·L_pred + w_match·L_match + w_ent·L_entropy + w_z·L_zloss +
+w_v0·L_v0_distill + w_uniq·L_uniq + w_hard·L_hardness`
 (`losses.py`; zero-weight terms are skipped entirely).
 
 | Term | Flag | Role | When to use |
@@ -93,12 +116,17 @@ overfitting to a single ratio.
 | Dense-sparse match | `--w-match` (default 0) | Auxiliary consistency | Small weight only, if selection oscillates; watch for background bias |
 | Score entropy | `--w-entropy` (default **0.01**) | Anti-collapse regularizer (penalizes peaked score distributions) | On by default (see rationale below); raise if grad_norm still dies, set 0 to disable |
 | v0 distillation | `--w-v0-distill` + `--v0-distill-warmup-steps` | Warmup: KL(v1 scores ‖ v0 saliency) linearly decayed to 0 | Start from the proven saliency prior instead of random selection; also the fastest sanity check of the training plumbing (loss should drop ~99% in tens of steps) |
-| Uniqueness reward | `--w-uniqueness` (default 0) | Anti-scatter: rewards selections the REST cannot reconstruct (capped negative MSE, inverse-ST-gate gradient conduit) | Counters the measured scatter bias of pure coverage (design.md "Borissal v0.2" Finding 1: random beat saliency on coverage alone). Costs one extra predictor pass |
+| Uniqueness reward | `--w-uniqueness` (default 0) | Anti-scatter: rewards selections the REST cannot reconstruct (capped negative MSE, inverse-ST-gate gradient conduit) | Counters the measured scatter bias of pure coverage (design.md "Borissal v0.2" Finding 1: random beat saliency on coverage alone). Costs one extra predictor pass. **§8 recipe promotes this to the PRIMARY objective** with coverage as a floor |
+| Router z-loss | `--w-zloss` (default **1e-3**) | Penalizes logit magnitude at the source (`mean(logsumexp²)`, ST-MoE arXiv:2202.08906) | On by default — the published coefficient stabilized 3/3 unstable runs WITH a quality gain; directly attacks the measured saturation (P2) |
+| Coverage floor | `--coverage-floor` (default 0) | Turns coverage into a CONSTRAINT: `relu(mse − floor)`, zero pressure below the floor | Set to the matched-ratio random baseline from `eval_borissal_coverage.py` when uniqueness is primary (§8); 0 keeps pure minimization |
+| Hardness ranking | `--w-hardness` (default 0) | HPM-style (arXiv:2304.05919): score head ranks REST tokens by per-token predictor error (pairwise BCE; reuses the coverage pass — free) | Experimental direct score-supervision channel that bypasses the ST gate. HPM caveat: ALL-hard selection underperforms random — keep a v0-distill warmup as the easy-to-hard curriculum |
 
 **Defaults with rationale:** `--w-entropy` defaults to **0.01** (not 0) —
 both real-teacher smoke runs showed grad_norm decaying to ~0 within 30
 steps (score-head saturation kills the ST soft path); the entropy term
 demonstrably keeps `score_entropy_mean` rising instead of collapsing.
+`--entropy-anneal-steps N` linearly decays it to 0 over N steps (ST-MoE
+prescription for long runs; default 0 = constant).
 
 **Collapse monitoring (built into the trainer log):** every `--log-every`
 steps the trainer re-selects a FIXED probe clip at a fixed ratio in eval
@@ -243,7 +271,7 @@ uv venv --python 3.11
 uv pip install -e .          # torch (CUDA wheel on Linux), transformers==5.5.0, av, timm, einops
 uv pip install -e '.[dev]'   # pytest (optional but recommended: run the suite once)
 # Do NOT install .[cuda] (flash_attn) -- legacy-stack only, not used by Borissal.
-uv run pytest tests/ -q      # expect 36 passed
+uv run pytest tests/ -q      # expect 43 passed
 ```
 torch.hub V-JEPA2 repo deps (`torch`, `timm`, `einops`) are already in the
 base dependencies.
@@ -289,3 +317,73 @@ bottleneck; scale with CPU cores), `--save-every 1000`.
   fine for the pre-trimmed AutoGaze-Training-Data clips, wasteful for long
   videos; `--num-workers` is the mitigation.
 - wandb is installed but the trainer logs to stdout+jsonl only.
+
+**7. Scale-run options from the theory survey deliberately deferred to
+Linux compute** (§8 has the rationale):
+- REAL-X-style calibration: fine-tune a light adapter on the predictor
+  with RANDOM masks spanning the 0.15–0.75 keep range before trusting it
+  as a reward model (the frozen 2.1 predictor was trained on ~90%-masked
+  multi-block geometry — our keep ratios are off-distribution for it).
+  Never train it jointly with the selector (L2X "selection as
+  communication" degeneracy).
+- EVAL-X-style audit: report reward under our evaluator vs under an
+  independent random-mask-calibrated evaluator; a large gap = the selector
+  is exploiting the frozen predictor's inductive bias, not finding
+  information.
+- Frame-Voyager-style model selection: offline, rank candidate selections
+  per validation clip by a frozen captioner's description loss — the only
+  metric guaranteed aligned with the downstream description task.
+
+## 8. Theory-driven upgrade (2026-07-14): why the objective had to change
+
+Two parallel literature surveys (token selection / differentiable top-k;
+SSL informative masking / selector training mechanics) were run against
+our three MEASURED pathologies. Full findings + citations in design.md
+("Theory notes"); what landed in code:
+
+**The core finding — P1/P3 are the objective's optimum, not bugs.**
+Coverage minimization (predict the rest from the selection) is a soft
+facility-location / D-optimal-design objective: its provable optimum is
+uniformly scattered anchors plus boundary points — exactly the measured
+"random beats saliency" (P1) and edge/band drift (P3). I-JEPA's ablation
+quantifies the same effect from the SSL side (scattered context 17.6 vs
+multi-block 54.2, IN-1k 1% linear: scatter = interpolation shortcut), and
+REAL-X explains the gradient mechanics: a selector trained against a
+frozen evaluator optimizes that evaluator's off-distribution inductive
+bias (the 2.1 predictor was trained at ~90% multi-block masking; our
+15–75%-keep scattered contexts are far off-distribution). Conclusion: no
+regularizer fixes P1/P3 while dense-feature coverage remains the
+maximized objective — hence the WP-B inversion.
+
+**Phased recipe (StableMoE-style: learn routing → distill → commit):**
+1. **Warmup** — `--w-v0-distill 1 --v0-distill-warmup-steps 500`: start
+   from the proven v0 saliency prior (doubles as HPM's easy-to-hard
+   curriculum; HPM measured that ALL-hard selection underperforms random).
+2. **ST phase** — uniqueness-primary + coverage floor:
+   `--w-uniqueness 1.0 --coverage-floor <random baseline from
+   eval_borissal_coverage.py> --w-zloss 1e-3 --w-entropy 0.01
+   [--train-block-size 2] [--w-hardness 0.1]`. τ fixed at 2/3, no
+   annealing.
+3. **RL phase (optional)** — `--rl-after-step N --rl-samples 4
+   --rl-cov-weight 1.0`: REINFORCE with the Kool leave-one-out baseline
+   (AdaMAE precedent: same frozen-teacher + tiny-selector setup, REINFORCE
+   made foreground saliency emerge). Reward = uniqueness −
+   rl-cov-weight·relu(coverage − floor), computed entirely under no_grad —
+   NO teacher backward graph, so peak memory is LOWER than the ST phase;
+   cost is 2·rl-samples predictor forward passes per step. Unbiased
+   gradients are immune to softmax saturation by construction. Caveats:
+   per-token sampling only (`train_block_size` shapes just the ST phase);
+   `--rl-samples ≥ 2` required (LOO needs peers).
+
+**Watch (in addition to §7.5):** `loss/rl_adv_std` should stay > 0 (zero =
+all samples get identical reward = no learning signal); `score_entropy_mean`
+falling fast in the ST phase → raise `--w-zloss` before `--w-entropy`
+(z-loss attacks the cause, entropy the symptom).
+
+**Deliberately NOT adopted** (full reasons in design.md): DPP/diversity
+regularizers (our objective is already over-spread), SIMPLE/perturbed
+top-k estimators (the z-loss+cosine bundle plus the RL phase cover the
+same failure modes more cheaply at our n=4608), GradNorm/uncertainty loss
+balancing (fixed weights win head-to-head, arXiv:2201.04122), SemMAE/
+AutoMAE-style part/GAN machinery (block sampling achieves the contiguity
+prior directly).
