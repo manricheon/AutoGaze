@@ -851,3 +851,24 @@ to Linux compute (training.md §7.7). Tests 37 → **43 green** (z-loss,
 cosine bound, coverage floor gating, hardness direction, block ST
 contract, RLOO smoke). Old-checkpoint compat: dump script defaults
 `cosine_scores=False` for pre-upgrade checkpoints.
+
+**WP-A validation — 40-step A/B against the baseline trend run** (same
+teacher facebook/vjepa2-vitl-fpc64-256, scale 256, bs 1, lr 3e-4, w_ent
+0.01, duplicated example clips; `weights/borissal_v1_trend_wpa/`):
+- **Saturation counter-evidence (the success criterion):** baseline
+  entropy fell monotonically 5.39 → 2.64 and was ACCELERATING downward at
+  step 40; WP-A entropy is mean-reverting — dipped to 3.09 at step 20,
+  RECOVERED to 4.55 by step 40. No runaway sharpening with the z-loss +
+  cosine-head bundle in place.
+- Probe IoU stays 0.34–0.63 (baseline crept to 0.85) — more selection
+  mobility, no freeze; grad_norm alive both runs (WP-A less spiky: no
+  700-class outliers).
+- Coverage loss flat ~8 in both — no learning expected at 40 steps on
+  duplicated clips; this A/B tests optimizer dynamics only.
+- **Honest caveats to watch at scale:** (a) the z_loss VALUE drifts up
+  29 → 79 (coverage gradient arm-wrestling the bound; the cosine head
+  caps the worst case, but if it keeps climbing raise `--w-zloss`);
+  (b) `lgrad_low_decile_mean` dipped to ~3e-6 around step 20–30 (τ=2/3
+  concentrates the relaxed backward on high-prob tokens) before
+  recovering with the entropy — if the low-decile channel stays collapsed
+  at scale, the §8 RL phase is the saturation-proof fallback.
