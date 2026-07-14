@@ -72,9 +72,8 @@ overfitting to a single ratio.
 |---|---|---|---|
 | Predictor coverage | `--w-pred` (default 1.0) | Main objective (§1) | Always |
 | Dense-sparse match | `--w-match` (default 0) | Auxiliary consistency | Small weight only, if selection oscillates; watch for background bias |
-| Score entropy | `--w-entropy` (default 0) | Anti-collapse regularizer (penalizes peaked score distributions) | If selection collapses to a few patches early; anneal to 0 |
+| Score entropy | `--w-entropy` (default **0.01**) | Anti-collapse regularizer (penalizes peaked score distributions) | On by default (see rationale below); raise if grad_norm still dies, set 0 to disable |
 | v0 distillation | `--w-v0-distill` + `--v0-distill-warmup-steps` | Warmup: KL(v1 scores ‖ v0 saliency) linearly decayed to 0 | Start from the proven saliency prior instead of random selection; also the fastest sanity check of the training plumbing (loss should drop ~99% in tens of steps) |
-
 | Uniqueness reward | `--w-uniqueness` (default 0) | Anti-scatter: rewards selections the REST cannot reconstruct (capped negative MSE, inverse-ST-gate gradient conduit) | Counters the measured scatter bias of pure coverage (design.md "Borissal v0.2" Finding 1: random beat saliency on coverage alone). Costs one extra predictor pass |
 
 **Defaults with rationale:** `--w-entropy` defaults to **0.01** (not 0) —
@@ -210,3 +209,64 @@ uv run python scripts/borissal_benchmark.py --model both
 Logged per `--log-every` steps (stdout + `train_log.jsonl` in the out dir):
 per-term losses, grad norm, sampled ratio, v0-selection overlap (cheap
 quality proxy), sec/step, peak memory (MB).
+
+## 7. Linux/CUDA scale-run preparation checklist
+
+Everything below was audited on 2026-07-14; the codebase itself needs no
+changes to run on Linux (all ops are standard aten with CUDA kernels; DDP
+activates automatically under torchrun).
+
+**1. Environment**
+```bash
+git clone git@github.com:manricheon/AutoGaze.git && cd AutoGaze
+git checkout feat/borissal
+uv venv --python 3.11
+uv pip install -e .          # torch (CUDA wheel on Linux), transformers==5.5.0, av, timm, einops
+uv pip install -e '.[dev]'   # pytest (optional but recommended: run the suite once)
+# Do NOT install .[cuda] (flash_attn) -- legacy-stack only, not used by Borissal.
+uv run pytest tests/ -q      # expect 36 passed
+```
+torch.hub V-JEPA2 repo deps (`torch`, `timm`, `einops`) are already in the
+base dependencies.
+
+**2. Teacher checkpoint (pick one)**
+- V-JEPA 2.1-L via torch.hub (`--teacher hub:vjepa2_1_vit_large_384`,
+  `--scale 384`): pre-download the weights first (upstream main hardcodes a
+  localhost URL -- see §5):
+  ```bash
+  mkdir -p ~/.cache/torch/hub/checkpoints
+  curl -L -o ~/.cache/torch/hub/checkpoints/vjepa2_1_vitl_dist_vitG_384.pt \
+      https://dl.fbaipublicfiles.com/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt
+  ```
+  (B variant: `vjepa2_1_vitb_dist_vitG_384.pt`, already validated locally.)
+- HF V-JEPA2-L (`--teacher facebook/vjepa2-vitl-fpc64-256`, `--scale 256`):
+  downloads automatically on first run; plain dense-target coverage loss.
+
+**3. Data**
+```bash
+hf download bfshi/AutoGaze-Training-Data --repo-type dataset --local-dir AutoGaze-Training-Data
+```
+Any folder of .mp4s works (recursive glob); gazing_labels.json is NOT
+needed (fully self-supervised). Point `--data-root` at it.
+
+**4. Launch (see §6 for the full command)** -- key flags for the first
+real run, per the §3 matrix baseline: `--w-entropy 0.01` (default),
+`--ratio-sampling uniform`, `--num-workers 8` (PyAV decode is the IO
+bottleneck; scale with CPU cores), `--save-every 1000`.
+
+**5. Watch during training** (`train_log.jsonl`):
+- `loss/predictor_coverage` trending down (never observed on the
+  degenerate Mac smoke sets; this is the first real learning-curve test),
+- `grad_norm` NOT decaying to ~0 (score saturation -- raise `--w-entropy`
+  or lower `--lr` if it does),
+- `probe_overlap_prev` NOT pinned at 1.0 (frozen-selection collapse),
+- `score_entropy_mean` stable or rising,
+- `peak_mem_mb` (CUDA-accurate) for batch-size headroom.
+
+**6. Known gaps accepted for the first run** (revisit if they bite):
+- No optimizer-state resume (checkpoints are model-only; `--save-every`
+  gives restart points but training restarts cold from a state_dict).
+- `video_io.load_video` decodes the full clip before sampling frames --
+  fine for the pre-trimmed AutoGaze-Training-Data clips, wasteful for long
+  videos; `--num-workers` is the mitigation.
+- wandb is installed but the trainer logs to stdout+jsonl only.

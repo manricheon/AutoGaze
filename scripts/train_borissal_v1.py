@@ -59,6 +59,8 @@ def parse_args():
     p.add_argument("--residual-scoring", action="store_true")
     p.add_argument("--steps", type=int, default=200)
     p.add_argument("--batch-size", type=int, default=2, help="per-process batch size")
+    p.add_argument("--num-workers", type=int, default=4,
+                   help="DataLoader workers (PyAV decode is the IO bottleneck on real data)")
     p.add_argument("--grad-accum", type=int, default=1)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--ratio-sampling", choices=["fixed", "uniform"], default="uniform")
@@ -114,7 +116,10 @@ def peak_memory_mb(device: torch.device) -> float:
         return torch.cuda.max_memory_allocated(device) / 1e6
     if device.type == "mps":
         return torch.mps.current_allocated_memory() / 1e6
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6  # bytes on linux are KB; mac is bytes
+    # ru_maxrss units: bytes on macOS, kilobytes on Linux
+    import sys
+    raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return raw / 1e6 if sys.platform == "darwin" else raw / 1e3
 
 
 def complement_indices(hard_keep: torch.Tensor) -> torch.Tensor:
@@ -145,6 +150,8 @@ def main():
         for i in range(4):
             shutil.copy(src, os.path.join(tmp_dir, f"clip{i}.mp4"))
         args.data_root = tmp_dir
+    if args.smoke:
+        args.num_workers = 0  # tiny duplicated-clip dataset; avoid worker spawn overhead
     if args.smoke and args.teacher is None:
         args.scale = 128
         args.steps = min(args.steps, 30)
@@ -153,7 +160,9 @@ def main():
     sampler = DistributedSampler(dataset, shuffle=True) if distributed else None
     loader = DataLoader(
         dataset, batch_size=args.batch_size, sampler=sampler,
-        shuffle=(sampler is None), num_workers=0, drop_last=True,
+        shuffle=(sampler is None), num_workers=args.num_workers,
+        pin_memory=(device.type == "cuda"), drop_last=True,
+        persistent_workers=(args.num_workers > 0),
     )
 
     # ------------------------------------------------------------- teacher

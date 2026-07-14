@@ -31,6 +31,11 @@ dependencies = [
 flash-attn = ["torch"]
 
 [project.optional-dependencies]
+# NOTE: flash_attn is required ONLY by the legacy AutoGaze training path
+# (attn_implementation="flash_attention_2"). Borissal v0/v1 training uses
+# transformers' V-JEPA2 with sdpa and torch.hub V-JEPA2.1 -- neither needs
+# flash_attn. On Linux/CUDA, plain `uv pip install -e .` is sufficient for
+# Borissal work; install `.[cuda]` only to run the legacy stack.
 cuda = [
     "flash_attn",
 ]
