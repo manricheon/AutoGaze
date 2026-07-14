@@ -89,7 +89,10 @@ def _pack_gazing_mask(gazing_mask: torch.Tensor):
 
     idx = torch.arange(N, device=gazing_mask.device).expand(B, N)
     key = (1 - gazing_mask) * N + idx
-    order = key.argsort(dim=1, stable=True)
+    # keys are UNIQUE (kept -> idx, dropped -> N+idx), so a plain argsort is
+    # already deterministic; stable=True would lower to aten::sort.out, which
+    # the ONNX exporter cannot represent (found by export_borissal_check.py)
+    order = key.argsort(dim=1)
     sorted_idx = idx.gather(1, order)
 
     counts = gazing_mask.sum(dim=1)

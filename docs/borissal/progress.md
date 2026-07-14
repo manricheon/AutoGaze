@@ -935,3 +935,44 @@ uniqueness 1.0 + floor 8.0, GCNet-lite on) and closed the judgment loop:
   uniqueness-primary + measured floor).
 
 Next: Linux scale run per §6/§7. Everything else is blocked on that.
+
+---
+
+## 2026-07-15 (same day) — scale-run readiness package: resume, logging, Linux assets, export, VideoMAE gate
+
+Five-part prep batch before the Linux scale run (user request):
+
+1. **Full resume**: checkpoints now carry optimizer state + RNG (+step, as
+   before); `--resume <path|auto>` rebuilds the exact (trunk, head) param
+   groups then restores. Verified: 6-step run → resume → z_loss continues
+   its trajectory (no cold-optimizer spike). DDP resumes reseed
+   deterministically (checkpoint holds rank0's stream only).
+2. **Logging backends**: `--log-backend {none,tensorboard,wandb}`, default
+   tensorboard (offline-safe; new base dep). Scalars = all jsonl fields;
+   images = probe-clip selection overlay + score heatmap per log point.
+   wandb is explicit opt-in (fails loudly). jsonl unchanged (source of
+   truth for plot/judgment tooling).
+3. **Linux asset reuse**: VideoFolderDataset takes comma-separated roots
+   (point it at the five AutoGaze-Training-Data train/ dirs), skips
+   unreadable clips with a warning (was: one bad file killed the worker),
+   `--max-files` subset option. `--hub-repo-dir` enables OFFLINE torch.hub
+   teachers (source=local clone). Checklist §7 item 1.5.
+4. **Mobile-export pre-check** (`scripts/export_borissal_check.py`):
+   v0.2 AND v1 (cosine+gctx) now PASS jit.trace + ONNX-17 (v1 → 4.2 MB).
+   Fixed two real export bugs it caught: stable-argsort → unique-key plain
+   argsort in `_pack_gazing_mask` (semantics identical, keys unique by
+   construction), and missing int() shape casts in
+   `_selection_from_scores` (trace round() pitfall, v0's old bug class).
+5. **Cross-family VideoMAE recon gate**
+   (`scripts/eval_borissal_videomae_recon.py` +
+   `adapters.to_videomae_gazing_info`): Borissal selections scored by the
+   ORIGINAL AutoGaze videomae.pt (multi-scale 265-token/frame layout,
+   tubelet→frame duplication, 5.5.0 pruning-API shim, module. prefix
+   strip; 0 missing keys). First numbers (ratio 0.25): random 0.183 <
+   v0.2 0.338 < v1-60step 1.224 — exactly the theory-predicted scatter
+   ordering; strips confirm the mechanism. Doubles as the FIRST end-to-end
+   consumer of the canonical keep-index contract. Reference axis, not an
+   adoption gate (design.md).
+
+Tests 46 → **47 green** (adapter mapping unit test). videomae.pt lives at
+weights/VideoMAE_AutoGaze/ (gitignored).

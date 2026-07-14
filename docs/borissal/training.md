@@ -294,6 +294,26 @@ uv run pytest tests/ -q      # expect 43 passed
 torch.hub V-JEPA2 repo deps (`torch`, `timm`, `einops`) are already in the
 base dependencies.
 
+**1.5 Offline machines (no GitHub/HF egress)** — everything can run from
+pre-downloaded local assets:
+- V-JEPA 2.1 teacher: clone `facebookresearch/vjepa2` anywhere local, pass
+  `--hub-repo-dir <clone>` (torch.hub `source="local"`); pre-download the
+  checkpoint .pt into `~/.cache/torch/hub/checkpoints/` (step 2).
+- Dataset: pass the AutoGaze-Training-Data TRAIN dirs as a comma-separated
+  `--data-root` (the loader is recursive per root and skips unreadable
+  clips with a warning; `--max-files N` for subset debugging):
+  `--data-root "<D>/InternVid_res448_250K/train,<D>/100DoH_res448_250K/train,<D>/Ego4D_res448_250K/train,<D>/scanning_SAM_res448_50K/train,<D>/scanning_idl_res448_50K/train"`
+- Logging: `--log-backend tensorboard` (default) writes local event files
+  under `<out-dir>/tb/` — scalars + probe selection overlay/heatmap images;
+  wandb is opt-in only. train_log.jsonl is always written.
+- Resume after interruption: `--resume auto` (restores model + optimizer +
+  step from `<out-dir>/checkpoint_last.pt`; RNG exactly in single-process,
+  reseeded deterministically under DDP).
+- Cross-family recon gate: copy AutoGaze's `videomae.pt`
+  (HF `bfshi/VideoMAE_AutoGaze`) and run
+  `scripts/eval_borissal_videomae_recon.py --videomae-ckpt <path>` — see
+  design.md "Cross-family gate" for interpretation caveats (scatter bias).
+
 **2. Teacher checkpoint (pick one)**
 - V-JEPA 2.1-L via torch.hub (`--teacher hub:vjepa2_1_vit_large_384`,
   `--scale 384`): pre-download the weights first (upstream main hardcodes a

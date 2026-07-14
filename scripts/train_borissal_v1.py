@@ -51,8 +51,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--data-root", default=None, help="folder of .mp4s (recursive)")
+    p.add_argument("--data-root", default=None,
+                   help="folder(s) of .mp4s, comma-separated, each globbed recursively. "
+                        "For AutoGaze-Training-Data pass the train/ dirs explicitly "
+                        "(see docs/borissal/training.md section 7)")
+    p.add_argument("--max-files", type=int, default=0, help="cap dataset size (0 = all; debug/subset)")
     p.add_argument("--teacher", default=None, help="HF id or local path; omit for tiny random teacher")
+    p.add_argument("--hub-repo-dir", default=None,
+                   help="local clone of facebookresearch/vjepa2 for OFFLINE hub: teachers "
+                        "(torch.hub source=local; pre-download checkpoints to ~/.cache/torch/hub/checkpoints/)")
     p.add_argument("--smoke", action="store_true",
                    help="tiny random teacher + duplicated example clip + few steps")
     p.add_argument("--scale", type=int, default=384)
@@ -109,7 +116,17 @@ def parse_args():
     p.add_argument("--input-v0-preset", choices=["v0.1", "v0.2"], default="v0.2",
                    help="which non-learned signal preset feeds the learned scorer")
     p.add_argument("--out-dir", default=str(REPO_ROOT / "weights" / "borissal_v1"))
+    p.add_argument("--resume", default=None,
+                   help='checkpoint path, or "auto" = <out-dir>/checkpoint_last.pt if present. '
+                        "Restores model + optimizer + step (+RNG when saved; older checkpoints "
+                        "fall back to seed+step reseeding -- approximate resume)")
     p.add_argument("--log-every", type=int, default=10)
+    # Visualization backend. jsonl is ALWAYS written (the judgment tooling's
+    # source of truth); this adds scalars + probe-selection images on top.
+    # tensorboard is the offline-safe default (local event files, no
+    # service); wandb is an explicit opt-in and fails loudly if unavailable.
+    p.add_argument("--log-backend", choices=["none", "tensorboard", "wandb"], default="tensorboard")
+    p.add_argument("--wandb-project", default="borissal")
     p.add_argument("--save-every", type=int, default=0, help="0 = save only at the end")
     p.add_argument("--device", default="auto")
     p.add_argument("--seed", type=int, default=0)
@@ -148,6 +165,39 @@ def peak_memory_mb(device: torch.device) -> float:
     import sys
     raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return raw / 1e6 if sys.platform == "darwin" else raw / 1e3
+
+
+_IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+_IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+
+
+def probe_images(video, sel, patch_size):
+    """CPU float [0,1] images for the logging backends: (3,H,W) selection
+    overlay of tubelet 0 on frame 0, and (1,Hg,Wg) score heatmap."""
+    img = (video[0, 0].cpu() * _IMAGENET_STD + _IMAGENET_MEAN).clamp(0, 1)
+    T_grid, H_grid, W_grid = sel.grid_thw[0].tolist()
+    mask0 = sel.keep_mask[0].reshape(T_grid, H_grid * W_grid)[0].reshape(H_grid, W_grid)
+    up = mask0.float().cpu().repeat_interleave(patch_size, 0).repeat_interleave(patch_size, 1)
+    overlay = img * (0.35 + 0.65 * up.unsqueeze(0))
+    heat = sel.scores[0].reshape(T_grid, H_grid, W_grid)[0].cpu()
+    heat = (heat - heat.min()) / (heat.max() - heat.min() + 1e-9)
+    return overlay, heat.unsqueeze(0)
+
+
+def save_checkpoint(path, config, model, optimizer, step):
+    """Full-resume checkpoint: model + optimizer + step + RNG.
+    (Older checkpoints lack optimizer/rng -- resume falls back to reseeding.)"""
+    rng = {"torch_cpu": torch.get_rng_state()}
+    if torch.cuda.is_available():
+        rng["torch_cuda"] = torch.cuda.get_rng_state_all()
+    torch.save({
+        "model_tag": MODEL_TAG_V1,
+        "config": config.__dict__,
+        "state_dict": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "step": step,
+        "torch_rng": rng,
+    }, path)
 
 
 def complement_indices(hard_keep: torch.Tensor) -> torch.Tensor:
@@ -267,7 +317,8 @@ def main():
         args.scale = 128
         args.steps = min(args.steps, 30)
 
-    dataset = VideoFolderDataset(args.data_root, num_frames=args.num_frames, size=args.scale)
+    dataset = VideoFolderDataset(args.data_root, num_frames=args.num_frames, size=args.scale,
+                                 max_files=args.max_files)
     sampler = DistributedSampler(dataset, shuffle=True) if distributed else None
     loader = DataLoader(
         dataset, batch_size=args.batch_size, sampler=sampler,
@@ -281,7 +332,7 @@ def main():
     hub_teacher = False
     if args.teacher and args.teacher.startswith("hub:"):
         from autogaze.models.borissal.vjepa21_hub import VJEPA21HubTeacher
-        teacher = VJEPA21HubTeacher.from_hub(args.teacher[len("hub:"):])
+        teacher = VJEPA21HubTeacher.from_hub(args.teacher[len("hub:"):], repo_dir=args.hub_repo_dir)
         hub_teacher = True
     elif args.teacher:
         teacher = VJEPA2Teacher.from_pretrained(args.teacher)
@@ -290,19 +341,40 @@ def main():
     teacher = teacher.to(device)
 
     # ------------------------------------------------------------- selector
-    config = BorissalV1Config(
-        scale=args.scale,
-        input_mode=args.input_mode,
-        residual_scoring=args.residual_scoring,
-        v0_preset=args.input_v0_preset,
-        train_block_size=args.train_block_size,
-    )
+    # Resume: the CHECKPOINT's config wins (the weights define the model
+    # structure); CLI model flags are ignored on resume.
+    resume_ckpt = None
+    if args.resume:
+        resume_path = Path(args.out_dir) / "checkpoint_last.pt" if args.resume == "auto" \
+            else Path(args.resume)
+        if resume_path.exists():
+            resume_ckpt = torch.load(resume_path, map_location="cpu", weights_only=False)
+            if is_main:
+                print(f"resuming from {resume_path} (step {resume_ckpt['step']})")
+        elif args.resume != "auto":
+            raise SystemExit(f"--resume checkpoint not found: {resume_path}")
+
+    if resume_ckpt is not None:
+        ckpt_cfg = dict(resume_ckpt["config"])
+        ckpt_cfg.setdefault("cosine_scores", False)   # pre-upgrade checkpoints
+        ckpt_cfg.setdefault("global_context", False)
+        config = BorissalV1Config(**ckpt_cfg)
+    else:
+        config = BorissalV1Config(
+            scale=args.scale,
+            input_mode=args.input_mode,
+            residual_scoring=args.residual_scoring,
+            v0_preset=args.input_v0_preset,
+            train_block_size=args.train_block_size,
+        )
     if args.rl_after_step > 0 and args.rl_samples < 2:
         raise SystemExit("--rl-samples must be >= 2 (leave-one-out baseline needs peers)")
     if args.rl_after_step > 0 and args.train_block_size > 1 and is_main:
         print("WARNING: the RL phase samples per-token; train_block_size only shapes the ST phase")
 
     model = BorissalV1(config).to(device)
+    if resume_ckpt is not None:
+        model.load_state_dict(resume_ckpt["state_dict"])
     model.train()
     wrapped = DDP(model, device_ids=[local_rank] if device.type == "cuda" else None) if distributed else model
 
@@ -320,6 +392,23 @@ def main():
         {"params": trunk_params, "lr": args.lr},
         {"params": head_params, "lr": args.lr * args.head_lr_scale},
     ])
+    start_step = 0
+    if resume_ckpt is not None:
+        start_step = int(resume_ckpt["step"])
+        if "optimizer" in resume_ckpt:
+            # param groups are rebuilt above in the same (trunk, head) order,
+            # so the AdamW moment tensors line up
+            optimizer.load_state_dict(resume_ckpt["optimizer"])
+        elif is_main:
+            print("NOTE: old checkpoint without optimizer state -- optimizer starts cold")
+        if not distributed and "torch_rng" in resume_ckpt:
+            torch.set_rng_state(resume_ckpt["torch_rng"]["torch_cpu"])
+            if torch.cuda.is_available() and "torch_cuda" in resume_ckpt["torch_rng"]:
+                torch.cuda.set_rng_state_all(resume_ckpt["torch_rng"]["torch_cuda"])
+        else:
+            # DDP (checkpoint holds only rank0's stream) or old checkpoint:
+            # deterministic per-rank reseed -- approximate resume
+            torch.manual_seed(args.seed + rank + start_step * 1009)
     weights = LossWeights(
         predictor_coverage=args.w_pred,
         dense_sparse_match=args.w_match,
@@ -343,8 +432,18 @@ def main():
         out_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / "train_log.jsonl"
 
+    tb_writer = None
+    use_wandb = False
+    if is_main and args.log_backend == "tensorboard":
+        from torch.utils.tensorboard import SummaryWriter
+        tb_writer = SummaryWriter(log_dir=str(out_dir / "tb"))
+    elif is_main and args.log_backend == "wandb":
+        import wandb  # explicit opt-in: fail loudly if unavailable/offline
+        wandb.init(project=args.wandb_project, dir=str(out_dir), config=vars(args))
+        use_wandb = True
+
     # ------------------------------------------------------------ train loop
-    step = 0
+    step = start_step
     data_iter = iter(loader)
     t_start = time.perf_counter()
     if device.type == "cuda":
@@ -492,7 +591,8 @@ def main():
                 # probe_overlap_prev pinned at 1.0 + dying grad_norm = frozen
                 # selector (content-independent constant pattern).
                 model.eval()
-                probe_mask = model.select(probe_clip, gazing_ratio=0.3).keep_mask
+                probe_sel = model.select(probe_clip, gazing_ratio=0.3)
+                probe_mask = probe_sel.keep_mask
                 model.train()
                 if probe_prev_mask is not None:
                     inter_ = (probe_mask & probe_prev_mask).sum().item()
@@ -510,7 +610,7 @@ def main():
                 "v0_overlap": round(overlap, 4),
                 "probe_overlap_prev": None if probe_iou is None else round(probe_iou, 4),
                 "score_entropy_mean": round(entropy_mean, 4),
-                "sec_per_step": round((time.perf_counter() - t_start) / step, 3),
+                "sec_per_step": round((time.perf_counter() - t_start) / max(1, step - start_step), 3),
                 "peak_mem_mb": round(peak_memory_mb(device), 1),
                 **{k: round(v, 9) for k, v in grad_reach.items()},
                 **{f"loss/{k}": round(v, 6) for k, v in accum_logs.items()},
@@ -518,24 +618,38 @@ def main():
             print(json.dumps(record))
             with open(log_path, "a") as f:
                 f.write(json.dumps(record) + "\n")
+            if tb_writer is not None or use_wandb:
+                overlay, heat = probe_images(probe_clip, probe_sel, config.patch_size)
+                scalars = {k: v for k, v in record.items() if isinstance(v, (int, float)) and v is not None}
+                if tb_writer is not None:
+                    for k, v in scalars.items():
+                        tb_writer.add_scalar(k, v, step)
+                    tb_writer.add_image("probe/selection_overlay", overlay, step)
+                    tb_writer.add_image("probe/score_heatmap", heat, step)
+                    tb_writer.flush()
+                if use_wandb:
+                    import wandb
+                    wandb.log({**scalars,
+                               "probe/selection_overlay": wandb.Image(overlay.permute(1, 2, 0).numpy()),
+                               "probe/score_heatmap": wandb.Image(heat[0].numpy())}, step=step)
             # Always keep an overwritten rolling checkpoint at every log point
             # so an interrupted run never loses its weights (learned the hard
             # way: a 40-step run killed before the final save left nothing).
-            torch.save({"model_tag": MODEL_TAG_V1, "config": config.__dict__,
-                        "state_dict": model.state_dict(), "step": step},
-                       out_dir / "checkpoint_last.pt")
+            save_checkpoint(out_dir / "checkpoint_last.pt", config, model, optimizer, step)
 
         if is_main and args.save_every and step % args.save_every == 0:
-            torch.save({"model_tag": MODEL_TAG_V1, "config": config.__dict__,
-                        "state_dict": model.state_dict(), "step": step},
-                       out_dir / f"checkpoint_step{step}.pt")
+            save_checkpoint(out_dir / f"checkpoint_step{step}.pt", config, model, optimizer, step)
 
     if is_main:
         ckpt_path = out_dir / "checkpoint_final.pt"
-        torch.save({"model_tag": MODEL_TAG_V1, "config": config.__dict__,
-                    "state_dict": model.state_dict(), "step": step}, ckpt_path)
+        save_checkpoint(ckpt_path, config, model, optimizer, step)
         print(f"saved {ckpt_path}")
 
+    if tb_writer is not None:
+        tb_writer.close()
+    if use_wandb:
+        import wandb
+        wandb.finish()
     if distributed:
         dist.destroy_process_group()
     if tmp_dir:

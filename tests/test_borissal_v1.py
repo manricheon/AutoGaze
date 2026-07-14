@@ -343,6 +343,34 @@ def test_hardness_rank_loss_direction():
     assert scores.grad is not None and scores.grad.abs().sum() > 0
 
 
+def test_videomae_gazing_adapter_mapping():
+    # Manual case: 2 tubelets, 2x2 fine grid (scales (16,32), patch 16 ->
+    # 1 + 4 = 5 tokens/frame, fine offset 1), tubelet_size 2.
+    from types import SimpleNamespace
+
+    from autogaze.models.borissal.adapters import to_videomae_gazing_info
+
+    # tubelet 0 keeps fine cells {1, 2}; tubelet 1 keeps {0, 3}
+    keep_index = torch.tensor([[0 * 4 + 1, 0 * 4 + 2, 1 * 4 + 0, 1 * 4 + 3]])
+    sel = SimpleNamespace(
+        keep_index=keep_index,
+        grid_thw=torch.tensor([[2, 2, 2]]),
+        per_frame_keep=torch.tensor([[2, 2]]),
+    )
+    out = to_videomae_gazing_info(sel, tubelet_size=2, scales=(16, 32), patch_size=16)
+    # frames 0,1 inherit tubelet 0 -> local {1,2} -> +offset1 = {2,3}; global f*5+{2,3}
+    # frames 2,3 inherit tubelet 1 -> local {0,3} -> +offset1 = {1,4}; global f*5+{1,4}
+    expected = torch.tensor([[2, 3, 5 + 2, 5 + 3, 10 + 1, 10 + 4, 15 + 1, 15 + 4]])
+    assert torch.equal(out["gazing_pos"], expected)
+    assert out["num_gazing_each_frame"].tolist() == [2, 2, 2, 2]
+    assert out["num_vision_tokens_each_frame"] == 5
+    assert out["frame_sampling_rate"] == 1
+    assert not out["if_padded_gazing"].any()
+    # ascending frame-major order (the canonical-contract property downstream relies on)
+    g = out["gazing_pos"][0]
+    assert (g[1:] > g[:-1]).all()
+
+
 def test_rloo_microbatch_smoke():
     # WP-C: REINFORCE with leave-one-out baseline against a tiny teacher.
     import importlib.util

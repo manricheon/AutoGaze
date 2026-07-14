@@ -39,7 +39,11 @@ def _selection_from_scores(
     Mirrors v0's selection tail (modeling_borissal._select_impl) so v1 output
     obeys the identical Selection contract, including ascending keep_index.
     """
-    B, T_grid, H_grid, W_grid = S.shape
+    # int() casts: under torch.jit.trace, unpacking .shape yields tensor
+    # scalars and the Python round()/min() budget arithmetic below breaks
+    # (same trace pitfall fixed in v0's _select_impl; found again by
+    # export_borissal_check.py on the v1 path)
+    B, T_grid, H_grid, W_grid = (int(x) for x in S.shape)
     N_pf = H_grid * W_grid
     L = T_grid * N_pf
     device = S.device

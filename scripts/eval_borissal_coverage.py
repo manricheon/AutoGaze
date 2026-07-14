@@ -136,7 +136,9 @@ def main():
                    help='config specs, e.g. v0.1 v0.2 "v0.1,block_size=2"')
     p.add_argument("--ratios", nargs="+", type=float, default=[0.25])
     p.add_argument("--teacher", default="facebook/vjepa2-vitl-fpc64-256",
-                   help="HF id/path (crop must match --scale)")
+                   help='HF id/path, or "hub:<entrypoint>" (crop must match --scale)')
+    p.add_argument("--hub-repo-dir", default=None,
+                   help="local clone of facebookresearch/vjepa2 for offline hub: teachers")
     p.add_argument("--scale", type=int, default=256,
                    help="clip resolution fed to selector AND teacher (default matches HF vitl-256)")
     p.add_argument("--num-frames", type=int, default=16)
@@ -150,7 +152,8 @@ def main():
     hub = args.teacher.startswith("hub:")
     if hub:
         from autogaze.models.borissal.vjepa21_hub import VJEPA21HubTeacher
-        teacher = VJEPA21HubTeacher.from_hub(args.teacher[len("hub:"):]).to(device)
+        teacher = VJEPA21HubTeacher.from_hub(args.teacher[len("hub:"):],
+                                             repo_dir=args.hub_repo_dir).to(device)
     else:
         teacher = VJEPA2Teacher.from_pretrained(args.teacher).to(device)
 

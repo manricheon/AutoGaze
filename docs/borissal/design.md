@@ -533,6 +533,52 @@ grid tensors, consistent with the original mobile review; mobile delegates
 are a different runtime, CPU is the honest proxy). Raw tables:
 `outputs/borissal/benchmark/latency_{cpu,mps}.json`.
 
+### Cross-family gate: VideoMAE reconstruction (2026-07-15)
+
+`scripts/eval_borissal_videomae_recon.py` scores selections with the
+ORIGINAL AutoGaze VideoMAE checkpoint (`bfshi/VideoMAE_AutoGaze`,
+videomae.pt) — the exact model family behind AutoGaze's own RL reward, and
+an axis INDEPENDENT of our V-JEPA training teacher. Wiring notes: multi-
+scale per-frame layout (32+64+112+224 → 265 tokens/frame; Borissal maps
+onto the finest-scale block via `adapters.to_videomae_gazing_info`,
+tubelet→2-frame duplication), DDP "module." prefix stripped, loss_type=l1
+only (checkpoint's dinov2/siglip2 heads skipped — need flash-attn + extra
+models; irrelevant for comparing selections), transformers-5.5.0 pruning-
+API shim installed script-locally. Checkpoint loads with 0 missing keys.
+
+First measurement (example clip, ratio 0.25, recon frames 1..15 odd):
+
+| selector | recon L1 (<) |
+|---|---|
+| random | **0.183** |
+| v0.2 | 0.338 |
+| v1 (60-step local recipe) | 1.224 |
+
+Reading: EXACTLY the theory-predicted ordering — a reconstruction-family
+metric rewards scatter, so random wins and the deliberately-concentrated
+selections lose; the strips confirm the mechanism (random reconstructs the
+whole frame faithfully; v1's concentrated selection leaves the background
+hallucinated). Two conclusions: (a) the canonical keep-index contract runs
+END-TO-END into the original AutoGaze task (first real consumer — the
+adapter is the integration point downstream will reuse); (b) this metric
+shares coverage's scatter bias and is a CROSS-FAMILY REFERENCE AXIS, not
+an adoption gate — do not optimize toward it blindly. Raw:
+`outputs/borissal/videomae_recon/results.json` + strips (gitignored).
+
+### Mobile-export pre-check (2026-07-15)
+
+`scripts/export_borissal_check.py`: v0.2 and v1 (cosine + global context)
+both PASS torch.jit.trace AND ONNX opset-17 export (v1 → 4.2 MB). Two
+real bugs found and fixed by the check: (1) `_pack_gazing_mask`'s
+`stable=True` argsort lowered to `aten::sort.out`, unsupported by the ONNX
+exporter — removed, safe because the sort keys are UNIQUE by construction
+(kept→idx, dropped→N+idx), so plain argsort is already deterministic;
+(2) `_selection_from_scores` unpacked `S.shape` without `int()` casts,
+breaking Python `round()` budget arithmetic under trace (same pitfall
+class as v0's earlier fix). CoreML conversion deliberately deferred to
+the Linux/CI side (onnx→coreml); this check's job is catching op/trace
+problems on the dev box.
+
 ## Theory notes (2026-07-14): what the literature says about our measured pathologies
 
 Two parallel surveys (① token selection / differentiable top-k;

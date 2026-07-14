@@ -55,8 +55,18 @@ class VJEPA21HubTeacher(nn.Module):
         self.predictor = predictor
 
     @classmethod
-    def from_hub(cls, entrypoint: str = "vjepa2_1_vit_base_384", **kwargs) -> "VJEPA21HubTeacher":
-        encoder, predictor = torch.hub.load(HUB_REPO, entrypoint, pretrained=True, **kwargs)
+    def from_hub(cls, entrypoint: str = "vjepa2_1_vit_base_384",
+                 repo_dir: Optional[str] = None, **kwargs) -> "VJEPA21HubTeacher":
+        """repo_dir: path to a LOCAL clone of facebookresearch/vjepa2 (a dir
+        containing hubconf.py) -- required on offline machines, where the
+        default source="github" cannot fetch the repo code. Checkpoints are
+        still resolved from ~/.cache/torch/hub/checkpoints/ (pre-download
+        them there; see the module docstring)."""
+        if repo_dir:
+            encoder, predictor = torch.hub.load(repo_dir, entrypoint, source="local",
+                                                pretrained=True, **kwargs)
+        else:
+            encoder, predictor = torch.hub.load(HUB_REPO, entrypoint, pretrained=True, **kwargs)
         return cls(encoder, predictor)
 
     @property

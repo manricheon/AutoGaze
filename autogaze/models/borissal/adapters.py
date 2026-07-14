@@ -60,6 +60,69 @@ def to_vjepa2(selection: Selection) -> dict:
     }
 
 
+def to_videomae_gazing_info(
+    selection: Selection,
+    tubelet_size: int,
+    scales: tuple = (32, 64, 112, 224),
+    patch_size: int = 16,
+) -> dict:
+    """Bridge to the ORIGINAL AutoGaze VideoMAE reconstruction task
+    (autogaze/tasks/video_mae_reconstruction), whose released checkpoint is
+    multi-scale and per-frame:
+
+    - each frame contributes sum((s/patch)^2 for s in scales) tokens (265
+      for 32+64+112+224), ordered scale-ascending, so the finest-scale
+      (224 -> 14x14=196) block starts at offset sum of the coarser counts (69);
+    - `gazing_pos` holds GLOBAL flat indices `frame*tokens_per_frame + local`,
+      frame-major ascending;
+    - the task is per-frame (frame_sampling_rate must be 1), while Borissal
+      selects per TUBELET -- each tubelet's spatial selection is therefore
+      duplicated to both of its frames (that is exactly what selecting a
+      tubelet means physically).
+
+    Borissal's selection maps onto the finest scale only; all coarser-scale
+    tokens stay unselected (within the checkpoint's training distribution --
+    its per-scale allocation was Dirichlet-sampled and could concentrate on
+    one scale). Requires an unpadded, batch-uniform per-tubelet keep count
+    (uniform allocation).
+    """
+    if (selection.keep_index < 0).any():
+        raise NotImplementedError("to_videomae_gazing_info requires unpadded selection (uniform allocation)")
+    B = selection.keep_index.shape[0]
+    T_grid, H_grid, W_grid = (int(x) for x in selection.grid_thw[0].tolist())
+    N_pf = H_grid * W_grid
+    fine = max(scales)
+    if N_pf != (fine // patch_size) ** 2:
+        raise ValueError(
+            f"selection grid {H_grid}x{W_grid} does not match the finest VideoMAE scale "
+            f"{fine} (expected {(fine // patch_size)}x{(fine // patch_size)}; run the selector at scale={fine})")
+    per_frame_keep = selection.per_frame_keep
+    if not torch.equal(per_frame_keep, per_frame_keep[0:1].expand_as(per_frame_keep)):
+        raise NotImplementedError("requires a batch-uniform per-tubelet keep count (uniform allocation)")
+
+    tokens_per_frame = sum((s // patch_size) ** 2 for s in scales)
+    fine_offset = tokens_per_frame - N_pf
+    num_frames = T_grid * tubelet_size
+
+    kept = selection.keep_index                      # (B, K) ascending t*N_pf + n
+    t = kept // N_pf                                 # (B, K) tubelet index
+    n = kept % N_pf                                  # (B, K) fine-scale spatial index
+    j = torch.arange(tubelet_size, device=kept.device)
+    frames = t.unsqueeze(-1) * tubelet_size + j      # (B, K, tub)
+    gazing = frames * tokens_per_frame + fine_offset + n.unsqueeze(-1)
+    gazing = gazing.reshape(B, -1).sort(dim=-1).values  # global ascending = frame-major
+
+    num_gazing_each_frame = per_frame_keep[0].repeat_interleave(tubelet_size).to(torch.long)
+    return {
+        "gazing_pos": gazing,
+        "num_gazing_each_frame": num_gazing_each_frame,          # (num_frames,)
+        "if_padded_gazing": torch.zeros_like(gazing, dtype=torch.bool),
+        "frame_sampling_rate": 1,
+        "num_vision_tokens_each_frame": tokens_per_frame,
+        "num_frames": num_frames,
+    }
+
+
 def to_autogaze_gazing_info(selection: Selection, scale: int, tubelet_size: int) -> dict:
     """Optional compatibility bridge to the legacy AutoGaze gaze-model output
     contract (autogaze/models/autogaze/autogaze.py forward return dict), for
