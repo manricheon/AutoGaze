@@ -486,6 +486,27 @@ gate's pass line; combination-optimization beyond that is v1's job
 task analysis: cross-tubelet variation isn't harmful for whole-clip
 description; a streaming-UI concern only).
 
+### Gate row added 2026-07-15 — first trained-v1 measurement (local, 60 steps)
+
+`outputs/borissal/gate_v1_recipe_local.json` (HF vitl-256 teacher, example
+clip; recipe = warmup 20 + uniqueness 1.0 + floor 8.0, GCNet-lite on):
+
+| selector | ratio 0.25 cov(<) / uniq(>) | ratio 0.5 cov(<) / uniq(>) |
+|---|---|---|
+| random | 8.239 / 7.933 | 8.065 / 8.055 |
+| v0.2 | 8.226 / **8.370** | 8.013 / **8.284** |
+| v1 (60-step local) | 8.497 / 7.854 | 8.406 / 8.086 |
+
+Honest read: the 60-step local model does NOT yet beat random on its own
+uniqueness objective (7.85 < 7.93 at 0.25) — uniqueness_reward stayed
+essentially flat during the run (-8.03→-8.13). Expected at this scale
+(1 duplicated clip, zero-init context path barely open at |w|=0.003), but
+it sets the bar the scale run must clear early (training.md §7 ladder,
+item 4). Notable disagreement: the visually-pleasing selection (screen
+diagram content, no edge bands) measured as LOW-uniqueness — human visual
+appeal and the predictor metric can conflict; report both, downstream
+captioner is the eventual referee.
+
 ## Theory notes (2026-07-14): what the literature says about our measured pathologies
 
 Two parallel surveys (① token selection / differentiable top-k;
@@ -548,7 +569,7 @@ citable negative finding for the eventual paper.
   beat adaptive balancers head-to-head (arXiv:2201.04122).
 - SemMAE part-learning / AutoMAE GAN prior: block sampling achieves the
   contiguity prior directly, without the machinery.
-- Deferred to Linux compute (training.md §7.7): REAL-X predictor
+- Deferred to Linux compute (training.md §7.8): REAL-X predictor
   calibration adapter, EVAL-X audit gap, Frame-Voyager caption-loss
   model selection.
 

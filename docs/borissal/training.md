@@ -239,14 +239,24 @@ uv run python scripts/train_borissal_v1.py --smoke \
     --batch-size 1 --device mps --steps 30 --out-dir weights/borissal_v1_vjepa21b
 ```
 
-Linux multi-GPU (AutoGaze-Training-Data, V-JEPA 2.1-L teacher):
+Linux multi-GPU (AutoGaze-Training-Data, V-JEPA 2.1-L teacher, the §8
+recipe — SSL-only, RL deferred). FIRST measure the random coverage
+baseline for this teacher (§7 item 0) and substitute it for <FLOOR>:
 ```bash
+uv run python scripts/eval_borissal_coverage.py \
+    --video <a few dataset clips> --ratios 0.25 \
+    --teacher hub:vjepa2_1_vit_large_384 --scale 384 --configs random
 torchrun --nproc_per_node=8 scripts/train_borissal_v1.py \
     --data-root /path/to/AutoGaze-Training-Data \
     --teacher hub:vjepa2_1_vit_large_384 --scale 384 \
-    --batch-size 8 --grad-accum 2 --steps 20000 \
-    --ratio-sampling uniform --ratio-min 0.15 --ratio-max 0.75
+    --batch-size 8 --grad-accum 2 --steps 20000 --lr 1e-4 \
+    --w-v0-distill 1.0 --v0-distill-warmup-steps 500 \
+    --w-uniqueness 1.0 --coverage-floor <FLOOR> \
+    --ratio-sampling uniform --ratio-min 0.15 --ratio-max 0.75 \
+    --save-every 1000 --num-workers 8
 ```
+(lr 1e-4 per the trend-run analysis; entropy annealing off for the first
+run — observe before tuning. Judge by the §7 ladder.)
 (HF `facebook/vjepa2-vitl-fpc64-256` at `--scale 256` remains a supported
 alternative teacher with the plain dense-target coverage loss.)
 (DDP activates automatically under torchrun; single-process otherwise.
@@ -326,7 +336,43 @@ bottleneck; scale with CPU cores), `--save-every 1000`.
   videos; `--num-workers` is the mitigation.
 - wandb is installed but the trainer logs to stdout+jsonl only.
 
-**7. Scale-run options from the theory survey deliberately deferred to
+**7. Scale-run judgment ladder (go/no-go, in observation order)** —
+consolidated 2026-07-15 after the local recipe test:
+
+0. **Before launch**: measure the random coverage baseline for YOUR teacher
+   (`eval_borissal_coverage.py --teacher hub:vjepa2_1_vit_large_384
+   --scale 384 --configs random`) and pass it as `--coverage-floor` —
+   the scale differs per teacher family (HF vitl-256 ≈ 8.2 vs hub 2.1
+   oracle-reference ≈ 0.05; measured).
+1. **First few hundred steps**: `loss/uniqueness_reward` trending DOWN
+   (the primary objective is learning) and coverage-floor overflow staying
+   bounded (< ~1.0). The 60-step local test showed a healthy recipe but
+   uniqueness essentially flat (-8.03 → -8.13) — at scale it must actually
+   trend, or the objective isn't biting.
+2. **Throughout**: `score_entropy_mean` > ~3.5 and not in freefall,
+   `grad_norm` alive, `probe_overlap_prev` never pinned at 1.0,
+   `lgrad_low_decile_mean` within ~2 orders of `lgrad_sel_mean`.
+3. **Every saved checkpoint** (`borissal_model_diagnostics.py --checkpoint`):
+   `perturb_near_over_far` DECREASING vs the untrained ~40–55x (the
+   zero-init global-context path opening — it moved only 0→0.003 |w| in 60
+   local steps, so this is a scale-run signal); `v0_spearman` NOT
+   converging to 1.0 (v0-reproduction collapse); `brightness_spearman`
+   decreasing from the ~0.83 init bias (content taking over).
+4. **Gate (the adoption criterion)**: `eval_borissal_coverage.py` with
+   random + v0.2 + `v1:<checkpoint>` — v1 must show uniqueness ABOVE
+   random (necessary) and approach/beat v0.2 (adoption bar), with coverage
+   near the floor. Local 60-step reference point (recorded in design.md):
+   v1 7.85 < random 7.93 < v0.2 8.37 at ratio 0.25 — i.e. the local test
+   does NOT yet beat random; the scale run must clear this bar early.
+5. **Visual dumps on diverse clips**: no edge bands, content-following,
+   frame-consistent. CAUTION from the local test: visual appeal and the
+   uniqueness metric can DISAGREE (the human-pleasing bright-screen
+   selection measured as LOW-uniqueness content) — when they conflict,
+   report both; the downstream captioner is the eventual referee.
+6. **RL trigger** (§8): only if entropy collapses / grads die despite
+   WP-A + global context.
+
+**8. Scale-run options from the theory survey deliberately deferred to
 Linux compute** (§8 has the rationale):
 - REAL-X-style calibration: fine-tune a light adapter on the predictor
   with RANDOM masks spanning the 0.15–0.75 keep range before trusting it

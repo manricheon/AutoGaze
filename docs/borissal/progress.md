@@ -847,7 +847,7 @@ design.md "Theory notes", training.md §8.
 Surveyed-and-rejected list (DPP diversity, SIMPLE/perturbed top-k,
 GradNorm, SemMAE/AutoMAE machinery) recorded with reasons in design.md;
 REAL-X calibration / EVAL-X audit / Frame-Voyager model selection deferred
-to Linux compute (training.md §7.7). Tests 37 → **43 green** (z-loss,
+to Linux compute (training.md §7.8). Tests 37 → **43 green** (z-loss,
 cosine bound, coverage floor gating, hardness direction, block ST
 contract, RLOO smoke). Old-checkpoint compat: dump script defaults
 `cosine_scores=False` for pre-upgrade checkpoints.
@@ -902,3 +902,36 @@ measurements + two codebase investigations, reviewed by Fable:
   — documented in training.md §8.
 - New `scripts/borissal_model_diagnostics.py` (v0-corr / perturbation RF /
   brightness-corr; old-checkpoint compat). Tests 43 → **46 green**.
+
+---
+
+## 2026-07-15 (same day) — local recipe test judged; scale-run playbook locked
+
+Ran the full §8 recipe locally (60 steps, HF vitl-256, warmup 20 →
+uniqueness 1.0 + floor 8.0, GCNet-lite on) and closed the judgment loop:
+
+- **Recipe health: PASS.** Warmup learned then annealed off (v0_distill
+  8.5→3.1), uniqueness held as primary, coverage-floor overflow bounded
+  (0.07–0.37), entropy gentle (4.86→4.45), probe IoU 0.75–0.82 (not
+  pinned), post-training v0 correlation 0.05 (no passthrough).
+- **Visual: PASS.** No edge bands; selection follows content (screen
+  diagram + subtitles + shelf) and is frame-consistent; v0.2 misses the
+  screen content that trained v1 picks up.
+  (outputs/borissal/cmp_recipe_* — gitignored.)
+- **Quantitative gate: NOT YET.** v1 uniqueness 7.85 < random 7.93 < v0.2
+  8.37 at ratio 0.25 (design.md gate row) — the objective didn't move in
+  60 steps on one duplicated clip; this is the bar the scale run must
+  clear early. Also recorded: visual appeal and the uniqueness metric
+  DISAGREED on this clip — the pleasing bright-screen selection measures
+  as predictable content.
+- **eval_borissal_coverage.py extended**: `v1:<checkpoint>` selector spec
+  (old-checkpoint compat) and `--teacher hub:*` with oracle-reference
+  targets (needed to measure the 2.1-L coverage-floor baseline before the
+  scale run).
+- **training.md §7 rewritten as a judgment ladder** (items 0–6: floor
+  baseline measurement → early uniqueness trend → collapse guards →
+  per-checkpoint diagnostics → adoption gate → visual → RL trigger) and
+  §6 scale-run command updated to the full recipe (lr 1e-4, warmup 500,
+  uniqueness-primary + measured floor).
+
+Next: Linux scale run per §6/§7. Everything else is blocked on that.

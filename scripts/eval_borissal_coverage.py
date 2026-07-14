@@ -28,6 +28,17 @@ Examples:
     uv run python scripts/eval_borissal_coverage.py \
         --video assets/example_input.mp4 --ratios 0.25 \
         --configs v0.1 "v0.1,block_size=2" "v0.1,motion_noise_floor=quantile"
+
+    # trained v1 checkpoint vs random and v0.2 (the post-training gate)
+    uv run python scripts/eval_borissal_coverage.py \
+        --video assets/example_input.mp4 --ratios 0.25 0.5 \
+        --configs random v0.2 v1:weights/<run>/checkpoint_final.pt
+
+    # measure the random coverage baseline for a hub 2.1 teacher (sets
+    # --coverage-floor for the scale run; oracle-reference targets applied)
+    uv run python scripts/eval_borissal_coverage.py \
+        --video assets/example_input.mp4 --ratios 0.25 \
+        --teacher hub:vjepa2_1_vit_large_384 --scale 384 --configs random
 """
 
 import argparse
@@ -78,16 +89,23 @@ def random_keep_mask(video: torch.Tensor, cfg: BorissalConfig, ratio: float, see
     return mask.reshape(B, T_grid * N_pf)
 
 
-def _predict_mse(teacher, video, ctx_idx, tgt_idx, L) -> float:
+def _predict_mse(teacher, video, ctx_idx, tgt_idx, L, hub: bool = False) -> float:
     with torch.no_grad():
         dense = teacher.dense_features(video)
         ctx = teacher.sparse_features(video, ctx_idx)
         pred = teacher.predict(ctx, ctx_idx, tgt_idx, num_tokens=L)
-        tgt = torch.gather(dense, 1, tgt_idx.unsqueeze(-1).expand(-1, -1, dense.size(-1)))
+        if hub:
+            # 2.1 predictors project into the distillation-teacher space, so
+            # the target is an oracle-reference pass through the SAME head
+            # with full context (training.md §5 -- same wiring as the trainer)
+            all_idx = torch.arange(L, device=video.device).unsqueeze(0).expand(video.shape[0], -1)
+            tgt = teacher.predict(dense, all_idx, tgt_idx, num_tokens=L)
+        else:
+            tgt = torch.gather(dense, 1, tgt_idx.unsqueeze(-1).expand(-1, -1, dense.size(-1)))
         return torch.nn.functional.mse_loss(pred, tgt).item()
 
 
-def score_selection(teacher, video: torch.Tensor, selector, ratio: float, cfg=None) -> dict:
+def score_selection(teacher, video: torch.Tensor, selector, ratio: float, cfg=None, hub: bool = False) -> dict:
     """Both metrics for one clip at one budget."""
     if selector == "random":
         keep_mask = random_keep_mask(video, cfg, ratio)
@@ -105,9 +123,9 @@ def score_selection(teacher, video: torch.Tensor, selector, ratio: float, cfg=No
 
     return {
         # reconstruct the rest FROM the selection (lower better; scatter-biased)
-        "coverage_mse": _predict_mse(teacher, video, keep_index, rest_idx, L),
+        "coverage_mse": _predict_mse(teacher, video, keep_index, rest_idx, L, hub=hub),
         # reconstruct the selection FROM the rest (higher better)
-        "uniqueness_mse": _predict_mse(teacher, video, rest_idx, keep_index, L),
+        "uniqueness_mse": _predict_mse(teacher, video, rest_idx, keep_index, L, hub=hub),
     }
 
 
@@ -127,7 +145,14 @@ def main():
     args = p.parse_args()
 
     device = resolve_device(args.device)
-    teacher = VJEPA2Teacher.from_pretrained(args.teacher).to(device)
+    # "hub:<entrypoint>" -> torch.hub V-JEPA 2.1 adapter with oracle-reference
+    # targets; anything else -> HF (same convention as the trainer).
+    hub = args.teacher.startswith("hub:")
+    if hub:
+        from autogaze.models.borissal.vjepa21_hub import VJEPA21HubTeacher
+        teacher = VJEPA21HubTeacher.from_hub(args.teacher[len("hub:"):]).to(device)
+    else:
+        teacher = VJEPA2Teacher.from_pretrained(args.teacher).to(device)
 
     videos = {v: load_video(v, num_frames=args.num_frames, size=args.scale).to(device)
               for v in args.video}
@@ -140,12 +165,23 @@ def main():
         if spec == "random":
             cfg = BorissalConfig(scale=args.scale)
             selector = "random"
+        elif spec.startswith("v1:"):
+            # trained learned-selector checkpoint (same Selection contract)
+            from autogaze.models.borissal import BorissalV1, BorissalV1Config
+            ckpt = torch.load(spec[len("v1:"):], map_location="cpu", weights_only=False)
+            ckpt_cfg = dict(ckpt["config"])
+            ckpt_cfg.setdefault("cosine_scores", False)   # pre-upgrade checkpoints
+            ckpt_cfg.setdefault("global_context", False)
+            cfg = BorissalV1Config(**ckpt_cfg)
+            selector = BorissalV1(cfg)
+            selector.load_state_dict(ckpt["state_dict"])
+            selector = selector.to(device).eval()
         else:
             cfg = parse_config_spec(spec)
             cfg.scale = args.scale
             selector = Borissal(cfg).to(device)
         for ratio in args.ratios:
-            per_clip = {v: score_selection(teacher, vid, selector, ratio, cfg=cfg)
+            per_clip = {v: score_selection(teacher, vid, selector, ratio, cfg=cfg, hub=hub)
                         for v, vid in videos.items()}
             cov = sum(s["coverage_mse"] for s in per_clip.values()) / len(per_clip)
             uni = sum(s["uniqueness_mse"] for s in per_clip.values()) / len(per_clip)
