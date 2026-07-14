@@ -1,8 +1,10 @@
-"""Borissal: a non-learned, feed-forward, single-scale saliency patch selector.
+"""Borissal v0: a non-learned, feed-forward, single-scale saliency patch selector.
 
 Combines motion (temporal tubelet differencing, a codec-residual proxy) and
 spatial (gradient/edge) energy into a per-patch score, then keeps the top-k
-patches per tubelet under a `gazing_ratio` budget. Output is grid_thw-native
+patches per tubelet under a `gazing_ratio` budget -- with that budget's
+per-frame share either uniform or dynamically reallocated to each frame's
+own saliency energy (`per_frame_allocation`). Output is grid_thw-native
 (video-encoder agnostic: V-JEPA2 / Qwen-VL style), not the AutoGaze
 `gazing_pos` dict contract -- see autogaze/models/borissal/adapters.py for an
 optional bridge to that contract.

@@ -3,6 +3,13 @@
 Read this file first when resuming work on the patch-selector line in a new
 session. See `design.md` in this directory for the full design rationale.
 
+Versioning: the current non-learned selector is **Borissal v0**
+(`autogaze.models.borissal.MODEL_TAG == "borissal-v0"`); the learned
+successor (Phase 2) will be **Borissal v1**. Earlier entries below predate
+this naming and call v0 "Borissal-signal" — left as written, since this file
+is a historical log, not a living reference (see `design.md`/`reference.md`
+for the current name).
+
 ---
 
 ## 2026-07-14 — Phase 1 (Borissal-signal) implemented and verified

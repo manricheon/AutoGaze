@@ -24,7 +24,7 @@ import argparse
 import json
 from pathlib import Path
 
-from autogaze.models.borissal import Borissal, BorissalConfig, resolve_device
+from autogaze.models.borissal import Borissal, BorissalConfig, MODEL_TAG, resolve_device
 from autogaze.models.borissal.video_io import load_video, unnormalize
 from autogaze.models.borissal.viz import (
     render_allocation_bar,
@@ -115,6 +115,7 @@ def main():
     )
 
     summary = {
+        "model_tag": MODEL_TAG,
         "video": str(Path(args.video).resolve()),
         "device": str(device),
         "config": {

@@ -1,4 +1,4 @@
-"""Configuration for Borissal, the signal-based feed-forward patch selector (Phase 1)."""
+"""Configuration for Borissal v0, the non-learned feed-forward patch selector (Phase 1)."""
 
 from dataclasses import dataclass, field
 from typing import Literal, Union

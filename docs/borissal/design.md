@@ -15,20 +15,21 @@ patch selector:
 
 - **single-scale** (one resolution / one patch grid, not a multi-scale tile)
 - **feed-forward** (no autoregressive decoding step)
-- **top-k under a ratio budget** (`gazing_ratio` sets how many patches survive)
+- **top-k under a ratio budget** (`gazing_ratio` sets the total; the
+  per-frame share of it is either uniform or dynamically reallocated to
+  each frame's own saliency energy — `per_frame_allocation`)
 
-The full effort is split into three phases, each its own spec/branch:
+The full effort is split into three phases/versions, all on branch `feat/borissal`:
 
-1. **Phase 1 (this doc, done)** — Borissal-signal: a non-learned, saliency-based
+1. **Phase 1 (this doc, done)** — **Borissal v0**: a non-learned, saliency-based
    feed-forward selector. Mobile-oriented (low latency, no learned weights).
-   Branch `feat/selector`.
-2. **Phase 2** — Borissal-learned: a trainable selector (TSM or conv3d backbone +
-   scoring head + differentiable/straight-through top-k), using the Phase 1
-   signal as a baseline/feature input. Branch `feat/selector`.
+2. **Phase 2** — **Borissal v1**: a trainable selector (TSM or conv3d backbone +
+   scoring head + differentiable/straight-through top-k), using v0's
+   saliency signal as a baseline/feature input.
 3. **Phase 3** — self-supervised training via V-JEPA2.1L: compare V-JEPA2
    features on a dense (full) video vs. a sparse (selector-chosen) video to
-   train the selector without ground-truth gazing labels. New task +
-   algorithm, likely on `feat/train`.
+   train Borissal v1 without ground-truth gazing labels. New task +
+   algorithm.
 
 ## Key design decisions (and why they depart from AutoGaze conventions)
 
@@ -221,7 +222,7 @@ legacy training path. See `pyproject.toml`.
 
 ## Mobile readiness review (2026-07-14, before starting Phase 2)
 
-Borissal-signal has zero learned parameters, so its "burden" isn't FLOPs
+Borissal v0 has zero learned parameters, so its "burden" isn't FLOPs
 (negligible next to any vision encoder) — it's **operator support and shape
 behavior on mobile inference runtimes** (CoreML / TFLite / NNAPI / delegates).
 This review is empirical, not just theoretical: it measured actual latency
@@ -344,7 +345,7 @@ not a shape-genericity nicety.
 - No FLOP/parameter burden concern — confirmed negligible vs. any encoder.
 - **Prefer `torch.topk`/bounded-selection over general sort/argsort** in any
   new learned selector code, for the same mobile-op-support reason. Already
-  applied to Borissal-signal's own top-k step.
+  applied to Borissal v0's own top-k step.
 - **Treat `"uniform"`-style (data-independent) per-frame/per-tubelet
   allocation as the mobile-export-safe default.** If Phase 2/3 need a
   data-dependent allocation policy on-device, it cannot be naively

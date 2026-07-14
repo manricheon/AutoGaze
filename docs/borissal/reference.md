@@ -1,7 +1,9 @@
-# Borissal-signal: Reference
+# Borissal v0: Reference
 
 A saliency-based, feed-forward patch selector. Non-learned, single-scale,
-top-k under a fixed budget. This is the "what and why" reference; see
+top-k under a fixed budget — with the per-frame share of that budget either
+uniform or dynamically reallocated to each frame's own saliency energy
+(`per_frame_allocation`, §3). This is the "what and why" reference; see
 [`design.md`](./design.md) for the full engineering rationale and
 [`progress.md`](./progress.md) for the session-by-session log.
 
@@ -39,12 +41,13 @@ on-device (mobile) execution, not maximum selection quality per se. See
 [`design.md`](./design.md#mobile-readiness-review-2026-07-14-before-starting-phase-2)
 for the mobile-specific tradeoffs this drove.
 
-**Where this fits in the bigger picture.** Borissal-signal is Phase 1 of a
-three-phase line: a learned selector (Phase 2) will replace this hand-built
-saliency score with a trainable one, and Borissal's motion/spatial maps are
-the natural starting point — either as literal input features or simply as
-the baseline it needs to beat. Phase 3 trains that learned selector
-self-supervised against V-JEPA2 (dense-vs-sparse feature comparison). None
+**Where this fits in the bigger picture.** Borissal v0 is Phase 1 of a
+three-phase line: a learned selector (Borissal v1, Phase 2) will replace
+this hand-built saliency score with a trainable one, and v0's motion/spatial
+maps are the natural starting point — either as literal input features or
+simply as the baseline it needs to beat. Phase 3 trains that learned
+selector self-supervised against V-JEPA2 (dense-vs-sparse feature
+comparison). None
 of that changes what's described below; it's the reason this exists.
 
 ## 2. Algorithm
@@ -85,7 +88,7 @@ Given a clip `(B, T, C, H, W)`:
 | `spatial_op` | `"grad"` | Gradient method | Cheapest option (no conv2d call) with no measured quality gain from Sobel |
 | `pooling` | `"avg"` | Pixel→patch reduction | Standard, cheap, well-supported everywhere |
 | `gazing_ratio` | `0.5` | Fraction of patches kept | Caller-set budget |
-| `per_frame_allocation` | `"uniform"` | How the budget splits across tubelets | Only variant that *exactly* hits the requested ratio every time; `"proportional"` is content-adaptive but can drift by a patch or two under extreme energy skew |
+| `per_frame_allocation` | `"uniform"` | How the budget splits across tubelets | `"uniform"` is the only variant that *exactly* hits the requested ratio every time; `"proportional"` dynamically reallocates the same total budget toward whichever tubelets carry more saliency energy, but can drift by a patch or two under extreme energy skew |
 
 `spatial_op="grad"`, `pooling="avg"`, and `per_frame_allocation="uniform"`
 were each chosen as the faster and/or ratio-safer of their alternatives —
