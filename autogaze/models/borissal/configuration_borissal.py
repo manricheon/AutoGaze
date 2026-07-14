@@ -1,7 +1,7 @@
 """Configuration for Borissal, the signal-based feed-forward patch selector (Phase 1)."""
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, Union
 
 
 @dataclass
@@ -16,7 +16,11 @@ class BorissalConfig:
     patch_size: int = 16
     tubelet_size: int = 2
 
-    motion_weight: float = 0.5
+    motion_weight: Union[float, Literal["auto"]] = 0.5
+    """Fixed blend weight in [0, 1], or "auto" to derive it per-clip from the
+    clip's own (pre-normalization) motion vs. spatial energy -- still
+    non-learned, just data-adaptive: motion_weight = motion_energy /
+    (motion_energy + spatial_energy)."""
     spatial_op: Literal["grad", "sobel"] = "grad"
     pooling: Literal["avg", "max"] = "avg"
 

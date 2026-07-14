@@ -9,7 +9,7 @@ optional bridge to that contract.
 """
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -116,7 +116,7 @@ class Borissal(nn.Module):
         self,
         video: torch.Tensor,
         gazing_ratio: Optional[float] = None,
-        motion_weight: Optional[float] = None,
+        motion_weight: Optional[Union[float, str]] = None,
         per_frame_allocation: Optional[str] = None,
         tubelet_size: Optional[int] = None,
         patch_size: Optional[int] = None,
@@ -133,7 +133,7 @@ class Borissal(nn.Module):
         self,
         video: torch.Tensor,
         gazing_ratio: Optional[float] = None,
-        motion_weight: Optional[float] = None,
+        motion_weight: Optional[Union[float, str]] = None,
         per_frame_allocation: Optional[str] = None,
         tubelet_size: Optional[int] = None,
         patch_size: Optional[int] = None,
@@ -144,9 +144,13 @@ class Borissal(nn.Module):
         output or recompute anything differently.
 
         Returns (Selection, intermediates) where intermediates is a dict with:
-            motion_norm  (B, T_grid, H_grid, W_grid) float -- normalized motion map
-            spatial_norm (B, T_grid, H_grid, W_grid) float -- normalized spatial map
-            score        (B, T_grid, H_grid, W_grid) float -- combined score S (pre-top-k)
+            motion_norm       (B, T_grid, H_grid, W_grid) float -- normalized motion map
+            spatial_norm      (B, T_grid, H_grid, W_grid) float -- normalized spatial map
+            score             (B, T_grid, H_grid, W_grid) float -- combined score S (pre-top-k)
+            motion_weight_used (B,) float -- the blend weight actually used per video
+                (equal to the fixed config/kwarg value, broadcast, unless
+                motion_weight="auto", in which case it's the per-video
+                computed value)
         """
         return self._select_impl(
             video, gazing_ratio, motion_weight, per_frame_allocation, tubelet_size, patch_size,
@@ -157,7 +161,7 @@ class Borissal(nn.Module):
         self,
         video: torch.Tensor,
         gazing_ratio: Optional[float],
-        motion_weight: Optional[float],
+        motion_weight: Optional[Union[float, str]],
         per_frame_allocation: Optional[str],
         tubelet_size: Optional[int],
         patch_size: Optional[int],
@@ -167,7 +171,7 @@ class Borissal(nn.Module):
         tubelet_size = tubelet_size or cfg.tubelet_size
         patch_size = patch_size or cfg.patch_size
         ratio = cfg.gazing_ratio if gazing_ratio is None else gazing_ratio
-        w = cfg.motion_weight if motion_weight is None else motion_weight
+        motion_weight_setting = cfg.motion_weight if motion_weight is None else motion_weight
         alloc = per_frame_allocation or cfg.per_frame_allocation
         eps = cfg.eps
 
@@ -218,6 +222,18 @@ class Borissal(nn.Module):
         motion_p = motion_p.view(B, T_grid, H_grid, W_grid)
         spatial_p = pool(spatial.reshape(B * T_grid, 1, H, W), kernel_size=patch_size, stride=patch_size)
         spatial_p = spatial_p.view(B, T_grid, H_grid, W_grid)
+
+        if motion_weight_setting == "auto":
+            # Content-adaptive blend: derived from the clip's own (pre-normalization,
+            # so absolute-magnitude-sensitive) motion vs. spatial energy -- still
+            # non-learned, just data-adaptive. A per-tubelet min-max normalized map
+            # (motion_n/spatial_n below) can't be used for this since it erases
+            # absolute magnitude by construction.
+            motion_energy = motion_p.mean(dim=(1, 2, 3), keepdim=True)   # (B, 1, 1, 1)
+            spatial_energy = spatial_p.mean(dim=(1, 2, 3), keepdim=True)  # (B, 1, 1, 1)
+            w = motion_energy / (motion_energy + spatial_energy + eps)
+        else:
+            w = motion_weight_setting
 
         motion_n = _minmax_norm(motion_p, eps)
         spatial_n = _minmax_norm(spatial_p, eps)
@@ -276,9 +292,14 @@ class Borissal(nn.Module):
         )
         intermediates = None
         if want_intermediates:
+            if isinstance(w, torch.Tensor):
+                motion_weight_used = w.reshape(B)
+            else:
+                motion_weight_used = torch.full((B,), float(w), device=device)
             intermediates = {
                 "motion_norm": motion_n,
                 "spatial_norm": spatial_n,
                 "score": S,
+                "motion_weight_used": motion_weight_used,
             }
         return selection, intermediates

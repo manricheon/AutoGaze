@@ -81,7 +81,7 @@ Given a clip `(B, T, C, H, W)`:
 | `scale` | `384` | Frame side length (square) | Matches the intended V-JEPA2 input size |
 | `patch_size` | `16` | Spatial patch edge | Matches V-JEPA2's patch size |
 | `tubelet_size` | `2` | Frames per temporal token | Matches V-JEPA2's tubelet size → `grid_thw=(8,24,24)` |
-| `motion_weight` | `0.5` | Motion vs. spatial blend | Neutral default; content-adaptive tuning is future work (Phase 2) |
+| `motion_weight` | `0.5` | Motion vs. spatial blend | Neutral fixed default; pass `"auto"` for content-adaptive weighting (see below) |
 | `spatial_op` | `"grad"` | Gradient method | Cheapest option (no conv2d call) with no measured quality gain from Sobel |
 | `pooling` | `"avg"` | Pixel→patch reduction | Standard, cheap, well-supported everywhere |
 | `gazing_ratio` | `0.5` | Fraction of patches kept | Caller-set budget |
@@ -89,10 +89,20 @@ Given a clip `(B, T, C, H, W)`:
 
 `spatial_op="grad"`, `pooling="avg"`, and `per_frame_allocation="uniform"`
 were each chosen as the faster and/or ratio-safer of their alternatives —
-together they're already the fast+exact-budget preset. `motion_weight` is
+together they're already the fast+exact-budget preset. `motion_weight` was
 the one knob whose best value genuinely depends on the clip's content
-(static talking-head vs. high-motion footage); it isn't auto-tuned yet (see
-§8).
+(static talking-head vs. high-motion footage) — `motion_weight="auto"`
+now handles that: `w = motion_energy / (motion_energy + spatial_energy)`,
+computed per video from the clip's own **pre-normalization** motion/spatial
+magnitude (the per-tubelet min-max-normalized maps used for scoring can't
+be used for this, since normalization erases absolute magnitude by
+design). Near-zero-cost (two extra `.mean()` calls on already-computed
+tensors). Verified on synthetic clips: a fully static clip (identical
+repeated frame) resolves to `w=0.000`; a clip with a sweeping bright block
+against low-texture background resolves to `w≈0.70`. On a mixed real clip
+(`assets/example_input.mp4`, text+diagram content that's both edge-rich and
+changing) it resolves to `w≈0.35` — a genuinely intermediate value, not
+just defaulting to 0.5.
 
 ## 4. Output: `Selection`
 
@@ -165,7 +175,10 @@ not duplicated here.
 
 ## 8. Not yet built
 
-Content-adaptive auto-tuning (starting with `motion_weight`) was scoped and
-designed but deliberately deferred — it'll be revisited alongside or after
-the learned selector (Phase 2), rather than bolted onto the signal-only
-version now.
+`motion_weight="auto"` (§3) is now implemented — content-adaptive
+auto-tuning of the other knobs (`spatial_op`, `pooling`,
+`per_frame_allocation`) was considered and intentionally *not* pursued,
+since each already defaults to the fast+ratio-safe choice regardless of
+content (§3). Revisit only if a future use case actually needs to trade
+that off against something else — most likely alongside the learned
+selector (Phase 2), not bolted onto the signal-only version.

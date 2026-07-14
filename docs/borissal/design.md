@@ -77,7 +77,8 @@ per_frame_keep: (B, T_grid) long  -- kept count per tubelet
 5. Pixel → patch pooling: `avg_pool2d`/`max_pool2d` with `kernel=stride=patch_size`.
 6. Per-(instance, tubelet) min-max normalize motion and spatial maps to `[0,1]`,
    combine with a single hyperparameter: `S = w*motion + (1-w)*spatial`
-   (`motion_weight = w`).
+   (`motion_weight = w`, fixed float or `"auto"` — see "Content-adaptive
+   `motion_weight`" below).
 7. Budget allocation (rule-based, not learned):
    - `per_frame_allocation="uniform"` (default): every tubelet keeps
      `k = clamp(round(gazing_ratio * H_grid*W_grid), 1, H_grid*W_grid)` patches.
@@ -126,6 +127,39 @@ Everything past the selector (processor/model/encoder/LLM internals,
 steps 3-6 of what the user's investigation described) is out of scope for
 Borissal — that's the downstream pipeline's responsibility, not addressed
 here.
+
+## Content-adaptive `motion_weight` (2026-07-14)
+
+`motion_weight` was the one knob whose best fixed value genuinely varies
+by clip content (the other allocation/op knobs already default to the
+fast+ratio-safe choice regardless of content — see the decisions table
+above). This was scoped, designed, and then *deliberately deferred* in an
+earlier round ("추후 더 고도화해보자. 학습 기반 모델도 추가로 있을 거니까" —
+revisit alongside the learned selector); this round the user asked to
+implement it before moving to Phase 2 after all.
+
+Implementation: `motion_weight="auto"` computes
+`w = motion_energy / (motion_energy + spatial_energy)` per video, from
+`motion_p`/`spatial_p` **before** their per-tubelet min-max normalization
+(using the already-normalized maps would erase the absolute-magnitude
+signal this needs — min-max normalization always rescales to `[0,1]`
+regardless of the original energy level). Two extra `.mean()` reductions
+on tensors already computed; no new tensors, no learning. Exposed via a new
+`motion_weight_used` field in the `select_with_intermediates` intermediates
+dict (not added to `Selection` itself, to avoid touching the
+already-tested/downstream-facing output contract) — `(B,)`, equal to the
+fixed value broadcast when `motion_weight` isn't `"auto"`.
+
+Verified (`tests/test_borissal.py::test_motion_weight_auto_adapts_to_content`
++ manual runs): a fully static synthetic clip (identical frame repeated)
+resolves to `w=0.000`; a synthetic clip with a sweeping bright block against
+low-texture background resolves to `w≈0.70`; the real
+`assets/example_input.mp4` clip (edge-rich *and* changing content) resolves
+to `w≈0.35`. Before/after overlay comparison
+(`outputs/borissal/{r50_m50_grad_uniform,r50_mauto_grad_uniform,
+auto_demo_static,auto_demo_motion}/04_overlay.png`, gitignored) shows the
+synthetic cases most clearly: the static case selects purely the block's
+edge, the motion case tracks the moving block's position per tubelet.
 
 ## Files
 

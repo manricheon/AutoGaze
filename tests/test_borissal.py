@@ -124,6 +124,41 @@ def test_to_canonical_keep_indices():
         assert (indices[1:] > indices[:-1]).all()
 
 
+def test_motion_weight_auto_adapts_to_content():
+    torch.manual_seed(0)
+    cfg = BorissalConfig(motion_weight="auto")
+    model = Borissal(cfg)
+
+    # Static clip: identical frame repeated (zero motion), with spatial texture.
+    static_frame = torch.rand(1, 3, 384, 384) * 0.3
+    static_frame[:, :, 100:300, 100:300] = 0.9
+    static_video = static_frame.unsqueeze(1).repeat(1, 16, 1, 1, 1)
+
+    # High-motion clip: a bright block sweeping across frames, low background texture.
+    motion_video = torch.rand(1, 16, 3, 384, 384) * 0.05
+    for t in range(16):
+        off = t * 20
+        motion_video[:, t, :, 150:200, off:off + 40] = 1.0
+
+    _, inter_static = model.select_with_intermediates(static_video)
+    _, inter_motion = model.select_with_intermediates(motion_video)
+
+    w_static = inter_static["motion_weight_used"].item()
+    w_motion = inter_motion["motion_weight_used"].item()
+    assert w_static < 0.2   # near-zero motion -> weight should lean spatial
+    assert w_motion > 0.5   # strong motion -> weight should lean motion
+    assert w_motion > w_static
+
+
+def test_motion_weight_fixed_unaffected_by_auto_support():
+    # Passing an explicit float must behave exactly as before "auto" existed.
+    video = _make_video(B=1, seed=3)
+    cfg = BorissalConfig(motion_weight=0.5)
+    sel_a = Borissal(cfg).select(video)
+    sel_b = Borissal(BorissalConfig(motion_weight=0.5)).select(video)
+    assert torch.equal(sel_a.keep_index, sel_b.keep_index)
+
+
 def test_mps_matches_cpu_grid_and_counts():
     if not torch.backends.mps.is_available():
         return

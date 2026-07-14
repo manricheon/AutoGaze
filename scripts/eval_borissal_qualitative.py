@@ -18,6 +18,10 @@ from autogaze.models.borissal.video_io import load_video, unnormalize
 from autogaze.models.borissal.viz import render_overlay
 
 
+def _motion_weight_type(s):
+    return s if s == "auto" else float(s)
+
+
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--video", required=True, help="path to an input video file")
@@ -27,7 +31,7 @@ def parse_args():
     p.add_argument("--patch", type=int, default=16)
     p.add_argument("--tubelet-size", type=int, default=2)
     p.add_argument("--gazing-ratio", type=float, default=0.5)
-    p.add_argument("--motion-weight", type=float, default=0.5)
+    p.add_argument("--motion-weight", type=_motion_weight_type, default=0.5, help="float in [0,1], or 'auto'")
     p.add_argument("--per-frame-allocation", choices=["uniform", "proportional"], default="uniform")
     p.add_argument("--spatial-op", choices=["grad", "sobel"], default="grad")
     p.add_argument("--pooling", choices=["avg", "max"], default="avg")
@@ -52,13 +56,14 @@ def main():
         pooling=args.pooling,
     )
     model = Borissal(config).to(device)
-    selection = model.select(video)
+    selection, intermediates = model.select_with_intermediates(video)
 
     grid_thw = selection.grid_thw[0].tolist()
     T_grid, H_grid, W_grid = grid_thw
     keep_mask_grid = selection.keep_mask[0].reshape(T_grid, H_grid, W_grid).cpu()
 
     print(f"grid_thw = {grid_thw}")
+    print(f"motion_weight = {args.motion_weight} (resolved = {intermediates['motion_weight_used'][0].item():.3f})")
     print(f"num_keep = {selection.num_keep[0].item()} / {selection.scores.shape[1]}")
     print(f"per_frame_keep = {selection.per_frame_keep[0].tolist()}")
 

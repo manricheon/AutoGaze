@@ -424,3 +424,86 @@ just `torch.jit.trace`, from the previous round).
 prior mobile-readiness constraints, plus: keep the canonical ascending
 `idx=t*N+n` output contract intact regardless of how the scoring/top-k
 mechanism changes (there's now a test guarding it).
+
+---
+
+## 2026-07-14 (same day) — motion_weight="auto" implemented, before Phase 2/3
+
+User decided to complete the previously-deferred `motion_weight` auto-tuning
+now, before moving on to Phase 2/3, and asked for a before/after comparison
+shown separately.
+
+**What was done:**
+- `configuration_borissal.py`: `motion_weight: Union[float, Literal["auto"]]`
+  (default unchanged, `0.5`).
+- `modeling_borissal.py`: when `motion_weight_setting == "auto"`,
+  `w = motion_energy / (motion_energy + spatial_energy + eps)` computed from
+  `motion_p`/`spatial_p` **before** `_minmax_norm` (using the post-normalization
+  maps would erase the absolute-magnitude signal needed here — min-max
+  normalization always rescales to `[0,1]` regardless of original energy).
+  Per-video (`(B,1,1,1)`, broadcasts against the `(B,T_grid,H_grid,W_grid)`
+  score maps). Exposed via a new `motion_weight_used` `(B,)` field in the
+  `select_with_intermediates` intermediates dict — deliberately *not* added
+  to `Selection` itself, to avoid touching the output contract that was just
+  locked down with tests/the canonical-interface work last round.
+- `scripts/{borissal_dump_outputs.py,eval_borissal_qualitative.py}`:
+  `--motion-weight` now accepts the literal string `"auto"` (custom argparse
+  type; `float()` otherwise) and both scripts print/record the *resolved*
+  value alongside the requested setting (`borissal_dump_outputs.py`'s
+  `summary.json` gained a `motion_weight_used` field; its combined-score
+  heatmap title shows both).
+- `tests/test_borissal.py`: two new tests —
+  `test_motion_weight_auto_adapts_to_content` (static synthetic clip →
+  `w<0.2`, high-motion synthetic clip → `w>0.5`, motion > static) and
+  `test_motion_weight_fixed_unaffected_by_auto_support` (explicit float
+  behavior unchanged by "auto" existing). 11/11 tests pass (9 previous + 2
+  new).
+
+**Before/after comparison (shown to the user directly, also saved to
+`outputs/borissal/`, gitignored):**
+- Real clip (`assets/example_input.mp4`): fixed `motion_weight=0.5`
+  (`r50_m50_grad_uniform/`) vs. `motion_weight="auto"` → resolved `w≈0.354`
+  (`r50_mauto_grad_uniform/`). Overlays are visually similar for this
+  particular clip — expected, since its content (on-screen text + diagram)
+  is both edge-rich *and* changing, so the auto value lands close to but
+  below the neutral 0.5 rather than at an extreme.
+- Synthetic contrast pair (ad hoc, not a permanent script — reused
+  `render_overlay` directly): a fully static clip (identical frame repeated)
+  resolves to **`w=0.000`** and the overlay shows selection concentrated
+  purely on the static block's edge; a clip with a small bright block
+  sweeping across low-texture background resolves to **`w≈0.697`** and the
+  overlay visibly tracks the block's per-tubelet position. Saved to
+  `outputs/borissal/{auto_demo_static,auto_demo_motion}/04_overlay.png`.
+  This pair demonstrates the actual adaptive range much more clearly than
+  the real clip does.
+
+**Verified (commands):**
+```
+uv run pytest tests/test_borissal.py -v          # 11 passed
+uv run python scripts/eval_borissal_qualitative.py --video assets/example_input.mp4 --motion-weight auto --out ...
+uv run python scripts/borissal_dump_outputs.py --video assets/example_input.mp4 --motion-weight auto
+                                                   # both scripts print "motion_weight = auto (resolved = 0.354)"
+```
+
+**Docs touched:** `reference.md` §3 (motion_weight row + explanation) and §8
+(moved from "not yet built" to "implemented, other knobs intentionally not
+auto-tuned"); `design.md` gained a "Content-adaptive `motion_weight`"
+section (algorithm, rationale for using pre-normalization energy, where the
+resolved value is exposed, verification numbers) and a small step-6 update
+in the algorithm walkthrough.
+
+**Not done / explicitly out of scope:** auto-tuning any other knob
+(`spatial_op`/`pooling`/`per_frame_allocation`) — each already defaults to
+the fast+ratio-safe choice regardless of content, so there was nothing to
+gain; revisit only if a real future need appears.
+
+**Aside (not a code decision):** user asked whether to start using the
+"Fable" model now or later. Recommended waiting for a natural scope
+boundary (e.g. the start of Phase 2) rather than switching mid-task, mainly
+so this session's accumulated context isn't lost — but this is the user's
+call, not something resolved here.
+
+**Next up (Phase 2, unchanged):** learned selector. `motion_weight="auto"`
+being done removes it from Phase 2's "carry forward" list — Phase 2 can
+decide independently whether its scoring head needs anything like it at
+all (a learned head may fold this decision in implicitly).
