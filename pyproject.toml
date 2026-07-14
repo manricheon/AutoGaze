@@ -17,7 +17,7 @@ dependencies = [
     "loguru",
     "timm>=1.0.15",
     "tqdm",
-    "transformers>=5.5,<6",
+    "transformers==5.5.0",
     "pillow",
     "numpy",
     "omegaconf",

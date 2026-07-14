@@ -1,5 +1,6 @@
 exps/
 outputs/
+weights/
 .idea/
 __pycache__/
 **/**/__pycache__/

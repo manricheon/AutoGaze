@@ -514,3 +514,72 @@ call, not something resolved here.
 being done removes it from Phase 2's "carry forward" list — Phase 2 can
 decide independently whether its scoring head needs anything like it at
 all (a learned head may fold this decision in implicitly).
+
+---
+
+## 2026-07-14 (same day) — Phase 2+3 implemented: Borissal v1 + V-JEPA2 SSL training
+
+Combined plan approved with 10 explicit user requirements (transformers
+==5.5.0 pin, differentiability first, random gazing_ratio during training,
+peak-memory tracking, DDP support, composable losses, self-inference/viz/
+profiling for v0+v1, minimal-data local training check, a training-method
+doc, and expanded v0-leverage options). All implemented this session.
+Canonical training doc: `docs/borissal/training.md`. Engineering summary:
+design.md's "Borissal v1 + SSL training" section.
+
+**New files:** `modeling_borissal_v1.py` (BorissalV1: TSM-style 2D CNN,
+~114K params, `input_mode: maps|pixels|both`, `residual_scoring`; same
+Selection contract + canonical ascending keep_index as v0),
+`vjepa2_sparse.py` (functional sparse-encoder forward over the stock HF
+encoder + frozen `VJEPA2Teacher` wrapper — the only core file importing
+transformers), `losses.py` (predictor-coverage / dense-sparse-match /
+entropy / v0-distill, weight-composable), `data.py` (VideoFolderDataset
+reusing video_io), `scripts/train_borissal_v1.py` (DDP-under-torchrun or
+single-device, per-batch ratio sampling rank-synced, jsonl logging incl.
+peak memory), `tests/test_borissal_v1.py` (9 tests),
+`docs/borissal/training.md`. Extended: dump/benchmark scripts got
+`--model v0|v1 --checkpoint` + peak-memory column; `BorissalV1Config`
+added; `weights/` added to .gitignore (was merely untracked).
+
+**Verified (highlights, all on this Mac):**
+- transformers==5.5.0 reinstalled; vjepa2 sparse primitives re-verified
+  identical to the 5.13.1 exploration; all pre-existing tests green.
+- **Two real bugs found empirically during smoke** (would have silently
+  broken training): (1) operator precedence made the Gumbel term
+  constant-NaN → topk ignored scores entirely (selection frozen); (2) raw
+  softmax probs (~1/N_pf) starved the ST gradient ~1000x. Both fixed +
+  regression-tested. 20/20 tests pass.
+- Plumbing proof: v0-distill-only smoke run collapsed loss 2.26 → 0.03 in
+  30 steps with healthy gradients.
+- **V-JEPA 2.1 checkpoints do not load into native transformers vjepa2**
+  (confirmed via load report on `davevanveen/vjepa2.1-vitb-fpc64-384`:
+  dual patch embeds / modality embeds / distillation norms / predictor
+  proj 1664). True-2.1 teachers (the team's torch.hub vjepa2.1l/b) need a
+  small adapter behind the teacher wrapper — interface already designed
+  for it; grid convention identical so nothing else changes.
+- **Real-teacher local check** (user req 8): official
+  `facebook/vjepa2-vitl-fpc64-256` (326M, patch16/tubelet2 asserted,
+  native load) on MPS, 30 steps, batch 1, scale 256, duplicated example
+  clips: ~8s/step, peak 1.4GB, gradients strong (norm 24–244 — vs ~0 with
+  a random tiny teacher, showing the real feature space genuinely
+  discriminates selections). **Honest caveat:** predictor-coverage loss
+  did NOT visibly decrease in 30 steps on this degenerate single-clip
+  dataset (8.18→8.28 fluctuation) — expected at this scale; the
+  optimization mechanism itself is proven by the v0-distill collapse
+  above. Real learning-curve claims need the Linux/CUDA run on
+  AutoGaze-Training-Data.
+- Before/after overlays (`outputs/borissal/v1_real_{before,after}/`):
+  the 30-step checkpoint visibly changes selection behavior vs random
+  init; checkpoint save→reload→inference path works
+  (`--model v1 --checkpoint`).
+- v0 vs v1 benchmark (`--model both`): v1 CPU ~17-18ms/clip (~2.7x v0,
+  includes internal v0 signal computation in `both` mode), peak-mem column
+  now reported.
+
+**Not done / open:** torch.hub V-JEPA2.1 teacher adapter (three methods,
+when scale training starts); loss-combination/input_mode experiment matrix
+at scale (training.md §3); predictor fine-tuning option.
+
+**Next up:** push, then Linux/CUDA scale training on AutoGaze-Training-Data
+(torchrun recipe in training.md §6), teacher = team's vjepa2.1l via adapter
+or HF ViT-L as-is.

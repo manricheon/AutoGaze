@@ -43,6 +43,8 @@ def _motion_weight_type(s):
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--video", required=True, help="path to an input video file")
+    p.add_argument("--model", choices=["v0", "v1"], default="v0")
+    p.add_argument("--checkpoint", default=None, help="v1 checkpoint .pt (from train_borissal_v1.py)")
     p.add_argument("--out-root", default=str(REPO_ROOT / "outputs" / "borissal"))
     p.add_argument("--run-name", default=None, help="defaults to a config-derived name")
     p.add_argument("--num-frames", type=int, default=16)
@@ -60,8 +62,66 @@ def parse_args():
 
 def default_run_name(args) -> str:
     r = int(round(args.gazing_ratio * 100))
+    if args.model == "v1":
+        return f"v1_r{r}_{args.per_frame_allocation}"
     m = "auto" if args.motion_weight == "auto" else int(round(args.motion_weight * 100))
     return f"r{r}_m{m}_{args.spatial_op}_{args.per_frame_allocation}"
+
+
+def dump_v1(args, device, run_dir):
+    """v1 path: score heatmap + overlay + allocation + summary (no v0-style
+    motion/spatial intermediates -- the learned score is the artifact)."""
+    import torch
+    from autogaze.models.borissal import BorissalV1, BorissalV1Config, MODEL_TAG_V1
+
+    video = load_video(args.video, num_frames=args.num_frames, size=args.scale).to(device)
+
+    if args.checkpoint:
+        ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+        config = BorissalV1Config(**ckpt["config"])
+        model = BorissalV1(config)
+        model.load_state_dict(ckpt["state_dict"])
+    else:
+        config = BorissalV1Config(scale=args.scale)
+        model = BorissalV1(config)
+    model = model.to(device).eval()
+
+    selection = model.select(video, gazing_ratio=args.gazing_ratio,
+                             per_frame_allocation=args.per_frame_allocation)
+
+    grid_thw = selection.grid_thw[0].tolist()
+    T_grid, H_grid, W_grid = grid_thw
+    per_frame_keep = selection.per_frame_keep[0].tolist()
+    num_keep = selection.num_keep[0].item()
+
+    video_disp = unnormalize(video[0]).cpu()
+    keep_mask_grid = selection.keep_mask[0].reshape(T_grid, H_grid, W_grid).cpu()
+    score_grid = selection.scores[0].reshape(T_grid, H_grid, W_grid).cpu()
+
+    render_frame_strip(video_disp, str(run_dir / "00_input_frames.png"), title=f"Input frames ({args.num_frames})")
+    render_heatmap_grid(score_grid, config.tubelet_size, str(run_dir / "03_score.png"),
+                        suptitle=f"Learned score (v1, input_mode={config.input_mode})")
+    render_overlay(video_disp, keep_mask_grid, config.tubelet_size, str(run_dir / "04_overlay.png"))
+    render_allocation_bar(per_frame_keep, str(run_dir / "05_allocation.png"),
+                          title=f"per_frame_allocation={args.per_frame_allocation}")
+
+    summary = {
+        "model_tag": MODEL_TAG_V1,
+        "checkpoint": str(Path(args.checkpoint).resolve()) if args.checkpoint else None,
+        "video": str(Path(args.video).resolve()),
+        "device": str(device),
+        "config": config.__dict__,
+        "grid_thw": grid_thw,
+        "num_keep": num_keep,
+        "L": selection.scores.shape[1],
+        "per_frame_keep": per_frame_keep,
+    }
+    with open(run_dir / "summary.json", "w") as f:
+        json.dump(summary, f, indent=2, default=str)
+
+    print(f"grid_thw = {grid_thw}")
+    print(f"num_keep = {num_keep} / {selection.scores.shape[1]}")
+    print(f"wrote stage outputs to {run_dir}")
 
 
 def main():
@@ -70,6 +130,10 @@ def main():
     run_name = args.run_name or default_run_name(args)
     run_dir = Path(args.out_root) / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.model == "v1":
+        dump_v1(args, device, run_dir)
+        return
 
     video = load_video(args.video, num_frames=args.num_frames, size=args.scale).to(device)
 

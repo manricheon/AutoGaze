@@ -363,13 +363,56 @@ not a shape-genericity nicety.
   representative). Get an actual on-device number once mobile export tooling
   is in place (Phase 3+), not before.
 
-## Open items for Phase 2/3 (tracked here so they aren't lost)
+## Borissal v1 + SSL training (2026-07-14, Phase 2+3)
 
-- Confirm the exact V-JEPA2.1L checkpoint/repo id and its native token flatten
-  order (verify it matches Borissal's t-major assumption, or add a remap in
-  `adapters.to_vjepa2`).
-- Decide whether Phase 2's learned scoring head consumes Borissal's raw
-  motion/spatial maps as input features or only its final scores.
-- Phase 3: where exactly to apply sparsity relative to V-JEPA2's conv3d
-  tubelet embedding (after conv3d, before the transformer — per V-JEPA2
-  predictor-based SSL guidance referenced in the original brainstorm).
+Implemented in one pass; full training rationale/recipes live in
+`training.md` (canonical), selector docs in `reference.md`. Key engineering
+facts recorded here:
+
+- **transformers pinned to ==5.5.0** (user requirement). The vjepa2 sparse
+  primitives (`apply_masks`, `VJEPA2Layer(position_mask)`,
+  `get_position_ids(masks)`) were re-verified identical at 5.5.0 after
+  originally being explored at 5.13.1. V-JEPA2's token flatten order is
+  t-major `idx = t*(H'W') + h*W' + w` — exactly Borissal's canonical
+  keep_index, so the selector output drives the teacher's RoPE positions
+  with no remapping.
+- **v1 architecture**: TSM-style 2D CNN (~114K params, 2D convs + a
+  zero-cost channel time-shift; mobile-delegate-friendly per the Mobile
+  readiness review) over grid-resolution inputs, `input_mode:
+  maps|pixels|both` ablation switch. Inference `select()` shares v0's
+  Selection contract and the canonical ascending-index guarantee (same
+  packing helper; same tests applied).
+- **Differentiable selection**: Gumbel-perturbed hard top-k forward +
+  straight-through soft gate backward, with an `·N_pf` gradient rescale.
+  Two real bugs were caught empirically during smoke: (1) an operator-
+  precedence error made the Gumbel term constant-NaN, silently freezing
+  selection (fixed, regression-tested via
+  `test_v1_gumbel_stochastic_in_train_deterministic_in_eval`); (2) raw
+  softmax probs (~1/N_pf) starved the ST gradient by ~3 orders of
+  magnitude (fixed by the rescale).
+- **Sparse teacher path**: `vjepa2_sparse.py` (the only core file importing
+  transformers) — functional sparse-encoder forward over the stock
+  encoder's own modules (no weight copies), frozen `VJEPA2Teacher` wrapper
+  with `dense_features/sparse_features/predict`, teacher-agnostic so a
+  torch.hub V-JEPA2.1 adapter can slot in later.
+- **V-JEPA 2.1 checkpoints do NOT load into the native vjepa2 class**
+  (empirically confirmed: dual image/video patch embeds, modality embeds,
+  distillation norms, predictor proj 1664≠hidden). True-2.1 teachers need a
+  torch.hub/custom-code adapter behind the same wrapper interface. Grid
+  convention is identical, so selector training against official V-JEPA2
+  (`facebook/vjepa2-vitl-fpc64-256`, loads cleanly, patch16/tubelet2
+  asserted) validates the mechanism equivalently — user confirmed the
+  teacher need not match the downstream encoder.
+- **Training loop** (`scripts/train_borissal_v1.py`): DDP-under-torchrun /
+  single-device otherwise, per-batch gazing_ratio sampling (rank-synced),
+  composable losses (`losses.py`), jsonl logging incl. peak memory,
+  checkpoints under `weights/` (gitignored).
+
+## Open items (updated)
+
+- torch.hub V-JEPA2.1-L/B teacher adapter (three wrapper methods) — when
+  large-scale training moves to Linux/CUDA and the team's existing 2.1
+  checkpoints should be the teacher.
+- Which loss combination / input_mode wins — experiment matrix in
+  `training.md` §3, to be run at scale.
+- Predictor fine-tuning (currently frozen) as a later option.
