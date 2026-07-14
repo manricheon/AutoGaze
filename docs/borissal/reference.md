@@ -57,25 +57,76 @@ Given a clip `(B, T, C, H, W)`:
 1. **Luma** — average channels: `gray = video.mean(dim=2)`.
 2. **Tubelet aggregation** — average every `tubelet_size` consecutive frames
    into one tubelet: `(B, T_grid, H, W)`, `T_grid = T // tubelet_size`.
-3. **Motion** — absolute difference between consecutive tubelets (a
-   residual/motion-vector proxy, computed directly on pixels rather than a
-   real codec's MV field).
+3. **Motion** — temporal differencing (a residual/motion-vector proxy,
+   computed on decoded pixels rather than a real codec's MV field). Two
+   granularities (`motion_diff`): `"tubelet"` differences the tubelet
+   means; `"frame"` differences consecutive raw frames then aggregates per
+   tubelet (`frame_diff_agg: mean|max`) — catches fast intra-tubelet motion
+   that tubelet averaging cancels. An experimental `motion_consistency=
+   "double_diff"` (temporal min of adjacent frame diffs) exists but is NOT
+   in the preset — see the negative result in `design.md`.
 4. **Spatial** — gradient magnitude (`spatial_op="grad"`, cheap finite
    differences) or a fixed Sobel kernel (`spatial_op="sobel"`).
 5. **Patch pooling** — average- or max-pool both maps down to the patch grid
    `(H_grid, W_grid) = (H, W) // patch_size`.
-6. **Normalize & combine** — min-max normalize motion and spatial per
-   (instance, tubelet) to `[0,1]`, then blend with one weight:
-   `score = motion_weight * motion + (1 - motion_weight) * spatial`.
-7. **Budget allocation** — turn `gazing_ratio` into a per-tubelet patch
-   count, either `uniform` (same count every tubelet) or `proportional`
-   (count follows each tubelet's total score energy).
-8. **Top-k → keep mask** — `torch.topk` per tubelet (chosen over a
-   sort/argsort-based rank, which has weaker mobile-runtime operator
-   support), producing a boolean keep mask.
-9. **Pack to global indices** — flatten to `keep_index`/`keep_coords` in
-   `(t, h, w)` grid_thw space via a stable-sort packer (`_pack_gazing_mask`,
-   self-contained — see §6) that also guarantees ascending order (§5).
+6. **Noise floor** (v0.2, `motion_noise_floor`) — robust per-tubelet
+   dead-zone shrinkage of the pooled motion map:
+   `motion = relu(motion − scale·τ)`, τ = per-tubelet mean or a
+   topk-computed quantile (median default). Runs BEFORE normalization
+   (which would otherwise re-amplify the noise floor to full range in
+   motionless tubelets) and before the `"auto"` weight energies.
+7. **Normalize & combine** — min-max normalize motion and spatial per
+   (instance, tubelet), blend with `motion_weight` (float or `"auto"`).
+   With `score_norm_blend < 1` (v0.2) a clip-GLOBAL min-max component is
+   mixed in: `S = β·S_local + (1−β)·S_global` — local keeps every tubelet
+   internally comparable, global preserves which tubelets carry more
+   energy clip-wide.
+8. **Center bias** (v0.2, `center_bias`, off by default) — additive
+   Gaussian center prior at grid resolution; enable per-domain.
+9. **Budget allocation** — turn `gazing_ratio` into patch counts:
+   `uniform` (same count every tubelet; exact ratio always), `proportional`
+   (counts follow per-tubelet score energy), or `global` (v0.2: one
+   clip-wide top-K_total with a guaranteed per-tubelet minimum — budget
+   concentrates on high-information moments while the floor preserves
+   temporal coverage; pair with `score_norm_blend < 1`).
+10. **Coherent-region gate** (v0.2, `block_size=b>1`) — a coarse pass runs
+    the SAME saliency pipeline on a 1/b-resized clip; its top-⌈k/b²⌉ blocks
+    per tubelet gate the fine selection (out-of-gate scores masked to
+    `finfo.min`). Gate capacity ⌈k/b²⌉·b² ≥ k keeps exact budgets intact;
+    fragmentation is hard-bounded to ≤⌈k/b²⌉ regions per tubelet.
+11. **Top-k → keep mask** — `torch.topk` (chosen over sort/argsort ranks,
+    which have weaker mobile-runtime operator support).
+12. **Pack to global indices** — flatten to `keep_index`/`keep_coords` in
+    `(t, h, w)` grid_thw space via a stable-sort packer (`_pack_gazing_mask`,
+    self-contained — see §7) that also guarantees ascending order (§6).
+
+**Why the v0.2 mechanisms are principled (and how they were validated).**
+Every v0.2 element carries both a theoretical argument and an empirical
+gate (`scripts/eval_borissal_coverage.py`; numbers and negative results in
+`design.md`'s "v0.2" section): *frame differencing*
+recovers fast intra-tubelet motion that tubelet-mean differencing provably
+cancels (an oscillating object's tubelet means are identical). *Noise
+floor*: two-frame differencing has a strictly positive expected |diff|
+under i.i.d. sensor noise, and per-tubelet min-max then amplifies exactly
+that floor to full range in motionless tubelets; subtracting a robust
+quantile and soft-shrinking is codec dead-zone quantization / classical
+coring, and true motion's spatial sparsity makes the median a valid floor
+estimate. *Coherent-region gate*: objects are spatially contiguous, so
+informative patches cluster — block gating imposes that smoothness prior
+at zero learned cost, low-res-select-then-refine mirrors classical
+multi-scale saliency integration and biological foveation, and a
+description LLM grounds objects/actions better from coherent chunks than
+isolated patches. *Global allocation + floor*: "every moment is equally
+informative" (uniform) is false for description — information concentrates
+where actions happen; global top-k concentrates budget there while the
+per-tubelet floor prevents un-described time gaps. *Local/global blend*
+is the scale infrastructure that makes cross-tubelet comparison (and thus
+global allocation) meaningful. *Center bias* is the classical composition
+prior — powerful on cinematic content, wrong on e.g. screen recordings,
+hence a per-domain knob, never a default. (Temporal selection
+stabilization was considered and deliberately dropped: for whole-clip
+description, cross-tubelet selection variation is not harmful and can even
+diversify coverage — a streaming-UI nicety, not a description mechanism.)
 
 ## 3. Config knobs
 
@@ -88,7 +139,16 @@ Given a clip `(B, T, C, H, W)`:
 | `spatial_op` | `"grad"` | Gradient method | Cheapest option (no conv2d call) with no measured quality gain from Sobel |
 | `pooling` | `"avg"` | Pixel→patch reduction | Standard, cheap, well-supported everywhere |
 | `gazing_ratio` | `0.5` | Fraction of patches kept | Caller-set budget |
-| `per_frame_allocation` | `"uniform"` | How the budget splits across tubelets | `"uniform"` is the only variant that *exactly* hits the requested ratio every time; `"proportional"` dynamically reallocates the same total budget toward whichever tubelets carry more saliency energy, but can drift by a patch or two under extreme energy skew |
+| `per_frame_allocation` | `"uniform"` | How the budget splits across tubelets | `"uniform"` exactly hits the ratio every time; `"proportional"` reallocates toward high-energy tubelets (can drift ±1-2 under extreme skew); `"global"` (v0.2) does one clip-wide top-K with a per-tubelet floor — concentrates budget on high-information moments, exact K by construction |
+| `min_keep_per_frame_ratio` | `0.25` | Per-tubelet floor in `global` mode | Guarantees temporal coverage (no undescribed gaps); 25% of the uniform share is a conservative floor |
+| `score_norm_blend` | `1.0` | Local vs clip-global normalization mix | 1.0 = v0.1 (per-tubelet only); <1 needed for `global` allocation to compare tubelets meaningfully |
+| `center_bias` | `0.0` (off) | Additive Gaussian center prior | Classical composition prior; content-dependent → per-domain knob, never a default |
+| `motion_diff` | `"tubelet"` | Temporal differencing granularity | `"frame"` catches fast intra-tubelet motion tubelet-averaging cancels; costs T−1 slice diffs (µs) |
+| `frame_diff_agg` | `"mean"` | Frame-diff → tubelet aggregation | `"max"` favors transient motion detection |
+| `motion_consistency` | `"none"` | Temporal double-difference (experimental) | NOT in preset: per-tubelet min-max structurally cancels its noise attenuation (negative result recorded in design.md); also suppresses untextured fast movers |
+| `motion_noise_floor` | `"none"` | Dead-zone shrinkage of motion map | `"quantile"` (median) removes the sensor-noise floor that normalization would otherwise amplify in motionless tubelets |
+| `motion_noise_q` / `motion_noise_scale` | `0.5` / `1.0` | Floor quantile / strength | Median assumes true motion is spatially sparse (<50% of patches) |
+| `block_size` | `1` | Resize-based coarse-to-fine gate | `2` bounds fragmentation to ≤⌈k/4⌉ regions/tubelet; coarse signal = same pipeline on a 1/b-resized clip (resize's low-pass adds noise robustness) |
 
 `spatial_op="grad"`, `pooling="avg"`, and `per_frame_allocation="uniform"`
 were each chosen as the faster and/or ratio-safer of their alternatives —

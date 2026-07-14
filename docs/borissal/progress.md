@@ -635,3 +635,54 @@ steps — consistent with score-head saturation (softmax sharpening kills
 the ST soft path). For scale runs, start with `--w-entropy > 0` and/or a
 lower lr; this is exactly what the training.md §3 experiment matrix is
 for. Mechanism validation (the purpose of this run) is complete.
+
+---
+
+## 2026-07-14 (same day) — Borissal v0.2: seven elements, quantitative gate, preset finalized
+
+User specified v0.2's element list (frame-diff motion, clustering, noise/
+consistency penalty, global top-k + minimum floor, edge blending, optional
+center bias, local/global score blending) with hard requirements: every
+element justified, fast, fully vectorized, judged against the video-
+description task. A skeleton review (requested by the user, "Fable 입장에서
+고도로 검토") added the key process change: a label-free quantitative
+adoption gate instead of eyeball-only tuning.
+
+**Implemented** (all config-gated, defaults byte-identical to v0.1;
+`BorissalConfig.v0_2()` preset): `motion_diff=frame|tubelet` +
+`frame_diff_agg`, resize-based coarse-to-fine block gate (`block_size`),
+`motion_noise_floor` (topk-quantile dead-zone), `motion_consistency=
+double_diff` (experimental, excluded — see below), `per_frame_allocation=
+"global"` + `min_keep_per_frame_ratio`, `score_norm_blend`, `center_bias`
+(off by default). New `scripts/eval_borissal_coverage.py` (coverage +
+uniqueness metrics, random-selection anchor). Dump script gained
+`--preset/--block-size/--noise-floor/...` flags, `07_coarse.png`, and a
+`contiguity` metric in summary.json. Tests 20 → 33, all green throughout.
+
+**Final preset** (gate-verified Pareto-best vs v0.1 at ratio 0.25 on the
+example clip: coverage 8.226<8.249 AND uniqueness 8.370>8.300; contiguity
+2.31→2.94; latency 5.9→12.2ms CPU): frame-diff + quantile floor + global
+allocation (25% floor) + blend 0.7 + block gate b=2.
+
+**Key findings recorded in design.md's "Borissal v0.2" section** (the
+substance of this round — read it when resuming):
+1. Coverage-alone is scatter-biased — random beat all saliency configs on
+   it; gate rule is therefore two-metric; the SAME bias affects the v1 SSL
+   objective (Phase 3 scale runs should add an anti-scatter term).
+2. Under global allocation the c2f gate was silently fully-open (worst-
+   case sizing) — the metric exposed it; fixed with 2x-share sizing.
+3. double_diff: negative result (normalization cancels its benefit;
+   suppresses untextured movers) — excluded from preset, knob retained.
+4. Corrected double-diff semantics claim (removes ghosting/uncorrelated
+   noise, NOT single-frame events).
+
+**Verified:** 33/33 tests; budget exactness for global(+c2f) across
+ratios; concentration on high-energy tubelets (synthetic); center-bias
+tie-break; blend beta=1 identity; qualitative overlays
+(`outputs/borissal/v02_final_preset/`); gate JSONs
+(`outputs/borissal/gate_v02*.json`).
+
+**Open:** validate the preset's gate numbers on more clips than
+example_input.mp4 (single-clip numbers are indicative, not conclusive);
+`center_bias` remains per-domain; low-ratio (<0.1) callers should set
+block_size=1.

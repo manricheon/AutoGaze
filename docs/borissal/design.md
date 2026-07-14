@@ -408,6 +408,84 @@ facts recorded here:
   composable losses (`losses.py`), jsonl logging incl. peak memory,
   checkpoints under `weights/` (gitignored).
 
+## Borissal v0.2 (2026-07-14): mechanisms, quantitative gate, and negative results
+
+Motivated by observed v0.1 failures (scattered selections; budget wasted on
+noise motion) with the video-DESCRIPTION task as the arbiter. Seven user-
+specified elements were implemented, each fully vectorized (no Python
+loops), and — after a skeleton review flagged the risk of hand-tuning 10+
+knobs by eyeball — gated with a label-free quantitative metric before
+preset admission. `reference.md` §2/§3 documents the mechanisms and their
+theoretical justifications; this section records the measurements and what
+they changed.
+
+### The adoption gate and what it revealed
+
+`scripts/eval_borissal_coverage.py` scores any selector config with a
+frozen V-JEPA2 (+ its predictor) on two axes:
+- **coverage** (predict UNSELECTED from selected; lower better),
+- **uniqueness** (predict SELECTED from the rest; higher better).
+
+**Finding 1 — coverage alone is scatter-biased (affects Phase 3 too).**
+On the example clip, RANDOM selection beat every saliency config on
+coverage at every ratio tried (e.g. 8.239 vs v0.1's 8.249 at ratio 0.25):
+reconstructing *everything* rewards evenly-scattered anchors for
+interpolation, which is precisely not saliency. Consequence for v0.2: the
+gate rule is "must not degrade BOTH metrics", never coverage alone.
+Consequence for the v1 SSL objective (same math): pure predictor-coverage
+training pressure points toward uniform scatter — the training.md
+experiment matrix should combine it with an anti-scatter term (uniqueness-
+style, or coherence regularization) at scale. Uniqueness, by contrast,
+ordered configs sensibly (v0.1 8.289-8.300 >> random 7.873-7.933).
+
+**Finding 2 — the winning combination (preset, ratio 0.25, example clip):**
+`frame-diff + quantile noise floor + global allocation(min-floor 25%) +
+score blend 0.7 + block gate b=2` is Pareto-best vs v0.1: coverage
+8.226 < 8.249 AND uniqueness 8.370 > 8.300, while contiguity rises
+2.31 → 2.94 and the overlays show clean object-chunk selections. Global
+allocation + blend is the single strongest element (uniqueness +0.07/+0.02
+alone). Caveat: at ratio ≲ 0.1 the block gate over-constrains (both
+metrics dip) — use `block_size=1` for ultra-low budgets.
+
+**Finding 3 — gate sizing bug found by the metric itself:** under global
+allocation, sizing the coarse-to-fine gate by worst-case per-tubelet
+capacity opened it fully and silently neutered coherence (identical
+metric values with/without b=2 exposed it). Fixed: gate allows up to 2x
+the uniform share per tubelet (total capacity 2·K_total ≥ K_total keeps
+the exact budget; concentration beyond 2x spills to other tubelets).
+
+**Finding 4 — negative result: `motion_consistency="double_diff"`.**
+Classical double-differencing was implemented and then EXCLUDED from the
+preset after synthetic testing showed (a) per-tubelet min-max
+normalization structurally cancels its noise attenuation (min halves noise
+AND the normalization ceiling alike; net selection actually shifted toward
+noise), and (b) it entirely suppresses untextured uniform-color movers
+whose displacement exceeds their edge-strip width (adjacent diff strips
+don't overlap). Kept as an experimental knob with the limitation
+documented; a useful reminder that classical mechanisms don't compose
+freely with normalization stages.
+
+**Finding 5 — double-diff semantics correction (recorded for honesty):**
+the initial design claimed it removes "single-frame spikes"; empirically a
+one-frame flash survives at its own frame (appear+disappear both produce
+large adjacent diffs) — what it removes is ghosting (leading/trailing
+revealed-background diffs) and temporally-uncorrelated pixel noise.
+
+### Latency (CPU, same benchmark protocol as the mobile readiness review)
+
+v0.1 5.9ms → v0.2 preset 12.2ms per clip (dominated by the 1/2-resolution
+coarse saliency pass; all four new elements combined add <1ms). Within the
+25ms target; still negligible vs. any encoder.
+
+### Roles going forward
+
+v0.2 is (a) the deployable non-learned baseline and (b) v1's input-feature
+bank — the hand-tuned combination is deliberately polished only to the
+gate's pass line; combination-optimization beyond that is v1's job
+(learned). Temporal selection stabilization stays excluded (description-
+task analysis: cross-tubelet variation isn't harmful for whole-clip
+description; a streaming-UI concern only).
+
 ## Open items (updated)
 
 - torch.hub V-JEPA2.1-L/B teacher adapter (three wrapper methods) — when

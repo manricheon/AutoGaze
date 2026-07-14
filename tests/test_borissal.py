@@ -159,6 +159,211 @@ def test_motion_weight_fixed_unaffected_by_auto_support():
     assert torch.equal(sel_a.keep_index, sel_b.keep_index)
 
 
+def _contiguity(sel, B, T_grid, H_grid, W_grid):
+    """Mean count of selected 4-neighbors per selected patch (fixed cross kernel)."""
+    import torch.nn.functional as F
+    m = sel.keep_mask.reshape(B, T_grid, H_grid, W_grid).float()
+    kern = torch.tensor([[0., 1., 0.], [1., 0., 1.], [0., 1., 0.]]).view(1, 1, 3, 3)
+    nb = F.conv2d(m.reshape(-1, 1, H_grid, W_grid), kern, padding=1)
+    return ((nb.reshape_as(m) * m).sum() / m.sum()).item()
+
+
+def test_v02_defaults_are_v01():
+    # Guard against accidental default drift: a plain config and an
+    # explicitly-all-off config must select identically.
+    video = _make_video(B=2, seed=5)
+    a = Borissal(BorissalConfig()).select(video)
+    b = Borissal(BorissalConfig(motion_noise_floor="none", motion_smooth_kernel=0, block_size=1)).select(video)
+    assert torch.equal(a.keep_index, b.keep_index)
+
+
+def test_v02_preset_contract():
+    # The full Selection contract holds under the v0.2 preset, both allocations.
+    video = _make_video(B=2, seed=6)
+    for alloc in ["uniform", "proportional"]:
+        sel = Borissal(BorissalConfig.v0_2(per_frame_allocation=alloc)).select(video, gazing_ratio=0.25)
+        assert sel.grid_thw[0].tolist() == [8, 24, 24]
+        assert torch.equal(sel.per_frame_keep.sum(dim=-1), sel.num_keep)
+        for bb in range(2):
+            valid = sel.keep_index[bb][sel.keep_index[bb] >= 0]
+            assert (valid[1:] > valid[:-1]).all()
+            assert valid.unique().numel() == valid.numel()
+
+
+def test_c2f_budget_exact():
+    video = _make_video(B=2, seed=7)
+    N_pf = 24 * 24
+    for b in [2, 3]:
+        for r in [0.05, 0.13, 0.5, 1.0]:
+            sel = Borissal(BorissalConfig(block_size=b)).select(video, gazing_ratio=r)
+            k = min(max(1, round(r * N_pf)), N_pf)
+            assert (sel.per_frame_keep == k).all()
+
+
+def test_c2f_full_ratio_is_identity():
+    # ratio=1.0 keeps everything regardless of block gating.
+    video = _make_video(B=1, seed=8)
+    sel = Borissal(BorissalConfig(block_size=2)).select(video, gazing_ratio=1.0)
+    assert sel.keep_mask.all()
+
+
+def test_c2f_bad_block_size_raises():
+    video = _make_video(B=1)
+    try:
+        Borissal(BorissalConfig(block_size=5)).select(video)  # 24 % 5 != 0
+    except ValueError as e:
+        assert "block_size" in str(e)
+    else:
+        raise AssertionError("block_size=5 on a 24x24 grid should raise")
+
+
+def test_c2f_increases_contiguity():
+    video = _make_video(B=2, seed=9)
+    c1 = _contiguity(Borissal(BorissalConfig(block_size=1)).select(video, gazing_ratio=0.25), 2, 8, 24, 24)
+    c2 = _contiguity(Borissal(BorissalConfig(block_size=2)).select(video, gazing_ratio=0.25), 2, 8, 24, 24)
+    assert c2 > c1
+
+
+def test_noise_floor_suppresses_amplified_noise():
+    # The floor's worst-case target: a clip with NO true motion anywhere --
+    # per-tubelet min-max then amplifies the sensor-noise diff to full [0,1],
+    # letting pure noise compete with real spatial signal in the blend.
+    # Setup: static texture in the LEFT half (real spatial saliency), static
+    # flat gray + per-frame noise everywhere. With the floor on, the motion
+    # channel of this motionless clip collapses and selection concentrates on
+    # the texture; with it off, amplified noise pulls selections into the
+    # flat right half.
+    torch.manual_seed(0)
+    B, T, H, W = 1, 16, 384, 384
+    base = torch.full((1, 1, 3, H, W), 0.5)
+    checker = (torch.arange(H).view(-1, 1) // 8 + torch.arange(W).view(1, -1) // 8) % 2
+    base[..., :, : W // 2] = 0.2 + 0.6 * checker[:, : W // 2].float()  # static texture, left half
+    video = base.expand(B, T, 3, H, W).clone() + 0.02 * torch.randn(B, T, 3, H, W)
+
+    kw = dict(motion_weight=0.5, gazing_ratio=0.1)
+    sel_off, inter_off = Borissal(BorissalConfig(motion_noise_floor="none", **kw)).select_with_intermediates(video)
+    sel_on, inter_on = Borissal(BorissalConfig(motion_noise_floor="quantile", **kw)).select_with_intermediates(video)
+
+    # budget unchanged
+    assert torch.equal(sel_off.num_keep, sel_on.num_keep)
+
+    # Mechanism: the normalized motion channel of a motionless clip is
+    # strongly suppressed with the floor on (min-max re-normalizes the
+    # positive residual tail, so it cannot reach exactly zero -- observed
+    # effect size is ~4x; assert a robust 2x).
+    assert inter_on["motion_norm"].mean() < 0.5 * inter_off["motion_norm"].mean()
+    assert "noise_floor_tau" in inter_on and inter_on["noise_floor_tau"].shape == (B, 8)
+
+    # (A selection-level "spatial score of kept set improves" assertion was
+    # tried and removed: on this clip both variants already saturate their
+    # selection inside the texture half (~0.98 either way), so the comparison
+    # is pure noise. The mechanism-level suppression above is the meaningful,
+    # stable check.)
+
+
+def test_frame_diff_catches_intra_tubelet_motion():
+    # A block that jumps away and back WITHIN one tubelet: tubelet-mean
+    # differencing largely cancels it; frame differencing must not.
+    B, T, H, W = 1, 16, 3, 384
+    video = torch.zeros(B, T, H, 384, 384)
+    # frames 0..15; within each tubelet (2 frames), the block alternates
+    # between two positions -> tubelet means are all (nearly) identical.
+    for t in range(T):
+        off = 100 if t % 2 == 0 else 200
+        video[:, t, :, off:off + 64, 100:164] = 1.0
+
+    kw = dict(motion_weight=1.0)
+    _, inter_tub = Borissal(BorissalConfig(motion_diff="tubelet", **kw)).select_with_intermediates(video)
+    _, inter_frm = Borissal(BorissalConfig(motion_diff="frame", **kw)).select_with_intermediates(video)
+
+    # Raw (pre-normalization) signal is not exposed; compare where the
+    # normalized motion mass sits: frame mode must put clear mass on the two
+    # block rows; contract must hold in both modes.
+    sel_frm = Borissal(BorissalConfig(motion_diff="frame", **kw)).select(video, gazing_ratio=0.1)
+    h_coord = sel_frm.keep_coords[..., 1]
+    valid = sel_frm.keep_index >= 0
+    block_rows = ((h_coord >= 100 // 16) & (h_coord <= (264 // 16)) & valid).sum().item()
+    assert block_rows / valid.sum().item() > 0.8  # selections concentrate on the oscillating block
+    assert torch.equal(sel_frm.per_frame_keep.sum(dim=-1), sel_frm.num_keep)
+
+
+def test_consistency_penalty_contract():
+    # double_diff is an EXPERIMENTAL knob, deliberately excluded from the
+    # v0.2 preset: synthetic testing showed the per-tubelet min-max
+    # normalization structurally cancels its noise attenuation (min halves
+    # noise AND the normalization ceiling alike, so post-norm noise density
+    # is unchanged, while textured-mover diffs degrade -- net selection
+    # shifted TOWARD noise in our experiments). Recorded as a negative
+    # result in docs/borissal/design.md. Here we only lock the contract:
+    # it runs, preserves budgets, and actually alters the motion signal.
+    video = _make_video(B=1, seed=12)
+    kw = dict(motion_diff="frame", motion_weight=1.0, gazing_ratio=0.1)
+    off_sel, off_i = Borissal(BorissalConfig(motion_consistency="none", **kw)).select_with_intermediates(video)
+    on_sel, on_i = Borissal(BorissalConfig(motion_consistency="double_diff", **kw)).select_with_intermediates(video)
+    assert torch.equal(off_sel.num_keep, on_sel.num_keep)
+    assert torch.equal(on_sel.per_frame_keep.sum(dim=-1), on_sel.num_keep)
+    assert not torch.equal(off_i["motion_norm"], on_i["motion_norm"])  # it does something
+    for bb in range(1):
+        valid = on_sel.keep_index[bb][on_sel.keep_index[bb] >= 0]
+        assert (valid[1:] > valid[:-1]).all()
+
+
+def test_score_blend_beta1_is_default():
+    video = _make_video(B=1, seed=10)
+    a = Borissal(BorissalConfig()).select(video)
+    b = Borissal(BorissalConfig(score_norm_blend=1.0)).select(video)
+    assert torch.equal(a.keep_index, b.keep_index)
+
+
+def test_global_allocation_invariants():
+    video = _make_video(B=2, seed=11)
+    L, T_grid = 8 * 576, 8
+    for ratio in [0.05, 0.25, 0.5]:
+        sel = Borissal(BorissalConfig(per_frame_allocation="global", score_norm_blend=0.7)) \
+            .select(video, gazing_ratio=ratio)
+        K_total = min(max(T_grid, round(ratio * L)), L)
+        m = min(max(1, round(0.25 * K_total / T_grid)), K_total // T_grid)
+        assert (sel.num_keep == K_total).all()
+        assert (sel.per_frame_keep >= m).all()
+        for bb in range(2):
+            valid = sel.keep_index[bb][sel.keep_index[bb] >= 0]
+            assert (valid[1:] > valid[:-1]).all()
+
+
+def test_global_allocation_concentrates_on_high_energy_tubelets():
+    # First half of the clip static, second half has a strong mover:
+    # global allocation should give the active tubelets more budget.
+    B, T = 1, 16
+    video = torch.full((B, T, 3, 384, 384), 0.5)
+    for t in range(8, 16):
+        off = (t - 8) * 40
+        video[:, t, :, 100:200, off:off + 80] = 1.0
+
+    # NOTE: the budget must stay below the total salient mass -- with a
+    # larger ratio the surplus spills into zero-score ties (index-ordered),
+    # which is arbitrary by construction. ratio=0.05 keeps K_total (~230)
+    # well under the mover's footprint.
+    sel = Borissal(BorissalConfig(per_frame_allocation="global", score_norm_blend=0.5,
+                                  motion_weight=1.0)).select(video, gazing_ratio=0.05)
+    first_half = sel.per_frame_keep[0, :4].sum().item()
+    second_half = sel.per_frame_keep[0, 4:].sum().item()
+    assert second_half > first_half
+
+
+def test_center_bias_prefers_center_on_uniform_clip():
+    flat = torch.full((1, 16, 3, 384, 384), 0.5)
+    on = Borissal(BorissalConfig(center_bias=0.5, motion_weight=0.0)).select(flat, gazing_ratio=0.1)
+    off = Borissal(BorissalConfig(center_bias=0.0, motion_weight=0.0)).select(flat, gazing_ratio=0.1)
+
+    def mean_center_dist(sel):
+        h = sel.keep_coords[..., 1].float()
+        w = sel.keep_coords[..., 2].float()
+        valid = sel.keep_index >= 0
+        return (((h[valid] - 11.5) / 12) ** 2 + ((w[valid] - 11.5) / 12) ** 2).mean().item()
+
+    assert mean_center_dist(on) < mean_center_dist(off)
+
+
 def test_mps_matches_cpu_grid_and_counts():
     if not torch.backends.mps.is_available():
         return

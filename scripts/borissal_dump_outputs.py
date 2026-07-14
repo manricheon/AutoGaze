@@ -53,9 +53,21 @@ def parse_args():
     p.add_argument("--tubelet-size", type=int, default=2)
     p.add_argument("--gazing-ratio", type=float, default=0.5)
     p.add_argument("--motion-weight", type=_motion_weight_type, default=0.5, help="float in [0,1], or 'auto'")
-    p.add_argument("--per-frame-allocation", choices=["uniform", "proportional"], default="uniform")
+    p.add_argument("--per-frame-allocation", choices=["uniform", "proportional", "global"], default="uniform")
     p.add_argument("--spatial-op", choices=["grad", "sobel"], default="grad")
     p.add_argument("--pooling", choices=["avg", "max"], default="avg")
+    # v0.2 knobs (None = follow preset/default)
+    p.add_argument("--preset", choices=["v0.1", "v0.2"], default="v0.1")
+    p.add_argument("--block-size", type=int, default=None)
+    p.add_argument("--noise-floor", choices=["none", "mean", "quantile"], default=None)
+    p.add_argument("--noise-q", type=float, default=None)
+    p.add_argument("--noise-scale", type=float, default=None)
+    p.add_argument("--motion-diff", choices=["tubelet", "frame"], default=None)
+    p.add_argument("--frame-diff-agg", choices=["mean", "max"], default=None)
+    p.add_argument("--motion-consistency", choices=["none", "double_diff"], default=None)
+    p.add_argument("--min-keep-ratio", type=float, default=None, help="global allocation floor")
+    p.add_argument("--score-blend", type=float, default=None, help="local/global norm blend beta")
+    p.add_argument("--center-bias", type=float, default=None)
     p.add_argument("--device", default="auto", choices=["auto", "cpu", "mps", "cuda"])
     return p.parse_args()
 
@@ -65,7 +77,40 @@ def default_run_name(args) -> str:
     if args.model == "v1":
         return f"v1_r{r}_{args.per_frame_allocation}"
     m = "auto" if args.motion_weight == "auto" else int(round(args.motion_weight * 100))
-    return f"r{r}_m{m}_{args.spatial_op}_{args.per_frame_allocation}"
+    name = f"r{r}_m{m}_{args.spatial_op}_{args.per_frame_allocation}"
+    if args.preset == "v0.2":
+        name = f"v02_{name}"
+    return name
+
+
+def build_v0_config(args) -> BorissalConfig:
+    """Preset base + explicit CLI overrides (None = keep preset value)."""
+    common = dict(
+        scale=args.scale,
+        patch_size=args.patch,
+        tubelet_size=args.tubelet_size,
+        gazing_ratio=args.gazing_ratio,
+        motion_weight=args.motion_weight,
+        per_frame_allocation=args.per_frame_allocation,
+        spatial_op=args.spatial_op,
+        pooling=args.pooling,
+    )
+    overrides = {
+        "block_size": args.block_size,
+        "motion_noise_floor": args.noise_floor,
+        "motion_noise_q": args.noise_q,
+        "motion_noise_scale": args.noise_scale,
+        "motion_diff": args.motion_diff,
+        "frame_diff_agg": args.frame_diff_agg,
+        "motion_consistency": args.motion_consistency,
+        "min_keep_per_frame_ratio": args.min_keep_ratio,
+        "score_norm_blend": args.score_blend,
+        "center_bias": args.center_bias,
+    }
+    common.update({k: v for k, v in overrides.items() if v is not None})
+    if args.preset == "v0.2":
+        return BorissalConfig.v0_2(**common)
+    return BorissalConfig(**common)
 
 
 def dump_v1(args, device, run_dir):
@@ -137,16 +182,7 @@ def main():
 
     video = load_video(args.video, num_frames=args.num_frames, size=args.scale).to(device)
 
-    config = BorissalConfig(
-        scale=args.scale,
-        patch_size=args.patch,
-        tubelet_size=args.tubelet_size,
-        gazing_ratio=args.gazing_ratio,
-        motion_weight=args.motion_weight,
-        per_frame_allocation=args.per_frame_allocation,
-        spatial_op=args.spatial_op,
-        pooling=args.pooling,
-    )
+    config = build_v0_config(args)
     model = Borissal(config).to(device)
     selection, intermediates = model.select_with_intermediates(video)
 
@@ -177,35 +213,40 @@ def main():
         per_frame_keep, str(run_dir / "05_allocation.png"),
         title=f"per_frame_allocation={args.per_frame_allocation}",
     )
+    if "coarse_score" in intermediates:
+        render_heatmap_grid(
+            intermediates["coarse_score"][0], args.tubelet_size, str(run_dir / "07_coarse.png"),
+            suptitle=f"Coarse (1/{config.block_size}-resized) saliency driving the block gate",
+        )
+
+    # Spatial-coherence metric: mean selected 4-neighbors per selected patch.
+    import torch
+    import torch.nn.functional as TF
+    m = keep_mask_grid.float().unsqueeze(1)  # (T_grid, 1, H_grid, W_grid)
+    cross = torch.tensor([[0., 1., 0.], [1., 0., 1.], [0., 1., 0.]]).view(1, 1, 3, 3)
+    contiguity = (TF.conv2d(m, cross, padding=1) * m).sum().item() / max(1.0, m.sum().item())
 
     summary = {
         "model_tag": MODEL_TAG,
+        "preset": args.preset,
         "video": str(Path(args.video).resolve()),
         "device": str(device),
-        "config": {
-            "scale": args.scale,
-            "patch_size": args.patch,
-            "tubelet_size": args.tubelet_size,
-            "gazing_ratio": args.gazing_ratio,
-            "motion_weight": args.motion_weight,
-            "per_frame_allocation": args.per_frame_allocation,
-            "spatial_op": args.spatial_op,
-            "pooling": args.pooling,
-            "num_frames": args.num_frames,
-        },
+        "config": {**config.__dict__, "num_frames": args.num_frames},
         "motion_weight_used": motion_weight_used,
         "grid_thw": grid_thw,
         "num_keep": num_keep,
         "L": selection.scores.shape[1],
         "per_frame_keep": per_frame_keep,
+        "contiguity": round(contiguity, 4),
     }
     with open(run_dir / "summary.json", "w") as f:
-        json.dump(summary, f, indent=2)
+        json.dump(summary, f, indent=2, default=str)
 
     print(f"grid_thw = {grid_thw}")
     print(f"motion_weight = {args.motion_weight} (resolved = {motion_weight_used:.3f})")
     print(f"num_keep = {num_keep} / {selection.scores.shape[1]}")
     print(f"per_frame_keep = {per_frame_keep}")
+    print(f"contiguity = {contiguity:.4f}")
     print(f"wrote stage outputs to {run_dir}")
 
 

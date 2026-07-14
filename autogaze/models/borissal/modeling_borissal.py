@@ -47,6 +47,17 @@ def _minmax_norm(x: torch.Tensor, eps: float) -> torch.Tensor:
     return normed.reshape(b, t, h, w)
 
 
+def _minmax_norm_global(x: torch.Tensor, eps: float) -> torch.Tensor:
+    """Per-batch clip-GLOBAL min-max over all (tubelet, h, w) jointly --
+    preserves cross-tubelet magnitude, unlike the per-tubelet variant."""
+    b = x.shape[0]
+    flat = x.reshape(b, -1)
+    mn = flat.min(dim=-1, keepdim=True).values
+    mx = flat.max(dim=-1, keepdim=True).values
+    normed = (flat - mn) / (mx - mn + eps)
+    return normed.reshape_as(x)
+
+
 def _largest_remainder(raw: torch.Tensor, total_budget: int, min_val: int, max_val: int) -> torch.Tensor:
     """Round per-row fractional allocations to integers summing to total_budget (Hamilton's method).
 
@@ -159,6 +170,146 @@ class Borissal(nn.Module):
             want_intermediates=True,
         )
 
+    def _saliency_scores(
+        self,
+        video: torch.Tensor,
+        tubelet_size: int,
+        patch_size: int,
+        motion_weight_setting,
+    ) -> dict:
+        """The full saliency pipeline (luma -> tubelet -> motion/spatial ->
+        pool -> noise floor -> auto-weight -> normalize -> blend), shared by
+        the fine pass and the v0.2 coarse (resized-input) pass.
+
+        Returns dict(score, motion_norm, spatial_norm, w, noise_floor_tau) --
+        maps are (B, T_grid, H_grid, W_grid) for THIS video's resolution.
+        """
+        cfg = self.config
+        eps = cfg.eps
+        B, T, C, H, W = (int(x) for x in video.shape)
+        T_grid = T // tubelet_size
+        H_grid, W_grid = H // patch_size, W // patch_size
+
+        gray = video.mean(dim=2)  # (B, T, H, W)
+        tub = gray.view(B, T_grid, tubelet_size, H, W).mean(dim=2)  # (B, T_grid, H, W)
+
+        # Motion (codec-residual proxy). Two granularities:
+        #  - "tubelet" (v0.1): difference the tubelet means.
+        #  - "frame" (v0.2): difference consecutive frames, then aggregate per
+        #    tubelet -- catches fast intra-tubelet motion that tubelet
+        #    averaging cancels. Both are pure slice ops (fully vectorized).
+        if cfg.motion_diff == "frame" and T > 1 and tubelet_size > 1:
+            fdiff = (gray[:, 1:] - gray[:, :-1]).abs()          # (B, T-1, H, W)
+            fdiff = torch.cat([fdiff[:, :1], fdiff], dim=1)      # (B, T, H, W); frame 0 <- forward diff
+            if cfg.motion_consistency == "double_diff" and T > 2:
+                # Temporal AND (double-difference): real motion persists across
+                # consecutive diffs; single-frame spikes (flicker/compression
+                # artifacts) vanish under the min. One-sided at the boundary.
+                nxt = torch.cat([fdiff[:, 1:], fdiff[:, -1:]], dim=1)
+                fdiff = torch.minimum(fdiff, nxt)
+            grouped = fdiff.view(B, T_grid, tubelet_size, H, W)
+            motion = grouped.mean(dim=2) if cfg.frame_diff_agg == "mean" else grouped.amax(dim=2)
+        elif T_grid > 1:
+            diff = (tub[:, 1:] - tub[:, :-1]).abs()  # (B, T_grid-1, H, W)
+            motion = torch.zeros_like(tub)
+            motion[:, 1:] = diff
+            motion[:, 0] = diff[:, 0]
+        else:
+            motion = torch.zeros_like(tub)
+
+        # Optional pixel-level box blur of the motion map (v0.2 knob, default off).
+        if cfg.motion_smooth_kernel >= 3:
+            ksz = cfg.motion_smooth_kernel
+            motion = F.avg_pool2d(
+                motion.reshape(B * T_grid, 1, H, W), kernel_size=ksz, stride=1, padding=ksz // 2
+            ).view(B, T_grid, H, W)
+
+        # Spatial: gradient / edge energy.
+        if cfg.spatial_op == "grad":
+            dy = F.pad(tub[:, :, 1:, :] - tub[:, :, :-1, :], (0, 0, 0, 1))
+            dx = F.pad(tub[:, :, :, 1:] - tub[:, :, :, :-1], (0, 1, 0, 0))
+        elif cfg.spatial_op == "sobel":
+            flat = tub.reshape(B * T_grid, 1, H, W)
+            dx = F.conv2d(flat, self._sobel_x, padding=1).view(B, T_grid, H, W)
+            dy = F.conv2d(flat, self._sobel_y, padding=1).view(B, T_grid, H, W)
+        else:
+            raise ValueError(f"unknown spatial_op: {cfg.spatial_op}")
+        spatial = torch.sqrt(dx * dx + dy * dy + eps)
+
+        # Pixel -> patch pooling.
+        pool = F.avg_pool2d if cfg.pooling == "avg" else F.max_pool2d
+        motion_p = pool(motion.reshape(B * T_grid, 1, H, W), kernel_size=patch_size, stride=patch_size)
+        motion_p = motion_p.view(B, T_grid, H_grid, W_grid)
+        spatial_p = pool(spatial.reshape(B * T_grid, 1, H, W), kernel_size=patch_size, stride=patch_size)
+        spatial_p = spatial_p.view(B, T_grid, H_grid, W_grid)
+
+        # v0.2 noise floor: robust per-tubelet dead-zone shrinkage of the motion
+        # map. MUST run before min-max normalization (which would otherwise
+        # re-amplify the noise floor to full [0,1] range in low-motion tubelets)
+        # and before the "auto" weight energies (so w is noise-corrected).
+        # Analogous to codec dead-zone quantization / soft-threshold coring;
+        # true motion is spatially sparse, so a median/mean over the tubelet is
+        # dominated by non-moving patches and estimates the noise floor.
+        tau = None
+        if cfg.motion_noise_floor != "none":
+            N_pf = H_grid * W_grid
+            flat = motion_p.reshape(B, T_grid, N_pf)
+            if cfg.motion_noise_floor == "mean":
+                tau = flat.mean(dim=-1, keepdim=True)  # (B, T_grid, 1)
+            elif cfg.motion_noise_floor == "quantile":
+                # q-quantile via topk (mobile-safe: no sort/quantile/kthvalue).
+                # k_q is config/shape-derived -> data-independent, trace-safe.
+                k_q = min(max(1, int(round((1.0 - cfg.motion_noise_q) * N_pf))), N_pf)
+                tau = flat.topk(k_q, dim=-1).values[..., -1:]  # (B, T_grid, 1)
+            else:
+                raise ValueError(f"unknown motion_noise_floor: {cfg.motion_noise_floor}")
+            motion_p = F.relu(motion_p - cfg.motion_noise_scale * tau.reshape(B, T_grid, 1, 1))
+            tau = tau.reshape(B, T_grid)
+
+        if motion_weight_setting == "auto":
+            # Content-adaptive blend: derived from the clip's own (pre-normalization,
+            # so absolute-magnitude-sensitive) motion vs. spatial energy -- still
+            # non-learned, just data-adaptive. A per-tubelet min-max normalized map
+            # (motion_n/spatial_n below) can't be used for this since it erases
+            # absolute magnitude by construction.
+            motion_energy = motion_p.mean(dim=(1, 2, 3), keepdim=True)   # (B, 1, 1, 1)
+            spatial_energy = spatial_p.mean(dim=(1, 2, 3), keepdim=True)  # (B, 1, 1, 1)
+            w = motion_energy / (motion_energy + spatial_energy + eps)
+        else:
+            w = motion_weight_setting
+
+        motion_n = _minmax_norm(motion_p, eps)
+        spatial_n = _minmax_norm(spatial_p, eps)
+        S = w * motion_n + (1 - w) * spatial_n  # (B, T_grid, H_grid, W_grid)
+
+        # v0.2 local/global normalization blend: per-tubelet min-max (local)
+        # equalizes tubelets; a clip-global min-max component preserves
+        # cross-tubelet magnitude so high-energy moments can rank higher
+        # clip-wide (required for "global" allocation to be meaningful).
+        if cfg.score_norm_blend < 1.0:
+            motion_g = _minmax_norm_global(motion_p, eps)
+            spatial_g = _minmax_norm_global(spatial_p, eps)
+            S_global = w * motion_g + (1 - w) * spatial_g
+            beta = cfg.score_norm_blend
+            S = beta * S + (1.0 - beta) * S_global
+
+        # v0.2 center bias (conditional, off by default): additive Gaussian
+        # center prior -- the classical composition prior from saliency
+        # benchmarks. Grid-resolution constant map; negligible cost.
+        if cfg.center_bias > 0.0:
+            hh = torch.linspace(-1.0, 1.0, H_grid, device=S.device)
+            ww = torch.linspace(-1.0, 1.0, W_grid, device=S.device)
+            g = torch.exp(-(hh.view(-1, 1) ** 2 + ww.view(1, -1) ** 2) / (2 * 0.45 ** 2))
+            S = S + cfg.center_bias * g.view(1, 1, H_grid, W_grid)
+
+        return {
+            "score": S,
+            "motion_norm": motion_n,
+            "spatial_norm": spatial_n,
+            "w": w,
+            "noise_floor_tau": tau,
+        }
+
     def _select_impl(
         self,
         video: torch.Tensor,
@@ -188,58 +339,13 @@ class Borissal(nn.Module):
             raise ValueError(f"H,W ({H},{W}) must be divisible by patch_size ({patch_size})")
 
         device = video.device
-        gray = video.mean(dim=2)  # (B, T, H, W)
-
         T_grid = T // tubelet_size
         H_grid, W_grid = H // patch_size, W // patch_size
         N_pf = H_grid * W_grid
         L = T_grid * N_pf
 
-        tub = gray.view(B, T_grid, tubelet_size, H, W).mean(dim=2)  # (B, T_grid, H, W)
-
-        # Motion: forward/backward tubelet differencing (codec-residual proxy).
-        if T_grid > 1:
-            diff = (tub[:, 1:] - tub[:, :-1]).abs()  # (B, T_grid-1, H, W)
-            motion = torch.zeros_like(tub)
-            motion[:, 1:] = diff
-            motion[:, 0] = diff[:, 0]
-        else:
-            motion = torch.zeros_like(tub)
-
-        # Spatial: gradient / edge energy.
-        if cfg.spatial_op == "grad":
-            dy = F.pad(tub[:, :, 1:, :] - tub[:, :, :-1, :], (0, 0, 0, 1))
-            dx = F.pad(tub[:, :, :, 1:] - tub[:, :, :, :-1], (0, 1, 0, 0))
-        elif cfg.spatial_op == "sobel":
-            flat = tub.reshape(B * T_grid, 1, H, W)
-            dx = F.conv2d(flat, self._sobel_x, padding=1).view(B, T_grid, H, W)
-            dy = F.conv2d(flat, self._sobel_y, padding=1).view(B, T_grid, H, W)
-        else:
-            raise ValueError(f"unknown spatial_op: {cfg.spatial_op}")
-        spatial = torch.sqrt(dx * dx + dy * dy + eps)
-
-        # Pixel -> patch pooling.
-        pool = F.avg_pool2d if cfg.pooling == "avg" else F.max_pool2d
-        motion_p = pool(motion.reshape(B * T_grid, 1, H, W), kernel_size=patch_size, stride=patch_size)
-        motion_p = motion_p.view(B, T_grid, H_grid, W_grid)
-        spatial_p = pool(spatial.reshape(B * T_grid, 1, H, W), kernel_size=patch_size, stride=patch_size)
-        spatial_p = spatial_p.view(B, T_grid, H_grid, W_grid)
-
-        if motion_weight_setting == "auto":
-            # Content-adaptive blend: derived from the clip's own (pre-normalization,
-            # so absolute-magnitude-sensitive) motion vs. spatial energy -- still
-            # non-learned, just data-adaptive. A per-tubelet min-max normalized map
-            # (motion_n/spatial_n below) can't be used for this since it erases
-            # absolute magnitude by construction.
-            motion_energy = motion_p.mean(dim=(1, 2, 3), keepdim=True)   # (B, 1, 1, 1)
-            spatial_energy = spatial_p.mean(dim=(1, 2, 3), keepdim=True)  # (B, 1, 1, 1)
-            w = motion_energy / (motion_energy + spatial_energy + eps)
-        else:
-            w = motion_weight_setting
-
-        motion_n = _minmax_norm(motion_p, eps)
-        spatial_n = _minmax_norm(spatial_p, eps)
-        S = w * motion_n + (1 - w) * spatial_n  # (B, T_grid, H_grid, W_grid)
+        sal = self._saliency_scores(video, tubelet_size, patch_size, motion_weight_setting)
+        S, motion_n, spatial_n, w = sal["score"], sal["motion_norm"], sal["spatial_norm"], sal["w"]
 
         # Per-tubelet budget allocation.
         if alloc == "uniform":
@@ -251,20 +357,95 @@ class Borissal(nn.Module):
             energy_sum = energy.sum(dim=-1, keepdim=True).clamp_min(eps)
             raw = (energy / energy_sum) * total_budget
             k_per_frame = _largest_remainder(raw, total_budget, min_val=1, max_val=N_pf)
+        elif alloc == "global":
+            # v0.2: one clip-wide top-K_total with a guaranteed per-tubelet
+            # minimum m. The budget concentrates where the action is; the
+            # floor preserves temporal coverage (no tubelet ends up empty).
+            K_total = min(max(T_grid, round(ratio * L)), L)
+            m = max(1, int(round(cfg.min_keep_per_frame_ratio * K_total / T_grid)))
+            m = min(m, K_total // T_grid)
+            # Coarse-to-fine gate sizing under global allocation: worst-case
+            # capacity (K_total - (T-1)m) opens the gate almost fully and
+            # neuters coherence (found empirically). Instead allow up to 2x
+            # the uniform share per tubelet -- total gated capacity is then
+            # 2*K_total >= K_total, so the global topk always has enough
+            # finite candidates (exact budget preserved); concentration
+            # beyond 2x share spills to other tubelets' gated regions.
+            k_gate = min(N_pf, 2 * ((K_total + T_grid - 1) // T_grid))
+            k_per_frame = torch.full((B, T_grid), k_gate, dtype=torch.long, device=device)
         else:
             raise ValueError(f"unknown per_frame_allocation: {alloc}")
 
-        # Top-k -> keep mask, via torch.topk (bounded by k_max, not a full O(N) sort) --
-        # more mobile-runtime-friendly (TFLite TopKV2 / CoreML top_k are first-class ops,
-        # unlike general sort/argsort). For "uniform" allocation k_max == k for every
-        # tubelet, so this reduces to a single topk(k) + scatter with no extra compare.
         scores_flat = S.reshape(B, T_grid, N_pf)
-        k_max = int(k_per_frame.max().item())
-        _, topk_idx = scores_flat.topk(k_max, dim=-1)  # (B, T_grid, k_max), sorted descending
-        within_topk_rank = torch.arange(k_max, device=device).view(1, 1, k_max).expand(B, T_grid, k_max)
-        keep_within_topk = within_topk_rank < k_per_frame.unsqueeze(-1)  # (B, T_grid, k_max) bool
-        keep_mask_grid = torch.zeros(B, T_grid, N_pf, dtype=torch.bool, device=device)
-        keep_mask_grid.scatter_(-1, topk_idx, keep_within_topk)  # (B, T_grid, N_pf) bool
+
+        # v0.2 coherent-region selection (resize-based coarse-to-fine): a
+        # low-resolution saliency pass picks top-ceil(k/b^2) blocks per tubelet,
+        # then the fine top-k below runs only inside those blocks. Gate capacity
+        # ceil(k/b^2)*b^2 >= k guarantees the exact-k budget is unaffected.
+        # Fragmentation is hard-bounded to <= ceil(k/b^2) regions per tubelet.
+        coarse_score = None
+        block_mask = None
+        sel_scores = scores_flat
+        b = cfg.block_size
+        if b > 1:
+            if H_grid % b != 0 or W_grid % b != 0 or (H // b) % patch_size != 0 or (W // b) % patch_size != 0:
+                raise ValueError(
+                    f"block_size={b} incompatible with grid {H_grid}x{W_grid} "
+                    f"(needs H_grid,W_grid divisible by b and H/b,W/b divisible by patch_size)"
+                )
+            Hc, Wc = H_grid // b, W_grid // b
+            Nc = Hc * Wc
+            A = b * b
+            # Coarse signal: the SAME saliency pipeline on a 1/b-resized clip --
+            # the resize's low-pass naturally kills fine noise motion/texture.
+            video_small = F.interpolate(
+                video.reshape(B * T, C, H, W), scale_factor=1.0 / b,
+                mode="bilinear", align_corners=False,
+            ).view(B, T, C, H // b, W // b)
+            coarse_score = self._saliency_scores(
+                video_small, tubelet_size, patch_size, motion_weight_setting
+            )["score"]  # (B, T_grid, Hc, Wc)
+
+            kb_pf = ((k_per_frame + A - 1) // A).clamp(max=Nc)  # ceil-div, gate fully open if cap >= capacity
+            kb_max = int(kb_pf.max().item())
+            coarse_flat = coarse_score.reshape(B, T_grid, Nc)
+            _, blk_idx = coarse_flat.topk(kb_max, dim=-1)
+            blk_rank = torch.arange(kb_max, device=device).view(1, 1, kb_max).expand(B, T_grid, kb_max)
+            blk_keep = blk_rank < kb_pf.unsqueeze(-1)
+            block_mask = torch.zeros(B, T_grid, Nc, dtype=torch.bool, device=device)
+            block_mask.scatter_(-1, blk_idx, blk_keep)  # (B, T_grid, Nc)
+
+            fine_gate = (
+                block_mask.reshape(B, T_grid, Hc, 1, Wc, 1)
+                .expand(B, T_grid, Hc, b, Wc, b)
+                .reshape(B, T_grid, N_pf)
+            )
+            # finfo.min (not -inf) for mobile-backend safety.
+            sel_scores = scores_flat.masked_fill(~fine_gate, torch.finfo(scores_flat.dtype).min)
+
+        if alloc == "global":
+            # Guaranteed per-tubelet top-m (from gated scores), then one
+            # clip-wide topk(K_total) with a large finite bonus keeping the
+            # guaranteed set in. Exact-K_total by construction.
+            _, gidx = sel_scores.topk(m, dim=-1)
+            guaranteed = torch.zeros(B, T_grid, N_pf, dtype=torch.bool, device=device)
+            guaranteed.scatter_(-1, gidx, True)
+            global_scores = (sel_scores + 10.0 * guaranteed.to(sel_scores.dtype)).reshape(B, L)
+            _, kidx = global_scores.topk(K_total, dim=-1)
+            keep_mask_flat = torch.zeros(B, L, dtype=torch.bool, device=device)
+            keep_mask_flat.scatter_(1, kidx, True)
+            keep_mask_grid = keep_mask_flat.reshape(B, T_grid, N_pf)
+        else:
+            # Top-k -> keep mask, via torch.topk (bounded by k_max, not a full O(N) sort) --
+            # more mobile-runtime-friendly (TFLite TopKV2 / CoreML top_k are first-class ops,
+            # unlike general sort/argsort). For "uniform" allocation k_max == k for every
+            # tubelet, so this reduces to a single topk(k) + scatter with no extra compare.
+            k_max = int(k_per_frame.max().item())
+            _, topk_idx = sel_scores.topk(k_max, dim=-1)  # (B, T_grid, k_max), sorted descending
+            within_topk_rank = torch.arange(k_max, device=device).view(1, 1, k_max).expand(B, T_grid, k_max)
+            keep_within_topk = within_topk_rank < k_per_frame.unsqueeze(-1)  # (B, T_grid, k_max) bool
+            keep_mask_grid = torch.zeros(B, T_grid, N_pf, dtype=torch.bool, device=device)
+            keep_mask_grid.scatter_(-1, topk_idx, keep_within_topk)  # (B, T_grid, N_pf) bool
 
         per_frame_keep = keep_mask_grid.sum(dim=-1)  # (B, T_grid)
         num_keep = per_frame_keep.sum(dim=-1)        # (B,)
@@ -304,4 +485,9 @@ class Borissal(nn.Module):
                 "score": S,
                 "motion_weight_used": motion_weight_used,
             }
+            if sal["noise_floor_tau"] is not None:
+                intermediates["noise_floor_tau"] = sal["noise_floor_tau"]
+            if coarse_score is not None:
+                intermediates["coarse_score"] = coarse_score
+                intermediates["block_mask"] = block_mask
         return selection, intermediates
