@@ -124,9 +124,10 @@ def dump_v1(args, device, run_dir):
     if args.checkpoint:
         ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
         ckpt_cfg = dict(ckpt["config"])
-        # pre-cosine-head checkpoints predate this config field; their head
-        # weights are the plain-conv variant.
+        # pre-cosine-head / pre-global-context checkpoints predate these
+        # config fields; their weights are the older variants.
         ckpt_cfg.setdefault("cosine_scores", False)
+        ckpt_cfg.setdefault("global_context", False)
         config = BorissalV1Config(**ckpt_cfg)
         model = BorissalV1(config)
         model.load_state_dict(ckpt["state_dict"])

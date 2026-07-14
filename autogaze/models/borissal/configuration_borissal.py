@@ -149,6 +149,17 @@ class BorissalV1Config:
     # score saturation (P2). False = plain 1x1-conv head (pre-WP-A behavior).
     cosine_scores: bool = True
 
+    # GCNet-lite learned global context (2026-07-15 model review): the plain
+    # TSM stack's receptive field is ~9x9 grid cells (measured: far-field
+    # perturbation response 200x weaker than local), but coverage/uniqueness
+    # objectives ask a CLIP-GLOBAL question ("how does this patch compare to
+    # everything else?"). A learned weighted pooling (GCNet, arXiv:1904.11492)
+    # provides that signal at O(L) cost: one 1x1 attention conv + softmax +
+    # zero-init 1x1 transform, injected before the LAST TSM block so its
+    # conv+GELU mixes local x global per position. Mobile-safe (conv/softmax/
+    # mul-sum only). False = pre-review local-only behavior.
+    global_context: bool = True
+
     gazing_ratio: float = 0.5
     per_frame_allocation: Literal["uniform", "proportional", "global"] = "uniform"
     min_keep_per_frame_ratio: float = 0.25  # global mode floor (mirrors BorissalConfig)

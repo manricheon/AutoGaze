@@ -552,6 +552,66 @@ citable negative finding for the eventual paper.
   calibration adapter, EVAL-X audit gap, Frame-Voyager caption-loss
   model selection.
 
+## Model diagnostics & global context (2026-07-15)
+
+A user-prompted architecture review ("is the model itself the problem — does
+it just pass its initial guidance through?"), settled with measurements
+(`scripts/borissal_model_diagnostics.py` re-runs all of these):
+
+**Rejected concern — v0 passthrough.** Untrained v1 scores vs v0 saliency:
+Spearman ≈ 0.03–0.08 across seeds; after the WP-A 40-step run: −0.08 (and
+−0.09 vs the untrained model). v1 neither reproduces v0 nor freezes at its
+init. (Init note: a shallow random CNN's scores DO correlate with RGB
+brightness at init — measured anywhere from −0.3 to +0.86 depending on
+seed/scale; harmless, training reshapes it immediately, but the diagnostics
+track it.)
+
+**Confirmed gap — no learnable global pathway.** The TSM stack's receptive
+field is ~9×9 grid cells (4 stacked 3×3 convs); a corner perturbation moves
+nearby scores ~55–200× more than far-corner scores (the residue is GroupNorm
+statistics leakage, not content routing). The v0 input maps carry only a
+weak global signal (min-max normalization = 2 scalars per frame). Meanwhile
+coverage/uniqueness objectives ask a CLIP-GLOBAL question — a local scorer
+is being trained toward something it cannot express, and this worsens under
+the uniqueness-primary recipe.
+
+**Related finding — the AutoGaze precedent legitimizes proxy-only training.**
+The original pipeline's GRPO stage rewards `-VideoMAE_reconstruction_loss`
+only (task_video_mae_reconstruction.py:130-140); the real downstream
+(NVILA-8B-HD, HLVid QA) attaches later in a separate repo. And
+`gazing_labels.json` is NOT human gaze — it is precomputed
+reconstruction-optimal selection orders (another reconstruction-family
+proxy). So training Borissal v1 purely against predictor-based proxies,
+with downstream attached later, follows the project's own precedent — the
+earlier idea of demoting uniqueness to "experimental" was over-conservative
+and was withdrawn.
+
+**Fix adopted — GCNet-lite learned global context** (`_GlobalContext` in
+modeling_borissal_v1.py, `global_context=True` default):
+- One 1×1 attention conv scores positions; softmax within each frame gives
+  a per-tubelet context, softmax over all (t, position) gives a clip
+  context (weighted — a few high-motion frames aren't diluted like a
+  uniform mean); concat → zero-init 1×1 transform → added to features.
+- Chosen over (a) plain mean pooling (dilutes sparse important content;
+  GCNet showed learned weighted pooling captures most of full attention's
+  benefit) and (b) full pairwise attention (~21M pairwise ops per layer at
+  L=4608 — threatens the 25ms mobile budget and the raison d'être of the
+  feed-forward design).
+- Injected BEFORE the last TSM block: the context is per-frame constant, so
+  added at the head it would interact with positions only through the
+  cosine normalization (a linear head + per-frame softmax would erase it
+  entirely via shift invariance); before the last block, its conv+GELU
+  mixes local×global per position.
+- Zero-init transform = exact no-op at init (preserves WP-A-validated
+  early dynamics). Known transient: the attn conv receives zero gradient
+  for exactly one step (measured: step 0 = 0, step 1 = healthy).
+- Cost: +8.3K params (114K → 122K); CPU select() latency unchanged
+  (14.5ms vs 16.0ms off — within noise, budget 25ms). Ops: conv, softmax,
+  mul+sum only — mobile constraints intact.
+- The canonical Selection contract path (`_selection_from_scores` →
+  `_pack_gazing_mask`, ascending `idx = t*N + n`) is untouched (user
+  requirement: downstream attachability).
+
 ## Open items (updated)
 
 - torch.hub V-JEPA2.1-L/B teacher adapter (three wrapper methods) — when

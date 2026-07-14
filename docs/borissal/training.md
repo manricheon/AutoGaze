@@ -61,6 +61,14 @@ gradients through "which tokens were kept":
   selector of gradient — found empirically during smoke). The returned
   `probs` stays the CLEAN `softmax(scores)` so the entropy loss and
   saturation monitoring are not polluted by per-sample Gumbel sharpness.
+- **GCNet-lite global context** (`global_context`, default on since the
+  2026-07-15 model review): a learned weighted per-frame + clip summary
+  added back to features before the last TSM block, zero-initialized (exact
+  no-op at init; the attn conv wakes up after one optimizer step). Why: the
+  local conv stack (~9×9-cell receptive field) cannot express the
+  clip-global comparisons that coverage/uniqueness objectives ask for —
+  full rationale and measurements in design.md "Model diagnostics & global
+  context". +8.3K params, latency unchanged, Selection contract untouched.
 - **Cosine score head** (`cosine_scores`, default on since §8): logits =
   normalized-feature · normalized-weight × learnable temperature (X-MoE,
   arXiv:2204.09179) — |logit| ≤ temp by construction, so the score head
@@ -364,8 +372,16 @@ maximized objective — hence the WP-B inversion.
    eval_borissal_coverage.py> --w-zloss 1e-3 --w-entropy 0.01
    [--train-block-size 2] [--w-hardness 0.1]`. τ fixed at 2/3, no
    annealing.
-3. **RL phase (optional)** — `--rl-after-step N --rl-samples 4
-   --rl-cov-weight 1.0`: REINFORCE with the Kool leave-one-out baseline
+3. **RL phase (DEFERRED — decision 2026-07-15)** — stage-1 training runs
+   SSL(ST)-only; do NOT enable `--rl-after-step` by default. Rationale:
+   our ST path directly differentiates the actual objective (unlike
+   AutoGaze's stage-1 label imitation, which *needed* an RL stage 2), and
+   WP-A already addresses the saturation motive (40-step A/B: entropy
+   mean-reverts instead of collapsing). **Re-enable trigger**: if, with
+   WP-A + global_context on, a scale run still shows `score_entropy_mean`
+   collapsing or `grad_norm` dying, switch the run to
+   `--rl-after-step N --rl-samples 4 --rl-cov-weight 1.0`:
+   REINFORCE with the Kool leave-one-out baseline
    (AdaMAE precedent: same frozen-teacher + tiny-selector setup, REINFORCE
    made foreground saliency emerge). Reward = uniqueness −
    rl-cov-weight·relu(coverage − floor), computed entirely under no_grad —

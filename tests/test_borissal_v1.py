@@ -40,6 +40,11 @@ def test_v1_residual_scoring_forward():
 def test_v1_forward_train_gradients_reach_all_params():
     video = _make_video(B=1)
     model = BorissalV1(BorissalV1Config()).train()
+    # At EXACT zero-init the context transform silences the attn conv for one
+    # step (transform.weight IS the attn path's gradient conduit); excite it
+    # to assert the steady-state property (all params reached from step 2 on).
+    with torch.no_grad():
+        model.gctx.transform.weight.normal_(0, 0.1)
     out = model.forward_train(video, gazing_ratio=0.4)
     loss = (out["st_gate"] * torch.randn_like(out["st_gate"])).sum()
     loss.backward()
@@ -222,6 +227,8 @@ def test_combine_losses_weights_and_warmup_decay():
 def test_v1_block_st_selection():
     video = _make_video(B=2, seed=50)
     model = BorissalV1(BorissalV1Config(train_block_size=2)).train()
+    with torch.no_grad():
+        model.gctx.transform.weight.normal_(0, 0.1)  # see gradients-reach test
     out = model.forward_train(video, gazing_ratio=0.3)
     B, T_grid, N_pf = out["hard_keep"].shape
     k = out["k"]
@@ -244,6 +251,49 @@ def test_v1_block_st_selection():
     a = model.forward_train(video, gazing_ratio=0.3)["hard_keep"]
     c = model.forward_train(video, gazing_ratio=0.3)["hard_keep"]
     assert torch.equal(a, c)
+
+
+def test_global_context_zero_init_is_noop():
+    from autogaze.models.borissal.modeling_borissal_v1 import _GlobalContext
+
+    gc = _GlobalContext(16)
+    h = torch.randn(2, 4, 16, 6, 6)
+    assert torch.equal(gc(h), h), "zero-init transform must make the context path an exact no-op"
+    # and the default model must carry the module with zero-init transform
+    model = BorissalV1(BorissalV1Config())
+    assert model.gctx is not None
+    assert model.gctx.transform.weight.abs().sum().item() == 0.0
+
+
+def test_global_context_carries_far_field_information():
+    # The whole point of the context path: a change at ONE position must be
+    # able to reach EVERY position (different frame, opposite corner) --
+    # something the local conv stack cannot do. Zero-init hides the path, so
+    # excite the transform (simulating a trained state). Module-level and
+    # deterministic; trained-model far-field behavior is measured by
+    # scripts/borissal_model_diagnostics.py instead.
+    from autogaze.models.borissal.modeling_borissal_v1 import _GlobalContext
+
+    torch.manual_seed(3)
+    gc = _GlobalContext(8)
+    with torch.no_grad():
+        gc.transform.weight.normal_(0, 0.5)
+    h = torch.randn(1, 2, 8, 6, 6)
+    h2 = h.clone()
+    h2[0, 0, :, 0, 0] += 5.0  # perturb one position in frame 0
+    d = (gc(h2) - gc(h)).abs()
+    assert d[0, 1, :, 5, 5].max() > 1e-4, \
+        "excited context path must carry information to the far corner of ANOTHER frame"
+
+
+def test_global_context_off_path_backcompat():
+    video = _make_video(B=1, seed=71)
+    model = BorissalV1(BorissalV1Config(global_context=False)).eval()
+    assert model.gctx is None
+    sel = model.select(video, gazing_ratio=0.3)
+    assert sel.grid_thw[0].tolist() == [8, 24, 24]
+    valid = sel.keep_index[0][sel.keep_index[0] >= 0]
+    assert (valid[1:] > valid[:-1]).all()
 
 
 def test_router_z_loss_penalizes_logit_magnitude():

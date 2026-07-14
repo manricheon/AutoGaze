@@ -872,3 +872,33 @@ teacher facebook/vjepa2-vitl-fpc64-256, scale 256, bs 1, lr 3e-4, w_ent
   concentrates the relaxed backward on high-prob tokens) before
   recovering with the entropy — if the low-decile channel stays collapsed
   at scale, the §8 RL phase is the saturation-proof fallback.
+
+---
+
+## 2026-07-15 — architecture review: GCNet-lite global context; SSL-only recipe locked
+
+User challenged the training approach ("is the model itself the problem —
+does it just guide its initial results through?"). Settled with
+measurements + two codebase investigations, reviewed by Fable:
+
+- **v0-passthrough concern rejected** (untrained/trained v1 vs v0 Spearman
+  ≈ 0); **real gap found instead**: the TSM stack is local (~9×9 cells,
+  55–200× near/far perturbation decay) while coverage/uniqueness are
+  clip-global questions.
+- **gazing_labels.json investigated**: NOT human gaze — precomputed
+  reconstruction-optimal orders (another recon-family proxy; also absent
+  locally). **AutoGaze precedent investigated**: its GRPO reward is
+  `-VideoMAE recon loss` only; downstream attaches later in a separate
+  repo → proxy-only training is the project's own precedent; the
+  "demote uniqueness to experimental" idea was withdrawn.
+- **Adopted: `_GlobalContext` (GCNet-lite)**, default on — learned weighted
+  per-frame + clip summaries, zero-init transform (exact no-op at init;
+  attn conv wakes at step 1 — measured), injected BEFORE the last TSM block
+  (a per-frame-constant context added at the head would rely solely on the
+  cosine normalization for positional interaction). +8.3K params, CPU
+  select() 14.5ms (budget 25ms), Selection contract untouched.
+- **Recipe locked: SSL(ST)-only for stage 1; RL deferred** with an explicit
+  re-enable trigger (entropy collapse / dying grads despite WP-A + context)
+  — documented in training.md §8.
+- New `scripts/borissal_model_diagnostics.py` (v0-corr / perturbation RF /
+  brightness-corr; old-checkpoint compat). Tests 43 → **46 green**.

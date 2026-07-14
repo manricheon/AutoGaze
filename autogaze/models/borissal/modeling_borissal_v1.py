@@ -125,6 +125,45 @@ class TemporalShift(nn.Module):
         return out
 
 
+class _GlobalContext(nn.Module):
+    """GCNet-style learned weighted global context (video-aware, mobile-safe).
+
+    Why: the TSM conv stack is local (~9x9 grid cells), but the SSL
+    objectives (coverage/uniqueness) ask how a patch relates to the WHOLE
+    clip -- a scorer that never sees the rest of the clip cannot express
+    "relatively important here". This block computes two learned weighted
+    summaries -- per-tubelet ("the rest of this frame") and clip-wide
+    ("the rest of the clip"; weighted, so a few high-motion frames are not
+    diluted the way a uniform mean would be) -- and adds their transform
+    back to every position. The output transform is ZERO-INITIALIZED so the
+    path starts as an exact no-op and cannot disturb validated early
+    training dynamics. Ops: 1x1 conv, softmax, mul+sum -- no pairwise
+    attention, O(L) cost, export-friendly."""
+
+    def __init__(self, channels: int):
+        super().__init__()
+        self.attn = nn.Conv2d(channels, 1, kernel_size=1)
+        self.transform = nn.Conv2d(2 * channels, channels, kernel_size=1)
+        nn.init.zeros_(self.transform.weight)
+        nn.init.zeros_(self.transform.bias)
+
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        # h: (B, T, C, H, W)
+        B, T, C, H, W = h.shape
+        logits = self.attn(h.reshape(B * T, C, H, W)).reshape(B, T, H * W)
+        flat = h.reshape(B, T, C, H * W)
+        # per-tubelet context: softmax over the frame's positions
+        w_frame = logits.softmax(dim=-1)                                   # (B, T, N)
+        ctx_frame = (flat * w_frame.unsqueeze(2)).sum(dim=-1)              # (B, T, C)
+        # clip context: one softmax over ALL (t, position) -- learns which
+        # frames AND which positions summarize the clip
+        w_clip = logits.reshape(B, T * H * W).softmax(dim=-1).reshape(B, T, H * W)
+        ctx_clip = (flat * w_clip.unsqueeze(2)).sum(dim=(1, 3))            # (B, C)
+        ctx = torch.cat([ctx_frame, ctx_clip.unsqueeze(1).expand(-1, T, -1)], dim=-1)
+        delta = self.transform(ctx.reshape(B * T, 2 * C, 1, 1)).reshape(B, T, C, 1, 1)
+        return h + delta
+
+
 class _TSMBlock(nn.Module):
     def __init__(self, channels: int, shift_fraction: float):
         super().__init__()
@@ -160,6 +199,13 @@ class BorissalV1(nn.Module):
         self.blocks = nn.ModuleList(
             [_TSMBlock(config.hidden_channels, config.shift_fraction) for _ in range(config.num_blocks)]
         )
+        # Injected BEFORE the last TSM block (not after all of them): the
+        # context is a per-frame constant, so if it were added right before
+        # the head, per-position interaction would hinge entirely on the
+        # cosine head's normalization (a plain linear head + per-frame
+        # softmax would erase it via shift invariance). Before the last
+        # block, its conv+GELU mixes local x global per position.
+        self.gctx = _GlobalContext(config.hidden_channels) if config.global_context else None
         if config.cosine_scores:
             # Cosine score head (X-MoE): logit = <feat/|feat|, w/|w|> * temp
             # with a learnable temperature. |logit| <= temp by construction,
@@ -242,8 +288,12 @@ class BorissalV1(nn.Module):
         x, v0_score = self._grid_inputs(video)
         B, T, C, H, W = x.shape
         h = self.stem(x.reshape(B * T, C, H, W)).view(B, T, -1, H, W)
-        for block in self.blocks:
+        for i, block in enumerate(self.blocks):
+            if self.gctx is not None and i == len(self.blocks) - 1:
+                h = self.gctx(h)
             h = block(h)
+        if self.gctx is not None and not self.blocks:
+            h = self.gctx(h)  # degenerate num_blocks=0 config: apply before head
         h_flat = h.reshape(B * T, -1, H, W)
         if self.config.cosine_scores:
             temp = self.log_score_temp.exp().clamp(max=100.0)
