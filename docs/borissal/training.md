@@ -100,16 +100,37 @@ Suggested first real experiment matrix (one knob at a time):
 - **Works out of the box (pinned transformers==5.5.0):** official
   `facebook/vjepa2-vitl-fpc64-256` (ViT-L, 326M) — used for the local
   real-teacher validation run.
-- **V-JEPA 2.1 checkpoints (e.g. `davevanveen/vjepa2.1-vitb-fpc64-384`) do
-  NOT load into the native `vjepa2` class**: 2.1 adds image/video dual patch
-  embeddings, modality embeddings, distillation norms, and a differently
-  shaped predictor projection (1664 vs hidden). Confirmed empirically (load
-  report: UNEXPECTED/MISSING/MISMATCH keys). To use a true 2.1 teacher
-  (e.g. the torch.hub vjepa2.1l/b the team already uses), write a small
-  adapter implementing the three wrapper methods on top of the torch.hub
-  model — the trainer needs no changes. The token grid convention is
-  identical, so selectors trained against either teacher stay
-  downstream-compatible.
+- **V-JEPA 2.1 (the team's preferred teacher) is supported via torch.hub**:
+  `--teacher hub:vjepa2_1_vit_base_384` (B, used for local validation) or
+  `hub:vjepa2_1_vit_large_384` (L, for scale training) — official
+  `facebookresearch/vjepa2` entrypoints, each returning `(encoder,
+  predictor)`. Adapter: `vjepa21_hub.VJEPA21HubTeacher`. The original
+  encoder supports sparse natively (`masks=[keep_index]`, same t-major
+  canonical order); the ST gate is applied to the encoder *output* features
+  there (no clean input-embedding injection point in the original code —
+  an equally valid gradient conduit; the HF wrapper gates at input
+  embeddings).
+  - **2.1-specific loss wiring — oracle-reference coverage.** 2.1's
+    `predictor_proj` outputs the *distillation-teacher* space (1664-d,
+    ViT-gigantic), not the encoder's own space, so predictions can't be
+    compared to the 2.1 encoder's dense features directly. Instead the
+    trainer runs the SAME predictor head twice: a no-grad **reference pass**
+    with context = ALL tokens (full-information prediction of the target
+    positions) and the **student pass** with context = selected tokens only;
+    the loss is MSE between the two, in the same 1664-d space, same head,
+    same positions. The selector thus learns selections whose
+    sparse-context prediction matches the full-information prediction —
+    the same coverage intuition, made well-defined for 2.1's head
+    structure. NOTE: this is our adaptation, not a published recipe —
+    validate empirically at scale.
+  - HF-side note: HF-hosted 2.1 checkpoints do NOT load into the native
+    `vjepa2` class (dual patch embeds / modality embeds / distillation
+    norms / 1664 proj — confirmed empirically); torch.hub is the supported
+    2.1 path.
+  - torch.hub caveat: the repo's current main hardcodes a localhost
+    checkpoint URL (dev leftover). Pre-download
+    `https://dl.fbaipublicfiles.com/vjepa2/<file>.pt` into
+    `~/.cache/torch/hub/checkpoints/` and torch.hub uses the cache.
 - `--smoke` with no `--teacher` uses a tiny randomly-initialized V-JEPA2
   config: validates the full graph/gradients in seconds, but its random
   features give the coverage loss no meaningful preference between
@@ -126,21 +147,30 @@ uv run python scripts/train_borissal_v1.py --smoke --device cpu \
     --w-pred 0 --w-v0-distill 1 --ratio-sampling fixed --ratio 0.3
 ```
 
-Mac real-teacher check (ViT-L, MPS, minutes):
+Mac real-teacher check (V-JEPA2 ViT-L via HF, MPS, minutes):
 ```bash
 uv run python scripts/train_borissal_v1.py --smoke \
     --teacher facebook/vjepa2-vitl-fpc64-256 --scale 256 \
     --batch-size 1 --device mps --steps 30 --out-dir weights/borissal_v1_real
 ```
 
-Linux multi-GPU (AutoGaze-Training-Data):
+Mac real-teacher check (V-JEPA **2.1**-B via torch.hub, oracle-reference loss):
+```bash
+uv run python scripts/train_borissal_v1.py --smoke \
+    --teacher hub:vjepa2_1_vit_base_384 --scale 384 \
+    --batch-size 1 --device mps --steps 30 --out-dir weights/borissal_v1_vjepa21b
+```
+
+Linux multi-GPU (AutoGaze-Training-Data, V-JEPA 2.1-L teacher):
 ```bash
 torchrun --nproc_per_node=8 scripts/train_borissal_v1.py \
     --data-root /path/to/AutoGaze-Training-Data \
-    --teacher facebook/vjepa2-vitl-fpc64-256 --scale 256 \
+    --teacher hub:vjepa2_1_vit_large_384 --scale 384 \
     --batch-size 8 --grad-accum 2 --steps 20000 \
     --ratio-sampling uniform --ratio-min 0.15 --ratio-max 0.75
 ```
+(HF `facebook/vjepa2-vitl-fpc64-256` at `--scale 256` remains a supported
+alternative teacher with the plain dense-target coverage loss.)
 (DDP activates automatically under torchrun; single-process otherwise.
 gazing_labels.json is not needed — this is fully self-supervised.)
 

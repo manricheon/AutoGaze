@@ -583,3 +583,55 @@ at scale (training.md §3); predictor fine-tuning option.
 **Next up:** push, then Linux/CUDA scale training on AutoGaze-Training-Data
 (torchrun recipe in training.md §6), teacher = team's vjepa2.1l via adapter
 or HF ViT-L as-is.
+
+---
+
+## 2026-07-14 (same day) — V-JEPA 2.1 torch.hub teacher + oracle-reference coverage loss
+
+User asked to fetch V-JEPA 2.1 from the official torch.hub and to check
+whether its predictor is usable. Both done; one upstream bug and one design
+adaptation along the way.
+
+**Findings:**
+- Official `facebookresearch/vjepa2` torch.hub exposes 2.1 entrypoints
+  (`vjepa2_1_vit_base_384`, `vjepa2_1_vit_large_384`, ...), all returning
+  `(encoder, predictor)` — **predictor included** (depth 12 for B/L),
+  img384/patch16/tubelet2 (grid matches ours).
+- **Upstream bug**: the repo's main hardcodes `VJEPA_BASE_URL =
+  "http://localhost:8300"` (dev leftover; the real
+  `https://dl.fbaipublicfiles.com/vjepa2` is commented out). Workaround:
+  pre-download the .pt into `~/.cache/torch/hub/checkpoints/` (done for
+  `vjepa2_1_vitb_dist_vitG_384.pt`, 1.66GB).
+- The original encoder supports sparse natively (`masks=[keep_index]`) and
+  its token order is the same canonical t-major — verified shapes:
+  dense (1,4608,768), sparse (1,1382,768) at ratio 0.3/384.
+- **2.1's predictor projects to the DISTILLATION-teacher space (1664-d,
+  ViT-gigantic; `return_all_tokens=True` → (x_pred, x_context))**, not the
+  encoder's own 768-d. So plain "predict vs own dense features" coverage
+  can't be wired. User asked if 2.1-L/B alone (no gigantic) is workable →
+  **oracle-reference coverage** designed and implemented: run the SAME
+  predictor head twice — reference pass (no-grad) with context = ALL dense
+  tokens, student pass with context = selected only — and MSE the two in
+  the same 1664-d space, same positions. "Selection should make the
+  sparse-context prediction match the full-information prediction." Our
+  adaptation, not a published recipe (flagged in training.md §5);
+  user approved direction explicitly.
+
+**Implementation:** `autogaze/models/borissal/vjepa21_hub.py`
+(`VJEPA21HubTeacher`, same 3-method interface; ST gate applied at encoder
+OUTPUT features there — no clean input-embedding injection point in the
+original code; equally valid gradient conduit). Trainer: `--teacher
+hub:<entrypoint>` scheme + automatic oracle-reference targets for hub
+teachers. Verified: gate gradient flows, teacher params isolated, 20/20
+tests green.
+
+**Local training run (2.1-B, MPS, 30 steps, batch 1, scale 384, fixed
+ratio 0.3, duplicated example clips):** ran end-to-end, checkpoint saved,
+peak 602MB, ~125s/step (dense + oracle predictor + sparse + student
+predictor + backward). Loss scale ~0.05-0.08 (same-head comparison, small
+by construction). **Honest caveats:** loss did not decrease on this
+degenerate single-clip setup, and grad_norm decayed 0.17→0.0002 over 30
+steps — consistent with score-head saturation (softmax sharpening kills
+the ST soft path). For scale runs, start with `--w-entropy > 0` and/or a
+lower lr; this is exactly what the training.md §3 experiment matrix is
+for. Mechanism validation (the purpose of this run) is complete.

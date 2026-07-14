@@ -148,7 +148,13 @@ def main():
     )
 
     # ------------------------------------------------------------- teacher
-    if args.teacher:
+    # "hub:<entrypoint>" -> torch.hub V-JEPA 2.1 adapter; anything else -> HF.
+    hub_teacher = False
+    if args.teacher and args.teacher.startswith("hub:"):
+        from autogaze.models.borissal.vjepa21_hub import VJEPA21HubTeacher
+        teacher = VJEPA21HubTeacher.from_hub(args.teacher[len("hub:"):])
+        hub_teacher = True
+    elif args.teacher:
         teacher = VJEPA2Teacher.from_pretrained(args.teacher)
     else:
         teacher = VJEPA2Teacher.tiny_random(crop_size=args.scale, frames_per_clip=args.num_frames)
@@ -214,9 +220,21 @@ def main():
             teacher_dense = teacher.dense_features(video)                     # no_grad
             sparse = teacher.sparse_features(video, keep_idx, gate=gate)      # grads -> gate
             predicted = teacher.predict(sparse, keep_idx, tgt_idx, num_tokens=L)
-            teacher_targets = torch.gather(
-                teacher_dense, 1, tgt_idx.unsqueeze(-1).expand(-1, -1, teacher_dense.size(-1))
-            )
+            if hub_teacher:
+                # V-JEPA 2.1's predictor projects into its distillation-teacher
+                # space (1664-d), not the encoder's own space -- so the coverage
+                # target is an ORACLE REFERENCE pass through the same predictor
+                # head: context = ALL tokens (dense feats). The selector learns
+                # to make the sparse-context prediction match the
+                # full-information prediction. (Our adaptation to 2.1's head
+                # structure -- see training.md §5.)
+                with torch.no_grad():
+                    all_idx = torch.arange(L, device=device).unsqueeze(0).expand(B, -1)
+                    teacher_targets = teacher.predict(teacher_dense, all_idx, tgt_idx, num_tokens=L)
+            else:
+                teacher_targets = torch.gather(
+                    teacher_dense, 1, tgt_idx.unsqueeze(-1).expand(-1, -1, teacher_dense.size(-1))
+                )
 
             v0_scores_flat = None
             if weights.v0_distill > 0:
