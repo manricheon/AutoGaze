@@ -26,6 +26,11 @@ class LossWeights:
     # v0_distill is intended as a warmup: linearly decayed to 0 over this many
     # steps by the trainer (0 = no decay schedule).
     v0_distill_warmup_steps: int = 0
+    # Anti-scatter reward (see design.md "Borissal v0.2" Finding 1: pure
+    # coverage pressure favors uniform scatter): rewards selections holding
+    # information the REST cannot reconstruct. Costs one extra predictor pass
+    # when nonzero.
+    uniqueness_reward: float = 0.0
 
 
 def predictor_coverage_loss(
@@ -58,6 +63,18 @@ def score_entropy_loss(probs: torch.Tensor) -> torch.Tensor:
     entropy = -(probs.clamp_min(1e-9).log() * probs).sum(dim=-1)  # (B, T_grid)
     max_entropy = torch.log(torch.tensor(probs.shape[-1], dtype=probs.dtype, device=probs.device))
     return (max_entropy - entropy).mean()  # 0 when uniform, grows as it peaks
+
+
+def uniqueness_reward_loss(
+    rest_predicted_selected: torch.Tensor,  # (B, K, D) predictor(unselected -> selected positions)
+    teacher_selected: torch.Tensor,         # (B, K, D) dense-teacher features at selected positions
+    cap: float = 20.0,
+) -> torch.Tensor:
+    """Anti-scatter term: NEGATIVE of the error the rest makes when trying to
+    reconstruct the selection -- minimizing it maximizes how much unique
+    (rest-unexplainable) information the selection holds. Capped so the
+    reward cannot diverge by selecting degenerate/unpredictable content."""
+    return -torch.clamp(F.mse_loss(rest_predicted_selected, teacher_selected), max=cap)
 
 
 def v0_distill_loss(

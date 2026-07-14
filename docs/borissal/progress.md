@@ -686,3 +686,48 @@ tie-break; blend beta=1 identity; qualitative overlays
 example_input.mp4 (single-clip numbers are indicative, not conclusive);
 `center_bias` remains per-domain; low-ratio (<0.1) callers should set
 block_size=1.
+
+---
+
+## 2026-07-14 (same day) — v0.2 signals wired into v1 training; collapse monitoring added
+
+User asked whether the training setup is complete and v0.2-based, how the
+loss is composed, whether gazing_ratio varies during training, and whether
+the "always selects the same patches" collapse is a live risk. Gap analysis
+answered honestly (infra complete; v1's internal v0 signals were still
+v0.1; collapse risk real — its signature was observed twice) and the gaps
+were closed this round:
+
+1. **v0.2 → v1 signal wiring**: `BorissalV1Config.v0_preset` (default
+   "v0.2") — the learned scorer's input maps / residual base now come from
+   the gate-validated v0.2 SIGNAL knobs (frame-diff, noise floor, score
+   blend); selection-stage knobs (global/block) are internally overridden
+   to cheap defaults since v1 does its own selection. `--input-v0-preset`
+   in the trainer for ablation.
+2. **v1 global-allocation inference**: `_selection_from_scores` gained the
+   global branch (exact K_total + per-tubelet floor + canonical ascending —
+   contract-tested), so a trained v1 can serve selections with the same
+   allocation policy as the v0.2 preset.
+3. **Anti-scatter loss option**: `uniqueness_reward` in losses.py (capped
+   negative MSE of rest→selected reconstruction; gradient reaches the
+   selector via an INVERSE ST gate on the unselected side — verified by
+   test). Counters the measured scatter bias of pure coverage.
+4. **Collapse monitoring + safer default**: trainer logs
+   `probe_overlap_prev` (fixed-clip eval-mode selection IoU across log
+   points; pinned 1.0 + dying grad = frozen selector) and
+   `score_entropy_mean`; `--w-entropy` default changed 0 → 0.01 (both
+   real-teacher smokes had shown grad death from score saturation).
+
+**Verified:** 36/36 tests (3 new: preset paths, v1 global contract,
+uniqueness gradient flow). Smoke (tiny teacher, entropy default +
+`--w-uniqueness 0.1`): all three loss terms active,
+`score_entropy_mean` RISES 3.90→4.15 (saturation counteracted),
+`probe_overlap_prev` fluctuates 0.09–0.30 (no freeze; random-selection
+reference ≈ 0.3 at ratio 0.3).
+
+**Loss composition summary as of now** (the user's question, for the
+record): main = predictor coverage (oracle-reference variant for hub-2.1
+teachers); optional weighted terms = dense-sparse match (aux only),
+score entropy (default 0.01), v0-distill warmup (decayed), uniqueness
+reward (anti-scatter, default 0); gazing_ratio sampled per batch
+(uniform 0.15–0.75, rank-synced) so the selector trains budget-general.

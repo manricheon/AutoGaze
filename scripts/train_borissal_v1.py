@@ -38,6 +38,7 @@ from autogaze.models.borissal.losses import (
     dense_sparse_match_loss,
     predictor_coverage_loss,
     score_entropy_loss,
+    uniqueness_reward_loss,
     v0_distill_loss,
 )
 from autogaze.models.borissal.modeling_borissal import _pack_gazing_mask
@@ -66,9 +67,17 @@ def parse_args():
     p.add_argument("--ratio-max", type=float, default=0.75)
     p.add_argument("--w-pred", type=float, default=1.0)
     p.add_argument("--w-match", type=float, default=0.0)
-    p.add_argument("--w-entropy", type=float, default=0.0)
+    # default 0.01: both real-teacher smoke runs showed grad_norm decaying to
+    # ~0 within 30 steps (score-head saturation kills the ST soft path) --
+    # a small entropy term counteracts that. Set 0 to disable.
+    p.add_argument("--w-entropy", type=float, default=0.01)
     p.add_argument("--w-v0-distill", type=float, default=0.0)
     p.add_argument("--v0-distill-warmup-steps", type=int, default=0)
+    # anti-scatter reward (design.md "Borissal v0.2" Finding 1); costs one
+    # extra predictor pass per step when nonzero.
+    p.add_argument("--w-uniqueness", type=float, default=0.0)
+    p.add_argument("--input-v0-preset", choices=["v0.1", "v0.2"], default="v0.2",
+                   help="which non-learned signal preset feeds the learned scorer")
     p.add_argument("--out-dir", default=str(REPO_ROOT / "weights" / "borissal_v1"))
     p.add_argument("--log-every", type=int, default=10)
     p.add_argument("--save-every", type=int, default=0, help="0 = save only at the end")
@@ -165,6 +174,7 @@ def main():
         scale=args.scale,
         input_mode=args.input_mode,
         residual_scoring=args.residual_scoring,
+        v0_preset=args.input_v0_preset,
     )
     model = BorissalV1(config).to(device)
     model.train()
@@ -177,7 +187,15 @@ def main():
         score_entropy=args.w_entropy,
         v0_distill=args.w_v0_distill,
         v0_distill_warmup_steps=args.v0_distill_warmup_steps,
+        uniqueness_reward=args.w_uniqueness,
     )
+
+    # Collapse probe: a FIXED clip + fixed ratio, re-selected in eval mode at
+    # every log point. If probe_overlap_prev pins to 1.0 while grad_norm dies,
+    # the selector has frozen onto a constant pattern (the failure mode the
+    # user flagged). Random-selection IoU at ratio 0.3 is ~0.3 for reference.
+    probe_clip = dataset[0].unsqueeze(0).to(device)
+    probe_prev_mask = None
 
     out_dir = Path(args.out_dir)
     if is_main:
@@ -242,6 +260,22 @@ def main():
                     _, v0_inter = model._v0.select_with_intermediates(video)
                 v0_scores_flat = v0_inter["score"].reshape(B, hard.shape[1], hard.shape[2])
 
+            def uniqueness_term():
+                # Gradient conduit on the REST side: inverse ST gate
+                # (forward value 1 at unselected positions, backward -d soft).
+                rest_gate = torch.gather(1.0 - gate_flat, 1, tgt_idx)
+                rest_sparse = teacher.sparse_features(video, tgt_idx, gate=rest_gate)
+                pred_sel = teacher.predict(rest_sparse, tgt_idx, keep_idx, num_tokens=L)
+                if hub_teacher:
+                    with torch.no_grad():
+                        all_idx = torch.arange(L, device=device).unsqueeze(0).expand(B, -1)
+                        sel_targets = teacher.predict(teacher_dense, all_idx, keep_idx, num_tokens=L)
+                else:
+                    sel_targets = torch.gather(
+                        teacher_dense, 1, keep_idx.unsqueeze(-1).expand(-1, -1, teacher_dense.size(-1))
+                    )
+                return uniqueness_reward_loss(pred_sel, sel_targets)
+
             total, logs = combine_losses(weights, step, {
                 "predictor_coverage": lambda: predictor_coverage_loss(predicted, teacher_targets),
                 "dense_sparse_match": lambda: dense_sparse_match_loss(sparse, teacher_dense, keep_idx),
@@ -249,6 +283,7 @@ def main():
                 "v0_distill": lambda: v0_distill_loss(
                     out["scores"].reshape(B, hard.shape[1], hard.shape[2]), v0_scores_flat
                 ),
+                "uniqueness_reward": uniqueness_term,
             })
             (total / args.grad_accum).backward()
             accum_logs = logs  # keep the last micro-batch's numbers
@@ -258,17 +293,34 @@ def main():
         step += 1
 
         if is_main and (step % args.log_every == 0 or step == 1 or step == args.steps):
-            # selection overlap with v0 as a cheap quality proxy
             with torch.no_grad():
+                # selection overlap with v0 as a cheap quality proxy
                 v0_sel = model._v0.select(video, gazing_ratio=ratio)
                 v0_mask = v0_sel.keep_mask
                 v1_mask = hard.reshape(B, L)
                 overlap = (v0_mask & v1_mask).sum().item() / max(1, v1_mask.sum().item())
+                # collapse probe: fixed clip + fixed ratio, eval-mode selection.
+                # probe_overlap_prev pinned at 1.0 + dying grad_norm = frozen
+                # selector (content-independent constant pattern).
+                model.eval()
+                probe_mask = model.select(probe_clip, gazing_ratio=0.3).keep_mask
+                model.train()
+                if probe_prev_mask is not None:
+                    inter_ = (probe_mask & probe_prev_mask).sum().item()
+                    union_ = (probe_mask | probe_prev_mask).sum().item()
+                    probe_iou = inter_ / max(1, union_)
+                else:
+                    probe_iou = None
+                probe_prev_mask = probe_mask
+                probs_ = out["probs"]
+                entropy_mean = (-(probs_.clamp_min(1e-9).log() * probs_).sum(-1)).mean().item()
             record = {
                 "step": step,
                 "ratio": round(ratio, 4),
                 "grad_norm": round(grad_norm.item(), 5),
                 "v0_overlap": round(overlap, 4),
+                "probe_overlap_prev": None if probe_iou is None else round(probe_iou, 4),
+                "score_entropy_mean": round(entropy_mean, 4),
                 "sec_per_step": round((time.perf_counter() - t_start) / step, 3),
                 "peak_mem_mb": round(peak_memory_mb(device), 1),
                 **{f"loss/{k}": round(v, 6) for k, v in accum_logs.items()},

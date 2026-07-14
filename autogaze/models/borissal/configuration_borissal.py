@@ -144,7 +144,8 @@ class BorissalV1Config:
     residual_scoring: bool = False
 
     gazing_ratio: float = 0.5
-    per_frame_allocation: Literal["uniform", "proportional"] = "uniform"
+    per_frame_allocation: Literal["uniform", "proportional", "global"] = "uniform"
+    min_keep_per_frame_ratio: float = 0.25  # global mode floor (mirrors BorissalConfig)
 
     # Gumbel noise scale for the straight-through training path (0 disables noise).
     gumbel_tau: float = 1.0
@@ -152,6 +153,10 @@ class BorissalV1Config:
     eps: float = 1e-6
 
     # v0 signal settings (used for maps input / residual scoring).
+    # v0_preset selects which non-learned signal generation feeds the learned
+    # scorer: "v0.2" (default -- frame-diff motion + noise floor etc., the
+    # gate-validated preset) or "v0.1" (plain baseline signals).
+    v0_preset: Literal["v0.1", "v0.2"] = "v0.2"
     motion_weight: Union[float, Literal["auto"]] = 0.5
     spatial_op: Literal["grad", "sobel"] = "grad"
     pooling: Literal["avg", "max"] = "avg"

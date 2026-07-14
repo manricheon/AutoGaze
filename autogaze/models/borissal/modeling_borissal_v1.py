@@ -32,6 +32,7 @@ def _selection_from_scores(
     ratio: float,
     alloc: str,
     eps: float,
+    min_keep_per_frame_ratio: float = 0.25,
 ) -> Selection:
     """Budget allocation + hard top-k + canonical packing, from a score grid.
 
@@ -42,26 +43,41 @@ def _selection_from_scores(
     N_pf = H_grid * W_grid
     L = T_grid * N_pf
     device = S.device
-
-    if alloc == "uniform":
-        k = min(max(1, round(ratio * N_pf)), N_pf)
-        k_per_frame = torch.full((B, T_grid), k, dtype=torch.long, device=device)
-    elif alloc == "proportional":
-        total_budget = min(max(1, round(ratio * L)), L)
-        energy = S.reshape(B, T_grid, -1).sum(dim=-1)
-        energy_sum = energy.sum(dim=-1, keepdim=True).clamp_min(eps)
-        raw = (energy / energy_sum) * total_budget
-        k_per_frame = _largest_remainder(raw, total_budget, min_val=1, max_val=N_pf)
-    else:
-        raise ValueError(f"unknown per_frame_allocation: {alloc}")
-
     scores_flat = S.reshape(B, T_grid, N_pf)
-    k_max = int(k_per_frame.max().item())
-    _, topk_idx = scores_flat.topk(k_max, dim=-1)
-    within_topk_rank = torch.arange(k_max, device=device).view(1, 1, k_max).expand(B, T_grid, k_max)
-    keep_within_topk = within_topk_rank < k_per_frame.unsqueeze(-1)
-    keep_mask_grid = torch.zeros(B, T_grid, N_pf, dtype=torch.bool, device=device)
-    keep_mask_grid.scatter_(-1, topk_idx, keep_within_topk)
+
+    if alloc == "global":
+        # Mirrors v0's global mode: one clip-wide top-K_total with a
+        # guaranteed per-tubelet minimum m.
+        K_total = min(max(T_grid, round(ratio * L)), L)
+        m = max(1, int(round(min_keep_per_frame_ratio * K_total / T_grid)))
+        m = min(m, K_total // T_grid)
+        _, gidx = scores_flat.topk(m, dim=-1)
+        guaranteed = torch.zeros(B, T_grid, N_pf, dtype=torch.bool, device=device)
+        guaranteed.scatter_(-1, gidx, True)
+        global_scores = (scores_flat + 10.0 * guaranteed.to(scores_flat.dtype)).reshape(B, L)
+        _, kidx = global_scores.topk(K_total, dim=-1)
+        keep_mask_flat = torch.zeros(B, L, dtype=torch.bool, device=device)
+        keep_mask_flat.scatter_(1, kidx, True)
+        keep_mask_grid = keep_mask_flat.reshape(B, T_grid, N_pf)
+    else:
+        if alloc == "uniform":
+            k = min(max(1, round(ratio * N_pf)), N_pf)
+            k_per_frame = torch.full((B, T_grid), k, dtype=torch.long, device=device)
+        elif alloc == "proportional":
+            total_budget = min(max(1, round(ratio * L)), L)
+            energy = S.reshape(B, T_grid, -1).sum(dim=-1)
+            energy_sum = energy.sum(dim=-1, keepdim=True).clamp_min(eps)
+            raw = (energy / energy_sum) * total_budget
+            k_per_frame = _largest_remainder(raw, total_budget, min_val=1, max_val=N_pf)
+        else:
+            raise ValueError(f"unknown per_frame_allocation: {alloc}")
+
+        k_max = int(k_per_frame.max().item())
+        _, topk_idx = scores_flat.topk(k_max, dim=-1)
+        within_topk_rank = torch.arange(k_max, device=device).view(1, 1, k_max).expand(B, T_grid, k_max)
+        keep_within_topk = within_topk_rank < k_per_frame.unsqueeze(-1)
+        keep_mask_grid = torch.zeros(B, T_grid, N_pf, dtype=torch.bool, device=device)
+        keep_mask_grid.scatter_(-1, topk_idx, keep_within_topk)
 
     per_frame_keep = keep_mask_grid.sum(dim=-1)
     num_keep = per_frame_keep.sum(dim=-1)
@@ -148,7 +164,11 @@ class BorissalV1(nn.Module):
 
         # Non-learned v0 signal provider (maps input / residual scoring). Not
         # registered parameters; buffers only (sobel kernels), negligible cost.
-        self._v0 = Borissal(BorissalConfig(
+        # config.v0_preset picks the signal generation: the gate-validated
+        # v0.2 preset (default) or the plain v0.1 baseline. Only SIGNAL knobs
+        # matter here (the provider's own allocation settings are unused --
+        # v1 does its own selection).
+        v0_kwargs = dict(
             scale=config.scale,
             patch_size=config.patch_size,
             tubelet_size=config.tubelet_size,
@@ -157,7 +177,17 @@ class BorissalV1(nn.Module):
             pooling=config.pooling,
             gazing_ratio=config.gazing_ratio,
             eps=config.eps,
-        ))
+        )
+        if config.v0_preset == "v0.2":
+            # Keep v0.2 SIGNAL knobs (frame-diff, noise floor, score blend);
+            # override its selection-stage knobs (global allocation, block
+            # gate) to the cheap defaults -- they don't affect the maps v1
+            # consumes, only v0's own selection, which is unused here.
+            self._v0 = Borissal(BorissalConfig.v0_2(
+                **v0_kwargs, per_frame_allocation="uniform", block_size=1,
+            ))
+        else:
+            self._v0 = Borissal(BorissalConfig(**v0_kwargs))
 
     # ------------------------------------------------------------------ inputs
 
@@ -225,7 +255,7 @@ class BorissalV1(nn.Module):
         ratio = cfg.gazing_ratio if gazing_ratio is None else gazing_ratio
         alloc = per_frame_allocation or cfg.per_frame_allocation
         S = self.scores(video)
-        return _selection_from_scores(S, ratio, alloc, cfg.eps)
+        return _selection_from_scores(S, ratio, alloc, cfg.eps, cfg.min_keep_per_frame_ratio)
 
     # ---------------------------------------------------------------- training
 

@@ -70,6 +70,63 @@ def test_v1_gumbel_stochastic_in_train_deterministic_in_eval():
     assert torch.equal(c, d), "eval selection must be deterministic"
 
 
+def test_v1_v0_preset_paths():
+    # default is v0.2 signals; v0.1 path must also work; both keep the contract.
+    video = _make_video(B=1, seed=20)
+    for preset in ["v0.2", "v0.1"]:
+        model = BorissalV1(BorissalV1Config(v0_preset=preset)).eval()
+        sel = model.select(video, gazing_ratio=0.3)
+        assert sel.grid_thw[0].tolist() == [8, 24, 24]
+        valid = sel.keep_index[0][sel.keep_index[0] >= 0]
+        assert (valid[1:] > valid[:-1]).all()
+    # the two presets must actually produce different input signals
+    a = BorissalV1(BorissalV1Config(v0_preset="v0.2"))
+    assert a._v0.config.motion_noise_floor == "quantile"
+    b = BorissalV1(BorissalV1Config(v0_preset="v0.1"))
+    assert b._v0.config.motion_noise_floor == "none"
+
+
+def test_v1_global_allocation_select():
+    video = _make_video(B=2, seed=21)
+    model = BorissalV1(BorissalV1Config()).eval()
+    L, T_grid = 8 * 576, 8
+    sel = model.select(video, gazing_ratio=0.25, per_frame_allocation="global")
+    K_total = min(max(T_grid, round(0.25 * L)), L)
+    m = min(max(1, round(0.25 * K_total / T_grid)), K_total // T_grid)
+    assert (sel.num_keep == K_total).all()
+    assert (sel.per_frame_keep >= m).all()
+    for bb in range(2):
+        valid = sel.keep_index[bb][sel.keep_index[bb] >= 0]
+        assert (valid[1:] > valid[:-1]).all()
+
+
+def test_uniqueness_reward_gradient_flow():
+    from autogaze.models.borissal.losses import uniqueness_reward_loss
+    from autogaze.models.borissal.modeling_borissal import _pack_gazing_mask
+
+    teacher = VJEPA2Teacher.tiny_random(crop_size=128, frames_per_clip=16)
+    model = BorissalV1(BorissalV1Config(scale=128)).train()
+    video = _make_video(B=1, H=128, W=128, seed=22)
+
+    out = model.forward_train(video, gazing_ratio=0.5)
+    B, L = 1, out["hard_keep"].shape[1] * out["hard_keep"].shape[2]
+    keep_idx = out["keep_index"]
+    tgt_idx, _ = _pack_gazing_mask(~out["hard_keep"].reshape(B, L))
+    gate_flat = out["st_gate"].reshape(B, L)
+    rest_gate = torch.gather(1.0 - gate_flat, 1, tgt_idx)
+
+    dense = teacher.dense_features(video)
+    rest_sparse = teacher.sparse_features(video, tgt_idx, gate=rest_gate)
+    pred_sel = teacher.predict(rest_sparse, tgt_idx, keep_idx, num_tokens=L)
+    sel_targets = torch.gather(dense, 1, keep_idx.unsqueeze(-1).expand(-1, -1, dense.size(-1)))
+
+    loss = uniqueness_reward_loss(pred_sel, sel_targets)
+    assert loss.item() <= 0  # reward form
+    loss.backward()
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in model.parameters()), \
+        "uniqueness reward must reach the selector through the inverse gate"
+
+
 def test_sparse_teacher_pipeline_and_grad_isolation():
     # tiny random teacher at reduced resolution: full SSL graph in one test
     teacher = VJEPA2Teacher.tiny_random(crop_size=128, frames_per_clip=16)

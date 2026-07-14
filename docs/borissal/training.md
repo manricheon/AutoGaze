@@ -75,14 +75,38 @@ overfitting to a single ratio.
 | Score entropy | `--w-entropy` (default 0) | Anti-collapse regularizer (penalizes peaked score distributions) | If selection collapses to a few patches early; anneal to 0 |
 | v0 distillation | `--w-v0-distill` + `--v0-distill-warmup-steps` | Warmup: KL(v1 scores ‖ v0 saliency) linearly decayed to 0 | Start from the proven saliency prior instead of random selection; also the fastest sanity check of the training plumbing (loss should drop ~99% in tens of steps) |
 
+| Uniqueness reward | `--w-uniqueness` (default 0) | Anti-scatter: rewards selections the REST cannot reconstruct (capped negative MSE, inverse-ST-gate gradient conduit) | Counters the measured scatter bias of pure coverage (design.md "Borissal v0.2" Finding 1: random beat saliency on coverage alone). Costs one extra predictor pass |
+
+**Defaults with rationale:** `--w-entropy` defaults to **0.01** (not 0) —
+both real-teacher smoke runs showed grad_norm decaying to ~0 within 30
+steps (score-head saturation kills the ST soft path); the entropy term
+demonstrably keeps `score_entropy_mean` rising instead of collapsing.
+
+**Collapse monitoring (built into the trainer log):** every `--log-every`
+steps the trainer re-selects a FIXED probe clip at a fixed ratio in eval
+mode and logs `probe_overlap_prev` (IoU with the previous probe selection)
+plus `score_entropy_mean`. A `probe_overlap_prev` pinned at 1.0 together
+with dying `grad_norm` = the selector has frozen onto a constant,
+content-independent pattern — the exact failure mode to watch for. (For
+reference, random selection at ratio 0.3 gives IoU ≈ 0.3.)
+
 Suggested first real experiment matrix (one knob at a time):
-1. `w_pred=1` alone (baseline).
-2. `w_pred=1, w_v0=1, warmup=500` (prior-guided start).
-3. `w_pred=1, w_ent=0.01` (if 1 collapses).
-4. Ablate `--input-mode maps|pixels|both` on the best of the above.
+1. `w_pred=1, w_ent=0.01` (baseline — entropy default on, see above).
+2. `w_pred=1, w_ent=0.01, w_v0=1, warmup=500` (prior-guided start).
+3. `w_pred=1, w_ent=0.01, w_uniqueness=0.1..0.5` (anti-scatter; watch that
+   coverage doesn't degrade too far — the two terms pull oppositely by
+   design).
+4. Ablate `--input-mode maps|pixels|both` and `--input-v0-preset v0.2|v0.1`
+   on the best of the above.
 
 ## 4. v0 leverage options (all config-switchable, default off unless noted)
 
+- `--input-v0-preset v0.2` (default): the non-learned signal generation
+  feeding the learned scorer uses the gate-validated v0.2 SIGNAL knobs
+  (frame-diff motion, noise floor, score blend); selection-stage knobs
+  (global allocation, block gate) are irrelevant to the maps and internally
+  overridden to the cheap defaults. `v0.1` gives the plain baseline signals
+  for ablation.
 - `--input-mode both` (default): v0's motion/spatial patch maps are input
   channels — the network learns a contextual weighting policy over the
   proven saliency signal (superset of v0's fixed `motion_weight`) plus
