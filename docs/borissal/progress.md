@@ -731,3 +731,28 @@ teachers); optional weighted terms = dense-sparse match (aux only),
 score entropy (default 0.01), v0-distill warmup (decayed), uniqueness
 reward (anti-scatter, default 0); gazing_ratio sampled per batch
 (uniform 0.15–0.75, rank-synced) so the selector trains budget-general.
+
+---
+
+## 2026-07-14 (same day) — gradient-reach diagnostics for unselected/low-score patches
+
+User relayed a team concern: do unselected (or very low-probability)
+patches receive gradient during training, or do they freeze out? Answered
+with analysis + live instrumentation:
+
+- **Channels** (documented in training.md §2): softmax Jacobian coupling
+  (∝ p_j — vanishes as p_j→0), Gumbel exploration (the real revival
+  channel; protected by the entropy default), the entropy term itself,
+  and the uniqueness inverse gate. The concern is legitimate in the limit
+  — hence measurement, not just argument.
+- **Instrumentation**: `forward_train` now retains the logits' grad
+  (`out["logits"].grad` readable after backward); the trainer logs
+  `lgrad_sel_mean` / `lgrad_unsel_mean` / `lgrad_low_decile_mean` /
+  `lgrad_unsel_zero_frac` every log point.
+- **Measured (smoke, entropy 0.01 + uniqueness 0.1)**: zero-grad fraction
+  among unselected = 0.0; unselected mean ≈ 0.5–0.6× selected mean;
+  lowest-prob decile same order — no freeze-out under current defaults.
+  Alarm rule for scale runs recorded in training.md (low-decile collapsing
+  orders below selected ⇒ raise --w-entropy / gumbel_tau).
+- New test `test_gradient_reaches_unselected_and_low_prob_patches`
+  (37/37 green).

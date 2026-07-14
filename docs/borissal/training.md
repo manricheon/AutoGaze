@@ -58,6 +58,25 @@ gradients through "which tokens were kept":
 - Training always uses **uniform per-tubelet allocation** (exact k,
   data-independent K) — matching the mobile-export-safe inference default.
 
+**Gradient reach to unselected / low-score patches** (a frequently-raised
+worry: if a patch is never selected, can its score ever recover?). Four
+channels carry gradient to unselected logits: (1) the softmax Jacobian
+couples every logit — magnitude ∝ p_j, so it VANISHES as a patch's
+probability → 0; (2) Gumbel exploration occasionally hard-selects
+low-score patches, giving them direct gate gradient — the primary
+*revival* channel, alive only while logits stay unsaturated (which the
+entropy default protects); (3) the entropy term itself (all logits,
+~p·log p scale); (4) the uniqueness inverse gate when enabled. Because
+every differentiable channel decays with p_j, this is measured LIVE: the
+trainer logs `lgrad_sel_mean` / `lgrad_unsel_mean` /
+`lgrad_low_decile_mean` (mean |d loss/d logit| over selected, unselected,
+and the lowest-probability decile) and `lgrad_unsel_zero_frac`. Healthy
+smoke values: zero-frac 0.0 and unselected ≈ 0.5–0.6× the selected mean.
+If `lgrad_low_decile_mean` collapses orders of magnitude below
+`lgrad_sel_mean` at scale, scores are locking in — raise `--w-entropy`
+and/or `gumbel_tau`. Locked by
+`test_gradient_reaches_unselected_and_low_prob_patches`.
+
 `gazing_ratio` is **sampled per batch** during training
 (`--ratio-sampling uniform --ratio-min 0.15 --ratio-max 0.75`, synced
 across DDP ranks) so one selector generalizes across budgets instead of

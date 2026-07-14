@@ -127,6 +127,39 @@ def test_uniqueness_reward_gradient_flow():
         "uniqueness reward must reach the selector through the inverse gate"
 
 
+def test_gradient_reaches_unselected_and_low_prob_patches():
+    # The lock-in worry: patches that are unselected (or low-probability)
+    # must still receive score gradients, otherwise they can never recover.
+    # Channels: softmax coupling (~p_j), entropy term (all logits), and --
+    # when enabled -- the uniqueness inverse gate. This locks in that a
+    # standard coverage-style loss through the ST gate reaches UNSELECTED
+    # logits with nonzero gradient.
+    from autogaze.models.borissal.losses import score_entropy_loss
+
+    model = BorissalV1(BorissalV1Config(scale=128)).train()
+    video = _make_video(B=1, H=128, W=128, seed=30)
+    out = model.forward_train(video, gazing_ratio=0.3)
+
+    # a loss that only touches the SELECTED side (like coverage does)
+    B, L = 1, out["hard_keep"].shape[1] * out["hard_keep"].shape[2]
+    gate_flat = out["st_gate"].reshape(B, L)
+    gate = torch.gather(gate_flat, 1, out["keep_index"])
+    loss = (gate * torch.randn_like(gate)).sum()
+    loss.backward(retain_graph=True)
+
+    g = out["logits"].grad.abs()
+    unsel = ~out["hard_keep"]
+    assert g[unsel].max() > 0, "softmax coupling must reach unselected logits"
+    frac_nonzero_unsel = (g[unsel] > 0).float().mean().item()
+    assert frac_nonzero_unsel > 0.99, f"only {frac_nonzero_unsel:.2%} of unselected logits got gradient"
+
+    # entropy term reaches ALL logits too (magnitude ~ p log p)
+    out["logits"].grad = None
+    score_entropy_loss(out["probs"]).backward()
+    g2 = out["logits"].grad.abs()
+    assert (g2[unsel] > 0).float().mean().item() > 0.99
+
+
 def test_sparse_teacher_pipeline_and_grad_isolation():
     # tiny random teacher at reduced resolution: full SSL graph in one test
     teacher = VJEPA2Teacher.tiny_random(crop_size=128, frames_per_clip=16)

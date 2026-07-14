@@ -298,6 +298,27 @@ def main():
             accum_logs = logs  # keep the last micro-batch's numbers
 
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
+
+        # Gradient-reach diagnostics: does the loss actually move the scores
+        # of UNSELECTED and low-probability patches? (Channels: softmax
+        # coupling ~p_j, Gumbel exploration, entropy term, uniqueness inverse
+        # gate -- all vanish as p_j -> 0 except exploration, so this is the
+        # early-warning meter for score lock-in.)
+        grad_reach = {}
+        lgrad = out["logits"].grad
+        if lgrad is not None:
+            with torch.no_grad():
+                g = lgrad.abs()
+                sel = out["hard_keep"]
+                grad_reach["lgrad_sel_mean"] = g[sel].mean().item() if sel.any() else 0.0
+                grad_reach["lgrad_unsel_mean"] = g[~sel].mean().item() if (~sel).any() else 0.0
+                # lowest-probability decile: the patches most at risk of freezing
+                p = out["probs"]
+                n_low = max(1, p.shape[-1] // 10)
+                low_idx = p.topk(n_low, dim=-1, largest=False).indices
+                grad_reach["lgrad_low_decile_mean"] = g.gather(-1, low_idx).mean().item()
+                grad_reach["lgrad_unsel_zero_frac"] = (g[~sel] == 0).float().mean().item() if (~sel).any() else 0.0
+
         optimizer.step()
         step += 1
 
@@ -332,6 +353,7 @@ def main():
                 "score_entropy_mean": round(entropy_mean, 4),
                 "sec_per_step": round((time.perf_counter() - t_start) / step, 3),
                 "peak_mem_mb": round(peak_memory_mb(device), 1),
+                **{k: round(v, 9) for k, v in grad_reach.items()},
                 **{f"loss/{k}": round(v, 6) for k, v in accum_logs.items()},
             }
             print(json.dumps(record))

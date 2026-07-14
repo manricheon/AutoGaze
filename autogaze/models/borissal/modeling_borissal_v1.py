@@ -284,6 +284,11 @@ class BorissalV1(nn.Module):
         B, T_grid, H_grid, W_grid = S.shape
         N_pf = H_grid * W_grid
         logits = S.reshape(B, T_grid, N_pf)
+        if logits.requires_grad:
+            # Expose d(loss)/d(logits) after backward so the trainer can
+            # measure gradient reach to UNSELECTED / low-probability patches
+            # (returned as out["logits"]; read .grad after loss.backward()).
+            logits.retain_grad()
 
         k = min(max(1, round(ratio * N_pf)), N_pf)
 
@@ -316,6 +321,7 @@ class BorissalV1(nn.Module):
 
         return {
             "scores": S,
+            "logits": logits,     # retains .grad (see above) for gradient-reach diagnostics
             "probs": probs,
             "hard_keep": hard_keep,
             "st_gate": st_gate,
