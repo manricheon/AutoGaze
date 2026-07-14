@@ -756,3 +756,42 @@ with analysis + live instrumentation:
   orders below selected ⇒ raise --w-entropy / gumbel_tau).
 - New test `test_gradient_reaches_unselected_and_low_prob_patches`
   (37/37 green).
+
+---
+
+## 2026-07-14 (same day) — first real-teacher trend run analyzed; rolling checkpoints
+
+User asked how to verify training health (locally and at scale). Delivered
+three ways: the field guide (training.md §7.5), a one-page dashboard
+plotter (`scripts/plot_borissal_training.py` — 6 panels matching the six
+health signals), and a live demonstration: a 40-step trend run
+(HF V-JEPA2-L teacher, MPS, lr 3e-4, uniform ratio 0.15–0.75, w_ent 0.01,
+duplicated example clips).
+
+**Dashboard findings (the demonstration run):**
+- No collapse: grad_norm alive (30–700, spiking on low-ratio steps),
+  probe IoU peaked 0.85 then relaxed to 0.64 (never pinned at 1.0),
+  gradient zero-frac 0.0 throughout.
+- **Real warning caught by our own instruments**: score entropy stable
+  ~5.0 until step 25 then accelerating fall to 2.64 (max ln256=5.55) —
+  the real teacher's coverage gradients overpower w_ent=0.01 at lr 3e-4;
+  the entropy loss term rose 0.15→2.9 fighting back. Recommendation
+  recorded for scale runs: **start lr 1e-4, w_entropy 0.05**, watch the
+  entropy slope as the primary early signal.
+- v0-overlap ≈ sampled ratio throughout ⇒ v1's selection statistically
+  independent of v0 at this (non-)scale — expected for 40 steps on
+  duplicated clips.
+- Checkpoint comparison (30-step 2.1-B checkpoint vs untrained): training
+  demonstrably restructures selection; the trained pattern leans toward
+  edges/bands — the documented coverage scatter/anchor bias expressing
+  itself ("is edge-band selection right?" — no: it is the loss's
+  interpolation-anchor preference, not the description-task optimum;
+  `--w-uniqueness` is the built-in counterweight to enable at scale).
+- Ops note: MPS sec/step degraded 18→203s over the long session (thermal/
+  memory pressure) — trend experiments of this size belong on Linux.
+
+**Fix from a real mistake:** the 40-step run's weights were LOST (killed
+before the end-of-run save; --save-every defaulted to 0). The trainer now
+writes an overwritten `checkpoint_last.pt` at every log point, so any
+interrupted run keeps its latest weights. Verified: rolling checkpoint
+saves and reloads; 37/37 tests green.

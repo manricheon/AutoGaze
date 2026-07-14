@@ -359,9 +359,15 @@ def main():
             print(json.dumps(record))
             with open(log_path, "a") as f:
                 f.write(json.dumps(record) + "\n")
+            # Always keep an overwritten rolling checkpoint at every log point
+            # so an interrupted run never loses its weights (learned the hard
+            # way: a 40-step run killed before the final save left nothing).
+            torch.save({"model_tag": MODEL_TAG_V1, "config": config.__dict__,
+                        "state_dict": model.state_dict(), "step": step},
+                       out_dir / "checkpoint_last.pt")
 
         if is_main and args.save_every and step % args.save_every == 0:
-            torch.save({"model_tag": MODEL_TAG_V1, "config": vars(config) | {"input_mode": config.input_mode},
+            torch.save({"model_tag": MODEL_TAG_V1, "config": config.__dict__,
                         "state_dict": model.state_dict(), "step": step},
                        out_dir / f"checkpoint_step{step}.pt")
 
