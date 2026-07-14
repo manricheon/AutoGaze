@@ -507,6 +507,32 @@ diagram content, no edge bands) measured as LOW-uniqueness — human visual
 appeal and the predictor metric can conflict; report both, downstream
 captioner is the eventual referee.
 
+### v0 vs v1 latency profile (2026-07-15, current architecture)
+
+`scripts/borissal_benchmark.py --model both` (Mac CPU, B=1 T=16 384², 50
+iters) + component breakdown (ratio 0.25):
+
+| config | CPU ms/clip | note |
+|---|---|---|
+| v0 (v0.1 defaults) | 7.1–7.6 | |
+| v0.2 preset (deploy baseline) | 15.4 | incl. coarse-to-fine pass |
+| **v1 default (both + cosine + gctx)** | **22.0–23.0** | within the 25ms budget, tight |
+| ├ `_grid_inputs` (internal v0 maps + pixel downsample) | 13.3 | **the dominant cost** |
+| ├ CNN trunk (stem + 3 TSM + gctx) | 7.7 | |
+| v1 `input_mode=pixels` (skips v0 maps) | 12.0 | cheapest v1; ablation lever |
+| v1 `global_context=False` | 21.8 | **gctx costs ~0.2ms — negligible** |
+| v1 `hidden_channels=32` | 19.1 | second lever |
+
+Reading: v1 ≈ 3× v0.1 but only ~1.4× the v0.2 deploy baseline, and v1
+REPLACES v0 (the 13.3ms v0-map computation is inside it, not on top). If
+the mobile budget tightens on-device, the levers in order are
+`input_mode=pixels` (−10ms, needs the §3 input-mode ablation to confirm
+quality) then `hidden_channels=32` (−3ms). MPS numbers are pathological
+for BOTH models (184ms v0 / 460ms v1 — per-op dispatch overhead on tiny
+grid tensors, consistent with the original mobile review; mobile delegates
+are a different runtime, CPU is the honest proxy). Raw tables:
+`outputs/borissal/benchmark/latency_{cpu,mps}.json`.
+
 ## Theory notes (2026-07-14): what the literature says about our measured pathologies
 
 Two parallel surveys (① token selection / differentiable top-k;
