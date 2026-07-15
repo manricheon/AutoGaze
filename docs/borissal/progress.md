@@ -1132,6 +1132,60 @@ uniqueness-primary optimization bite with global batch 128 + hub 2.1-L
 at 384 (vs pilot's batch 2 + vitl-256), and does entropy's slow drift
 mean-revert or keep sliding toward 3.5?
 
+---
+
+## 2026-07-16 — Trend runs E0 (pilot→1000 steps) & E3 (block2): more training
+wins, block training loses; 4-clip v0.2 comparison corrected
+
+Two arms (user-chosen from the "model vs training vs data" decomposition),
+judged on a NEW held-out eval set — 16 InternVid clips never seen in
+training (`videos/internvid_eval16/`, stream-extracted past the first
+1000) — with semantic recall as the tracked per-checkpoint metric, since
+it was the only axis that moved in the pilot.
+
+**E0 — extend the pilot 500→1000 steps, unchanged recipe (`--resume auto`;
+first real use of full resume). Verdict: the "not enough training"
+hypothesis holds.** Held-out recall curve (random 0.250 ±0.003, v0.2
+0.325 ±0.022):
+
+| step | 100 | 200 | 300 | 400 | 500 | 600 | 700 | 800 | 900 | 1000 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| recall | .208 | .241 | .280 | .267 | .258 | .251 | .289 | .320 | .307 | .315 |
+
+Clear rise with a 400–600 dip that coincides with the entropy sag (the
+drift mean-reverted after resume: 3.87 → 4.84 → settle ~4.4 — the §7
+alarm never fired). gist climbs 0.898 → 0.933, closing on random's
+0.946. Uniqueness at fixed 0.25 stays ~flat (7.768 @1000 vs 7.763 @500)
+— recall trends while uniqueness doesn't, so track held-out semantic
+recall PER CHECKPOINT at scale, not just at the end.
+
+**CORRECTION of the 2026-07-15 4-clip claim** ("v1@500 recall 0.327 beats
+v0.2 0.295"): on the 16-clip held-out set v1@500 is 0.258 vs v0.2 0.325 —
+the 4-clip win was noise. Honest current picture: v1 catches UP to v0.2
+by steps 800–1000 (0.31–0.32, overlapping error bars); "beats random" is
+stable from ~step 300.
+
+**E3 — fresh 500 steps with `--train-block-size 2` (the theory-survey
+card: object-chunk selection + on-distribution predictor). Verdict:
+LOSES at pilot scale — do NOT add to the §6 recipe.** Held-out recall
+flat at 0.20–0.24 (≈ random, far below the plain run's 0.258@500),
+gist DECLINING 0.893 → 0.877, uniqueness 7.693 @500 (below plain 7.763).
+Entropy was gentler (4.50 vs 3.87 at step 500) but bought nothing.
+Recorded as a negative result; the design.md open item "inference-side
+block selection if block-trained wins" stays shelved unless the scale
+run says otherwise.
+
+**Scale-run recipe impact**: §6 command unchanged (no block flag). At
+batch 2 the recall trend needed ~700+ steps to clear its own noise; at
+global batch 128 expect it far earlier — judge ladder item 1 on held-out
+recall per checkpoint alongside the uniqueness trend. E4
+(description-aligned aux distill) stays shelved: its trigger condition
+("E0/E3 flat") did NOT fire — E0 is rising on pure SSL.
+
+Artifacts: `weights/borissal_v1_pilot_internvid/` (now 10 ckpts),
+`weights/borissal_v1_pilot_block2/`, curves in
+`outputs/borissal/pilot_gate/e{0,3}_curve_*.json` (all gitignored).
+
 **Follow-up diagnostics (same day, user asked "is single-scale the
 limit — model vs training vs data?"):**
 - `borissal_model_diagnostics.py` untrained vs pilot@500:

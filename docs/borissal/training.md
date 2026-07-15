@@ -372,7 +372,14 @@ consolidated 2026-07-15 after the local recipe test:
    (the primary objective is learning) and coverage-floor overflow staying
    bounded (< ~1.0). The 60-step local test showed a healthy recipe but
    uniqueness essentially flat (-8.03 → -8.13) — at scale it must actually
-   trend, or the objective isn't biting.
+   trend, or the objective isn't biting. ALSO track held-out semantic
+   recall per saved checkpoint (a fixed set of unseen clips through
+   `eval_borissal_semantic.py`): in the 2026-07-16 Mac trend run it was
+   the metric that trended (0.21 → 0.32 over 1000 steps) while
+   fixed-ratio uniqueness stayed flat — it is the earlier, less noisy
+   learning signal. (Same run: `--train-block-size 2` LOST on every
+   axis at pilot scale — keep it out of the recipe unless scale says
+   otherwise.)
 2. **Throughout**: `score_entropy_mean` > ~3.5 and not in freefall,
    `grad_norm` alive, `probe_overlap_prev` never pinned at 1.0,
    `lgrad_low_decile_mean` within ~2 orders of `lgrad_sel_mean`.
