@@ -1073,3 +1073,54 @@ saturation fixes, deferred RL, frozen-model roles table), and the
 three-axis evaluation with semantic recall primary. Keep it updated
 whenever the approach changes; design/reference/training.md stay the
 source of numbers.
+
+---
+
+## 2026-07-15 (same day) — Mac real-data pilot: 500 steps on 1K InternVid clips
+
+First-ever run on REAL diverse data (all prior local runs used one
+duplicated clip). Setup: the HF dataset ships as monolithic tar.gz
+archives (InternVid 90 GB), so the first 1,000 clips (402 MB) were
+STREAM-extracted (curl | tarfile, stop after N — gzip is sequential, only
+the consumed prefix downloads) into `videos/internvid_pilot/` (gitignored).
+Real-data floor measured first: random coverage 7.852 / uniqueness 7.553
+(vitl-256, ratio 0.25, 4 clips) — note it differs from the old single-clip
+8.2 scale. Run: §6 recipe at 500 steps, batch 2, warmup 50, floor 7.85,
+MPS, ~33 s/step (real-clip PyAV decode dominates; single-clip runs were
+~11 s/step). Checkpoints under `weights/borissal_v1_pilot_internvid/`.
+
+**Training health**: collapse guards all passed (probe IoU 0.89–0.91,
+overflow ≤ 0.71 bounded, grad spikes only on floor-activation steps and
+clipped at 10.0 — the logged grad_norm is pre-clip). Two watch items:
+`loss/uniqueness_reward` linear slope −0.017/100 steps post-warmup ≈
+FLAT (same magnitude as the 60-step verdict), and `score_entropy_mean`
+drifting down −0.28/100 steps (5.36 → 3.87 final; not P2 freefall, but
+would cross the 3.5 alarm in ~300 more steps at this slope).
+
+**Gates (4 real clips, ratio 0.25) — both v1 bars CLEARED for the first
+time:**
+
+| config | cov(<) | uniq(>) | sem-recall(>) | sem-gist |
+|---|---|---|---|---|
+| random | 7.852 | 7.553 | 0.228 | 0.940 |
+| v0.2 | 7.921 | 7.730 | 0.295 | 0.868 |
+| v1@100 | 7.913 | 7.793 | 0.296 | 0.903 |
+| v1@300 | 7.924 | 7.801 | — | — |
+| v1@500 | 7.948 | 7.763 | **0.327** | 0.924 |
+
+Readings: (a) the old local "v1 uniqueness < random" failure was a
+single-clip eval ARTIFACT — on real data every checkpoint beats random
+(and v0.2) on uniqueness; (b) that uniqueness edge comes from the
+v0-distill warmup, not from further training (flat 100→500 at fixed
+ratio 0.25, matching the flat training slope); (c) BUT on the PRIMARY
+semantic-recall axis the extra 400 steps DID help: 0.296 → 0.327,
+beating v0.2's 0.295 mean — first evidence that training moves the
+description-aligned metric even while ratio-0.25 uniqueness stays flat.
+Caveat: n=4 clips, high per-clip variance (v1@500 recall 0.23–0.45) —
+encouraging, not conclusive. Ladder §7.7 item-4 reference numbers
+updated to these real-data values.
+
+Open question for the scale run (sharpened, not answered): does
+uniqueness-primary optimization bite with global batch 128 + hub 2.1-L
+at 384 (vs pilot's batch 2 + vitl-256), and does entropy's slow drift
+mean-revert or keep sliding toward 3.5?

@@ -387,13 +387,17 @@ consolidated 2026-07-15 after the local recipe test:
    and a spread sweep (s ∈ {0, 0.25, 0.5}):
    - `eval_borissal_semantic.py` (PRIMARY, description-aligned): v1 must
      beat random on **recall** (necessary) and approach/beat v0.2's
-     recall (adoption bar; local reference at ratio 0.25: random 0.267,
-     v0.2+s0.25 0.309, v1-60step 0.205). gist is secondary (retains a
-     spread tilt).
+     recall (adoption bar). REAL-DATA references from the 2026-07-15
+     Mac pilot (4 InternVid clips, vitl-256, ratio 0.25): random 0.228,
+     v0.2 0.295, v1-500step 0.327 — both bars CLEARED at pilot scale.
+     gist is secondary (retains a spread tilt).
    - `eval_borissal_coverage.py` (training-consistency): uniqueness above
-     random confirms the objective actually trained (local reference:
-     v1 7.85 < random 7.93 — the bar the scale run must clear early);
-     coverage near the floor.
+     random confirms the objective actually trained. Real-data pilot
+     references: random 7.553 < v0.2 7.730 < v1-500step 7.763 — the old
+     "v1 < random" local failure was a single-clip eval artifact; the
+     scale run should stay above random and, unlike the pilot, IMPROVE
+     with steps (pilot was flat 100→500 on this axis). Coverage near
+     the floor (pilot floor 7.85, overflow ≤ 0.10).
    - `eval_borissal_videomae_recon.py` (cross-family reference only).
 5. **Visual dumps on diverse clips**: no edge bands, content-following,
    frame-consistent. CAUTION from the local test: visual appeal and the
