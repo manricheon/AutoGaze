@@ -1040,3 +1040,22 @@ Full audit of code defaults vs docs (user request). Verdicts:
   spread — previously documented nowhere as a table); deploy
   recommendation (v0.2 + global + spread 0.25, single-clip caveat) added
   to reference.md §3.
+
+---
+
+## 2026-07-15 (same day) — Linux runbook: offline manifest + 4/8-GPU launch
+
+Scale-run plan re-cut for the actual target machine (user-confirmed: 4 or
+8 GPUs, restricted egress — plan as offline, carry assets in). New
+**`linux-runbook.md`**: transfer-bundle manifest (dataset / 2.1-L teacher
+.pt / vjepa2 clone / SigLIP2 HF-cache seed / videomae.pt / optional pip
+wheelhouse — `uv pip download` doesn't exist, use pip), online-baseline +
+offline install variants, smoke gate (pytest + 1-GPU tiny run + resume
+check; first CUDA validation of the hub 2.1-**L** teacher), floor
+measurement, 4-GPU (`bs8/accum4`) and 8-GPU (`bs8/accum2`) launches at
+global batch 128, then the §7.7 ladder → gate → verdict branches.
+training.md §7.6 de-staled (resume + logging gaps were closed 2026-07-15
+but still listed; now notes the SigLIP2 hardcoded-id offline caveat,
+`eval_borissal_semantic.py` needs a seeded HF cache + `HF_HUB_OFFLINE=1`).
+Tests still 49 green. Execution order unchanged: the Linux run per
+runbook/§6/§7 remains the blocker for everything else.

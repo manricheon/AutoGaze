@@ -349,12 +349,16 @@ bottleneck; scale with CPU cores), `--save-every 1000`.
 - `peak_mem_mb` (CUDA-accurate) for batch-size headroom.
 
 **6. Known gaps accepted for the first run** (revisit if they bite):
-- No optimizer-state resume (checkpoints are model-only; `--save-every`
-  gives restart points but training restarts cold from a state_dict).
 - `video_io.load_video` decodes the full clip before sampling frames --
   fine for the pre-trimmed AutoGaze-Training-Data clips, wasteful for long
   videos; `--num-workers` is the mitigation.
-- wandb is installed but the trainer logs to stdout+jsonl only.
+- `eval_borissal_semantic.py` hardcodes the SigLIP2 encoder id -- on an
+  offline machine, seed the HF cache first and run with `HF_HUB_OFFLINE=1`
+  (see linux-runbook.md).
+
+(Two gaps formerly listed here were closed in the 2026-07-15 readiness
+batch: full optimizer+RNG resume via `--resume auto`, and tensorboard
+logging via `--log-backend` -- see §7.1.5.)
 
 **7. Scale-run judgment ladder (go/no-go, in observation order)** —
 consolidated 2026-07-15 after the local recipe test:
