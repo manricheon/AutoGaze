@@ -422,6 +422,10 @@ Linux compute** (§8 has the rationale):
 - Frame-Voyager-style model selection: offline, rank candidate selections
   per validation clip by a frozen captioner's description loss — the only
   metric guaranteed aligned with the downstream description task.
+- Description-aligned auxiliary distill (E4): frozen non-SigLIP2 VLM
+  attention as a weighted auxiliary distill target — design and trigger
+  conditions in design.md "Open items"; implement only if E0/E3 and the
+  scale run all leave semantic recall flat.
 
 ## 8. Theory-driven upgrade (2026-07-14): why the objective had to change
 

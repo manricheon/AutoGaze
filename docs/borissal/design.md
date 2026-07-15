@@ -786,3 +786,20 @@ modeling_borissal_v1.py, `global_context=True` default):
 - Predictor fine-tuning (currently frozen) as a later option.
 - Inference-side block selection for v1 `select()` if the block-trained
   selector wins the eval gate (training-side only for now).
+- **Description-aligned auxiliary distill (E4, designed 2026-07-15, not
+  implemented)**: add the patch-attention of a frozen VLM as an auxiliary
+  distill target alongside the V-JEPA SSL objective, on the user's
+  intuition that description quality is object-driven. Constraints that
+  make this safe: (a) the distill VLM must NOT be SigLIP2 — SigLIP2 stays
+  the held-out judge or the semantic gate stops measuring anything
+  (eval contamination); candidates: a different CLIP-family encoder's
+  attention-pool head, or a small frozen captioner's cross-attention
+  rollup; (b) never train the selector jointly with any evaluator it is
+  scored by (L2X "selection as communication" degeneracy, same reason
+  the REAL-X calibration adapter is trained on random masks only);
+  (c) keep it a WEIGHTED AUXILIARY (`--w-sem-distill`) so the SSL
+  objective stays primary — this is a prior, not a new objective.
+  TRIGGER to implement: E0 (pilot extension) and E3 (block2) trend runs
+  AND the Linux scale run all leave semantic recall flat — i.e., the
+  pure-SSL signal is shown insufficient for the description-aligned
+  axis. Until then it stays on the shelf.
