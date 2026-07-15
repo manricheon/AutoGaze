@@ -378,12 +378,19 @@ consolidated 2026-07-15 after the local recipe test:
    local steps, so this is a scale-run signal); `v0_spearman` NOT
    converging to 1.0 (v0-reproduction collapse); `brightness_spearman`
    decreasing from the ~0.83 init bias (content taking over).
-4. **Gate (the adoption criterion)**: `eval_borissal_coverage.py` with
-   random + v0.2 + `v1:<checkpoint>` — v1 must show uniqueness ABOVE
-   random (necessary) and approach/beat v0.2 (adoption bar), with coverage
-   near the floor. Local 60-step reference point (recorded in design.md):
-   v1 7.85 < random 7.93 < v0.2 8.37 at ratio 0.25 — i.e. the local test
-   does NOT yet beat random; the scale run must clear this bar early.
+4. **Gate (the adoption criterion — updated 2026-07-15: SEMANTIC gate is
+   primary)**: run all three axes with random + v0.2 + `v1:<checkpoint>`
+   and a spread sweep (s ∈ {0, 0.25, 0.5}):
+   - `eval_borissal_semantic.py` (PRIMARY, description-aligned): v1 must
+     beat random on **recall** (necessary) and approach/beat v0.2's
+     recall (adoption bar; local reference at ratio 0.25: random 0.267,
+     v0.2+s0.25 0.309, v1-60step 0.205). gist is secondary (retains a
+     spread tilt).
+   - `eval_borissal_coverage.py` (training-consistency): uniqueness above
+     random confirms the objective actually trained (local reference:
+     v1 7.85 < random 7.93 — the bar the scale run must clear early);
+     coverage near the floor.
+   - `eval_borissal_videomae_recon.py` (cross-family reference only).
 5. **Visual dumps on diverse clips**: no edge bands, content-following,
    frame-consistent. CAUTION from the local test: visual appeal and the
    uniqueness metric can DISAGREE (the human-pleasing bright-screen

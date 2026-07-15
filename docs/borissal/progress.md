@@ -976,3 +976,43 @@ Five-part prep batch before the Linux scale run (user request):
 
 Tests 46 → **47 green** (adapter mapping unit test). videomae.pt lives at
 weights/VideoMAE_AutoGaze/ (gitignored).
+
+---
+
+## 2026-07-15 (same day) — description-task alignment: semantic gate + spread_fraction hybrid
+
+User reframed the criterion ("the selection is FOR video description") and
+contributed the key intuition ("spread evenly, concentrate on what
+matters") — which turned out to be exactly AutoGaze's multi-scale essence
+(its coarse scales reserve ~26% of every frame's tokens for global gist).
+Target budget confirmed: gazing_ratio 0.25–0.5.
+
+**Semantic gate** (`scripts/eval_borissal_semantic.py`, SigLIP2-384,
+24×24 tokens 1:1 with the main grid, eval-only — training stays pure
+V-JEPA SSL): honest metric iteration recorded — the first attempt
+(mean-pool gist + cosine-to-mean importance) was won by random at exactly
+chance level, i.e. it measured TYPICALITY; both metrics now use the MAP
+head's own attention. **First axis where saliency beats random** (recall
+at ratio 0.25: v0.2 0.300 vs random 0.267; at 0.5: 0.552 vs 0.524) — the
+pre-registered design-review alarm does NOT fire.
+
+**Hybrid allocation** (`_hybrid_topk` + `spread_fraction`, v0+v1, uniform
+2D / global 3D stratification, time-first quotas via largest remainder;
+inference-only): full three-axis sweep at ratio 0.25 —
+
+| config | sem-gist | sem-recall | VJEPA cov(<) / uniq(>) | VMAE recon(<) |
+|---|---|---|---|---|
+| v0.2 s=0 | 0.879 | 0.300 | 8.226 / 8.370 | 0.338 |
+| **v0.2 s=0.25** | 0.899 | **0.309** | 8.211 / 8.353 | 0.287 |
+| v0.2 s=0.5 | 0.899 | 0.283 | 8.201 / 8.267 | 0.254 |
+
+s=0.25 improves EVERY axis (recall included) — sweet spot matching the
+AutoGaze coarse-share precedent; s=0.5 starts costing recall/uniqueness.
+For the barely-trained v1-60step, spread helps massively (recon 1.22→0.68,
+gist 0.835→0.914). **Best deployable config today: v0.2 + spread 0.25.**
+
+Two real export bugs found by extending the check to the hybrid/global
+path (scalar-True scatter_ untraceable → tensor src; time-slice quota
+needed against tie-break starvation — caught by test). Export 6/6 PASS
+(v1+global+spread included). Judgment ladder item 4 rewritten: semantic
+recall is now the PRIMARY adoption axis. Tests 47 → **49 green**.

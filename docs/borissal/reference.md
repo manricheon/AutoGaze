@@ -149,6 +149,7 @@ diversify coverage — a streaming-UI nicety, not a description mechanism.)
 | `motion_noise_floor` | `"none"` | Dead-zone shrinkage of motion map | `"quantile"` (median) removes the sensor-noise floor that normalization would otherwise amplify in motionless tubelets |
 | `motion_noise_q` / `motion_noise_scale` | `0.5` / `1.0` | Floor quantile / strength | Median assumes true motion is spatially sparse (<50% of patches) |
 | `block_size` | `1` | Resize-based coarse-to-fine gate | `2` bounds fragmentation to ≤⌈k/4⌉ regions/tubelet; coarse signal = same pipeline on a 1/b-resized clip (resize's low-pass adds noise robustness) |
+| `spread_fraction` | `0.0` | Hybrid focus+spread allocation (v0 AND v1) | `s>0` reserves `round(s·K)` of the budget for a stratified spatio-temporal skeleton (time first, then space; best-scoring cell per bucket), the rest stays pure top-k — the single-scale analogue of AutoGaze's multi-scale coarse share (~26%). Measured sweet spot `s=0.25` at the 0.25–0.5 target budget: improves semantic gist AND recall, coverage, and VideoMAE recon at once (design.md "Description-task alignment"). Works with `uniform` (2D in-tubelet) and `global` (3D clip-wide) allocation; not `proportional`. Inference-only knob — training is untouched |
 
 `spatial_op="grad"`, `pooling="avg"`, and `per_frame_allocation="uniform"`
 were each chosen as the faster and/or ratio-safer of their alternatives —

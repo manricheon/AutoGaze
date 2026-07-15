@@ -105,14 +105,16 @@ def _predict_mse(teacher, video, ctx_idx, tgt_idx, L, hub: bool = False) -> floa
         return torch.nn.functional.mse_loss(pred, tgt).item()
 
 
-def score_selection(teacher, video: torch.Tensor, selector, ratio: float, cfg=None, hub: bool = False) -> dict:
+def score_selection(teacher, video: torch.Tensor, selector, ratio: float, cfg=None, hub: bool = False,
+                    spread=None) -> dict:
     """Both metrics for one clip at one budget."""
     if selector == "random":
         keep_mask = random_keep_mask(video, cfg, ratio)
         keep_index, pad_k = _pack_gazing_mask(keep_mask)
         assert not pad_k.any()
     else:
-        sel = selector.select(video, gazing_ratio=ratio)
+        kw = {} if spread is None else {"spread_fraction": spread}
+        sel = selector.select(video, gazing_ratio=ratio, **kw)
         keep_mask = sel.keep_mask
         keep_index = sel.keep_index
         if keep_index.lt(0).any():
@@ -142,6 +144,8 @@ def main():
     p.add_argument("--scale", type=int, default=256,
                    help="clip resolution fed to selector AND teacher (default matches HF vitl-256)")
     p.add_argument("--num-frames", type=int, default=16)
+    p.add_argument("--spread", type=float, default=None,
+                   help="spread_fraction override for hybrid focus+spread allocation")
     p.add_argument("--device", default="auto")
     p.add_argument("--out", default=None, help="optional json output path")
     args = p.parse_args()
@@ -184,7 +188,8 @@ def main():
             cfg.scale = args.scale
             selector = Borissal(cfg).to(device)
         for ratio in args.ratios:
-            per_clip = {v: score_selection(teacher, vid, selector, ratio, cfg=cfg, hub=hub)
+            per_clip = {v: score_selection(teacher, vid, selector, ratio, cfg=cfg, hub=hub,
+                                           spread=args.spread)
                         for v, vid in videos.items()}
             cov = sum(s["coverage_mse"] for s in per_clip.values()) / len(per_clip)
             uni = sum(s["uniqueness_mse"] for s in per_clip.values()) / len(per_clip)

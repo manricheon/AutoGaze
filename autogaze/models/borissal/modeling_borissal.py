@@ -75,6 +75,104 @@ def _largest_remainder(raw: torch.Tensor, total_budget: int, min_val: int, max_v
     return counts.clamp(min=min_val, max=max_val)
 
 
+def _bucket_grid(k_spread: int, t: int, h: int, w: int):
+    """Smallest (G_t, G_h, G_w) bucket layout with G_t*G_h*G_w >= k_spread:
+    stratify time first (event coverage), then space near-square."""
+    G_t = min(t, k_spread)
+    q = -(-k_spread // G_t)  # per-time-slice bucket quota (ceil)
+    G_h = min(h, max(1, int(q ** 0.5)))
+    G_w = min(w, -(-q // G_h))
+    while G_t * G_h * G_w < k_spread:
+        if G_w < w:
+            G_w += 1
+        elif G_h < h:
+            G_h += 1
+        elif G_t < t:
+            G_t += 1
+        else:
+            break
+    return G_t, G_h, G_w
+
+
+def _hybrid_topk(scores: torch.Tensor, k: int, spread_fraction: float, grid: tuple) -> torch.Tensor:
+    """Hybrid focus+spread selection over a (t, h, w) grid (the single-scale
+    analogue of AutoGaze's multi-scale layout, whose coarse scales dedicate a
+    fixed share of every frame's budget to a global gist).
+
+    scores: (R, L) independent selection problems, L == t*h*w for grid.
+    Returns a bool keep mask (R, L) with EXACTLY k True per row:
+    - focus share (k - k_spread): plain global top-k by score;
+    - spread share k_spread = round(spread_fraction * k): the grid is cut
+      into >= k_spread spatio-temporal buckets (time stratified first, then
+      space) and each of the best k_spread buckets contributes its
+      highest-scoring cell -- guaranteed scene/timeline skeleton, with
+      saliency still choosing WITHIN each bucket.
+    Ops: topk/scatter/gather/scatter_reduce only (mobile-safe); exactness is
+    enforced by a final boosted top-k (same bonus pattern as global-alloc's
+    per-tubelet floor), which also backfills the rare empty-bucket case.
+    """
+    R, L = (int(x) for x in scores.shape)
+    t, h, w = grid
+    device = scores.device
+    k_spread = min(k, int(round(spread_fraction * k)))
+    k_focus = k - k_spread
+
+    chosen = torch.zeros(R, L, dtype=torch.bool, device=device)
+    if k_focus > 0:
+        _, fidx = scores.topk(k_focus, dim=-1)
+        chosen.scatter_(1, fidx, torch.ones_like(fidx, dtype=torch.bool))
+
+    if k_spread > 0:
+        G_t, G_h, G_w = _bucket_grid(k_spread, t, h, w)
+        n_b = G_t * G_h * G_w
+        tt = torch.arange(t, device=device).view(t, 1, 1)
+        hh = torch.arange(h, device=device).view(1, h, 1)
+        ww = torch.arange(w, device=device).view(1, 1, w)
+        bucket = ((tt * G_t // t) * G_h + (hh * G_h // h)) * G_w + (ww * G_w // w)
+        bucket = bucket.reshape(1, L).expand(R, L)
+
+        neg = torch.finfo(scores.dtype).min
+        avail = scores.masked_fill(chosen, neg)
+        bmax = torch.full((R, n_b), neg, dtype=scores.dtype, device=device)
+        bmax.scatter_reduce_(1, bucket, avail, reduce="amax")
+        # representative cell per bucket = lowest index attaining the bucket max
+        cand = (avail == bmax.gather(1, bucket)) & ~chosen & (avail > neg)
+        idx_key = torch.where(cand, (L - torch.arange(L, device=device)).expand(R, L),
+                              torch.zeros(1, dtype=torch.long, device=device))
+        rep_key = torch.zeros(R, n_b, dtype=torch.long, device=device)
+        rep_key.scatter_reduce_(1, bucket, idx_key, reduce="amax")
+        has_rep = rep_key > 0
+        rep_idx = (L - rep_key).clamp_(0, L - 1)
+        rank = torch.where(has_rep, bmax, torch.full_like(bmax, neg))
+        # PER-TIME-SLICE quotas (largest-remainder style): guarantees timeline
+        # coverage even when scores tie (plain top-k over buckets breaks ties
+        # toward low indices and can starve late time slices -- caught by test)
+        S_b = G_h * G_w
+        base, rem = divmod(k_spread, G_t)
+        q_max = min(base + (1 if rem else 0), S_b)
+        if q_max > 0:
+            _, top_b3 = rank.reshape(R, G_t, S_b).topk(q_max, dim=-1)   # (R, G_t, q_max)
+            quota = torch.tensor([min(base + (1 if i < rem else 0), S_b) for i in range(G_t)],
+                                 device=device)
+            within = torch.arange(q_max, device=device).view(1, 1, q_max) < quota.view(1, G_t, 1)
+            flat_b = (top_b3 + torch.arange(G_t, device=device).view(1, G_t, 1) * S_b).reshape(R, -1)
+            ok = has_rep.gather(1, flat_b) & within.expand(R, -1, -1).reshape(R, -1)
+            # invalid entries scatter into a dummy column (a False src could
+            # otherwise CLEAR a colliding True -- scatter overwrite hazard)
+            sel_idx = torch.where(ok, rep_idx.gather(1, flat_b), torch.full_like(flat_b, L))
+            chosen = torch.cat([chosen, torch.zeros(R, 1, dtype=torch.bool, device=device)], dim=1)
+            chosen.scatter_(1, sel_idx, torch.ones_like(sel_idx, dtype=torch.bool))
+            chosen = chosen[:, :L]
+
+    # exact-k: chosen cells get a large finite bonus, then one top-k --
+    # keeps every chosen cell (they number <= k) and backfills by score.
+    boosted = scores + chosen.to(scores.dtype) * 1e4
+    _, kidx = boosted.topk(k, dim=-1)
+    mask = torch.zeros_like(chosen)
+    mask.scatter_(1, kidx, torch.ones_like(kidx, dtype=torch.bool))
+    return mask
+
+
 def _pack_gazing_mask(gazing_mask: torch.Tensor):
     """Pack a (B, N) boolean/0-1 mask into (kept_index, is_padded), both (B, K),
     K = max ones-count over the batch. Kept indices come first in each row, in
@@ -136,11 +234,12 @@ class Borissal(nn.Module):
         per_frame_allocation: Optional[str] = None,
         tubelet_size: Optional[int] = None,
         patch_size: Optional[int] = None,
+        spread_fraction: Optional[float] = None,
     ) -> Selection:
         """video: (B, T, C, H, W) float, already resized/normalized."""
         selection, _ = self._select_impl(
             video, gazing_ratio, motion_weight, per_frame_allocation, tubelet_size, patch_size,
-            want_intermediates=False,
+            want_intermediates=False, spread_fraction=spread_fraction,
         )
         return selection
 
@@ -153,6 +252,7 @@ class Borissal(nn.Module):
         per_frame_allocation: Optional[str] = None,
         tubelet_size: Optional[int] = None,
         patch_size: Optional[int] = None,
+        spread_fraction: Optional[float] = None,
     ):
         """Same as `select`, but also returns the intermediate (pre-top-k) saliency
         maps -- useful for visualizing the motion/spatial/combined-score stages,
@@ -170,7 +270,7 @@ class Borissal(nn.Module):
         """
         return self._select_impl(
             video, gazing_ratio, motion_weight, per_frame_allocation, tubelet_size, patch_size,
-            want_intermediates=True,
+            want_intermediates=True, spread_fraction=spread_fraction,
         )
 
     def _saliency_scores(
@@ -322,6 +422,7 @@ class Borissal(nn.Module):
         tubelet_size: Optional[int],
         patch_size: Optional[int],
         want_intermediates: bool,
+        spread_fraction: Optional[float] = None,
     ):
         cfg = self.config
         tubelet_size = tubelet_size or cfg.tubelet_size
@@ -329,6 +430,9 @@ class Borissal(nn.Module):
         ratio = cfg.gazing_ratio if gazing_ratio is None else gazing_ratio
         motion_weight_setting = cfg.motion_weight if motion_weight is None else motion_weight
         alloc = per_frame_allocation or cfg.per_frame_allocation
+        spread = cfg.spread_fraction if spread_fraction is None else spread_fraction
+        if spread > 0 and alloc == "proportional":
+            raise ValueError("spread_fraction requires uniform or global allocation")
         eps = cfg.eps
 
         # Explicit int() casts: under torch.jit.trace / torch.export, .shape components
@@ -432,23 +536,36 @@ class Borissal(nn.Module):
             # guaranteed set in. Exact-K_total by construction.
             _, gidx = sel_scores.topk(m, dim=-1)
             guaranteed = torch.zeros(B, T_grid, N_pf, dtype=torch.bool, device=device)
-            guaranteed.scatter_(-1, gidx, True)
+            guaranteed.scatter_(-1, gidx, torch.ones_like(gidx, dtype=torch.bool))
             global_scores = (sel_scores + 10.0 * guaranteed.to(sel_scores.dtype)).reshape(B, L)
-            _, kidx = global_scores.topk(K_total, dim=-1)
-            keep_mask_flat = torch.zeros(B, L, dtype=torch.bool, device=device)
-            keep_mask_flat.scatter_(1, kidx, True)
+            if spread > 0:
+                # hybrid: clip-wide focus + 3D spatio-temporal stratified spread
+                keep_mask_flat = _hybrid_topk(global_scores, K_total, spread,
+                                              (T_grid, H_grid, W_grid))
+            else:
+                _, kidx = global_scores.topk(K_total, dim=-1)
+                keep_mask_flat = torch.zeros(B, L, dtype=torch.bool, device=device)
+                keep_mask_flat.scatter_(1, kidx, torch.ones_like(kidx, dtype=torch.bool))
             keep_mask_grid = keep_mask_flat.reshape(B, T_grid, N_pf)
         else:
             # Top-k -> keep mask, via torch.topk (bounded by k_max, not a full O(N) sort) --
             # more mobile-runtime-friendly (TFLite TopKV2 / CoreML top_k are first-class ops,
             # unlike general sort/argsort). For "uniform" allocation k_max == k for every
             # tubelet, so this reduces to a single topk(k) + scatter with no extra compare.
-            k_max = int(k_per_frame.max().item())
-            _, topk_idx = sel_scores.topk(k_max, dim=-1)  # (B, T_grid, k_max), sorted descending
-            within_topk_rank = torch.arange(k_max, device=device).view(1, 1, k_max).expand(B, T_grid, k_max)
-            keep_within_topk = within_topk_rank < k_per_frame.unsqueeze(-1)  # (B, T_grid, k_max) bool
-            keep_mask_grid = torch.zeros(B, T_grid, N_pf, dtype=torch.bool, device=device)
-            keep_mask_grid.scatter_(-1, topk_idx, keep_within_topk)  # (B, T_grid, N_pf) bool
+            if spread > 0 and alloc == "uniform":
+                # hybrid within each tubelet (per-frame exact-k contract kept):
+                # 2D spatial buckets, same helper with a singleton time axis
+                k_u = int(k_per_frame[0, 0].item())
+                keep_mask_grid = _hybrid_topk(
+                    sel_scores.reshape(B * T_grid, N_pf), k_u, spread, (1, H_grid, W_grid)
+                ).reshape(B, T_grid, N_pf)
+            else:
+                k_max = int(k_per_frame.max().item())
+                _, topk_idx = sel_scores.topk(k_max, dim=-1)  # (B, T_grid, k_max), sorted descending
+                within_topk_rank = torch.arange(k_max, device=device).view(1, 1, k_max).expand(B, T_grid, k_max)
+                keep_within_topk = within_topk_rank < k_per_frame.unsqueeze(-1)  # (B, T_grid, k_max) bool
+                keep_mask_grid = torch.zeros(B, T_grid, N_pf, dtype=torch.bool, device=device)
+                keep_mask_grid.scatter_(-1, topk_idx, keep_within_topk)  # (B, T_grid, N_pf) bool
 
         per_frame_keep = keep_mask_grid.sum(dim=-1)  # (B, T_grid)
         num_keep = per_frame_keep.sum(dim=-1)        # (B,)

@@ -22,6 +22,7 @@ from .configuration_borissal import BorissalConfig, BorissalV1Config
 from .modeling_borissal import (
     Borissal,
     Selection,
+    _hybrid_topk,
     _largest_remainder,
     _pack_gazing_mask,
 )
@@ -33,6 +34,7 @@ def _selection_from_scores(
     alloc: str,
     eps: float,
     min_keep_per_frame_ratio: float = 0.25,
+    spread_fraction: float = 0.0,
 ) -> Selection:
     """Budget allocation + hard top-k + canonical packing, from a score grid.
 
@@ -57,17 +59,30 @@ def _selection_from_scores(
         m = min(m, K_total // T_grid)
         _, gidx = scores_flat.topk(m, dim=-1)
         guaranteed = torch.zeros(B, T_grid, N_pf, dtype=torch.bool, device=device)
-        guaranteed.scatter_(-1, gidx, True)
+        guaranteed.scatter_(-1, gidx, torch.ones_like(gidx, dtype=torch.bool))
         global_scores = (scores_flat + 10.0 * guaranteed.to(scores_flat.dtype)).reshape(B, L)
-        _, kidx = global_scores.topk(K_total, dim=-1)
-        keep_mask_flat = torch.zeros(B, L, dtype=torch.bool, device=device)
-        keep_mask_flat.scatter_(1, kidx, True)
+        if spread_fraction > 0:
+            keep_mask_flat = _hybrid_topk(global_scores, K_total, spread_fraction,
+                                          (T_grid, H_grid, W_grid))
+        else:
+            _, kidx = global_scores.topk(K_total, dim=-1)
+            keep_mask_flat = torch.zeros(B, L, dtype=torch.bool, device=device)
+            keep_mask_flat.scatter_(1, kidx, torch.ones_like(kidx, dtype=torch.bool))
         keep_mask_grid = keep_mask_flat.reshape(B, T_grid, N_pf)
     else:
+        keep_mask_grid = None
         if alloc == "uniform":
             k = min(max(1, round(ratio * N_pf)), N_pf)
-            k_per_frame = torch.full((B, T_grid), k, dtype=torch.long, device=device)
+            if spread_fraction > 0:
+                # hybrid within each tubelet (per-frame exact-k contract kept)
+                keep_mask_grid = _hybrid_topk(
+                    scores_flat.reshape(B * T_grid, N_pf), k, spread_fraction, (1, H_grid, W_grid)
+                ).reshape(B, T_grid, N_pf)
+            else:
+                k_per_frame = torch.full((B, T_grid), k, dtype=torch.long, device=device)
         elif alloc == "proportional":
+            if spread_fraction > 0:
+                raise ValueError("spread_fraction requires uniform or global allocation")
             total_budget = min(max(1, round(ratio * L)), L)
             energy = S.reshape(B, T_grid, -1).sum(dim=-1)
             energy_sum = energy.sum(dim=-1, keepdim=True).clamp_min(eps)
@@ -76,12 +91,13 @@ def _selection_from_scores(
         else:
             raise ValueError(f"unknown per_frame_allocation: {alloc}")
 
-        k_max = int(k_per_frame.max().item())
-        _, topk_idx = scores_flat.topk(k_max, dim=-1)
-        within_topk_rank = torch.arange(k_max, device=device).view(1, 1, k_max).expand(B, T_grid, k_max)
-        keep_within_topk = within_topk_rank < k_per_frame.unsqueeze(-1)
-        keep_mask_grid = torch.zeros(B, T_grid, N_pf, dtype=torch.bool, device=device)
-        keep_mask_grid.scatter_(-1, topk_idx, keep_within_topk)
+        if keep_mask_grid is None:
+            k_max = int(k_per_frame.max().item())
+            _, topk_idx = scores_flat.topk(k_max, dim=-1)
+            within_topk_rank = torch.arange(k_max, device=device).view(1, 1, k_max).expand(B, T_grid, k_max)
+            keep_within_topk = within_topk_rank < k_per_frame.unsqueeze(-1)
+            keep_mask_grid = torch.zeros(B, T_grid, N_pf, dtype=torch.bool, device=device)
+            keep_mask_grid.scatter_(-1, topk_idx, keep_within_topk)
 
     per_frame_keep = keep_mask_grid.sum(dim=-1)
     num_keep = per_frame_keep.sum(dim=-1)
@@ -317,13 +333,16 @@ class BorissalV1(nn.Module):
         video: torch.Tensor,
         gazing_ratio: Optional[float] = None,
         per_frame_allocation: Optional[str] = None,
+        spread_fraction: Optional[float] = None,
     ) -> Selection:
         """video: (B, T, C, H, W) float, resized/normalized. Same contract as v0."""
         cfg = self.config
         ratio = cfg.gazing_ratio if gazing_ratio is None else gazing_ratio
         alloc = per_frame_allocation or cfg.per_frame_allocation
+        spread = cfg.spread_fraction if spread_fraction is None else spread_fraction
         S = self.scores(video)
-        return _selection_from_scores(S, ratio, alloc, cfg.eps, cfg.min_keep_per_frame_ratio)
+        return _selection_from_scores(S, ratio, alloc, cfg.eps, cfg.min_keep_per_frame_ratio,
+                                      spread_fraction=spread)
 
     # ---------------------------------------------------------------- training
 

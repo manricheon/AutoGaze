@@ -579,6 +579,76 @@ class as v0's earlier fix). CoreML conversion deliberately deferred to
 the Linux/CI side (onnx→coreml); this check's job is catching op/trace
 problems on the dev box.
 
+## Description-task alignment (2026-07-15): semantic gate + hybrid allocation
+
+User-driven reframe: the selection exists FOR video description, and both
+existing gates are reconstruction-family (random provably/measurably wins
+them) — a judgment axis aligned with description was missing. Theory
+session conclusions (recorded from the dialogue):
+
+- **"Spread evenly + concentrate on what matters" is AutoGaze's own
+  multi-scale essence**: its 3 coarse scales (4+16+49 = 69 of 265 tokens,
+  ~26% of every frame's budget) are a STRUCTURAL global-gist reservation;
+  fine tokens carry detail. Borissal is single-scale by downstream
+  contract (V-JEPA2.1 grid), so the closest analogue is a **stratified
+  spread share** — sampled points + RoPE positions instead of per-token
+  summaries (honest gap: a coarse token SUMMARIZES its region,
+  anti-aliased; a stratified fine token SAMPLES it).
+- Target budget confirmed by the user: **gazing_ratio 0.25–0.5** (not
+  AutoGaze-RL's 0.02–0.15 ultra-sparse regime) — at 0.25, an s=0.25
+  spread share still leaves a 6x6 per-tubelet skeleton plus ~108
+  focus tokens/tubelet, arithmetically enough for scene gist + 2-3
+  recognizable objects.
+
+**Mechanism — `spread_fraction` hybrid allocation** (`_hybrid_topk`,
+config `spread_fraction`, runtime override on both v0/v1 `select()`):
+focus share = plain top-k; spread share = per-time-slice quota (largest
+remainder) over >= k_spread spatio-temporal buckets, best cell per bucket.
+Time is stratified FIRST (event coverage; a tie-broken plain bucket top-k
+starved late time slices — caught by test). Inference-only (training path
+untouched); uniform (2D in-tubelet) and global (3D clip-wide) modes;
+incompatible with proportional. Export: v1+global+spread traces and
+exports (found+fixed: scalar-True `scatter_` on bool tensors is
+untraceable — tensor src now).
+
+**Semantic gate** (`scripts/eval_borissal_semantic.py`, SigLIP2
+`google/siglip2-base-patch16-384` — 24x24 tokens, EXACT 1:1 with the
+384/patch16 main-target grid; eval-only, never in the training loop):
+- **Metric-design pitfall (first attempt, kept as a warning)**: mean-pool
+  gist is won by random (sample mean -> population mean) and
+  cosine-to-mean "importance" marks TYPICAL patches — random recall
+  landed exactly at chance (=ratio) and saliency scored BELOW chance.
+  Both metrics now use the MAP (attention-pooling) head: gist = probe
+  pooling of the selected subset vs the full frame; recall = fraction of
+  the head's top-10%-attention patches captured.
+- **First results where saliency BEATS random** (pre-registered
+  expectation met — the design-review alarm does not fire):
+
+| selector (ratio 0.25) | gist(>) | recall(>) |
+|---|---|---|
+| random | 0.945 | 0.267 |
+| v0.1 / v0.2, s=0 | 0.880 / 0.879 | 0.296 / 0.300 |
+| **v0.2, s=0.25** | **0.899** | **0.309** |
+| v0.2, s=0.5 | 0.899 | 0.283 |
+| v1-60step, s=0 → s=0.5 | 0.835 → 0.914 | 0.205 → 0.276 |
+
+- Readings: (a) recall — the description-aligned axis — favors saliency
+  over random at both ratios (0.31 vs 0.27 at 0.25; 0.556 vs 0.524 at
+  0.5); (b) gist retains a residual spread tilt (subset pooling of
+  scattered tokens approximates the full pooling) — treat recall as
+  primary, gist as secondary; (c) **s=0.25 is the sweet spot**: for v0.2
+  at the target budget it improves BOTH metrics (and V-JEPA coverage
+  8.226→8.211 with uniqueness ~held 8.370→8.353); s=0.5 starts costing
+  recall. Matches the AutoGaze coarse-share precedent (~26%).
+- Cross-family confirmation (VideoMAE recon L1, ratio 0.25): spread
+  recovers most of the reconstruction penalty of concentration —
+  v0.2 0.338 (s=0) → 0.287 (s=0.25) → 0.254 (s=0.5); v1-60step
+  1.224 → 0.684 → 0.685. Together with the semantic table: s=0.25 buys
+  large recon/coverage gains at zero-to-positive semantic cost.
+- The 60-step local v1 stays behind v0.2 on every axis (consistent with
+  all gates; it is barely trained) — v0.2 + s=0.25 is the best currently
+  deployable configuration; the scale run remains the deciding step for v1.
+
 ## Theory notes (2026-07-14): what the literature says about our measured pathologies
 
 Two parallel surveys (① token selection / differentiable top-k;

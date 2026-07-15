@@ -34,6 +34,16 @@ class BorissalConfig:
     # round(min_keep_per_frame_ratio * K_total / T_grid) patches.
     min_keep_per_frame_ratio: float = 0.25
 
+    # --- hybrid focus+spread allocation (2026-07-15, description-task review) ---
+    # spread_fraction s > 0 dedicates round(s*K) of the budget to a
+    # stratified spatio-temporal skeleton (best cell of each of the top
+    # buckets; time stratified first), the rest to plain score top-k.
+    # The single-scale analogue of AutoGaze's multi-scale coarse share
+    # (~26% of its per-frame tokens). 0 = pure top-k (pre-existing
+    # behavior). Applies to uniform (per-tubelet 2D buckets) and global
+    # (clip-wide 3D buckets) allocation; incompatible with "proportional".
+    spread_fraction: float = 0.0
+
     # --- v0.2: local/global score-normalization blend ---
     # 1.0 = pure per-tubelet min-max (v0.1: every tubelet competes equally,
     # cross-tubelet magnitude erased). < 1 blends in a clip-global min-max
@@ -163,6 +173,7 @@ class BorissalV1Config:
     gazing_ratio: float = 0.5
     per_frame_allocation: Literal["uniform", "proportional", "global"] = "uniform"
     min_keep_per_frame_ratio: float = 0.25  # global mode floor (mirrors BorissalConfig)
+    spread_fraction: float = 0.0  # hybrid focus+spread allocation (mirrors BorissalConfig)
 
     # Training-time block-structured selection (WP-B): b > 1 selects at
     # b x b spatial-block granularity in forward_train (block-mean logits,

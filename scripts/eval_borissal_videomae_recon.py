@@ -84,7 +84,7 @@ def build_task(videomae_ckpt: str, device: torch.device):
     return task.to(device).eval()
 
 
-def build_selection(spec: str, video: torch.Tensor, ratio: float):
+def build_selection(spec: str, video: torch.Tensor, ratio: float, spread: float = 0.0):
     """spec: random | v0.1 | v0.2 | v1:<checkpoint>. Returns a Selection."""
     from autogaze.models.borissal import Borissal, BorissalConfig, BorissalV1, BorissalV1Config
     scale = video.shape[-1]
@@ -104,12 +104,15 @@ def build_selection(spec: str, video: torch.Tensor, ratio: float):
         ckpt_cfg.setdefault("global_context", False)
         model = BorissalV1(BorissalV1Config(**ckpt_cfg))
         model.load_state_dict(ckpt["state_dict"])
-        return model.eval().select(video, gazing_ratio=ratio, per_frame_allocation="uniform")
+        return model.eval().select(video, gazing_ratio=ratio, per_frame_allocation="uniform",
+                                   spread_fraction=spread)
     if spec == "v0.2":
         return Borissal(BorissalConfig.v0_2(scale=scale, per_frame_allocation="uniform",
-                                            block_size=1)).select(video, gazing_ratio=ratio)
+                                            block_size=1)).select(video, gazing_ratio=ratio,
+                                                                  spread_fraction=spread)
     if spec == "v0.1":
-        return Borissal(BorissalConfig(scale=scale)).select(video, gazing_ratio=ratio)
+        return Borissal(BorissalConfig(scale=scale)).select(video, gazing_ratio=ratio,
+                                                            spread_fraction=spread)
     raise ValueError(f"unknown selector spec: {spec}")
 
 
@@ -151,6 +154,8 @@ def main():
                    help="random | v0.1 | v0.2 | v1:<checkpoint.pt>")
     p.add_argument("--ratios", nargs="+", type=float, default=[0.25])
     p.add_argument("--num-frames", type=int, default=16)
+    p.add_argument("--spread", type=float, default=0.0,
+                   help="spread_fraction for hybrid allocation (non-random selectors)")
     p.add_argument("--recon-frames", default="1,3,5,7,9,11,13,15",
                    help="comma-separated frame indices to reconstruct (fixed for comparability)")
     p.add_argument("--device", default="cpu")
@@ -181,7 +186,8 @@ def main():
     print("-" * len(header))
     for spec in args.selectors:
         for ratio in args.ratios:
-            sel = build_selection(spec, video, ratio)
+            sel = build_selection(spec, video, ratio,
+                                  spread=0.0 if spec == "random" else args.spread)
             gaze = to_videomae_gazing_info(sel, tubelet_size=2, scales=tuple(task.scales))
             with torch.no_grad():
                 out = task.forward_output({"video_for_task": video_task.to(device)},

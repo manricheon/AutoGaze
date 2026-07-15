@@ -343,6 +343,47 @@ def test_hardness_rank_loss_direction():
     assert scores.grad is not None and scores.grad.abs().sum() > 0
 
 
+def test_hybrid_topk_contract():
+    from autogaze.models.borissal.modeling_borissal import _hybrid_topk
+
+    g = torch.Generator().manual_seed(5)
+    t, h, w = 8, 24, 24
+    L = t * h * w
+    scores = torch.rand(3, L, generator=g)
+    for s in (0.0, 0.25, 0.5, 1.0):
+        mask = _hybrid_topk(scores, k=1152, spread_fraction=s, grid=(t, h, w))
+        assert mask.sum(dim=-1).eq(1152).all(), f"exact budget violated at s={s}"
+    # s=0 is bit-identical to plain top-k (backward compat)
+    plain = torch.zeros(3, L, dtype=torch.bool)
+    plain.scatter_(1, scores.topk(1152, dim=-1).indices, True)
+    assert torch.equal(_hybrid_topk(scores, 1152, 0.0, (t, h, w)), plain)
+    # s=1 pure stratification: selection covers >= k distinct buckets' worth of
+    # temporal slices -- every tubelet must be hit (time stratified first)
+    m1 = _hybrid_topk(scores, 64, 1.0, (t, h, w)).reshape(3, t, h * w)
+    assert (m1.sum(dim=-1) > 0).all(), "time-first stratification must touch every tubelet"
+    # spread actually spreads: peaky scores (all mass in one corner) still
+    # yield selections in distant regions when s>0
+    peaky = torch.zeros(1, L)
+    peaky[0, :100] = torch.arange(100, 0, -1).float()
+    m = _hybrid_topk(peaky, 100, 0.5, (t, h, w)).reshape(t, h, w)
+    assert m[t - 1].any(), "spread share must reach the far end of the clip"
+    m0 = _hybrid_topk(peaky, 100, 0.0, (t, h, w)).reshape(t, h, w)
+    assert not m0[t - 1].any(), "sanity: pure top-k stays in the corner"
+
+
+def test_v1_select_spread_fraction():
+    video = _make_video(B=1, seed=90)
+    model = BorissalV1(BorissalV1Config()).eval()
+    for alloc in ("uniform", "global"):
+        sel = model.select(video, gazing_ratio=0.25, per_frame_allocation=alloc,
+                           spread_fraction=0.25)
+        L = 8 * 576
+        assert sel.num_keep[0].item() == min(max(8, round(0.25 * L)), L) if alloc == "global" \
+            else sel.per_frame_keep.eq(144).all()
+        valid = sel.keep_index[0][sel.keep_index[0] >= 0]
+        assert (valid[1:] > valid[:-1]).all(), "canonical ascending order must survive hybrid"
+
+
 def test_videomae_gazing_adapter_mapping():
     # Manual case: 2 tubelets, 2x2 fine grid (scales (16,32), patch 16 ->
     # 1 + 4 = 5 tokens/frame, fine offset 1), tubelet_size 2.

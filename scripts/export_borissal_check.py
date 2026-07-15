@@ -32,15 +32,18 @@ OUT_DIR = REPO_ROOT / "outputs" / "borissal" / "export"
 
 
 class _SelectWrapper(torch.nn.Module):
-    """Tensor-only facade over select() for trace/onnx (fixed ratio/alloc)."""
+    """Tensor-only facade over select() for trace/onnx (fixed ratio/alloc/spread)."""
 
-    def __init__(self, model, ratio: float):
+    def __init__(self, model, ratio: float, alloc: str = "uniform", spread: float = 0.0):
         super().__init__()
         self.model = model
         self.ratio = ratio
+        self.alloc = alloc
+        self.spread = spread
 
     def forward(self, video):
-        sel = self.model.select(video, gazing_ratio=self.ratio, per_frame_allocation="uniform")
+        sel = self.model.select(video, gazing_ratio=self.ratio,
+                                per_frame_allocation=self.alloc, spread_fraction=self.spread)
         return sel.scores, sel.keep_mask, sel.keep_index
 
 
@@ -82,14 +85,17 @@ def main():
     video = torch.rand(1, args.num_frames, 3, args.scale, args.scale, generator=g)
     video2 = torch.rand(1, args.num_frames, 3, args.scale, args.scale, generator=g)
 
-    models = {
-        "v0.2": Borissal(BorissalConfig.v0_2(scale=args.scale)).eval(),
-        "v1": BorissalV1(BorissalV1Config(scale=args.scale)).eval(),
+    v1 = BorissalV1(BorissalV1Config(scale=args.scale)).eval()
+    cases = {
+        "v0.2": (Borissal(BorissalConfig.v0_2(scale=args.scale)).eval(), "uniform", 0.0),
+        "v1": (v1, "uniform", 0.0),
+        # hybrid focus+spread over global allocation (K_total fixed -> static shapes)
+        "v1-hyb": (v1, "global", 0.25),
     }
 
     rows = []
-    for name, model in models.items():
-        wrapper = _SelectWrapper(model, args.ratio)
+    for name, (model, alloc, spread) in cases.items():
+        wrapper = _SelectWrapper(model, args.ratio, alloc=alloc, spread=spread)
         for check, fn in [("jit.trace", lambda w: check_trace(w, video, video2)),
                           ("onnx", lambda w: check_onnx(w, video, OUT_DIR / f"borissal_{name.replace('.', '')}.onnx"))]:
             try:
