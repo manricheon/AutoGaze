@@ -113,19 +113,31 @@ def build_selection(spec: str, video: torch.Tensor, ratio: float):
     raise ValueError(f"unknown selector spec: {spec}")
 
 
-def save_strip(orig, recon, frame_idx, mean, std, path):
-    """Original (top) vs reconstruction (bottom) for the reconstructed frames."""
+def save_strip(orig, recon, frame_idx, selection, patch_size, tubelet_size, mean, std, path):
+    """Three rows per reconstructed frame: input / selection-mask overlay /
+    reconstruction."""
     import matplotlib.pyplot as plt
     n = len(frame_idx)
-    fig, axes = plt.subplots(2, n, figsize=(2.2 * n, 4.6))
+    fig, axes = plt.subplots(3, n, figsize=(2.2 * n, 6.9))
     mean_t = torch.tensor(mean).view(3, 1, 1)
     std_t = torch.tensor(std).view(3, 1, 1)
+    T_grid, H_grid, W_grid = (int(x) for x in selection.grid_thw[0].tolist())
+    mask_grid = selection.keep_mask[0].reshape(T_grid, H_grid, W_grid).float().cpu()
+
+    def denorm(img):
+        return (img * std_t + mean_t).clamp(0, 1).permute(1, 2, 0).numpy()
+
     for i, f in enumerate(frame_idx):
-        for row, img in enumerate([orig[0, f].cpu(), recon[0, i].float().cpu()]):
+        f = int(f)
+        img = orig[0, f].cpu()
+        up = mask_grid[f // tubelet_size].repeat_interleave(patch_size, 0).repeat_interleave(patch_size, 1)
+        overlay = img * (0.25 + 0.75 * up.unsqueeze(0))
+        for row, (label, im) in enumerate([("input", img), ("selected", overlay),
+                                           ("recon", recon[0, i].float().cpu())]):
             ax = axes[row, i]
-            ax.imshow((img * std_t + mean_t).clamp(0, 1).permute(1, 2, 0).numpy())
+            ax.imshow(denorm(im))
             ax.set_axis_off()
-            ax.set_title(f"{'orig' if row == 0 else 'recon'} f{int(f)}", fontsize=8)
+            ax.set_title(f"{label} f{f}", fontsize=8)
     fig.tight_layout()
     fig.savefig(path, dpi=110)
     plt.close(fig)
@@ -179,7 +191,8 @@ def main():
             tag = spec.replace(":", "_").replace("/", "_")
             png = out_root / f"{tag}_r{int(ratio * 100)}.png"
             save_strip(video_task, out["reconstruction"], frame_idx.tolist(),
-                       task.transform.image_mean, task.transform.image_std, png)
+                       sel, patch_size=16, tubelet_size=2,
+                       mean=task.transform.image_mean, std=task.transform.image_std, path=png)
             results.append({"selector": spec, "ratio": ratio, "recon_l1_mean": mean_loss,
                             "recon_l1_per_frame": per_frame, "strip": str(png)})
             print(f"{spec:44} {ratio:<6} {mean_loss:12.5f}  "
