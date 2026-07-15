@@ -1131,3 +1131,26 @@ Open question for the scale run (sharpened, not answered): does
 uniqueness-primary optimization bite with global batch 128 + hub 2.1-L
 at 384 (vs pilot's batch 2 + vitl-256), and does entropy's slow drift
 mean-revert or keep sliding toward 3.5?
+
+**Follow-up diagnostics (same day, user asked "is single-scale the
+limit — model vs training vs data?"):**
+- `borissal_model_diagnostics.py` untrained vs pilot@500:
+  `perturb_near_over_far` 120.3 → **32.2** (the zero-init global-context
+  path OPENED on real data — it barely moved in 60 single-clip steps),
+  `brightness_spearman` +0.81 → **−0.65** (init bias not just erased but
+  inverted; content took over), `v0_spearman` 0.02 (no passthrough).
+  Argues against a model-side wall at this evidence scale.
+- Spread on REAL data is ~neutral on the semantic axes (4-clip means):
+  v1@500 recall 0.327→0.319, gist 0.924→0.933 at s 0→0.25; v0.2
+  similarly flat. The single-example-clip finding that s=0.25 improves
+  every axis does NOT transfer to these clips — keep spread as a deploy
+  knob for recon/coverage recovery, not as a semantic-recall lever.
+- Where a single-scale cost IS visible: gist stays below random for
+  every saliency config (0.87–0.93 vs 0.940) — subset pooling loses a
+  little global summary, structurally. For trained v1 the gap is small
+  (−0.016) and primary recall more than compensates. Verdict recorded:
+  current numbers show an OPTIMIZATION-scale question (flat uniqueness
+  at 500 steps/batch 2), not a demonstrated single-scale ceiling;
+  revisit multi-scale (summary tokens = downstream-contract change)
+  only if the scale run's captioner-side results say gist/recon gaps
+  matter.
