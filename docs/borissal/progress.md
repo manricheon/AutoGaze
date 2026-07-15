@@ -1059,3 +1059,17 @@ but still listed; now notes the SigLIP2 hardcoded-id offline caveat,
 `eval_borissal_semantic.py` needs a seeded HF cache + `HF_HUB_OFFLINE=1`).
 Tests still 49 green. Execution order unchanged: the Linux run per
 runbook/§6/§7 remains the blocker for everything else.
+
+---
+
+## 2026-07-15 (same day) — approach-ko.md: plain-language Korean explainer
+
+New **`approach-ko.md`**: a LIVING document explaining the approach's
+theoretical background in easy Korean — architecture (v0/v0.2 signals,
+v1 TSM + GCNet-lite + cosine head), token selection/allocation policy
+(budget rules, spread hybrid, block coherence), training method (the
+coverage→uniqueness objective inversion and why, loss table, Gumbel-ST,
+saturation fixes, deferred RL, frozen-model roles table), and the
+three-axis evaluation with semantic recall primary. Keep it updated
+whenever the approach changes; design/reference/training.md stay the
+source of numbers.
