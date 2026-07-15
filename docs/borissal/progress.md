@@ -1100,13 +1100,20 @@ would cross the 3.5 alarm in ~300 more steps at this slope).
 **Gates (4 real clips, ratio 0.25) — both v1 bars CLEARED for the first
 time:**
 
-| config | cov(<) | uniq(>) | sem-recall(>) | sem-gist |
-|---|---|---|---|---|
-| random | 7.852 | 7.553 | 0.228 | 0.940 |
-| v0.2 | 7.921 | 7.730 | 0.295 | 0.868 |
-| v1@100 | 7.913 | 7.793 | 0.296 | 0.903 |
-| v1@300 | 7.924 | 7.801 | — | — |
-| v1@500 | 7.948 | 7.763 | **0.327** | 0.924 |
+| config | cov(<) | uniq(>) | sem-recall(>) | sem-gist | VMAE recon(<, ref) |
+|---|---|---|---|---|---|
+| random | 7.852 | 7.553 | 0.228 | 0.940 | 0.209 |
+| v0.2 | 7.921 | 7.730 | 0.295 | 0.868 | 0.253 |
+| v1@100 | 7.913 | 7.793 | 0.296 | 0.903 | — |
+| v1@300 | 7.924 | 7.801 | — | — | — |
+| v1@500 | 7.948 | 7.763 | **0.327** | 0.924 | 0.499 |
+
+VideoMAE recon (4-clip mean, s=0) reproduces the theory-predicted
+scatter ordering random < v0.2 < v1 on real data too — reference axis
+only, as documented. Visual artifacts: recon strips under
+`outputs/borissal/pilot_gate/videomae_recon_{1..4}/`, selection
+overlay/score dumps under `outputs/borissal/pilot_v{1s500,02}_*/`
+(gitignored).
 
 Readings: (a) the old local "v1 uniqueness < random" failure was a
 single-clip eval ARTIFACT — on real data every checkpoint beats random
