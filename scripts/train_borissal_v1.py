@@ -71,7 +71,9 @@ def parse_args():
     p.add_argument("--num-workers", type=int, default=4,
                    help="DataLoader workers (PyAV decode is the IO bottleneck on real data)")
     p.add_argument("--grad-accum", type=int, default=1)
-    p.add_argument("--lr", type=float, default=1e-3)
+    # default matches the scale-run recommendation (trend-run analysis:
+    # 3e-4 saturated scores); smokes don't care about convergence
+    p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--ratio-sampling", choices=["fixed", "uniform"], default="uniform")
     p.add_argument("--ratio", type=float, default=0.5, help="fixed ratio (ratio-sampling=fixed)")
     p.add_argument("--ratio-min", type=float, default=0.15)

@@ -1016,3 +1016,27 @@ path (scalar-True scatter_ untraceable → tensor src; time-slice quota
 needed against tie-break starvation — caught by test). Export 6/6 PASS
 (v1+global+spread included). Judgment ladder item 4 rewritten: semantic
 recall is now the PRIMARY adoption axis. Tests 47 → **49 green**.
+
+---
+
+## 2026-07-15 (same day) — defaults audit + doc sync
+
+Full audit of code defaults vs docs (user request). Verdicts:
+- **Kept (rationale re-confirmed)**: all v0/v1 config defaults incl.
+  spread_fraction=0.0 as the backward-compat baseline (the measured
+  s=0.25 sweet spot is single-clip evidence — recorded as the recommended
+  DEPLOY override in reference.md §3, not baked into the preset until the
+  scale run confirms it); recipe loss terms stay opt-in (§6 command is
+  the recipe's source of truth); ratio sampling 0.15–0.75 (wider than the
+  0.25–0.5 target = generalization margin).
+- **Changed (footgun)**: trainer `--lr` default 1e-3 → **1e-4** — the
+  recommendation and the §6 scale command both said 1e-4; forgetting the
+  flag would have run 10x hot. Smokes don't measure convergence, so the
+  lower default costs nothing.
+- **Doc fixes**: stale test count (43→49); reference.md §7 still claimed
+  a stable-sort in the packer (removed in the ONNX fix); reference.md §8
+  rewritten as a **Borissal v1 knob table** (cosine_scores /
+  global_context / gumbel_tau 2/3 / train_block_size / v0_preset /
+  spread — previously documented nowhere as a table); deploy
+  recommendation (v0.2 + global + spread 0.25, single-clip caveat) added
+  to reference.md §3.

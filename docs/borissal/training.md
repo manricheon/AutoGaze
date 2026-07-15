@@ -249,13 +249,13 @@ uv run python scripts/eval_borissal_coverage.py \
 torchrun --nproc_per_node=8 scripts/train_borissal_v1.py \
     --data-root /path/to/AutoGaze-Training-Data \
     --teacher hub:vjepa2_1_vit_large_384 --scale 384 \
-    --batch-size 8 --grad-accum 2 --steps 20000 --lr 1e-4 \
+    --batch-size 8 --grad-accum 2 --steps 20000 \
     --w-v0-distill 1.0 --v0-distill-warmup-steps 500 \
     --w-uniqueness 1.0 --coverage-floor <FLOOR> \
     --ratio-sampling uniform --ratio-min 0.15 --ratio-max 0.75 \
     --save-every 1000 --num-workers 8
 ```
-(lr 1e-4 per the trend-run analysis; entropy annealing off for the first
+(lr defaults to 1e-4 per the trend-run analysis; entropy annealing off for the first
 run — observe before tuning. Judge by the §7 ladder.)
 (HF `facebook/vjepa2-vitl-fpc64-256` at `--scale 256` remains a supported
 alternative teacher with the plain dense-target coverage loss.)
@@ -289,7 +289,7 @@ uv venv --python 3.11
 uv pip install -e .          # torch (CUDA wheel on Linux), transformers==5.5.0, av, timm, einops
 uv pip install -e '.[dev]'   # pytest (optional but recommended: run the suite once)
 # Do NOT install .[cuda] (flash_attn) -- legacy-stack only, not used by Borissal.
-uv run pytest tests/ -q      # expect 43 passed
+uv run pytest tests/ -q      # expect 49 passed
 ```
 torch.hub V-JEPA2 repo deps (`torch`, `timm`, `einops`) are already in the
 base dependencies.

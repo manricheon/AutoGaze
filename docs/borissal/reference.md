@@ -168,6 +168,14 @@ against low-texture background resolves to `w≈0.70`. On a mixed real clip
 changing) it resolves to `w≈0.35` — a genuinely intermediate value, not
 just defaulting to 0.5.
 
+**Current recommended deploy configuration (2026-07-15)**: the `v0_2()`
+preset with `per_frame_allocation="global"` and **`spread_fraction=0.25`**
+— at the confirmed 0.25–0.5 target budget it improved ALL measured axes at
+once (semantic gist AND recall, V-JEPA coverage, VideoMAE recon; tables in
+design.md "Description-task alignment"). Caveat: that sweet spot was
+measured on a single clip; it stays a runtime override rather than a baked
+preset default until the scale run confirms it on real data.
+
 ## 4. Output: `Selection`
 
 grid_thw-native, not AutoGaze's `gazing_pos` dict contract — see
@@ -226,9 +234,11 @@ otherwise `cpu` (not `mps` — see §7, CPU measured faster for this workload).
 
 Non-learned, so the cost is arithmetic, not FLOPs-vs-an-encoder. Measured
 on a Mac: **~7-12ms/clip on CPU**, ~85-150 clips/sec (16 frames, 384×384).
-Sort-family ops (the one remaining stable-sort in the packer, plus
-`torch.topk`) are under 6% of self-CPU time; the rest is ordinary
-elementwise/pooling arithmetic, universally supported on mobile backends.
+Sort-family ops (the packer's argsort — plain, not stable: its keys are
+unique by construction, and the stable variant was removed because the
+ONNX exporter cannot represent it — plus `torch.topk`) are under 6% of
+self-CPU time; the rest is ordinary elementwise/pooling arithmetic,
+universally supported on mobile backends.
 An empirical `torch.jit.trace` pass caught and fixed a real tracing bug, and
 surfaced a genuine correctness trap in `"proportional"` allocation under
 naive tracing (it silently freezes a data-dependent value). Full numbers,
@@ -237,12 +247,29 @@ Phase 2 are in
 [`design.md`](./design.md#mobile-readiness-review-2026-07-14-before-starting-phase-2) —
 not duplicated here.
 
-## 8. Not yet built
+## 8. Borissal v1 (the learned selector) — knob summary
 
-`motion_weight="auto"` (§3) is now implemented — content-adaptive
-auto-tuning of the other knobs (`spatial_op`, `pooling`,
-`per_frame_allocation`) was considered and intentionally *not* pursued,
-since each already defaults to the fast+ratio-safe choice regardless of
-content (§3). Revisit only if a future use case actually needs to trade
-that off against something else — most likely alongside the learned
-selector (Phase 2), not bolted onto the signal-only version.
+v1 exists (Phase 2/3 built; training guide = `training.md`, architecture
+rationale = `design.md`). Same `Selection` contract and canonical
+keep-index as v0; `select()` accepts the same runtime overrides
+(`gazing_ratio`, `per_frame_allocation`, `spread_fraction`).
+`BorissalV1Config` defaults, audited 2026-07-15:
+
+| Knob | Default | Why this default |
+|---|---|---|
+| `input_mode` | `"both"` | v0 saliency maps (proven prior) + grid pixels (complementary cues); `maps`/`pixels` are ablation arms |
+| `hidden_channels` / `num_blocks` | `64` / `3` | ~122K params incl. context path; CPU select() 14.5ms (budget 25ms) |
+| `cosine_scores` | `True` | Bounds \|logit\| by construction — the anti-saturation fix validated by the 40-step A/B (entropy mean-reverts instead of collapsing) |
+| `global_context` | `True` | GCNet-lite learned weighted frame+clip summary; the local ~9×9-cell stack cannot express the clip-global comparisons the SSL objectives ask for; zero-init = exact no-op at init |
+| `gumbel_tau` | `2/3` | Concrete/Gumbel-softmax canonical temperature; fixed (τ<0.5 is the gradient-variance blowup zone) |
+| `train_block_size` | `1` | Experimental: `2` = block-structured ST selection (anti-scatter, on-distribution for the multi-block-trained predictor); training-only |
+| `v0_preset` | `"v0.2"` | Gate-validated signal preset feeds the scorer |
+| `per_frame_allocation` | `"uniform"` | Export-safe default; `"global"` available at inference |
+| `spread_fraction` | `0.0` | Backward-compat baseline; see deploy recommendation in §3 |
+| `residual_scoring` | `False` | `score = f(x)` not `v0 + f(x)`; residual is an ablation arm |
+
+Still not built: content-adaptive auto-tuning of v0's remaining knobs
+(intentionally skipped — v1 IS the learned version of that), on-device
+(CoreML/TFLite) export validation (ONNX-17 export passes for v0.2, v1,
+and v1+global+spread — see design.md "Mobile-export pre-check"), and the
+downstream processor→encoder→LLM attachment (separate track).
