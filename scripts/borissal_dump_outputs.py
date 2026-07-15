@@ -54,6 +54,8 @@ def parse_args():
     p.add_argument("--gazing-ratio", type=float, default=0.5)
     p.add_argument("--motion-weight", type=_motion_weight_type, default=0.5, help="float in [0,1], or 'auto'")
     p.add_argument("--per-frame-allocation", choices=["uniform", "proportional", "global"], default="uniform")
+    p.add_argument("--spread", type=float, default=0.0,
+                   help="spread_fraction: hybrid focus+spread allocation (0 = pure top-k)")
     p.add_argument("--spatial-op", choices=["grad", "sobel"], default="grad")
     p.add_argument("--pooling", choices=["avg", "max"], default="avg")
     # v0.2 knobs (None = follow preset/default)
@@ -92,6 +94,7 @@ def build_v0_config(args) -> BorissalConfig:
         gazing_ratio=args.gazing_ratio,
         motion_weight=args.motion_weight,
         per_frame_allocation=args.per_frame_allocation,
+        spread_fraction=args.spread,
         spatial_op=args.spatial_op,
         pooling=args.pooling,
     )
@@ -137,7 +140,8 @@ def dump_v1(args, device, run_dir):
     model = model.to(device).eval()
 
     selection = model.select(video, gazing_ratio=args.gazing_ratio,
-                             per_frame_allocation=args.per_frame_allocation)
+                             per_frame_allocation=args.per_frame_allocation,
+                             spread_fraction=args.spread)
 
     grid_thw = selection.grid_thw[0].tolist()
     T_grid, H_grid, W_grid = grid_thw
