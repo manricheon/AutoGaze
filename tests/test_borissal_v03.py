@@ -4,7 +4,7 @@ import math
 import pytest
 import torch
 
-from autogaze.models.borissal.signals_v03 import motion_center_surround, coherence_gate_map, dct_matrix, image_signature
+from autogaze.models.borissal.signals_v03 import motion_center_surround, coherence_gate_map, dct_matrix, image_signature, color_rarity
 
 
 def test_motion_cs_suppresses_uniform_pan_keeps_local_mover():
@@ -58,3 +58,18 @@ def test_image_signature_fires_on_sparse_foreground():
     blob = sal2[:, :, 10:13, 10:13].mean()
     background = sal2[:, :, :, :8].mean()
     assert blob > 1.5 * background
+
+
+def test_color_rarity_fires_on_rare_color_interior():
+    B, T, H, W = 1, 2, 24, 24
+    rgb = torch.zeros(B, T, 3, H, W)
+    rgb[:, :, 1] = 0.6                       # 지배적 초록 배경
+    rgb[:, :, 0, 8:14, 8:14] = 0.9           # 희소한 빨강 사각형
+    rgb[:, :, 1, 8:14, 8:14] = 0.1
+    sal = color_rarity(rgb, num_bins_per_axis=3, sigma=0.15, eps=1e-6)
+    inside = sal[:, :, 10:12, 10:12].mean()  # 사각형 내부 (경계 아님)
+    outside = sal[:, :, :, :6].mean()        # 배경
+    assert inside > 1.5 * outside            # 내부가 균일하게 발화 (엣지 편향 없음)
+    # 내부와 경계가 같은 색 -> 같은 희소성 (interior filling의 증명)
+    edge = sal[:, :, 8, 8:14].mean()
+    assert torch.allclose(inside, edge, rtol=0.05)

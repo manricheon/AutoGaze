@@ -83,3 +83,33 @@ def image_signature(gray_grid: torch.Tensor) -> torch.Tensor:
     return F.avg_pool2d(
         sal.reshape(b * t, 1, h, w), kernel_size=3, stride=1, padding=1
     ).view(b, t, h, w)
+
+
+def color_rarity(rgb_grid: torch.Tensor, num_bins_per_axis: int, sigma: float,
+                 eps: float) -> torch.Tensor:
+    """Global color rarity (histogram-contrast, HC variant of Cheng et al.
+    CVPR 2011 -- no segmentation) over grid-resolution patch mean colors.
+
+    Colors are min-max normalized per clip/channel (input video is
+    ImageNet-normalized, so the fixed [0,1] bin lattice needs this),
+    soft-binned onto a fixed n^3 RGB lattice, and each patch's saliency is
+    its histogram-mass-weighted distance to all bins: rare colors far from
+    the color mass score high -- across the OBJECT INTERIOR, not just its
+    silhouette. Heavy-tailed by nature: sqrt-compressed here, and the
+    caller must normalize it CLIP-GLOBALLY (spec section 3 ordering rules).
+    """
+    b, t, c, h, w = (int(x) for x in rgb_grid.shape)
+    n = num_bins_per_axis
+    axis = torch.linspace(0.0, 1.0, n, device=rgb_grid.device, dtype=rgb_grid.dtype)
+    centers = torch.stack(
+        torch.meshgrid(axis, axis, axis, indexing="ij"), dim=-1
+    ).reshape(-1, 3)                                                    # (K, 3)
+    pix = rgb_grid.permute(0, 1, 3, 4, 2).reshape(b, t * h * w, 3)      # (B, P, 3)
+    mn = pix.amin(dim=1, keepdim=True)
+    mx = pix.amax(dim=1, keepdim=True)
+    pix = (pix - mn) / (mx - mn + eps)                                  # per-clip [0,1]
+    d2 = (pix.unsqueeze(2) - centers.view(1, 1, -1, 3)).pow(2).sum(-1)  # (B, P, K)
+    assign = torch.softmax(-d2 / (2.0 * sigma * sigma), dim=-1)
+    hist = assign.mean(dim=1)                                           # (B, K) mass
+    sal = (d2.sqrt() * hist.unsqueeze(1)).sum(-1)                       # (B, P)
+    return sal.sqrt().reshape(b, t, h, w)
