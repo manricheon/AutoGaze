@@ -4,7 +4,7 @@ import math
 import pytest
 import torch
 
-from autogaze.models.borissal.signals_v03 import motion_center_surround, coherence_gate_map, dct_matrix, image_signature, color_rarity, dog_blob
+from autogaze.models.borissal.signals_v03 import motion_center_surround, coherence_gate_map, dct_matrix, image_signature, color_rarity, dog_blob, fused_blend, fusion_multiplier
 
 
 def test_motion_cs_suppresses_uniform_pan_keeps_local_mover():
@@ -87,3 +87,37 @@ def test_dog_blob_fires_on_flat_interior_where_gradient_is_zero():
     # DoG blob은 그 내부에서 발화한다 -- 그라디언트가 못 하는 일
     blob = dog_blob(img)
     assert blob[0, 0, 12, 12] > 0.05
+
+
+def test_peak_promotion_ranks_single_peak_over_texture():
+    B, T, H, W = 1, 1, 24, 24
+    single = torch.zeros(B, T, H, W)
+    single[:, :, 12, 12] = 1.0                       # 피크 1개짜리 맵
+    torch.manual_seed(0)
+    many = torch.rand(B, T, H, W)                    # 비슷한 피크 다수 = 텍스처성 맵
+    m_single = fusion_multiplier(single, "peak", 0.3, 1e-6)
+    m_many = fusion_multiplier(many, "peak", 0.3, 1e-6)
+    assert m_single.shape == (B, T)
+    assert m_single[0, 0] > m_many[0, 0]
+
+
+def test_entropy_gate_hits_floor_on_flat_map_and_is_bounded():
+    flat = torch.full((1, 1, 24, 24), 0.5)           # 균일 맵 -> 최대 엔트로피
+    peaked = torch.zeros(1, 1, 24, 24)
+    peaked[:, :, 12, 12] = 8.0
+    m_flat = fusion_multiplier(flat, "entropy", 0.3, 1e-6)
+    m_peak = fusion_multiplier(peaked, "entropy", 0.3, 1e-6)
+    assert abs(m_flat[0, 0].item() - 0.3) < 1e-3     # 하한에 클램프
+    assert m_flat[0, 0] < m_peak[0, 0] <= 1.0
+
+
+def test_fused_blend_two_equal_channels_is_identity_weighted_average():
+    torch.manual_seed(0)
+    a = torch.rand(2, 4, 6, 6)
+    b = torch.rand(2, 4, 6, 6)
+    out = fused_blend([(0.5, a), (0.5, b)], "none", 0.3, 1e-6)
+    assert torch.allclose(out, (0.5 * a + 0.5 * b) / (1.0 + 1e-6), atol=1e-6)
+    # 텐서 가중치 (motion_weight="auto"의 (B,1,1,1) 케이스)도 브로드캐스트된다
+    w = torch.full((2, 1, 1, 1), 0.3)
+    out_t = fused_blend([(w, a), (1 - w, b)], "none", 0.3, 1e-6)
+    assert out_t.shape == a.shape

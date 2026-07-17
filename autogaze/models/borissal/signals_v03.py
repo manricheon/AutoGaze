@@ -128,3 +128,57 @@ def dog_blob(gray_grid: torch.Tensor) -> torch.Tensor:
 
     maps = [(_blur(k1) - _blur(k2)).abs() for k1, k2 in ((3, 7), (5, 11))]
     return torch.stack(maps, dim=0).amax(dim=0).view(b, t, h, w)
+
+
+def fusion_multiplier(x: torch.Tensor, mode: str, entropy_floor: float,
+                      eps: float) -> torch.Tensor:
+    """Per-(clip, tubelet) content-adaptive fusion weight for one normalized
+    channel map.
+
+    "peak": Itti's N(.) peak promotion, (M - mean_of_local_maxima)^2 -- a map
+    with one decisive peak is promoted, a map firing everywhere (gradient on
+    texture; motion during a pan) is demoted BEFORE blending.
+    "entropy": 1 - normalized softmax entropy, clamped to [entropy_floor, 1]
+    (vid-TLDR CVPR 2024 spirit) -- bounded below so a large-but-diffuse
+    salient object can never zero a channel out entirely.
+    """
+    b, t, h, w = (int(v) for v in x.shape)
+    flat = x.reshape(b, t, h * w)
+    if mode == "peak":
+        mp = F.max_pool2d(x.reshape(b * t, 1, h, w), kernel_size=3, stride=1,
+                          padding=1).view(b, t, h, w)
+        is_local_max = x >= mp
+        lm_sum = (x * is_local_max).reshape(b, t, -1).sum(dim=-1)
+        lm_cnt = is_local_max.reshape(b, t, -1).sum(dim=-1).clamp(min=1)
+        m_bar = lm_sum / lm_cnt
+        return (flat.amax(dim=-1) - m_bar).pow(2)
+    if mode == "entropy":
+        p = torch.softmax(flat, dim=-1)
+        H = -(p * (p + eps).log()).sum(dim=-1)
+        H_norm = H / math.log(h * w)
+        return (1.0 - H_norm).clamp(min=entropy_floor, max=1.0)
+    raise ValueError(f"unknown fusion mode: {mode}")
+
+
+def fused_blend(channels, fusion_mode: str, entropy_floor: float,
+                eps: float) -> torch.Tensor:
+    """Weighted average of normalized channel maps with optional per-(clip,
+    tubelet) fusion multipliers. channels: list of (weight, map); weight is a
+    float or a tensor broadcastable against (B, T_grid, H, W).
+
+    NOTE: callers must keep the v0.2 legacy two-channel path (`w*m + (1-w)*s`)
+    when no extra channels exist and fusion_mode == "none" -- this general
+    weighted average divides by the weight sum, whose float error would break
+    the all-knobs-off bit-identity guarantee.
+    """
+    num, den = None, None
+    for weight, m in channels:
+        if fusion_mode != "none":
+            mult = fusion_multiplier(m, fusion_mode, entropy_floor, eps)
+            weight = weight * mult.unsqueeze(-1).unsqueeze(-1)
+        term = weight * m
+        num = term if num is None else num + term
+        w_t = weight if isinstance(weight, torch.Tensor) else torch.as_tensor(
+            weight, dtype=m.dtype, device=m.device)
+        den = w_t if den is None else den + w_t
+    return num / (den + eps)
