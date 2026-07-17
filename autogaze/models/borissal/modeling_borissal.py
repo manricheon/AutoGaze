@@ -244,11 +244,12 @@ class Borissal(nn.Module):
         tubelet_size: Optional[int] = None,
         patch_size: Optional[int] = None,
         spread_fraction: Optional[float] = None,
+        temporal_state: Optional[dict] = None,
     ) -> Selection:
         """video: (B, T, C, H, W) float, already resized/normalized."""
         selection, _ = self._select_impl(
             video, gazing_ratio, motion_weight, per_frame_allocation, tubelet_size, patch_size,
-            want_intermediates=False, spread_fraction=spread_fraction,
+            want_intermediates=False, spread_fraction=spread_fraction, temporal_state=temporal_state,
         )
         return selection
 
@@ -262,6 +263,7 @@ class Borissal(nn.Module):
         tubelet_size: Optional[int] = None,
         patch_size: Optional[int] = None,
         spread_fraction: Optional[float] = None,
+        temporal_state: Optional[dict] = None,
     ):
         """Same as `select`, but also returns the intermediate (pre-top-k) saliency
         maps -- useful for visualizing the motion/spatial/combined-score stages,
@@ -276,10 +278,13 @@ class Borissal(nn.Module):
                 (equal to the fixed config/kwarg value, broadcast, unless
                 motion_weight="auto", in which case it's the per-video
                 computed value)
+            temporal_state     dict with "ema" (B, H_grid, W_grid) and
+                "prev_keep" (B, N_pf) bool -- feed back into the next clip's
+                `select(..., temporal_state=...)` call for cross-clip continuity
         """
         return self._select_impl(
             video, gazing_ratio, motion_weight, per_frame_allocation, tubelet_size, patch_size,
-            want_intermediates=True, spread_fraction=spread_fraction,
+            want_intermediates=True, spread_fraction=spread_fraction, temporal_state=temporal_state,
         )
 
     def _extra_channels(self, video: torch.Tensor, tub: torch.Tensor,
@@ -487,6 +492,38 @@ class Borissal(nn.Module):
             "noise_floor_tau": tau,
         }
 
+    def _allocate_and_topk(self, sel_scores, alloc, k_per_frame, m, K_total,
+                           spread, B, T_grid, N_pf, H_grid, W_grid, device):
+        """Selection stage: (B, T_grid, N_pf) gated scores -> same-shape bool
+        keep mask. Extracted verbatim from _select_impl so the hysteresis
+        two-pass (v0.3) can run it twice on identically-shaped inputs."""
+        L = T_grid * N_pf
+        if alloc == "global":
+            _, gidx = sel_scores.topk(m, dim=-1)
+            guaranteed = torch.zeros(B, T_grid, N_pf, dtype=torch.bool, device=device)
+            guaranteed.scatter_(-1, gidx, torch.ones_like(gidx, dtype=torch.bool))
+            global_scores = (sel_scores + 10.0 * guaranteed.to(sel_scores.dtype)).reshape(B, L)
+            if spread > 0:
+                keep_mask_flat = _hybrid_topk(global_scores, K_total, spread,
+                                              (T_grid, H_grid, W_grid))
+            else:
+                _, kidx = global_scores.topk(K_total, dim=-1)
+                keep_mask_flat = torch.zeros(B, L, dtype=torch.bool, device=device)
+                keep_mask_flat.scatter_(1, kidx, torch.ones_like(kidx, dtype=torch.bool))
+            return keep_mask_flat.reshape(B, T_grid, N_pf)
+        if spread > 0 and alloc == "uniform":
+            k_u = int(k_per_frame[0, 0].item())
+            return _hybrid_topk(
+                sel_scores.reshape(B * T_grid, N_pf), k_u, spread, (1, H_grid, W_grid)
+            ).reshape(B, T_grid, N_pf)
+        k_max = int(k_per_frame.max().item())
+        _, topk_idx = sel_scores.topk(k_max, dim=-1)
+        within_topk_rank = torch.arange(k_max, device=device).view(1, 1, k_max).expand(B, T_grid, k_max)
+        keep_within_topk = within_topk_rank < k_per_frame.unsqueeze(-1)
+        keep_mask_grid = torch.zeros(B, T_grid, N_pf, dtype=torch.bool, device=device)
+        keep_mask_grid.scatter_(-1, topk_idx, keep_within_topk)
+        return keep_mask_grid
+
     def _select_impl(
         self,
         video: torch.Tensor,
@@ -497,6 +534,7 @@ class Borissal(nn.Module):
         patch_size: Optional[int],
         want_intermediates: bool,
         spread_fraction: Optional[float] = None,
+        temporal_state: Optional[dict] = None,
     ):
         cfg = self.config
         tubelet_size = tubelet_size or cfg.tubelet_size
@@ -528,7 +566,17 @@ class Borissal(nn.Module):
         sal = self._saliency_scores(video, tubelet_size, patch_size, motion_weight_setting)
         S, motion_n, spatial_n, w = sal["score"], sal["motion_norm"], sal["spatial_norm"], sal["w"]
 
+        if cfg.score_ema_alpha > 0.0:
+            # v0.3 temporal EMA. Applied AFTER _saliency_scores (which already
+            # added center_bias): the decay matrix rows sum to 1, so a
+            # time-constant additive prior commutes -- this equals the spec's
+            # fusion -> EMA -> center_bias order exactly.
+            ema_state = None if temporal_state is None else temporal_state.get("ema")
+            S = apply_score_ema(S, cfg.score_ema_alpha, ema_state)
+
         # Per-tubelet budget allocation.
+        m = None
+        K_total = None
         if alloc == "uniform":
             k = min(max(1, round(ratio * N_pf)), N_pf)
             k_per_frame = torch.full((B, T_grid), k, dtype=torch.long, device=device)
@@ -604,42 +652,25 @@ class Borissal(nn.Module):
             # finfo.min (not -inf) for mobile-backend safety.
             sel_scores = scores_flat.masked_fill(~fine_gate, torch.finfo(scores_flat.dtype).min)
 
-        if alloc == "global":
-            # Guaranteed per-tubelet top-m (from gated scores), then one
-            # clip-wide topk(K_total) with a large finite bonus keeping the
-            # guaranteed set in. Exact-K_total by construction.
-            _, gidx = sel_scores.topk(m, dim=-1)
-            guaranteed = torch.zeros(B, T_grid, N_pf, dtype=torch.bool, device=device)
-            guaranteed.scatter_(-1, gidx, torch.ones_like(gidx, dtype=torch.bool))
-            global_scores = (sel_scores + 10.0 * guaranteed.to(sel_scores.dtype)).reshape(B, L)
-            if spread > 0:
-                # hybrid: clip-wide focus + 3D spatio-temporal stratified spread
-                keep_mask_flat = _hybrid_topk(global_scores, K_total, spread,
-                                              (T_grid, H_grid, W_grid))
+        eps_h = cfg.select_hysteresis_eps
+        if eps_h > 0.0:
+            # v0.3 selection hysteresis -- ONE-STEP VECTORIZED approximation:
+            # the continuity bonus comes from the previous tubelet's
+            # PRE-hysteresis selection (the true recursive chain would need a
+            # sequential loop over tubelets, banned by the vectorization rule).
+            base_keep = self._allocate_and_topk(
+                sel_scores, alloc, k_per_frame, m, K_total, spread,
+                B, T_grid, N_pf, H_grid, W_grid, device)
+            prev0 = None if temporal_state is None else temporal_state.get("prev_keep")
+            if prev0 is None:
+                prev0 = torch.zeros(B, 1, N_pf, dtype=torch.bool, device=device)
             else:
-                _, kidx = global_scores.topk(K_total, dim=-1)
-                keep_mask_flat = torch.zeros(B, L, dtype=torch.bool, device=device)
-                keep_mask_flat.scatter_(1, kidx, torch.ones_like(kidx, dtype=torch.bool))
-            keep_mask_grid = keep_mask_flat.reshape(B, T_grid, N_pf)
-        else:
-            # Top-k -> keep mask, via torch.topk (bounded by k_max, not a full O(N) sort) --
-            # more mobile-runtime-friendly (TFLite TopKV2 / CoreML top_k are first-class ops,
-            # unlike general sort/argsort). For "uniform" allocation k_max == k for every
-            # tubelet, so this reduces to a single topk(k) + scatter with no extra compare.
-            if spread > 0 and alloc == "uniform":
-                # hybrid within each tubelet (per-frame exact-k contract kept):
-                # 2D spatial buckets, same helper with a singleton time axis
-                k_u = int(k_per_frame[0, 0].item())
-                keep_mask_grid = _hybrid_topk(
-                    sel_scores.reshape(B * T_grid, N_pf), k_u, spread, (1, H_grid, W_grid)
-                ).reshape(B, T_grid, N_pf)
-            else:
-                k_max = int(k_per_frame.max().item())
-                _, topk_idx = sel_scores.topk(k_max, dim=-1)  # (B, T_grid, k_max), sorted descending
-                within_topk_rank = torch.arange(k_max, device=device).view(1, 1, k_max).expand(B, T_grid, k_max)
-                keep_within_topk = within_topk_rank < k_per_frame.unsqueeze(-1)  # (B, T_grid, k_max) bool
-                keep_mask_grid = torch.zeros(B, T_grid, N_pf, dtype=torch.bool, device=device)
-                keep_mask_grid.scatter_(-1, topk_idx, keep_within_topk)  # (B, T_grid, N_pf) bool
+                prev0 = prev0.reshape(B, 1, N_pf)
+            prev = torch.cat([prev0, base_keep[:, :-1]], dim=1)
+            sel_scores = sel_scores + eps_h * prev.to(sel_scores.dtype)
+        keep_mask_grid = self._allocate_and_topk(
+            sel_scores, alloc, k_per_frame, m, K_total, spread,
+            B, T_grid, N_pf, H_grid, W_grid, device)
 
         per_frame_keep = keep_mask_grid.sum(dim=-1)  # (B, T_grid)
         num_keep = per_frame_keep.sum(dim=-1)        # (B,)
@@ -678,6 +709,10 @@ class Borissal(nn.Module):
                 "spatial_norm": spatial_n,
                 "score": S,
                 "motion_weight_used": motion_weight_used,
+            }
+            intermediates["temporal_state"] = {
+                "ema": S[:, -1],
+                "prev_keep": keep_mask_grid[:, -1],
             }
             if sal["noise_floor_tau"] is not None:
                 intermediates["noise_floor_tau"] = sal["noise_floor_tau"]

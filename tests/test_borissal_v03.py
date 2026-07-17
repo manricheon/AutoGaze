@@ -63,14 +63,11 @@ def _entropy_contrast_video(B=1, T=8, size=96):
     ANY input bounded to the [0,1] range that _minmax_norm/_minmax_norm_global
     always produce -- even the theoretical maximum-contrast case (a single
     exact 1.0 spike, all else 0) yields a raw (pre-floor) entropy-gate value
-    of ~0.007, indistinguishable from a flat map's ~0.00001. Since
-    _saliency_scores always normalizes motion_n/spatial_n to [0,1] BEFORE
-    calling fused_blend, "entropy" mode is a structural no-op in the actual
-    pipeline for any clip -- not a stimulus-design problem. This stimulus is
-    kept as the intended, spec-faithful trigger (and will exercise the
-    knob correctly once/if the primitive or its call site is revisited); the
-    corresponding parametrized case is expected to stay red until that
-    upstream issue is resolved (out of scope here: test-stimulus only).
+    of ~0.007, indistinguishable from a flat map's ~0.00001. This was fixed in
+    Task 8 by normalizing entropy against the map's own linear mass (not a
+    fixed [0,1] bound), so the knob now discriminates concentrated vs.
+    diffuse maps in the actual pipeline. This stimulus is kept as the
+    intended, spec-faithful trigger for the fix.
     """
     torch.manual_seed(0)
     texture = torch.rand(1, 1, 3, size, size)            # fixed per-pixel noise, static across T
@@ -256,3 +253,43 @@ def test_ema_streaming_split_equals_full_run():
     first = apply_score_ema(S[:, :4], alpha, None)
     second = apply_score_ema(S[:, 4:], alpha, first[:, -1])   # 상태 이월
     assert torch.allclose(torch.cat([first, second], dim=1), full, atol=1e-5)
+
+
+def test_hysteresis_increases_cross_tubelet_selection_overlap():
+    torch.manual_seed(0)
+    video = torch.rand(1, 8, 3, 96, 96)        # 노이즈 점수 -> 불안정한 기본 선택
+
+    def overlap(sel):
+        T_grid = int(sel.grid_thw[0, 0].item())
+        m = sel.keep_mask.reshape(1, T_grid, -1).float()
+        inter = (m[:, 1:] * m[:, :-1]).sum()
+        return (inter / m[:, 1:].sum()).item()
+
+    base = Borissal(_v02_uniform(scale=96)).select(video, gazing_ratio=0.25)
+    hyst = Borissal(_v02_uniform(scale=96, select_hysteresis_eps=0.2)).select(
+        video, gazing_ratio=0.25)
+    assert overlap(hyst) > overlap(base)
+    assert torch.equal(base.per_frame_keep, hyst.per_frame_keep)  # 예산 불변
+
+
+def test_temporal_state_round_trip():
+    video = _structured_video()
+    model = Borissal(_v02_uniform(
+        scale=96, score_ema_alpha=0.5, select_hysteresis_eps=0.1))
+    sel, inter = model.select_with_intermediates(video, gazing_ratio=0.25)
+    st = inter["temporal_state"]
+    assert st["ema"].shape == (1, 6, 6)        # 96/16 그리드
+    assert st["prev_keep"].shape == (1, 36) and st["prev_keep"].dtype == torch.bool
+    # 상태를 넣으면 첫 tubelet 선택이 달라진다 (이월 효과)
+    sel2 = model.select(video, gazing_ratio=0.25, temporal_state=st)
+    m1 = sel.keep_mask.reshape(1, 4, 36)
+    m2 = sel2.keep_mask.reshape(1, 4, 36)
+    assert not torch.equal(m1[:, 0], m2[:, 0])
+
+
+def test_temporal_knobs_off_ignore_state_and_match_base():
+    video = _structured_video()
+    model = Borissal(_v02_uniform(scale=96))
+    a = model.select(video, gazing_ratio=0.25)
+    b = model.select(video, gazing_ratio=0.25, temporal_state=None)
+    assert torch.equal(a.keep_mask, b.keep_mask)
