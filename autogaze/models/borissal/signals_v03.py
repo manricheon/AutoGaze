@@ -30,3 +30,29 @@ def motion_center_surround(motion_p: torch.Tensor, kernel: int) -> torch.Tensor:
         padding=kernel // 2, count_include_pad=False,
     ).view(b, t, h, w)
     return F.relu(motion_p - surround)
+
+
+def coherence_gate_map(dx: torch.Tensor, dy: torch.Tensor, kernel: int,
+                       gamma: float, eps: float) -> torch.Tensor:
+    """(1 - coherence)^gamma texture-suppression gate from the structure tensor.
+
+    Closed form, no eigendecomposition: for the smoothed tensor [a b; b c],
+    coherence = ((lam1-lam2)/(lam1+lam2))^2 = ((a-c)^2 + 4b^2) / (a+c)^2.
+    Repetitive gratings / long straight edges (lam1 >> lam2) -> gate ~0;
+    multi-orientation object micro-structure (lam1 ~ lam2) -> gate ~1
+    (Harris 1988; Forstner 1987; Weickert 1999). Box smoothing stands in for
+    the classical Gaussian window (cheaper; delegate-native).
+    """
+    b, t, h, w = (int(x) for x in dx.shape)
+
+    def _smooth(x):
+        return F.avg_pool2d(
+            x.reshape(b * t, 1, h, w), kernel_size=kernel, stride=1,
+            padding=kernel // 2, count_include_pad=False,
+        ).view(b, t, h, w)
+
+    a = _smooth(dx * dx)
+    c = _smooth(dy * dy)
+    bb = _smooth(dx * dy)
+    coherence = ((a - c) ** 2 + 4.0 * bb * bb) / ((a + c) ** 2 + eps)
+    return (1.0 - coherence).clamp(min=0.0, max=1.0) ** gamma
