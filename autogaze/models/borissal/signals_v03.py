@@ -56,3 +56,30 @@ def coherence_gate_map(dx: torch.Tensor, dy: torch.Tensor, kernel: int,
     bb = _smooth(dx * dy)
     coherence = ((a - c) ** 2 + 4.0 * bb * bb) / ((a + c) ** 2 + eps)
     return (1.0 - coherence).clamp(min=0.0, max=1.0) ** gamma
+
+
+def dct_matrix(n: int, device, dtype) -> torch.Tensor:
+    """Orthonormal DCT-II basis as a constant (n, n) matrix -- the FFT-free,
+    delegate-native (matmul) route to the DCT. Tiny at grid resolution."""
+    i = torch.arange(n, device=device, dtype=dtype)
+    basis = torch.cos(math.pi * (2.0 * i.view(1, -1) + 1.0) * i.view(-1, 1) / (2.0 * n))
+    basis[0] = basis[0] / math.sqrt(2.0)
+    return basis * math.sqrt(2.0 / n)
+
+
+def image_signature(gray_grid: torch.Tensor) -> torch.Tensor:
+    """Image-signature saliency (Hou, Harel & Koch, TPAMI 2012) at grid res.
+
+    Reconstruct from only the SIGN of the DCT: energy concentrates on
+    spatially sparse foreground, spectrally sparse (periodic-texture)
+    background dies. Fires on object support, not just boundaries.
+    """
+    b, t, h, w = (int(x) for x in gray_grid.shape)
+    Dh = dct_matrix(h, gray_grid.device, gray_grid.dtype)
+    Dw = dct_matrix(w, gray_grid.device, gray_grid.dtype)
+    coef = Dh @ gray_grid @ Dw.t()               # batched: (B, T, h, w)
+    recon = Dh.t() @ torch.sign(coef) @ Dw       # inverse DCT of the sign
+    sal = recon * recon
+    return F.avg_pool2d(
+        sal.reshape(b * t, 1, h, w), kernel_size=3, stride=1, padding=1
+    ).view(b, t, h, w)

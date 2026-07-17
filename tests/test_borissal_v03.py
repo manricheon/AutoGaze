@@ -4,7 +4,7 @@ import math
 import pytest
 import torch
 
-from autogaze.models.borissal.signals_v03 import motion_center_surround, coherence_gate_map
+from autogaze.models.borissal.signals_v03 import motion_center_surround, coherence_gate_map, dct_matrix, image_signature
 
 
 def test_motion_cs_suppresses_uniform_pan_keeps_local_mover():
@@ -33,3 +33,28 @@ def test_coherence_gate_kills_coherent_gradients_spares_isotropic():
     g_iso = coherence_gate_map(dx, dy, kernel=5, gamma=1.0, eps=1e-6)
     assert g_iso.mean() > 0.5
     assert (g_iso >= 0).all() and (g_iso <= 1).all()
+
+
+def test_dct_matrix_is_orthonormal():
+    D = dct_matrix(24, torch.device("cpu"), torch.float32)
+    assert torch.allclose(D @ D.t(), torch.eye(24), atol=1e-5)
+
+
+def test_image_signature_fires_on_sparse_foreground():
+    B, T, n = 1, 1, 24
+    # (a) 상수 배경 + 단일 스파이크: 스파이크 위치가 전역 최대여야 한다
+    img = torch.zeros(B, T, n, n)
+    img[:, :, 12, 12] = 1.0
+    sal = image_signature(img)
+    spike = sal[0, 0, 12, 12]
+    background = sal[0, 0, :, :8].mean()
+    assert spike > 5 * background
+    # (b) 주기적 격자무늬 배경 + 희소 blob: blob 영역 평균 > 배경 평균
+    xx = torch.arange(n, dtype=torch.float32)
+    stripes = 0.5 + 0.5 * torch.cos(2 * math.pi * xx * 6 / n)   # 스펙트럼 희소 배경
+    img2 = stripes.view(1, 1, 1, n).expand(B, T, n, n).clone()
+    img2[:, :, 10:13, 10:13] = 2.0                              # 공간적으로 희소한 전경
+    sal2 = image_signature(img2)
+    blob = sal2[:, :, 10:13, 10:13].mean()
+    background = sal2[:, :, :, :8].mean()
+    assert blob > 1.5 * background
