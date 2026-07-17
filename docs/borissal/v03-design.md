@@ -213,6 +213,23 @@ markdown)을 `outputs/borissal/v03_sweep/`(gitignored)에 덤프하되,
   1/2단계 판정은 held-out 16클립 세트로만 하고 example clip 단독으로
   절대 하지 않는다; example clip은 오버레이/디버깅용이다.
 
+## 7.5 후속 아이디어 기록 — E5: 학습형 프레임 간 예산 할당 (2026-07-17, 사용자 제안)
+
+토큰 버짓 K_total이 항상 입력으로 주어진다는 전제 하에, 프레임(tubelet) 간
+top-k **배분**을 학습하게 하자는 제안. 선택을 (a) 프레임 내 위치(per-patch
+점수, v1이 학습)와 (b) 프레임 간 수량(현재 uniform/proportional/global+floor
+규칙)으로 분해하면 이것은 (b)의 학습화다. 근거: v0.2에서 global
+allocation + floor가 단일 요소로 최대 이득(uniqueness +0.07) — 할당 축은
+학습 최적화 여지가 입증됨. 스케치: v1 트렁크에 초소형 할당 헤드(softmax
+분율 × K_total → `_largest_remainder` 반올림, 총예산 정확 보존; Selection의
+가변 `per_frame_keep`가 이미 지원). 학습 신호 후보: soft top-k 확장 /
+REINFORCE(AdaMAE 전례) / **oracle 증류(teacher 한계 이득 기반 탐욕 할당,
+권장 출발점)**. 함정: coverage 계열의 scatter 편향(P1)이 할당에도 작용
+(uniqueness-primary + floor 제약 필요); 데이터 의존 분할은 mobile review의
+proportional trace 고착 버그와 같은 클래스(온디바이스는 동적 export 필요).
+v0.3과 상보적 — v0.3 채널들이 할당 헤드의 tubelet별 입력 특징이 된다.
+구현은 v1 실험 매트릭스(training.md) 쪽 후속 작업.
+
 ## 8. 범위 밖
 
 - 학습 가중치나 동결 사전학습 모델 일체 (v0.4+ 후보 방향, 사용자
