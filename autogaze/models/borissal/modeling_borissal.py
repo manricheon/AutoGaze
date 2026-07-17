@@ -18,6 +18,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .configuration_borissal import BorissalConfig
+from .signals_v03 import (
+    apply_score_ema,
+    coherence_gate_map,
+    color_rarity,
+    dog_blob,
+    fused_blend,
+    image_signature,
+    motion_center_surround,
+)
 
 
 @dataclass
@@ -273,6 +282,50 @@ class Borissal(nn.Module):
             want_intermediates=True, spread_fraction=spread_fraction,
         )
 
+    def _extra_channels(self, video: torch.Tensor, tub: torch.Tensor,
+                        tubelet_size: int, patch_size: int):
+        """v0.3 appearance channels at grid resolution (spec section 3).
+
+        Returns (local, global_) lists of (weight, normalized_map); both empty
+        when every channel knob is off (the caller then takes the legacy blend
+        path). color_rarity is heavy-tailed and uses its clip-global
+        normalization in BOTH lists (spec ordering rules).
+        """
+        cfg = self.config
+        eps = cfg.eps
+        local, global_ = [], []
+        if cfg.signature_weight <= 0.0 and cfg.dog_blob_weight <= 0.0 \
+                and cfg.color_rarity_weight <= 0.0:
+            return local, global_
+        B, T, C, H, W = (int(x) for x in video.shape)
+        T_grid = T // tubelet_size
+        H_grid, W_grid = H // patch_size, W // patch_size
+        if cfg.signature_weight > 0.0 or cfg.dog_blob_weight > 0.0:
+            gray_grid = F.avg_pool2d(
+                tub.reshape(B * T_grid, 1, H, W),
+                kernel_size=patch_size, stride=patch_size,
+            ).view(B, T_grid, H_grid, W_grid)
+        if cfg.signature_weight > 0.0:
+            sig = image_signature(gray_grid)
+            local.append((cfg.signature_weight, _minmax_norm(sig, eps)))
+            global_.append((cfg.signature_weight, _minmax_norm_global(sig, eps)))
+        if cfg.dog_blob_weight > 0.0:
+            blob = dog_blob(gray_grid)
+            local.append((cfg.dog_blob_weight, _minmax_norm(blob, eps)))
+            global_.append((cfg.dog_blob_weight, _minmax_norm_global(blob, eps)))
+        if cfg.color_rarity_weight > 0.0:
+            rgb_tub = video.view(B, T_grid, tubelet_size, C, H, W).mean(dim=2)
+            rgb_grid = F.avg_pool2d(
+                rgb_tub.reshape(B * T_grid, C, H, W),
+                kernel_size=patch_size, stride=patch_size,
+            ).view(B, T_grid, C, H_grid, W_grid)
+            rar = color_rarity(rgb_grid, cfg.color_bins_per_axis,
+                               cfg.color_bin_sigma, eps)
+            rar_n = _minmax_norm_global(rar, eps)
+            local.append((cfg.color_rarity_weight, rar_n))
+            global_.append((cfg.color_rarity_weight, rar_n))
+        return local, global_
+
     def _saliency_scores(
         self,
         video: torch.Tensor,
@@ -338,6 +391,9 @@ class Borissal(nn.Module):
         else:
             raise ValueError(f"unknown spatial_op: {cfg.spatial_op}")
         spatial = torch.sqrt(dx * dx + dy * dy + eps)
+        if cfg.coherence_gate:
+            spatial = spatial * coherence_gate_map(
+                dx, dy, cfg.coherence_kernel, cfg.coherence_gamma, eps)
 
         # Pixel -> patch pooling.
         pool = F.avg_pool2d if cfg.pooling == "avg" else F.max_pool2d
@@ -345,6 +401,11 @@ class Borissal(nn.Module):
         motion_p = motion_p.view(B, T_grid, H_grid, W_grid)
         spatial_p = pool(spatial.reshape(B * T_grid, 1, H, W), kernel_size=patch_size, stride=patch_size)
         spatial_p = spatial_p.view(B, T_grid, H_grid, W_grid)
+
+        # v0.3 motion center-surround: BEFORE the noise floor (spec section 3
+        # ordering -- center-surround first, then dead-zone shrinkage).
+        if cfg.motion_center_surround:
+            motion_p = motion_center_surround(motion_p, cfg.motion_cs_kernel)
 
         # v0.2 noise floor: robust per-tubelet dead-zone shrinkage of the motion
         # map. MUST run before min-max normalization (which would otherwise
@@ -383,7 +444,15 @@ class Borissal(nn.Module):
 
         motion_n = _minmax_norm(motion_p, eps)
         spatial_n = _minmax_norm(spatial_p, eps)
-        S = w * motion_n + (1 - w) * spatial_n  # (B, T_grid, H_grid, W_grid)
+        extra_local, extra_global = self._extra_channels(video, tub, tubelet_size, patch_size)
+        if not extra_local and cfg.fusion_norm == "none":
+            # legacy exact path: bit-identical to v0.2 (the generalized
+            # weighted average divides by the weight sum, whose float error
+            # would break the all-knobs-off regression guarantee)
+            S = w * motion_n + (1 - w) * spatial_n
+        else:
+            S = fused_blend([(w, motion_n), (1 - w, spatial_n)] + extra_local,
+                            cfg.fusion_norm, cfg.fusion_entropy_floor, eps)  # (B, T_grid, H_grid, W_grid)
 
         # v0.2 local/global normalization blend: per-tubelet min-max (local)
         # equalizes tubelets; a clip-global min-max component preserves
@@ -392,7 +461,12 @@ class Borissal(nn.Module):
         if cfg.score_norm_blend < 1.0:
             motion_g = _minmax_norm_global(motion_p, eps)
             spatial_g = _minmax_norm_global(spatial_p, eps)
-            S_global = w * motion_g + (1 - w) * spatial_g
+            if not extra_global and cfg.fusion_norm == "none":
+                S_global = w * motion_g + (1 - w) * spatial_g
+            else:
+                S_global = fused_blend(
+                    [(w, motion_g), (1 - w, spatial_g)] + extra_global,
+                    cfg.fusion_norm, cfg.fusion_entropy_floor, eps)
             beta = cfg.score_norm_blend
             S = beta * S + (1.0 - beta) * S_global
 

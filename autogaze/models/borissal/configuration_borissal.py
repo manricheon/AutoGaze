@@ -95,6 +95,52 @@ class BorissalConfig:
     # picks top-ceil(k/b^2) blocks, then the fine pass top-k's within them.
     block_size: int = 1
 
+    # --- v0.3 candidate bank (docs/borissal/v03-design.md). ALL OFF by
+    # default: with every knob at its default the pipeline takes the legacy
+    # blend path and is bit-identical to v0.2 (regression-tested). Adoption
+    # into a preset happens only through the sweep gates
+    # (scripts/sweep_borissal_v03.py); until then these are experimental.
+    motion_center_surround: bool = False
+    """relu(D - avgpool(D)): cancels uniform ego-motion diff fields (pan/zoom),
+    keeps independently moving objects. Runs after pooling, before the noise
+    floor."""
+    motion_cs_kernel: int = 9
+
+    coherence_gate: bool = False
+    """Multiply the gradient channel by (1 - structure-tensor coherence)^gamma:
+    suppresses repetitive gratings / long straight edges, spares
+    multi-orientation object micro-structure. Pixel-res, closed form."""
+    coherence_kernel: int = 5
+    coherence_gamma: float = 1.0
+
+    signature_weight: float = 0.0
+    """Image-signature (sign-of-DCT, fixed matmul) appearance channel weight;
+    0 = off. Fires on spatially sparse foreground support."""
+    color_rarity_weight: float = 0.0
+    """Global color-rarity (soft-binned histogram contrast) channel weight;
+    0 = off. First use of color in the v0 line; grid-resolution only.
+    Heavy-tailed: sqrt-compressed and clip-globally normalized."""
+    color_bins_per_axis: int = 3
+    color_bin_sigma: float = 0.15
+    dog_blob_weight: float = 0.0
+    """Multi-scale difference-of-boxes blob channel weight; 0 = off."""
+
+    fusion_norm: Literal["none", "peak", "entropy"] = "none"
+    """Content-adaptive per-channel fusion weighting: "peak" = Itti N(.)
+    (maps with one decisive peak promoted, everywhere-firing maps demoted),
+    "entropy" = bounded inverse-entropy gate (free camera-pan fallback:
+    a flooded motion map loses fusion weight)."""
+    fusion_entropy_floor: float = 0.3
+
+    score_ema_alpha: float = 0.0
+    """Temporal score EMA over tubelets (0 = off): S_t = a*S_{t-1} + (1-a)*S_t,
+    loop-free within a clip; streaming carries one state map via
+    select(..., temporal_state=...)."""
+    select_hysteresis_eps: float = 0.0
+    """Pre-topk additive bonus for patches kept in the previous tubelet
+    (0 = off). One-step vectorized approximation (bonus from the
+    pre-hysteresis selection, not the recursive chain)."""
+
     eps: float = 1e-6
 
     image_mean: tuple = field(default_factory=lambda: (0.485, 0.456, 0.406))

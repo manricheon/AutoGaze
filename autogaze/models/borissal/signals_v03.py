@@ -153,7 +153,16 @@ def fusion_multiplier(x: torch.Tensor, mode: str, entropy_floor: float,
         m_bar = lm_sum / lm_cnt
         return (flat.amax(dim=-1) - m_bar).pow(2)
     if mode == "entropy":
-        p = torch.softmax(flat, dim=-1)
+        # Softmax entropy is a no-op on min-max-normalized [0,1] maps (logit
+        # spread <= 1 -> near-uniform softmax regardless of content, proven
+        # empirically during Task 8 integration: even the most concentrated
+        # possible [0,1] map -- a single 1.0 spike -- barely moves off a flat
+        # map's entropy). Linear mass normalization is the correct analogue
+        # of vid-TLDR's attention-probability entropy for saliency maps: it
+        # treats the map itself as a probability mass (like an attention
+        # distribution), which DOES have full dynamic range regardless of
+        # the map's absolute magnitude scale.
+        p = flat / (flat.sum(dim=-1, keepdim=True) + eps)
         H = -(p * (p + eps).log()).sum(dim=-1)
         H_norm = H / math.log(h * w)
         return (1.0 - H_norm).clamp(min=entropy_floor, max=1.0)
