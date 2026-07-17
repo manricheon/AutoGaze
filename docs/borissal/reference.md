@@ -176,6 +176,24 @@ design.md "Description-task alignment"). Caveat: that sweet spot was
 measured on a single clip; it stays a runtime override rather than a baked
 preset default until the scale run confirms it on real data.
 
+### v0.3 candidate knobs (experimental, pre-gate)
+
+All OFF by default; with every knob off the pipeline is bit-identical to
+v0.2. These are the Tier-1 candidate bank of `v03-design.md` -- they enter
+a named preset only after passing the sweep gates
+(`scripts/sweep_borissal_v03.py`; verdicts recorded in `design.md`).
+
+| knob | default | what it does |
+|---|---|---|
+| `motion_center_surround` (+`motion_cs_kernel`) | off | relu(D − avgpool(D)) on the pooled motion map: cancels uniform ego-motion (pan/zoom), keeps independent movers |
+| `coherence_gate` (+`coherence_kernel`, `coherence_gamma`) | off | multiplies the gradient channel by (1 − structure-tensor coherence)^γ: suppresses gratings/straight edges, spares isotropic object micro-structure |
+| `signature_weight` | 0 | image-signature (sign-of-DCT via fixed matmul) appearance channel: fires on spatially sparse foreground support |
+| `color_rarity_weight` (+`color_bins_per_axis`, `color_bin_sigma`) | 0 | global color rarity (soft-binned histogram contrast): object interiors with rare colors fire uniformly; first use of color in the v0 line |
+| `dog_blob_weight` | 0 | multi-scale difference-of-boxes blob channel: the cheapest interior filler |
+| `fusion_norm` (+`fusion_entropy_floor`) | none | content-adaptive channel fusion: "peak" (Itti N(·)) or "entropy" (bounded inverse-entropy gate; a pan-flooded motion map loses fusion weight automatically) |
+| `score_ema_alpha` | 0 | temporal score EMA across tubelets (loop-free); streaming state via `select(..., temporal_state=...)` |
+| `select_hysteresis_eps` | 0 | pre-topk bonus for patches kept in the previous tubelet (one-step vectorized approximation) |
+
 ## 4. Output: `Selection`
 
 grid_thw-native, not AutoGaze's `gazing_pos` dict contract — see
