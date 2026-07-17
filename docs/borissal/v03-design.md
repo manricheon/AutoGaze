@@ -1,237 +1,225 @@
-# Borissal v0.3 — Design Spec (2026-07-17)
+# Borissal v0.3 — 디자인 스펙 (2026-07-17)
 
-Approved design for the next non-learned selector iteration. This spec is
-the contract for implementation planning; measurement results and
-adopt/reject verdicts will be recorded in `design.md` (dev log) as they
-land, per the v0.2 precedent. Companion docs: `reference.md` (user-facing
-knobs, updated on adoption), `approach-ko.md` (Korean explainer, updated
-on adoption).
+비학습 selector의 다음 이터레이션에 대한 승인된 디자인. 이 스펙은 구현
+계획의 계약(contract)이며, 측정 결과와 채택/기각 판정은 v0.2 전례대로
+`design.md`(개발 로그)에 기록한다. 동반 문서: `reference.md`(사용자용
+노브 설명, 채택 시 갱신), `approach-ko.md`(한글 해설, 채택 시 갱신).
 
-## 1. Positioning and goals
+## 1. 포지셔닝과 목표
 
-v0.3 is **not a single mechanism — it is a candidate bank + quantitative
-gate + combination search**, the scaled-up version of the process that
-produced v0.2 (seven elements implemented, each gated, some rejected as
-negative results). Every candidate is an independent config knob; with all
-knobs off the pipeline is **bit-identical to v0.2** (locked by a
-regression test). Only gate-passing combinations are admitted to the v0.3
-preset.
+v0.3은 **단일 메커니즘이 아니라 "후보 뱅크 + 정량 게이트 + 조합 탐색"**
+이다 — v0.2를 만든 프로세스(7개 요소를 구현하고 각각 게이트로 판정,
+일부는 negative result로 기각)의 확장판. 모든 후보는 독립 config
+노브이며, **전부 off면 v0.2와 비트 단위로 동일**하다(회귀 테스트로
+잠금). 게이트를 통과한 조합만 v0.3 프리셋에 채택한다.
 
-User-set priorities (2026-07-17), in order:
+사용자 지정 우선순위 (2026-07-17), 순서대로:
 
-1. **Semantic recall** — the description-aligned axis (SigLIP2 MAP-head
-   recall on the held-out 16-clip set; v0.2 baseline 0.325 ± 0.022).
-2. **Edge/texture bias mitigation** — luma gradient fires on repetitive
-   background texture and only on object boundaries, never interiors.
-3. **Temporal selection stability** — previously excluded as a
-   streaming-UI nicety; now an explicit target, but admitted only under a
-   recall-non-degradation condition (see §5).
-4. **Camera-motion robustness** (subsumed under 1: pan/zoom makes
-   frame-diff fire everywhere, wasting budget).
+1. **Semantic recall** — 설명(description) 태스크 정렬 축 (held-out
+   16클립 세트에서 SigLIP2 MAP-head recall; v0.2 기준선 0.325 ± 0.022).
+2. **엣지/텍스처 편향 완화** — luma 그라디언트는 반복되는 배경
+   텍스처에 발화하고, 객체는 경계에만 발화할 뿐 내부는 비어 있다.
+3. **시간적 선택 안정성** — 이전에는 스트리밍 UI 관심사로 분류되어
+   의도적으로 제외했으나 이제 명시적 타겟. 단, recall 비열화 조건
+   하에서만 채택한다(§5).
+4. **카메라 모션 강건성** (1에 포섭: 팬/줌이 frame-diff를 화면 전체에
+   발화시켜 예산을 낭비하는 문제).
 
-Enriching v1's input feature bank is an expected side effect, not a gate.
+v1의 입력 특징 뱅크가 풍부해지는 것은 기대되는 부수 효과이지 게이트가
+아니다.
 
-Constraints (unchanged from the v0 line):
+제약 (v0 계열에서 불변):
 
-- **Pure classical signals only** — zero learned weights, no frozen
-  pretrained models (a hybrid/frozen path is a possible v0.4+ direction,
-  explicitly out of scope here).
-- **Mobile-safe ops only**: conv/pool/elementwise/topk. No FFT, no
-  general sort in new code paths, no connected components, no sequential
-  raster scans. Fixed small matmuls (e.g. DCT as a constant matrix) are
-  allowed — a matmul is a delegate-native op.
-- **Latency budget ≤ 25 ms/clip** on the dev-box CPU (v0.2 preset is at
-  15.4 ms; new-mechanism headroom ≈ 10 ms). v0.3's cost also lands inside
-  v1's `_grid_inputs`, so cheap matters twice.
-- **The `Selection` output contract and the canonical ascending
-  `keep_index` convention are immutable** (downstream attachability).
-- Fully vectorized torch — no Python loops over batch/frame/patch.
+- **순수 고전 신호만** — 학습된 가중치 없음, 동결(frozen) 사전학습
+  모델도 없음 (하이브리드/동결 경로는 v0.4+ 후보 방향으로, 여기서는
+  명시적으로 범위 밖).
+- **모바일 안전 연산만**: conv/pool/elementwise/topk. 새 코드 경로에
+  FFT 금지, 일반 sort 금지, connected components 금지, 순차 raster
+  scan 금지. 고정 소형 matmul(예: 상수 행렬로서의 DCT)은 허용 —
+  matmul은 딜리게이트 네이티브 연산이다.
+- **지연 예산: 클립당 ≤ 25ms** (개발 머신 CPU 기준; v0.2 프리셋은
+  15.4ms → 신규 메커니즘 여유분 ≈ 10ms). v0.3의 비용은 v1의
+  `_grid_inputs` 안에도 들어가므로 저렴함이 두 배로 중요하다.
+- **`Selection` 출력 규약과 canonical 오름차순 `keep_index` 규약은
+  불변** (다운스트림 attachability).
+- 완전 벡터화 torch — batch/frame/patch에 대한 Python 루프 금지.
 
-## 2. Candidate bank
+## 2. 후보 뱅크
 
-Three tiers. Tier 1 is implemented unconditionally; Tier 2 is implemented
-only for axes where the Tier-1 combination stalls (§5); Tier 3 is
-recorded for completeness and deliberately not implemented now.
+3개 티어. Tier 1은 무조건 구현; Tier 2는 Tier 1 조합이 정체된 축에만
+구현(§5 트리거 규칙); Tier 3은 완결성을 위해 기록만 하고 의도적으로
+구현하지 않는다.
 
-### Tier 1 (implement now — highest value per millisecond)
+### Tier 1 (지금 구현 — 밀리초당 가치 최상)
 
-| id | mechanism | principle & key reference | targets | est. cost |
+| id | 메커니즘 | 원리 & 핵심 문헌 | 타겟 | 비용 추정 |
 |---|---|---|---|---|
-| `motion_cs` | **Motion center-surround**: replace pooled diff energy `D` with `relu(D − avgpool_large(D))` | Uniform ego-motion produces a flat diff field whose center-surround difference ≈ 0; an independently moving object survives as a local peak (Itti motion conspicuity 1998; Mahadevan & Vasconcelos 2010, simplified) | camera | <0.5 ms |
-| `coherence_gate` | **Structure-tensor coherence gating** of the existing gradient channel: `grad × (1 − coherence)^γ`, closed-form coherence `((a−c)² + 4b²)/(a+c+ε)²` from Gaussian-smoothed gradient products | Repetitive gratings and long straight edges are maximally coherent (λ1≫λ2) and get suppressed; multi-orientation object micro-structure (λ1≈λ2) survives (Harris 1988; Förstner 1987; Weickert 1999) | texture | ~1.5 ms |
-| `signature` | **Image signature** at grid/low res: DCT as a fixed matmul (`D @ X @ D.T`), `sign()`, inverse matmul, square, small blur — *not* FFT | Sign-only reconstruction concentrates energy on spatially sparse foreground and kills spectrally sparse (periodic) background; fires on object support, not just boundaries (Hou, Harel & Koch, TPAMI 2012) | recall, texture | ~0.5 ms |
-| `color_rarity` | **Global color rarity**: per-patch mean color soft-binned onto K≈32 fixed centers (one matmul), rarity = distance-weighted inverse histogram mass; degenerate fallback = Mahalanobis distance to global mean color (Achanta 2009) | Rare colors mark description-relevant objects and fire on **interiors** uniformly (whole red car, not its silhouette) (Cheng et al., CVPR 2011, HC variant — no segmentation) | recall, texture | ~0.5 ms |
-| `dog_blob` | **Multi-scale DoG blob channel**: avgpool pyramid differences on tubelet-mean luma, \|·\|, max over scales (2–6 grid cells) | Objects are blobs at some scale; coarse DoG extrema fire on interiors (Lindeberg 1998) — the cheapest interior filler | texture | <1 ms |
-| `fusion_norm` | **Content-adaptive channel fusion**: Itti's N(·) peak-promotion (scale each map by `(M − m̄_localmax)²`) and/or bounded entropy gating (softmax-entropy of a map ↓ ⇒ weight ↓, floor 0.3) | A map that fires everywhere (gradient on texture; motion during a pan) gets its *fusion weight* crushed before blending — map-level texture suppression plus a free camera fallback (Itti 1998; vid-TLDR CVPR 2024 for the entropy variant) | texture, camera, fusion | ~0 ms |
-| `score_ema` | **Temporal score EMA**: `S̄_t = α·S̄_{t−1} + (1−α)·S_t`, unrolled within a clip as one lower-triangular decay-matrix matmul (no loop); streaming carries one grid-shaped state tensor | Leaky-integrator evidence accumulation; classical temporal filtering | stability | ~0 ms |
-| `select_hysteresis` | **Selection hysteresis**: additive bonus ε (pre-topk) to patches kept in the previous tubelet | Discrete cousin of EMA — stabilizes the kept set without smoothing scores | stability | ~0 ms |
+| `motion_cs` | **모션 center-surround**: 풀링된 diff 에너지 `D`를 `relu(D − avgpool_large(D))`로 대체 | 균일한 ego-motion은 평평한 diff 필드를 만들고 그 center-surround 차이는 ≈ 0; 독립적으로 움직이는 객체는 국소 피크로 살아남는다 (Itti motion conspicuity 1998; Mahadevan & Vasconcelos 2010, 단순화판) | 카메라 | <0.5ms |
+| `coherence_gate` | **구조텐서 coherence 게이팅**: 기존 그라디언트 채널에 `grad × (1 − coherence)^γ`, coherence는 Gaussian 평활된 그라디언트 곱들로부터 닫힌형 `((a−c)² + 4b²)/(a+c+ε)²` (eig 불필요) | 반복 격자무늬와 긴 직선 엣지는 coherence 최대(λ1≫λ2)라 억제되고, 다방향 미세구조를 가진 객체 내부(λ1≈λ2)는 살아남는다 (Harris 1988; Förstner 1987; Weickert 1999) | 텍스처 | ~1.5ms |
+| `signature` | **Image signature** (그리드/저해상도): DCT를 고정 matmul(`D @ X @ D.T`)로, `sign()`, 역 matmul, 제곱, 소형 블러 — *FFT 아님* | sign만으로 재구성하면 에너지가 공간적으로 희소한 전경에 집중되고 스펙트럼이 희소한(주기적) 배경은 죽는다; 경계가 아니라 객체 지지영역(support)에 발화 (Hou, Harel & Koch, TPAMI 2012) | recall, 텍스처 | ~0.5ms |
+| `color_rarity` | **전역 색 희소성**: 패치별 평균 색을 K≈32 고정 중심에 soft-binning(matmul 1개), 희소성 = 거리 가중 역 히스토그램 질량; 축퇴 폴백 = 전역 평균색까지의 Mahalanobis 거리 (Achanta 2009) | 희소한 색은 설명에 유의미한 객체를 표시하며 **내부**에 균일하게 발화한다 (빨간 차 전체가 발화하지, 실루엣만 발화하지 않는다) (Cheng et al., CVPR 2011, HC 변형 — 세그멘테이션 불필요) | recall, 텍스처 | ~0.5ms |
+| `dog_blob` | **다중 스케일 DoG blob 채널**: tubelet 평균 luma에 avgpool 피라미드 차분, \|·\|, 스케일(그리드 2~6칸)에 걸친 max | 객체는 어떤 스케일에선 blob이다; coarse DoG 극값은 내부에 발화 (Lindeberg 1998) — 가장 싼 내부 채움 장치 | 텍스처 | <1ms |
+| `fusion_norm` | **내용 적응형 채널 융합**: Itti의 N(·) 피크 촉진(각 맵을 `(M − m̄_localmax)²`로 스케일) 그리고/또는 하한 있는 엔트로피 게이팅(맵의 softmax 엔트로피 ↑ ⇒ 가중치 ↓, 하한 0.3) | 화면 전체에 발화하는 맵(텍스처 위 그라디언트; 팬 중의 모션)은 블렌딩 전에 *융합 가중치*가 뭉개진다 — 맵 수준 텍스처 억제 + 공짜 카메라 폴백 (Itti 1998; 엔트로피 변형은 vid-TLDR CVPR 2024) | 텍스처, 카메라, 융합 | ~0ms |
+| `score_ema` | **시간 점수 EMA**: `S̄_t = α·S̄_{t−1} + (1−α)·S_t`, 클립 안에서는 하삼각 감쇠 행렬 matmul 하나로 언롤(루프 없음); 스트리밍은 그리드 모양 상태 텐서 1개를 이월 | leaky-integrator 증거 누적; 고전적 시간 필터링 | 안정성 | ~0ms |
+| `select_hysteresis` | **선택 hysteresis**: 직전 tubelet에서 선택된 패치에 topk 전 가산 보너스 ε | EMA의 이산 사촌 — 점수를 평활하지 않고 선택 집합을 안정화 | 안정성 | ~0ms |
 
-### Tier 2 (implement only where Tier 1 stalls — see §5 trigger rule)
+### Tier 2 (Tier 1이 정체된 축에만 구현 — §5 트리거 규칙)
 
-| id | mechanism | principle & reference | targets | est. cost |
+| id | 메커니즘 | 원리 & 문헌 | 타겟 | 비용 추정 |
 |---|---|---|---|---|
-| `distinctness` | Patch distinctness via global self-similarity: per-cell descriptor (Lab mean + tiny gradient stats), 576×576 Gram matmul, distinctness = 1 − mean of top-k similarities, with a precomputed spatial-discount mask (compare only cells >r apart) | Repetitive texture has many near-duplicates → distinctness ≈ 0 across the whole texture; object patches are globally rare (Goferman 2010; Margolin 2013) | recall, texture | ~0.5 ms |
-| `border_prior` | Boundary-connectivity background prior: similarity of every cell to the ~92 border cells (one small matmul); bgness gates the fused score multiplicatively | Background texture connects to the frame border in appearance; kills it *even when high-gradient* (Zhu et al., CVPR 2014, soft variant — no superpixels) | texture | ~0.1 ms |
-| `mbd` | Minimum-barrier distance, parallel approximation: per-cell (hi, lo) path extrema seeded at the border, K≈24 Bellman–Ford iterations of shift (`roll`/pad) + elementwise min/max at grid res | Salient regions have a high barrier on every path to the border; the strongest classical interior-filler, robust to smooth illumination ramps (Zhang et al., ICCV 2015 — published raster-scan version is a showstopper; this is the fixed-iteration parallel form) | recall, texture | ~1–2 ms |
-| `gme` | Integral-projection global motion estimation + compensated diff: row/col mean profiles per frame, conv1d correlation over shifts ∈ [−16, 16], winner via topk-1, shift applied through a 33-way one-hot pad+slice (static-graph-safe, no dynamic `roll`) | The accurate classical pan/tilt fix (Alliney & Morandi 1986; Dufaux & Konrad 2000). Translation-only; zoom/rotation decorrelate the profiles → estimator returns ~0 shift → graceful fallback to `motion_cs` | camera | ~1–2 ms |
+| `distinctness` | 전역 자기유사성 기반 패치 distinctness: 셀별 기술자(Lab 평균 + 소형 그라디언트 통계), 576×576 Gram matmul, distinctness = 1 − top-k 유사도 평균, 사전계산된 공간 할인 마스크(r칸 이상 떨어진 셀끼리만 비교) | 반복 텍스처는 near-duplicate가 많아 텍스처 전체에서 distinctness ≈ 0; 객체 패치는 전역적으로 희소하다 (Goferman 2010; Margolin 2013) | recall, 텍스처 | ~0.5ms |
+| `border_prior` | Boundary-connectivity 배경 prior: 모든 셀과 경계 ~92셀의 유사도(소형 matmul 1개); bgness가 융합 점수를 곱셈으로 게이팅 | 배경 텍스처는 외형상 프레임 경계에 연결된다; *그라디언트가 높아도* 죽인다 (Zhu et al., CVPR 2014, soft 변형 — superpixel 불필요) | 텍스처 | ~0.1ms |
+| `mbd` | Minimum-barrier distance 병렬 근사: 경계에서 시드된 셀별 (hi, lo) 경로 극값, 그리드 해상도에서 shift(`roll`/pad) + elementwise min/max의 Bellman–Ford 반복 K≈24회 | 돌출 영역은 경계로 가는 모든 경로의 barrier가 높다; 가장 강력한 고전 내부 채움 장치, 완만한 조명 램프에 강건 (Zhang et al., ICCV 2015 — 발표된 raster-scan 판은 showstopper; 이것은 고정 반복 병렬형) | recall, 텍스처 | ~1–2ms |
+| `gme` | 적분 프로젝션 전역 모션 추정 + 보상 diff: 프레임별 행/열 평균 프로파일, shift ∈ [−16, 16]에 대한 conv1d 상관, 승자는 topk-1로, shift 적용은 33-way one-hot pad+slice(정적 그래프 안전, 동적 `roll` 없음) | 정확한 고전 팬/틸트 해법 (Alliney & Morandi 1986; Dufaux & Konrad 2000). 평행이동 전용; 줌/회전은 프로파일을 탈상관시켜 추정치 ~0 → `motion_cs`로 우아하게 폴백 | 카메라 | ~1–2ms |
 
-### Tier 3 (recorded, deliberately not implemented)
+### Tier 3 (기록만, 의도적 미구현)
 
-- **BMS approximation** (border-seeded iterative maxpool propagation) —
-  overlaps `mbd`, which is cheaper per unit of interior-filling.
-- **Gabor orientation-contrast bank** — 4× channel cost; `coherence_gate`
-  covers the anti-texture role at a fraction of the price.
-- **Coarse block-matching dominant-motion field** — ~5–10 ms even
-  downsampled; `gme` + `motion_cs` cover ~80% at a quarter of the cost.
-- **Sharpness/defocus prior** — needs bimodality confidence gating and is
-  domain-fragile (deep-DOF phone footage); revisit per-domain like
-  `center_bias`.
-- **Spectral residual / PQFT via DFT-matmul** — allowed as an
-  *experimental knob* if someone wants it (`double_diff` precedent), but
-  `signature` occupies the same niche with better op safety.
-- **GBVS, RARE2012, Kadir–Brady, radial symmetry, BING, background
-  subtraction GMMs, phase correlation** — surveyed and rejected
-  (duplicative, scatter-op-bound, learned weights, static-camera
-  assumption, or FFT-bound, respectively).
+- **BMS 근사** (경계 시드 반복 maxpool 전파) — `mbd`와 역할이 겹치고,
+  내부 채움 단위 비용은 `mbd`가 더 싸다.
+- **Gabor 방향 대비 뱅크** — 채널 비용 4배; anti-texture 역할은
+  `coherence_gate`가 훨씬 싼 값에 수행.
+- **Coarse 블록 매칭 dominant-motion 필드** — 다운샘플해도 ~5–10ms;
+  `gme` + `motion_cs`가 1/4 비용으로 ~80%를 커버.
+- **선명도/defocus prior** — bimodality 신뢰 게이팅이 필요하고 도메인
+  취약(깊은 심도 폰 영상); `center_bias`처럼 도메인별 재고 대상.
+- **Spectral residual / PQFT (DFT-matmul판)** — 원하면 *실험 노브*로
+  허용(`double_diff` 전례)하되, 같은 역할을 `signature`가 더 나은
+  연산 안전성으로 차지한다.
+- **GBVS, RARE2012, Kadir–Brady, radial symmetry, BING, 배경 차분
+  GMM, phase correlation** — 조사 후 기각 (각각 중복, scatter 연산
+  의존, 학습 가중치 포함, 정적 카메라 가정, FFT 의존).
 
-## 3. Pipeline integration
+## 3. 파이프라인 통합
 
-Signal flow (bracketed items are the new knobs; everything else is v0.2
-unchanged):
+신호 흐름 (대괄호가 신규 노브; 나머지는 v0.2 그대로):
 
 ```
-decode → luma (existing) + grid/half-res RGB or Lab (NEW, feeds color candidates)
+디코드 → luma (기존) + 그리드/하프 해상도 RGB 또는 Lab (신규, 색 후보용)
 
-motion path:   frame diff → [gme compensation] → pool → [motion_cs]
-               → noise floor (order: floor AFTER motion_cs)
-spatial path:  gradient → [coherence_gate] → pool
-new channels:  [signature] [color_rarity] [dog_blob]      (grid resolution)
+모션 경로:   frame diff → [gme 보상] → pool → [motion_cs]
+             → noise floor (순서: floor는 motion_cs 뒤)
+공간 경로:   gradient → [coherence_gate] → pool
+신규 채널:   [signature] [color_rarity] [dog_blob]      (그리드 해상도)
 
-fusion:        per-channel normalization → [fusion_norm weighting]
-               → N-channel blend (generalizes motion_weight="auto" to
-                 per-channel energy weights over 2–5 channels)
-temporal:      [score_ema] → center bias → allocation (global + floor,
-               spread_fraction) → coherent-region block gate
-selection:     [select_hysteresis] → topk → _pack_gazing_mask (UNCHANGED)
+융합:        채널별 정규화 → [fusion_norm 가중]
+             → N채널 블렌드 (motion_weight="auto"를 2~5채널
+               에너지 가중으로 일반화)
+시간:        [score_ema] → center bias → 할당 (global + floor,
+             spread_fraction) → coherent-region 블록 게이트
+선택:        [select_hysteresis] → topk → _pack_gazing_mask (불변)
 ```
 
-Notes:
+노트:
 
-- **The only structural change is color**: the pipeline is luma-only
-  today. RGB/Lab is kept at grid (24×24) or half resolution only, so the
-  added decode/memory cost is negligible. Lab conversion is a fixed 3×3
-  matmul + elementwise (mobile-safe); start with RGB and adopt Lab only if
-  rarity quality demands it.
-- **Ordering rules are part of the spec** (they encode known
-  interactions, learned from the v0.2 double_diff negative result):
-  quantile noise floor runs *after* `motion_cs` (center-surround first,
-  then dead-zone); per-channel normalization runs *before* `score_ema`
-  (never EMA raw-scale maps); `fusion_norm` runs after the quantile floor
-  (so a single noise spike can't win peak promotion); heavy-tailed
-  channels (`color_rarity`, `distinctness`) get a log/sqrt compression
-  before min-max and prefer clip-global over per-tubelet normalization.
-- New-channel weights fold into the existing blend machinery: the
-  2-channel `motion_weight` becomes an N-channel weight vector with an
-  `"auto"` mode that generalizes the current energy-ratio rule
-  (`w_i ∝ energy_i`, computed pre-normalization, optionally modulated by
-  `fusion_norm`).
-- `score_ema` and `select_hysteresis` must keep the streaming hook
-  viable: within-clip they are loop-free (decay matmul / shifted mask);
-  across clips each carries exactly one state tensor.
+- **유일한 구조 변화는 색이다**: 현재 파이프라인은 luma 전용.
+  RGB/Lab은 그리드(24×24) 또는 하프 해상도로만 유지해 디코드/메모리
+  추가 비용을 무시 가능한 수준으로 묶는다. Lab 변환은 고정 3×3
+  matmul + elementwise(모바일 안전); RGB로 시작하고 rarity 품질이
+  요구할 때만 Lab을 채택한다.
+- **순서 규칙은 스펙의 일부다** (v0.2의 double_diff negative result가
+  가르친 상호작용을 코드화): quantile noise floor는 `motion_cs`
+  *뒤에* 실행 (center-surround 먼저, dead-zone 다음); 채널별 정규화는
+  `score_ema` *앞에* 실행 (raw 스케일 맵을 EMA하지 않는다);
+  `fusion_norm`은 quantile floor 뒤에 실행 (노이즈 스파이크 하나가
+  피크 촉진을 이기지 못하게); heavy-tail 채널(`color_rarity`,
+  `distinctness`)은 min-max 전에 log/sqrt 압축을 거치고 per-tubelet
+  보다 클립 전역 정규화를 선호한다.
+- 신규 채널 가중치는 기존 블렌드 장치에 편입: 2채널 `motion_weight`가
+  N채널 가중 벡터가 되고, `"auto"` 모드는 현행 에너지 비율 규칙을
+  일반화한다 (`w_i ∝ energy_i`, 정규화 전 계산, 선택적으로
+  `fusion_norm`이 변조).
+- `score_ema`와 `select_hysteresis`는 스트리밍 훅을 유지해야 한다:
+  클립 안에서는 루프 없음(감쇠 matmul / shift된 마스크), 클립 사이는
+  각각 정확히 상태 텐서 1개를 이월.
 
-## 4. Evaluation gates (unchanged infrastructure, fixed decision rules)
+## 4. 평가 게이트 (인프라 불변, 판정 규칙 고정)
 
-| gate | script | rule |
+| 게이트 | 스크립트 | 규칙 |
 |---|---|---|
-| **Semantic recall (PRIMARY)** | `scripts/eval_borissal_semantic.py`, held-out `videos/internvid_eval16/`, ratio 0.25 (spot-check 0.5) | higher is better; differences within ±0.02 (≈ the set's observed std) are ties — resolve ties by paired per-clip comparison, not means |
-| Coverage / uniqueness | `scripts/eval_borissal_coverage.py`, frozen V-JEPA2 | **must not degrade BOTH** (v0.2 rule; never coverage alone — scatter bias) |
-| Latency | `scripts/borissal_benchmark.py` | combined preset ≤ 25 ms CPU; report per-knob deltas |
-| Export | `scripts/export_borissal_check.py` | jit trace + ONNX opset-17 must pass with each adopted knob on |
-| Visual | overlay dumps (`borissal_dump_outputs.py`) | qualitative sanity, not a pass/fail gate |
-| VideoMAE recon / gist | existing scripts | reference axes only, reported but never optimized toward |
+| **Semantic recall (주 지표)** | `scripts/eval_borissal_semantic.py`, held-out `videos/internvid_eval16/`, ratio 0.25 (0.5 스팟체크) | 높을수록 좋음; ±0.02(세트의 관측 표준편차 수준) 이내 차이는 동률 — 동률은 평균이 아니라 클립별 짝지은(paired) 비교로 판정 |
+| Coverage / uniqueness | `scripts/eval_borissal_coverage.py`, 동결 V-JEPA2 | **둘 다 나빠지면 안 됨** (v0.2 규칙; coverage 단독 판정 금지 — scatter 편향) |
+| 지연 | `scripts/borissal_benchmark.py` | 조합 프리셋 ≤ 25ms CPU; 노브별 증분 보고 |
+| Export | `scripts/export_borissal_check.py` | 채택된 노브를 켠 상태로 jit trace + ONNX opset-17 통과 |
+| 시각 | 오버레이 덤프 (`borissal_dump_outputs.py`) | 정성 확인용, pass/fail 게이트 아님 |
+| VideoMAE recon / gist | 기존 스크립트 | 참조 축 전용 — 보고는 하되 절대 최적화 대상 아님 |
 
-## 5. Combination search protocol
+## 5. 조합 탐색 프로토콜
 
-Exhaustive search over 8–12 binary knobs (plus their hyperparameters) is
-intractable and unnecessary. Three stages, mirroring v0.2's process:
+8~12개 이진 노브(+하이퍼파라미터)의 전수 탐색은 불가능하고 불필요하다.
+v0.2 프로세스를 반영한 3단계:
 
-1. **Solo screening.** Each Tier-1 candidate alone on top of the v0.2
-   preset, default hyperparameters, all four gates. Verdicts: KEEP
-   (recall up or tied with another axis clearly up), KILL (recall down
-   beyond tie range, or both cov/uniq degraded, or export fails), TUNE
-   (one retry with a single obvious hyperparameter change, e.g. surround
-   radius, K bins, α). Kills are recorded as negative results with the
-   mechanism kept as an off-by-default experimental knob (`double_diff`
-   precedent).
-2. **Greedy forward combination.** Start from the v0.2 preset; add
-   survivors in descending solo-recall order; keep an addition only if
-   the combined config passes all gates and does not drop recall vs. the
-   previous step (ties resolved per-clip). Stop when no remaining
-   survivor helps. Two targeted interaction checks regardless of greedy
-   order: (a) `fusion_norm` × each adopted new channel (fusion weighting
-   is the mechanism most likely to change another knob's verdict), and
-   (b) `score_ema` × `select_hysteresis` (redundant stabilizers — adopt
-   at most one unless both independently pass the recall condition).
-3. **Preset admission.** The winning combination becomes the v0.3 preset
-   (a named config, like v0.2's) once it passes: Pareto rule vs. v0.2 on
-   (recall, cov/uniq), latency ≤ 25 ms, export check, ascending-index
-   test, overlay review. Stability candidates (`score_ema`,
-   `select_hysteresis`) are admitted **only if recall is non-degraded**
-   (they trade recall of late-appearing objects for stability; the
-   description task pays for recall). Tier-2 trigger: implement a Tier-2
-   candidate only for an axis where the Tier-1 combination shows no gain
-   (e.g. texture bias unmoved → `distinctness`/`border_prior`/`mbd`;
-   pan clips still flooded → `gme`).
+1. **솔로 스크리닝.** Tier-1 각 후보를 v0.2 프리셋 위에 단독으로,
+   기본 하이퍼파라미터로, 4개 게이트 전부에 대해 평가. 판정: KEEP
+   (recall 상승, 또는 동률이면서 다른 축이 뚜렷이 상승), KILL (동률
+   범위를 넘는 recall 하락, 또는 cov/uniq 둘 다 열화, 또는 export
+   실패), TUNE (명백한 하이퍼파라미터 하나만 바꿔 1회 재시도 — 예:
+   surround 반경, K bins, α). KILL은 negative result로 기록하고
+   메커니즘은 off 기본값의 실험 노브로 유지 (`double_diff` 전례).
+2. **탐욕적 전진 조합.** v0.2 프리셋에서 시작; 생존자를 솔로 recall
+   내림차순으로 하나씩 추가; 조합 config가 모든 게이트를 통과하고
+   직전 단계 대비 recall이 떨어지지 않을 때만 유지 (동률은 클립별
+   비교). 남은 생존자가 도움이 안 되면 종료. 탐욕 순서와 무관하게
+   표적 상호작용 체크 2건: (a) `fusion_norm` × 채택된 각 신규 채널
+   (융합 가중은 다른 노브의 판정을 뒤집을 가능성이 가장 큰 메커니즘),
+   (b) `score_ema` × `select_hysteresis` (중복 안정화 장치 — 둘 다
+   독립적으로 recall 조건을 통과하지 않는 한 최대 하나만 채택).
+3. **프리셋 승격.** 승리 조합이 다음을 통과하면 v0.3 프리셋(v0.2처럼
+   이름 붙은 config)이 된다: v0.2 대비 (recall, cov/uniq) Pareto
+   규칙, 지연 ≤ 25ms, export 체크, 오름차순 인덱스 테스트, 오버레이
+   검토. 안정성 후보(`score_ema`, `select_hysteresis`)는 **recall이
+   비열화일 때만** 채택 (늦게 등장하는 객체의 recall을 안정성과
+   맞바꾸는 장치인데, 설명 태스크는 recall에 돈을 낸다). Tier-2
+   트리거: Tier-1 조합이 어떤 축에서 무이득일 때만 그 축의 Tier-2
+   후보를 구현 (예: 텍스처 편향이 그대로 → `distinctness`/
+   `border_prior`/`mbd`; 팬 클립이 여전히 범람 → `gme`).
 
-A sweep runner (`scripts/sweep_borissal_v03.py`) automates stages 1–2:
-takes a candidate list, runs gates per config, dumps a results table
-(JSON + markdown) under `outputs/borissal/v03_sweep/` (gitignored), and
-never decides adoption by itself — verdicts are recorded manually in
-`design.md` after reading the table (same discipline as v0.2).
+스윕 러너(`scripts/sweep_borissal_v03.py`)가 1~2단계를 자동화한다:
+후보 목록을 받아 config별 게이트를 실행하고 결과 테이블(JSON +
+markdown)을 `outputs/borissal/v03_sweep/`(gitignored)에 덤프하되,
+**채택 결정은 스스로 내리지 않는다** — 판정은 테이블을 읽은 뒤
+`design.md`에 수동으로 기록한다 (v0.2와 같은 규율).
 
-## 6. Deliverables
+## 6. 산출물
 
-- `autogaze/models/borissal/modeling_borissal.py` — new knobs, all
-  off by default; `configuration_borissal.py` — config fields.
-- `scripts/sweep_borissal_v03.py` — stage-1/2 sweep runner.
-- Tests (`tests/test_borissal.py` extensions):
-  - all-knobs-off output equals v0.2 exactly (tensor-level regression);
-  - each knob changes selection on a synthetic clip built to trigger it
-    (e.g. panning texture for `motion_cs`, picket-fence + colored blob
-    for `coherence_gate`/`color_rarity`);
-  - ascending `keep_index` invariant with every knob on;
-  - trace/export smoke for the adopted preset;
-  - streaming-state equivalence: EMA/hysteresis over a clip equals the
-    two-half-clips run with carried state.
-- Docs on adoption: `reference.md` §2/§3 (mechanisms + knobs),
-  `design.md` (measurements, adopt/reject verdicts, negative results),
-  `approach-ko.md` (explainer update).
+- `autogaze/models/borissal/modeling_borissal.py` — 신규 노브 (전부
+  off 기본값); `configuration_borissal.py` — config 필드.
+- `scripts/sweep_borissal_v03.py` — 1/2단계 스윕 러너.
+- 테스트 (`tests/test_borissal.py` 확장):
+  - 전 노브 off 출력이 v0.2와 정확히 동일 (텐서 수준 회귀);
+  - 각 노브가 그것을 격발하도록 설계된 합성 클립에서 선택을 바꾸는지
+    (예: `motion_cs`용 패닝 텍스처, `coherence_gate`/`color_rarity`용
+    말뚝 울타리 + 유색 blob);
+  - 모든 노브를 켠 상태에서 오름차순 `keep_index` 불변식;
+  - 채택 프리셋의 trace/export 스모크;
+  - 스트리밍 상태 등가성: 클립 전체의 EMA/hysteresis = 상태를 이월한
+    반클립 2회 실행.
+- 채택 시 문서: `reference.md` §2/§3 (메커니즘 + 노브), `design.md`
+  (측정, 채택/기각 판정, negative results), `approach-ko.md` (해설
+  갱신).
 
-## 7. Risks and mitigations
+## 7. 리스크와 완화
 
-- **Held-out eval variance** (per-clip recall spread 0.23–0.45 at n=16):
-  the ±0.02 tie rule + paired per-clip comparison in §4/§5 exist for
-  this; if verdicts stay ambiguous, extend the eval set before extending
-  the candidate bank.
-- **Color is a structural change**: contained by keeping color at grid
-  resolution and behind knobs; the all-off regression test guarantees
-  the luma-only path is untouched.
-- **Stability vs. recall tension**: explicit admission condition (§5.3).
-- **Knob explosion**: v0.3 adds ~8 knobs to an already knob-rich config.
-  Mitigation: the preset is the product; knobs are the search space.
-  Anything KILLed stays off-by-default and documented as experimental,
-  and Tier-3 items are not implemented at all.
-- **Hyperparameter overfitting to the example clip** (v0.2 lesson):
-  stage-1/2 verdicts use the held-out 16-clip set, never the example
-  clip alone; the example clip is for overlays/debugging.
+- **Held-out 평가 분산** (n=16에서 클립별 recall 산포 0.23–0.45):
+  §4/§5의 ±0.02 동률 규칙 + 클립별 짝지은 비교가 이를 위해 존재;
+  판정이 계속 모호하면 후보 뱅크를 늘리기 전에 평가 세트를 먼저
+  늘린다.
+- **색은 구조 변화다**: 그리드 해상도로만 유지하고 노브 뒤에 격리;
+  전 노브 off 회귀 테스트가 luma 전용 경로 불변을 보장.
+- **안정성 vs recall 긴장**: 명시적 채택 조건 (§5.3).
+- **노브 폭발**: v0.3은 이미 노브가 많은 config에 ~8개를 더한다.
+  완화: 프리셋이 제품이고 노브는 탐색 공간이다. KILL된 것은 전부
+  off 기본값의 실험 노브로 문서화되고, Tier-3는 아예 구현하지 않는다.
+- **example clip에 대한 하이퍼파라미터 과적합** (v0.2의 교훈):
+  1/2단계 판정은 held-out 16클립 세트로만 하고 example clip 단독으로
+  절대 하지 않는다; example clip은 오버레이/디버깅용이다.
 
-## 8. Out of scope
+## 8. 범위 밖
 
-- Any learned weights or frozen pretrained models (v0.4+ candidate
-  direction, per user: "일단 순수 고전 가자").
-- Changes to v1's architecture or training recipe (v1 picks up v0.3
-  maps automatically via `input_mode=maps|both`; retraining/re-gating v1
-  on the richer bank is a separate follow-up).
-- The `Selection` contract, packing, adapters, or downstream interfaces.
-- Multi-scale / summary-token output (downstream-contract change,
-  explicitly parked in `progress.md` 2026-07-16).
+- 학습 가중치나 동결 사전학습 모델 일체 (v0.4+ 후보 방향, 사용자
+  결정: "일단 순수 고전 가자").
+- v1 아키텍처나 학습 레시피 변경 (v1은 `input_mode=maps|both`를 통해
+  v0.3 맵을 자동으로 받는다; 풍부해진 뱅크로 v1을 재학습/재게이팅하는
+  것은 별도 후속 작업).
+- `Selection` 규약, 패킹, 어댑터, 다운스트림 인터페이스.
+- 다중 스케일 / summary-token 출력 (다운스트림 규약 변경,
+  `progress.md` 2026-07-16에 명시적으로 보류됨).
