@@ -4,7 +4,7 @@ import math
 import pytest
 import torch
 
-from autogaze.models.borissal.signals_v03 import motion_center_surround, coherence_gate_map, dct_matrix, image_signature, color_rarity, dog_blob, fused_blend, fusion_multiplier
+from autogaze.models.borissal.signals_v03 import motion_center_surround, coherence_gate_map, dct_matrix, image_signature, color_rarity, dog_blob, fused_blend, fusion_multiplier, apply_score_ema
 
 
 def test_motion_cs_suppresses_uniform_pan_keeps_local_mover():
@@ -121,3 +121,24 @@ def test_fused_blend_two_equal_channels_is_identity_weighted_average():
     w = torch.full((2, 1, 1, 1), 0.3)
     out_t = fused_blend([(w, a), (1 - w, b)], "none", 0.3, 1e-6)
     assert out_t.shape == a.shape
+
+
+def test_ema_matches_sequential_recursion():
+    torch.manual_seed(0)
+    S = torch.rand(2, 8, 6, 6)
+    alpha = 0.6
+    out = apply_score_ema(S, alpha, None)
+    ref = [S[:, 0]]                                 # S_bar_0 = S_0
+    for t in range(1, 8):
+        ref.append(alpha * ref[-1] + (1 - alpha) * S[:, t])
+    assert torch.allclose(out, torch.stack(ref, dim=1), atol=1e-5)
+
+
+def test_ema_streaming_split_equals_full_run():
+    torch.manual_seed(1)
+    S = torch.rand(2, 8, 6, 6)
+    alpha = 0.6
+    full = apply_score_ema(S, alpha, None)
+    first = apply_score_ema(S[:, :4], alpha, None)
+    second = apply_score_ema(S[:, 4:], alpha, first[:, -1])   # 상태 이월
+    assert torch.allclose(torch.cat([first, second], dim=1), full, atol=1e-5)

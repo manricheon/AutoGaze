@@ -182,3 +182,25 @@ def fused_blend(channels, fusion_mode: str, entropy_floor: float,
             weight, dtype=m.dtype, device=m.device)
         den = w_t if den is None else den + w_t
     return num / (den + eps)
+
+
+def apply_score_ema(S: torch.Tensor, alpha: float, state=None) -> torch.Tensor:
+    """Leaky-integrator EMA over the tubelet axis, unrolled WITHIN a clip to
+    one lower-triangular matmul (no sequential loop): S_bar_t = alpha *
+    S_bar_{t-1} + (1-alpha) * S_t with S_bar_0 = S_0 (or, when `state` -- the
+    previous clip's final smoothed map (B, Hg, Wg) -- is given, S_bar_{-1} =
+    state). Every row of the decay matrix sums to 1, so a time-constant
+    additive prior (center_bias) commutes with this op -- applying it after
+    _saliency_scores is exact.
+    """
+    b, t, h, w = (int(x) for x in S.shape)
+    seq = S if state is None else torch.cat([state.unsqueeze(1), S], dim=1)
+    n = int(seq.shape[1])
+    i = torch.arange(n, device=S.device, dtype=S.dtype)
+    delta = (i.view(-1, 1) - i.view(1, -1)).clamp(min=0)
+    W = (1.0 - alpha) * alpha ** delta
+    # column 0 carries the initial condition: weight alpha^row, not (1-a)*a^row
+    col0 = torch.arange(n, device=S.device).view(1, -1) == 0
+    W = torch.where(col0, alpha ** i.view(-1, 1), W).tril()
+    out = (W @ seq.reshape(b, n, h * w)).reshape(b, n, h, w)
+    return out if state is None else out[:, 1:]
