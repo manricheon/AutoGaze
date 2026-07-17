@@ -571,6 +571,9 @@ class Borissal(nn.Module):
             # added center_bias): the decay matrix rows sum to 1, so a
             # time-constant additive prior commutes -- this equals the spec's
             # fusion -> EMA -> center_bias order exactly.
+            # By design, EMA only smooths this fine-ranking score S: the
+            # coarse block-gate pass below recomputes its own saliency on
+            # video_small (unsmoothed) and is unaffected by this EMA.
             ema_state = None if temporal_state is None else temporal_state.get("ema")
             S = apply_score_ema(S, cfg.score_ema_alpha, ema_state)
 
@@ -712,6 +715,11 @@ class Borissal(nn.Module):
             }
             intermediates["temporal_state"] = {
                 "ema": S[:, -1],
+                # Deliberate one-step-approximation asymmetry: this exports the
+                # POST-hysteresis final mask (keep_mask_grid, computed after the
+                # eps_h bonus above) for cross-clip carry, whereas the in-clip
+                # continuity bonus at each tubelet is added w.r.t. the PREVIOUS
+                # tubelet's PRE-hysteresis base_keep (see base_keep above).
                 "prev_keep": keep_mask_grid[:, -1],
             }
             if sal["noise_floor_tau"] is not None:

@@ -192,7 +192,11 @@ markdown)을 `outputs/borissal/v03_sweep/`(gitignored)에 덤프하되,
   - 모든 노브를 켠 상태에서 오름차순 `keep_index` 불변식;
   - 채택 프리셋의 trace/export 스모크;
   - 스트리밍 상태 등가성: 클립 전체의 EMA/hysteresis = 상태를 이월한
-    반클립 2회 실행.
+    반클립 2회 실행. (편차 기록: 파이프라인 레벨의 반클립 분할 등가성은
+    구조적으로 불가능하다 -- 반클립별 min-max/auto-weight 정규화가
+    달라지고 one-step hysteresis도 경계를 끊기 때문. 따라서 이 보장은
+    EMA 메커니즘 레벨에서만 테스트한다 (`test_ema_streaming_split_equals_full_run`),
+    상태 라운드트립은 `test_temporal_state_round_trip`이 커버한다.)
 - 채택 시 문서: `reference.md` §2/§3 (메커니즘 + 노브), `design.md`
   (측정, 채택/기각 판정, negative results), `approach-ko.md` (해설
   갱신).

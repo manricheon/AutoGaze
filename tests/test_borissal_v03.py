@@ -287,6 +287,15 @@ def test_temporal_state_round_trip():
     assert not torch.equal(m1[:, 0], m2[:, 0])
 
 
+def test_auto_weight_composes_with_fusion():
+    video = _structured_video(B=2)
+    cfg = _v02_uniform(scale=96, motion_weight="auto", fusion_norm="peak",
+                       signature_weight=0.5)
+    sel = Borissal(cfg).select(video, gazing_ratio=0.25)
+    assert torch.isfinite(sel.scores).all()
+    assert sel.per_frame_keep.eq(sel.per_frame_keep[0, 0]).all()
+
+
 def test_temporal_knobs_off_ignore_state_and_match_base():
     video = _structured_video()
     model = Borissal(_v02_uniform(scale=96))
@@ -330,8 +339,16 @@ def test_all_knobs_on_traces_and_matches_eager_on_fresh_input():
     video = _structured_video()
     with torch.no_grad():
         traced = torch.jit.trace(_Wrap(model), video, check_trace=False)
-        fresh = _structured_video() + 0.01 * torch.rand(1, 8, 3, 96, 96)
+        # Genuinely independent input (not a perturbation of the trace input):
+        # a small perturbation of `video` can leave every mask decision
+        # unchanged, in which case the traced-vs-eager equality below would
+        # pass even with baked-in constants. Self-check this before trusting
+        # the comparison.
+        g = torch.Generator().manual_seed(123)
+        fresh = torch.rand(1, 8, 3, 96, 96, generator=g)
+        eager_base = model.select(video, gazing_ratio=0.25)
         eager = model.select(fresh, gazing_ratio=0.25)
+        assert not torch.equal(eager.keep_mask, eager_base.keep_mask)
         t_idx, t_mask = traced(fresh)
     assert torch.equal(t_idx, eager.keep_index)      # 상수 고착 없음
     assert torch.equal(t_mask, eager.keep_mask)
