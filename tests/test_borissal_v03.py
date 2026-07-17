@@ -4,7 +4,7 @@ import math
 import pytest
 import torch
 
-from autogaze.models.borissal.signals_v03 import motion_center_surround, coherence_gate_map, dct_matrix, image_signature, color_rarity
+from autogaze.models.borissal.signals_v03 import motion_center_surround, coherence_gate_map, dct_matrix, image_signature, color_rarity, dog_blob
 
 
 def test_motion_cs_suppresses_uniform_pan_keeps_local_mover():
@@ -73,3 +73,17 @@ def test_color_rarity_fires_on_rare_color_interior():
     # 내부와 경계가 같은 색 -> 같은 희소성 (interior filling의 증명)
     edge = sal[:, :, 8, 8:14].mean()
     assert torch.allclose(inside, edge, rtol=0.05)
+
+
+def test_dog_blob_fires_on_flat_interior_where_gradient_is_zero():
+    B, T, n = 1, 1, 24
+    img = torch.zeros(B, T, n, n)
+    img[:, :, 9:15, 9:15] = 1.0              # 6x6 평탄한 사각형
+    # 중심 (12,12)의 로컬 그라디언트는 정확히 0 (평탄 영역)
+    dy = img[:, :, 1:, :] - img[:, :, :-1, :]
+    dx = img[:, :, :, 1:] - img[:, :, :, :-1]
+    assert dy[0, 0, 11:13, 11:13].abs().max() == 0
+    assert dx[0, 0, 11:13, 11:13].abs().max() == 0
+    # DoG blob은 그 내부에서 발화한다 -- 그라디언트가 못 하는 일
+    blob = dog_blob(img)
+    assert blob[0, 0, 12, 12] > 0.05

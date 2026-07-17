@@ -113,3 +113,18 @@ def color_rarity(rgb_grid: torch.Tensor, num_bins_per_axis: int, sigma: float,
     hist = assign.mean(dim=1)                                           # (B, K) mass
     sal = (d2.sqrt() * hist.unsqueeze(1)).sum(-1)                       # (B, P)
     return sal.sqrt().reshape(b, t, h, w)
+
+
+def dog_blob(gray_grid: torch.Tensor) -> torch.Tensor:
+    """Multi-scale difference-of-boxes blob channel (Lindeberg 1998 substrate)
+    at grid resolution: the cheapest interior-filling mechanism. Scale pairs
+    (3,7)/(5,11) grid cells bracket typical object sizes on a 24x24 grid."""
+    b, t, h, w = (int(x) for x in gray_grid.shape)
+    flat = gray_grid.reshape(b * t, 1, h, w)
+
+    def _blur(k):
+        return F.avg_pool2d(flat, kernel_size=k, stride=1, padding=k // 2,
+                            count_include_pad=False)
+
+    maps = [(_blur(k1) - _blur(k2)).abs() for k1, k2 in ((3, 7), (5, 11))]
+    return torch.stack(maps, dim=0).amax(dim=0).view(b, t, h, w)
