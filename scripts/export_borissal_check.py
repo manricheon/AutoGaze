@@ -91,6 +91,13 @@ def main():
         "v1": (v1, "uniform", 0.0),
         # hybrid focus+spread over global allocation (K_total fixed -> static shapes)
         "v1-hyb": (v1, "global", 0.25),
+        # v0.3 Tier-1 knobs all on (docs/borissal/v03-design.md; adopted-preset
+        # export gate runs this same path with the final knob set)
+        "v0.3": (Borissal(BorissalConfig.v0_2(
+            scale=args.scale, motion_center_surround=True, coherence_gate=True,
+            signature_weight=0.5, color_rarity_weight=0.5, dog_blob_weight=0.5,
+            fusion_norm="entropy", score_ema_alpha=0.5,
+            select_hysteresis_eps=0.05)).eval(), "uniform", 0.0),
     }
 
     rows = []

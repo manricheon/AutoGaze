@@ -293,3 +293,45 @@ def test_temporal_knobs_off_ignore_state_and_match_base():
     a = model.select(video, gazing_ratio=0.25)
     b = model.select(video, gazing_ratio=0.25, temporal_state=None)
     assert torch.equal(a.keep_mask, b.keep_mask)
+
+
+ALL_KNOBS = dict(
+    motion_center_surround=True, coherence_gate=True, signature_weight=0.5,
+    color_rarity_weight=0.5, dog_blob_weight=0.5, fusion_norm="entropy",
+    score_ema_alpha=0.5, select_hysteresis_eps=0.05,
+)
+
+
+def test_all_knobs_on_keeps_selection_contract():
+    video = _structured_video()
+    for cfg in (_v02_uniform(scale=96, **ALL_KNOBS),          # uniform 변형
+                BorissalConfig.v0_2(scale=96, **ALL_KNOBS)):  # 풀 프리셋 (global+block)
+        sel = Borissal(cfg).select(video, gazing_ratio=0.25)
+        idx = sel.keep_index
+        valid = idx[:, 1:] >= 0
+        assert ((idx[:, 1:] > idx[:, :-1]) | ~valid).all()    # 오름차순 규약
+        assert sel.num_keep.sum() == sel.keep_mask.sum()      # 예산 정합
+        assert sel.per_frame_keep.sum(-1).eq(sel.num_keep).all()
+
+
+def test_all_knobs_on_traces_and_matches_eager_on_fresh_input():
+    cfg = _v02_uniform(scale=96, **ALL_KNOBS)
+    model = Borissal(cfg).eval()
+
+    class _Wrap(torch.nn.Module):
+        def __init__(self, m):
+            super().__init__()
+            self.m = m
+
+        def forward(self, v):
+            s = self.m.select(v, gazing_ratio=0.25)
+            return s.keep_index, s.keep_mask
+
+    video = _structured_video()
+    with torch.no_grad():
+        traced = torch.jit.trace(_Wrap(model), video, check_trace=False)
+        fresh = _structured_video() + 0.01 * torch.rand(1, 8, 3, 96, 96)
+        eager = model.select(fresh, gazing_ratio=0.25)
+        t_idx, t_mask = traced(fresh)
+    assert torch.equal(t_idx, eager.keep_index)      # 상수 고착 없음
+    assert torch.equal(t_mask, eager.keep_mask)
