@@ -803,3 +803,39 @@ modeling_borissal_v1.py, `global_context=True` default):
   AND the Linux scale run all leave semantic recall flat — i.e., the
   pure-SSL signal is shown insufficient for the description-aligned
   axis. Until then it stays on the shelf.
+
+## Borissal v0.3 solo screening (2026-07-18): 4 KEEP / 5 KILL / 1 TUNE applied
+
+Stage-1 of the v03-design.md §5 protocol, run with
+`scripts/sweep_borissal_v03.py --stage solo --ratio 0.25`. Semantic gate:
+held-out `videos/internvid_eval16/` (16 clips), v0.2-base recall 0.325
+(exactly reproduces the documented 0.325±0.022 baseline). Coverage gate:
+first 4 clips (pilot-gate precedent), HF vitl-256 teacher. Ties resolved by
+paired per-clip comparison per the spec rule. Raw tables:
+`outputs/borissal/v03_sweep/{solo,cov4,coh_tuned,coh_tuned_cov4}/` (gitignored).
+
+| candidate | recall paired (16 clips) | cov(<)/uniq(>) vs 8.238/8.106 | lat ms | verdict |
+|---|---|---|---|---|
+| fusion_peak | **13W-3L, +0.015** | 8.214 / 8.105 | 16.3 | **KEEP** (strongest; Itti N(·) delivers) |
+| coherence_gate (ds=4 TUNE) | **12W-4L, +0.012** | 8.212 / 7.993 (one-axis trade, allowed) | 18–25 | **KEEP** after TUNE |
+| dog_blob | 9W-7L, +0.010 | 8.222 / 8.156 (Pareto-better) | 18.6 | **KEEP** (also best gist +0.02) |
+| color_rarity | 9W-6L-1T, +0.004 | 8.233 / **8.220** (largest uniq gain) | 24.5–25.1 | **KEEP** (latency watch) |
+| signature | 8W-7L, +0.005 | 8.257 / 8.102 (both degraded) | 18.9 | KILL (coin-flip recall + both-axes rule) |
+| fusion_entropy | 1W-0L-15T, +0.000 | ~flat | 16.2 | KILL (practical no-op on real clips — the mass-entropy gate's theoretical camera fallback never fires on this data; knob stays experimental) |
+| motion_center_surround | **4W-12L, −0.013** | 8.244 / 8.073 (both degraded) | 16.6 | KILL (InternVid has little ego-motion; the surround subtraction only eats informative motion. Revisit per-domain for pan-heavy footage — the mechanism itself is verified on synthetic flicker) |
+| score_ema | 6W-10L, −0.002 | 8.250 / 8.086 (both degraded) | 15.6 | KILL (fails the stability-knob recall-non-degradation admission condition) |
+| hysteresis | 4W-9L-3T, −0.002 | 8.242 / 8.084 (both degraded) | 15.6 | KILL (same condition; both stability knobs remain available as off-default deploy knobs for streaming UIs) |
+
+**TUNE record (coherence_gate)**: the solo latency gate failed hard (61ms vs
+25ms budget — the three stride-1 pixel-res smooths, ~11ms each, not the
+kernel size; count_include_pad is irrelevant, measured). Fix: average the
+gradient PRODUCTS into ds×ds blocks (strided pool) before the kernel smooth
+— itself valid structure-tensor windowing, and safe for fine gratings
+(their dx² stays large at any period; downsampling the SIGNED gradients
+would cancel them instead — ordering matters). `coherence_downsample=4`
+default; 60.5→18.3ms standalone (24.6–25.0ms inside the sweep process).
+Recall actually improved after the TUNE (0.330→0.336; 12W-4L) — the larger
+effective window (4px blocks) appears to help.
+
+Greedy stage-2 order (by solo paired recall): fusion_peak →
+coherence_gate → dog_blob → color_rarity.
