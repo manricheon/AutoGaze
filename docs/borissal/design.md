@@ -839,3 +839,54 @@ effective window (4px blocks) appears to help.
 
 Greedy stage-2 order (by solo paired recall): fusion_peak →
 coherence_gate → dog_blob → color_rarity.
+
+## Borissal v0.3 greedy combination + preset admission (2026-07-19)
+
+Stage-2/3 of the v03-design.md §5 protocol, additions in solo-recall order,
+acceptance = all gates pass AND paired recall not degraded vs. the previous
+chain. Raw tables: `outputs/borissal/v03_sweep/greedy_*`, `r{1,2}_cov4/`,
+`ratio05_spotcheck.json` (gitignored).
+
+| step | chain | recall (16 clips) | paired vs prev | cov(<)/uniq(>) (4 clips) | verdict |
+|---|---|---|---|---|---|
+| 0 | v0.2 base | 0.325 | — | 8.238 / 8.106 | — |
+| 1 | + fusion_peak | 0.339 | 13W-3L, +0.015 | 8.214 / 8.105 | ACCEPT |
+| 2 | + coherence_gate (ds=4) | 0.346 | 9W-5L, +0.007 | 8.171 / 8.069 (one-axis trade) | ACCEPT |
+| 3 | + dog_blob | 0.344–0.351 | 10W-6L, +0.005 | **8.174 / 8.167 — Pareto-better than v0.2 on BOTH axes** | ACCEPT |
+| 4 | + color_rarity | 0.343 | **6W-10L, −0.008** | 8.182 / 8.188 | REJECT |
+
+**color_rarity rejection detail**: its solo signature (largest uniqueness
+gain, +0.114) reappears on the chain (uniq 8.167→8.188), but the PRIMARY
+axis drops (6W-10L) and its real +7.5ms latency (measured with the coarse
+pass isolated; NOT thermal noise) would push the chain to ~32ms vs the
+25ms budget. Kept as the top TUNE-later candidate: if a future round wants
+the uniqueness, the cost lives in the soft-binning/rgb path, and the
+recall drop suggests trying it INSTEAD OF (not on top of) dog_blob.
+
+**Latency note for future sweeps**: in-process latency readings drift
++30-70% after hours of continuous CPU load (thermal) — e.g. the chain read
+26-43ms inside sweeps but 24.5ms clean. Solo/chain admission used clean
+standalone re-measurement (`borissal_benchmark`-style probe); do the same
+before trusting any in-sweep `lat` column.
+
+**Preset admitted**: `BorissalConfig.v0_3()` = v0.2 + `fusion_norm="peak"`
++ `coherence_gate=True` (ds=4) + `dog_blob_weight=0.5`.
+- Held-out semantic recall (ratio 0.25): 0.325 → 0.346–0.351 — the first
+  non-learned config to clearly beat both v0.2 AND the pilot v1@1000
+  (0.315) on the primary axis.
+- V-JEPA cov/uniq: Pareto-better than v0.2 (8.174/8.167 vs 8.238/8.106).
+- CPU latency ~24.5ms clean (budget 25; tight — the ds=4 coherence TUNE is
+  what made it fit).
+- Export: jit.trace + ONNX opset-17 PASS (`export_borissal_check.py` v0.3
+  case now runs the preset).
+- Interaction checks per §5: fusion×channels covered by the chain itself
+  (fusion_peak adopted first, every later channel measured on top of it);
+  score_ema×select_hysteresis moot (both KILLed solo).
+- Ratio-0.5 spot check: recorded in `ratio05_spotcheck.json` (see table
+  above this commit's completion note).
+
+Follow-ups (not blocking): Tier-2 triggers per §5.3 — the texture axis
+moved (coherence+dog admitted), camera axis unresolved on this eval set
+(InternVid has little ego-motion; `gme`/`motion_cs` need a pan-heavy set
+to be judged fairly); v1 retraining on the enriched input bank; E5
+(learned cross-frame budget allocation, spec §7.5).

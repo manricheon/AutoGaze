@@ -353,3 +353,14 @@ def test_all_knobs_on_traces_and_matches_eager_on_fresh_input():
         t_idx, t_mask = traced(fresh)
     assert torch.equal(t_idx, eager.keep_index)      # 상수 고착 없음
     assert torch.equal(t_mask, eager.keep_mask)
+
+
+def test_v0_3_preset_contract():
+    cfg = BorissalConfig.v0_3(scale=96)
+    assert cfg.fusion_norm == "peak" and cfg.coherence_gate
+    assert cfg.dog_blob_weight > 0 and cfg.coherence_downsample == 4
+    sel = Borissal(cfg).select(_structured_video(), gazing_ratio=0.25)
+    idx = sel.keep_index
+    valid = idx[:, 1:] >= 0
+    assert ((idx[:, 1:] > idx[:, :-1]) | ~valid).all()   # ascending contract
+    assert sel.per_frame_keep.sum(-1).eq(sel.num_keep).all()

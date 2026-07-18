@@ -176,12 +176,16 @@ design.md "Description-task alignment"). Caveat: that sweet spot was
 measured on a single clip; it stays a runtime override rather than a baked
 preset default until the scale run confirms it on real data.
 
-### v0.3 candidate knobs (experimental, pre-gate)
+### v0.3 candidate knobs and the `v0_3()` preset
 
 All OFF by default; with every knob off the pipeline is bit-identical to
-v0.2. These are the Tier-1 candidate bank of `v03-design.md` -- they enter
-a named preset only after passing the sweep gates
-(`scripts/sweep_borissal_v03.py`; verdicts recorded in `design.md`).
+v0.2. The 2026-07-19 sweep (`scripts/sweep_borissal_v03.py`; verdicts in
+`design.md`) admitted three winners into **`BorissalConfig.v0_3()`** =
+v0.2 + `fusion_norm="peak"` + `coherence_gate` (products-then-pool ds=4)
++ `dog_blob_weight=0.5` -- held-out semantic recall 0.325 -> 0.346-0.351,
+V-JEPA cov/uniq Pareto-better than v0.2, ~24.5ms CPU. The remaining knobs
+were KILLed at solo/greedy screening and stay available as off-by-default
+experimental/per-domain switches.
 
 | knob | default | what it does |
 |---|---|---|

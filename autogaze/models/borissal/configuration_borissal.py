@@ -174,6 +174,27 @@ class BorissalConfig:
         base.update(overrides)
         return cls(**base)
 
+    @classmethod
+    def v0_3(cls, **overrides) -> "BorissalConfig":
+        """The Borissal v0.3 preset: v0.2 + the three sweep-gate winners
+        (2026-07-19 solo/greedy screening, docs/borissal/design.md "v0.3"
+        sections): content-adaptive peak fusion (Itti N(.)), the structure-
+        tensor coherence texture gate (products-then-pool ds=4 TUNE), and the
+        DoG blob interior channel. Held-out 16-clip semantic recall
+        0.325 -> 0.346-0.351 (ratio 0.25); V-JEPA coverage/uniqueness
+        Pareto-better than v0.2 (8.174/8.167 vs 8.238/8.106, 4 clips); CPU
+        latency ~24.5ms against the 25ms budget. Rejected candidates
+        (motion_center_surround, signature, color_rarity, fusion "entropy",
+        score_ema, select_hysteresis) remain available as individual
+        off-by-default knobs -- verdicts and negative results in design.md."""
+        base = dict(
+            fusion_norm="peak",
+            coherence_gate=True,
+            dog_blob_weight=0.5,
+        )
+        base.update(overrides)
+        return cls.v0_2(**base)
+
 
 @dataclass
 class BorissalV1Config:
