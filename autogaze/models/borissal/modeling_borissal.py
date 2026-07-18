@@ -398,7 +398,8 @@ class Borissal(nn.Module):
         spatial = torch.sqrt(dx * dx + dy * dy + eps)
         if cfg.coherence_gate:
             spatial = spatial * coherence_gate_map(
-                dx, dy, cfg.coherence_kernel, cfg.coherence_gamma, eps)
+                dx, dy, cfg.coherence_kernel, cfg.coherence_gamma, eps,
+                downsample=cfg.coherence_downsample)
 
         # Pixel -> patch pooling.
         pool = F.avg_pool2d if cfg.pooling == "avg" else F.max_pool2d

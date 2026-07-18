@@ -112,6 +112,10 @@ class BorissalConfig:
     multi-orientation object micro-structure. Pixel-res, closed form."""
     coherence_kernel: int = 5
     coherence_gamma: float = 1.0
+    # Sweep TUNE (2026-07-18): pixel-res stride-1 smoothing costs ~45ms at
+    # 384^2 (latency-gate FAIL); averaging the gradient PRODUCTS into ds x ds
+    # blocks first is valid structure-tensor windowing at ~1/ds^2 the cost.
+    coherence_downsample: int = 4
 
     signature_weight: float = 0.0
     """Image-signature (sign-of-DCT, fixed matmul) appearance channel weight;

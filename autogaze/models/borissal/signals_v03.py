@@ -33,7 +33,8 @@ def motion_center_surround(motion_p: torch.Tensor, kernel: int) -> torch.Tensor:
 
 
 def coherence_gate_map(dx: torch.Tensor, dy: torch.Tensor, kernel: int,
-                       gamma: float, eps: float) -> torch.Tensor:
+                       gamma: float, eps: float,
+                       downsample: int = 1) -> torch.Tensor:
     """(1 - coherence)^gamma texture-suppression gate from the structure tensor.
 
     Closed form, no eigendecomposition: for the smoothed tensor [a b; b c],
@@ -42,20 +43,40 @@ def coherence_gate_map(dx: torch.Tensor, dy: torch.Tensor, kernel: int,
     multi-orientation object micro-structure (lam1 ~ lam2) -> gate ~1
     (Harris 1988; Forstner 1987; Weickert 1999). Box smoothing stands in for
     the classical Gaussian window (cheaper; delegate-native).
+
+    downsample > 1 (sweep TUNE, latency): the gradient PRODUCTS are averaged
+    into ds x ds blocks (strided pool) before the kernel smooth, and the gate
+    is upsampled back. Averaging products is itself valid structure-tensor
+    windowing, so fine gratings are still caught (their dx^2 stays large no
+    matter the period); downsampling the SIGNED gradients instead would
+    cancel them and open the gate -- do not reorder. Cuts the three stride-1
+    pixel-res smooths (~45ms at 384^2) to reduced-res cost (~2ms at ds=4).
     """
     b, t, h, w = (int(x) for x in dx.shape)
+    hs, ws = h, w
+    prods = [dx * dx, dy * dy, dx * dy]
+    if downsample > 1:
+        hs, ws = h // downsample, w // downsample
+        prods = [
+            F.avg_pool2d(p.reshape(b * t, 1, h, w), kernel_size=downsample,
+                         stride=downsample).view(b, t, hs, ws)
+            for p in prods
+        ]
 
     def _smooth(x):
         return F.avg_pool2d(
-            x.reshape(b * t, 1, h, w), kernel_size=kernel, stride=1,
+            x.reshape(b * t, 1, hs, ws), kernel_size=kernel, stride=1,
             padding=kernel // 2, count_include_pad=False,
-        ).view(b, t, h, w)
+        ).view(b, t, hs, ws)
 
-    a = _smooth(dx * dx)
-    c = _smooth(dy * dy)
-    bb = _smooth(dx * dy)
+    a, c, bb = (_smooth(p) for p in prods)
     coherence = ((a - c) ** 2 + 4.0 * bb * bb) / ((a + c) ** 2 + eps)
-    return (1.0 - coherence).clamp(min=0.0, max=1.0) ** gamma
+    gate = (1.0 - coherence).clamp(min=0.0, max=1.0) ** gamma
+    if downsample > 1:
+        gate = F.interpolate(
+            gate.reshape(b * t, 1, hs, ws), size=(h, w), mode="nearest"
+        ).view(b, t, h, w)
+    return gate
 
 
 def dct_matrix(n: int, device, dtype) -> torch.Tensor:
