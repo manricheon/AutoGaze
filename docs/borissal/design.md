@@ -882,8 +882,9 @@ before trusting any in-sweep `lat` column.
 - Interaction checks per §5: fusion×channels covered by the chain itself
   (fusion_peak adopted first, every later channel measured on top of it);
   score_ema×select_hysteresis moot (both KILLed solo).
-- Ratio-0.5 spot check: recorded in `ratio05_spotcheck.json` (see table
-  above this commit's completion note).
+- Ratio-0.5 spot check (16 clips): recall 0.560 -> 0.577 (paired
+  +0.017, 10W-6L), gist 0.946 -> 0.950 -- the preset's edge holds at the
+  upper end of the target budget range too (`ratio05_spotcheck.json`).
 
 Follow-ups (not blocking): Tier-2 triggers per §5.3 — the texture axis
 moved (coherence+dog admitted), camera axis unresolved on this eval set
