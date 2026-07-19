@@ -1024,3 +1024,38 @@ varies), or a downstream task that penalizes temporal over-coverage.
 The `per_frame_counts` injection port (behavior-off plumbing, contract-
 tested) stays — it is the attachment point for any future allocator and
 for oracle-style diagnostics.
+
+## E5 revisit-condition sweep (2026-07-19, same day): the negative extends to multi-scene, ultra-sparse, and clip-global judging
+
+User asked whether the E5 verdict survives SCENE CHANGES. Multi-scene
+videos were CONSTRUCTED by hard-cut splicing held-out clips (8 two-clip +
+4 four-clip composites, cut positions controlled;
+`scripts/e5_multiscene_review.py`). Allocations compared on frozen v0.3
+scores: uniform / global(+floor, the v0.2-era default) / SigLIP2-oracle
+(teacher sees ALL frames densely; only per-tubelet counts taken). Judged
+by CLIP+DINOv2 only (oracle's teacher excluded). Raw:
+`outputs/borissal/e5_multiscene{,_r00625,_clipscope}/`.
+
+| condition | oracle − uniform (foreign-judge mean) | global − uniform |
+|---|---|---|
+| multi-scene, frame-scope judge, ratio 0.25 | −0.0006 | −0.0004 (judge-split +0.006/−0.006) |
+| multi-scene, ULTRA-SPARSE ratio 0.0625 (36 tok/tubelet) | +0.0003 | **−0.0070 (3W-9L — global HURTS)** |
+| multi-scene, CLIP-GLOBAL importance scope | −0.0008 | +0.0004 |
+
+Mechanistic reading: even across hard cuts the oracle's own allocation is
+nearly flat (per-tubelet std ~7 tokens of 144 — every scene has something
+to attend to), and per-frame-normalized recall makes equal-size target
+sets per frame, under which uniform is structurally near-optimal; moving
+to clip-global targets does not change the verdict on these composites.
+The ultra-sparse row also kills the "allocation matters when budget <
+important set" hypothesis on this data — and shows global's concentration
+actively starving coverage there.
+
+**Standing verdict**: temporal budget allocation — rule-based OR learned
+(oracle ceiling) — offers no measurable headroom over uniform for
+description-proxy metrics on InternVid-style content, across scene
+structure, budget scarcity, and importance scope. Remaining UNTESTED
+scope: long-form originals with true dead time (static shots, blackness,
+credits) and captioner-based judging. Also recorded: SigLIP2 MAP
+attention shows border attention-sink artifacts (visible in the recall-
+anatomy visualization) — part of the single-encoder bias budget.
