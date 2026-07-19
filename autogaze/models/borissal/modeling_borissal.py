@@ -405,13 +405,24 @@ class Borissal(nn.Module):
         else:
             raise ValueError(f"unknown spatial_op: {cfg.spatial_op}")
         spatial = torch.sqrt(dx * dx + dy * dy + eps)
-        if cfg.coherence_gate:
-            spatial = spatial * coherence_gate_map(
-                dx, dy, cfg.coherence_kernel, cfg.coherence_gamma, eps,
-                downsample=cfg.coherence_downsample)
         if cfg.spatial_diff == "frame":
             grouped = spatial.view(B, T_grid, tubelet_size, H, W)
             spatial = grouped.mean(dim=2) if cfg.spatial_agg == "mean" else grouped.amax(dim=2)
+            if cfg.coherence_gate:
+                # TUNE (2026-07-19 sweep): the gate stays TUBELET-granular
+                # even for frame-granular spatial -- coherence is a smoothed
+                # regional texture statistic, so recomputing it per frame
+                # (~2x coherence cost, ~+6ms) buys nothing; tubelet-mean
+                # gradients suffice and keep the frame signal affordable.
+                dyg = F.pad(tub[:, :, 1:, :] - tub[:, :, :-1, :], (0, 0, 0, 1))
+                dxg = F.pad(tub[:, :, :, 1:] - tub[:, :, :, :-1], (0, 1, 0, 0))
+                spatial = spatial * coherence_gate_map(
+                    dxg, dyg, cfg.coherence_kernel, cfg.coherence_gamma, eps,
+                    downsample=cfg.coherence_downsample)
+        elif cfg.coherence_gate:
+            spatial = spatial * coherence_gate_map(
+                dx, dy, cfg.coherence_kernel, cfg.coherence_gamma, eps,
+                downsample=cfg.coherence_downsample)
 
         # Pixel -> patch pooling.
         pool = F.avg_pool2d if cfg.pooling == "avg" else F.max_pool2d
