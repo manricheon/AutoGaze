@@ -49,6 +49,12 @@ CANDIDATES = {
     "fusion_entropy": {"fusion_norm": "entropy"},
     "score_ema": {"score_ema_alpha": 0.5},
     "hysteresis": {"select_hysteresis_eps": 0.05},
+    # v0.3.x follow-up candidates (2026-07-19): judged ON TOP OF the v0.3
+    # preset via --adopted fusion_peak coherence_gate dog_blob
+    "block_gate_pool": {"block_gate_source": "pool"},
+    "spatial_frame_mean": {"spatial_diff": "frame"},
+    "spatial_frame_max": {"spatial_diff": "frame", "spatial_agg": "max"},
+    "max_cap2": {"max_keep_per_frame_mult": 2.0},
 }
 
 
