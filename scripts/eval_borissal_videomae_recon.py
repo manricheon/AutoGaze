@@ -110,6 +110,10 @@ def build_selection(spec: str, video: torch.Tensor, ratio: float, spread: float 
         return Borissal(BorissalConfig.v0_2(scale=scale, per_frame_allocation="uniform",
                                             block_size=1)).select(video, gazing_ratio=ratio,
                                                                   spread_fraction=spread)
+    if spec == "v0.3":
+        return Borissal(BorissalConfig.v0_3(scale=scale, per_frame_allocation="uniform",
+                                            block_size=1)).select(video, gazing_ratio=ratio,
+                                                                  spread_fraction=spread)
     if spec == "v0.1":
         return Borissal(BorissalConfig(scale=scale)).select(video, gazing_ratio=ratio,
                                                             spread_fraction=spread)
@@ -151,7 +155,7 @@ def main():
     p.add_argument("--video", default=str(REPO_ROOT / "assets" / "example_input.mp4"))
     p.add_argument("--videomae-ckpt", default=str(REPO_ROOT / "weights" / "VideoMAE_AutoGaze" / "videomae.pt"))
     p.add_argument("--selectors", nargs="+", default=["random", "v0.2"],
-                   help="random | v0.1 | v0.2 | v1:<checkpoint.pt>")
+                   help="random | v0.1 | v0.2 | v0.3 | v1:<checkpoint.pt>")
     p.add_argument("--ratios", nargs="+", type=float, default=[0.25])
     p.add_argument("--num-frames", type=int, default=16)
     p.add_argument("--spread", type=float, default=0.0,
