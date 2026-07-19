@@ -985,3 +985,42 @@ Also per user review: the research-positioning claim comparing v0.3 to the
 PILOT v1@1000 was removed from the dashboard/features doc — a 1K-clip
 batch-2 pilot is not a fair learned-model baseline; the scatter-bias
 argument stands on coverage-gate measurements alone.
+
+## E5 Phase 0 verdict (2026-07-19): NEGATIVE — oracle allocation ceiling ≈ uniform on short clips; A1 not trained
+
+Plan: learn a temporal budget-allocation head ("Borissal-A1", user-named to
+keep v0.3 frozen as the training-free baseline) by distilling a VLM
+teacher's per-frame attention mass. Phase 0 reviewed teacher candidates by
+converting each candidate's attention into an ORACLE allocation (applied
+through the new `select(per_frame_counts=...)` override on top of frozen
+v0.3 patch scores) and cross-judging with the OTHER candidates' recall
+metrics — self-judging excluded. Candidates: SigLIP2 MAP attention,
+CLIP ViT-L/14-336 CLS attention, DINOv2-base CLS attention
+(language-unaligned control). Raw: `outputs/borissal/e5_teacher_review/`.
+
+Result (16 held-out clips, ratio 0.25; all judges sane — every saliency
+allocation ≫ random ~0.25):
+
+| oracle → foreign judge | Δ recall vs uniform | paired |
+|---|---|---|
+| siglip2 → dinov2 | **+0.0015 (best case)** | 11W-4L |
+| siglip2 → clip | −0.0003 | 8W-7L |
+| clip / dinov2 → any | ±0.001 | coin-flip |
+
+**The kill rule fired**: even a PERFECT teacher-derived oracle moves no
+foreign judge beyond +0.0015 — an order of magnitude below the ±0.02 tie
+band and ~10x smaller than the v0.3 signal elements' gains. Training A1
+could at best recover this ceiling, so it was not trained (the plan's
+pre-registered stop condition).
+
+**Interpretation and scope**: InternVid clips are 2–7s single-scene — the
+"which moment matters" question barely varies across 8 tubelets, so
+temporal allocation has no headroom regardless of teacher quality. This
+sharpens yesterday's rule-dial finding into a data-scoped claim: on
+short single-scene clips, uniform temporal allocation is effectively
+optimal, and the E5/A1 direction is dead HERE. REVISIT CONDITIONS:
+long-form/multi-scene videos (where per-tubelet information genuinely
+varies), or a downstream task that penalizes temporal over-coverage.
+The `per_frame_counts` injection port (behavior-off plumbing, contract-
+tested) stays — it is the attachment point for any future allocator and
+for oracle-style diagnostics.
