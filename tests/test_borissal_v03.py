@@ -371,15 +371,17 @@ def test_v0_3_preset_contract():
 def test_max_cap_mult1_equals_uniform_share():
     """cap = 1x uniform share exposes exactly K_total candidates -> every
     tubelet keeps its uniform share (global alloc degenerates to uniform)."""
-    cfg = BorissalConfig.v0_3(scale=96, block_size=1, max_keep_per_frame_mult=1.0)
+    cfg = BorissalConfig.v0_3(scale=96, block_size=1, per_frame_allocation="global",
+                              max_keep_per_frame_mult=1.0)
     sel = Borissal(cfg).select(_structured_video(), gazing_ratio=0.25)
     assert sel.per_frame_keep.eq(sel.per_frame_keep[0, 0]).all()
     assert int(sel.num_keep[0]) == round(0.25 * 4 * 36)
 
 
 def test_max_cap_bounds_concentration_keeps_budget():
-    cfg = BorissalConfig.v0_3(scale=96, block_size=1, max_keep_per_frame_mult=1.5)
-    base = BorissalConfig.v0_3(scale=96, block_size=1)
+    cfg = BorissalConfig.v0_3(scale=96, block_size=1, per_frame_allocation="global",
+                              max_keep_per_frame_mult=1.5)
+    base = BorissalConfig.v0_3(scale=96, block_size=1, per_frame_allocation="global")
     K = round(0.25 * 4 * 36)
     cap = round(1.5 * K / 4)
     sel = Borissal(cfg).select(_structured_video(), gazing_ratio=0.25)

@@ -936,3 +936,52 @@ ratio 0.25) vs v0.2 0.325; clean-normalized latency ~22ms (was ~24.5);
 tests 80/80; jit.trace + ONNX PASS. The pool adoption also supersedes the
 luma-resize optimization on the preset path (recompute retained for
 `block_gate_source="recompute"` users).
+
+## Allocation-policy comparison (2026-07-19, user-driven): uniform wins; preset default flipped
+
+User question: "uniform vs global의 자세한 비교 — description에 맞는 배분을
+나중에 제어하고 싶다." This exposed a measurement gap: ALL semantic-recall
+numbers to date used the uniform variant (the MAP-head metric's equal-count
+requirement); global allocation's semantic effect had never been measured.
+Fixed by generalizing the metric to variable per-frame counts (recall is
+count-agnostic as-is; gist via per-frame probe pooling), then comparing 6
+policies on the v0.3 signal stack (16 clips, both ratios). Raw:
+`outputs/borissal/v03_sweep/allocation_policies.json`.
+
+| policy | recall @0.25 (vs unif) | recall @0.5 (vs unif) | uniq/cov @0.25 (4 clips) |
+|---|---|---|---|
+| **uniform** | **0.3615** | **0.6034** | **8.191** / 8.183 |
+| global+floor (0.10/0.25/0.50 identical) | 0.3573 (9W-7L) | 0.5836 (**2W-12L**) | 8.133 / 8.179 |
+| proportional | 0.3560 (7W-9L) | 0.5803 (3W-11L) | — |
+| global+spread .25 | 0.3556 (8W-8L) | 0.5837 (4W-12L) | — |
+
+Findings:
+1. **Uniform wins the primary axis decisively at ratio 0.5** (12/16 clips)
+   and ties at 0.25. Interpretation: with a generous budget, concentration
+   has nothing left to buy — coverage dominates, and global's drained
+   tubelets lose their top-attention patches.
+2. **The floor dial is DEAD on this data**: floors 0.10/0.25/0.50 produce
+   identical selections — every tubelet naturally wins more than the floor
+   in free competition (per-frame std ~29 on mean 144), so the knob never
+   binds. The v0.2-era "floor preserves coverage" story was measured on the
+   example clip; on real clips the coverage problem it solves doesn't occur.
+3. **Uniform also wins uniqueness with the v0.3 stack** (8.191 vs 8.133,
+   cov ~tie +0.004): the v0.2-era "global+floor strongest element" finding
+   (example clip, v0.1 signals) does NOT carry over to v0.3 signals on
+   real data.
+4. Consequence: `v0_3()` preset default flipped to
+   `per_frame_allocation="uniform"` — also the trace/export-safe
+   (data-independent) policy per the mobile review. global/proportional/
+   floor/cap/spread all remain as knobs; cap tests pinned to global (the
+   only branch where cap exists). 80/80 tests.
+
+Control guidance for description (recorded for the eventual allocation
+work): the meaningful dial is NOT floor size but the uniform<->global
+choice itself, plus spread. The path to content-adaptive allocation is E5
+(learned, oracle-distilled) — rule-level dials measured so far don't move
+the semantic axis except to lose.
+
+Also per user review: the research-positioning claim comparing v0.3 to the
+PILOT v1@1000 was removed from the dashboard/features doc — a 1K-clip
+batch-2 pilot is not a fair learned-model baseline; the scatter-bias
+argument stands on coverage-gate measurements alone.

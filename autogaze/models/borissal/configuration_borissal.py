@@ -213,6 +213,15 @@ class BorissalConfig:
             fusion_norm="peak",
             coherence_gate=True,
             dog_blob_weight=0.5,
+            # Allocation-policy comparison (2026-07-19, count-agnostic semantic
+            # metric, 16 clips): UNIFORM beats global+floor decisively at
+            # ratio 0.5 (0.603 vs 0.584, 12 of 16 clips) and ties at 0.25;
+            # with the v0.3 signal stack uniform also wins UNIQUENESS
+            # (8.191 vs 8.133, cov ~tie) -- the v0.2-era "global+floor
+            # strongest" finding does not carry over. Uniform is additionally
+            # the trace/export-safe (data-independent) policy per the mobile
+            # review. global/proportional/floor/cap stay as control knobs.
+            per_frame_allocation="uniform",
             # v0.3.x follow-up round (2026-07-19): pooled block gate --
             # identical selections to the recompute path on the whole held-out
             # set at 384, ~7ms cheaper (single pipeline pass); frame-granular
