@@ -891,3 +891,48 @@ moved (coherence+dog admitted), camera axis unresolved on this eval set
 (InternVid has little ego-motion; `gme`/`motion_cs` need a pan-heavy set
 to be judged fairly); v1 retraining on the enriched input bank; E5
 (learned cross-frame budget allocation, spec §7.5).
+
+## Borissal v0.3.x efficiency/allocation round (2026-07-19): user-driven review
+
+Four follow-ups from a user review of the v0.3 pipeline ("이중 패스 낭비 /
+tubelet 평균 전 프레임 처리 / top-k 할당 개선"), handled as two
+behavior-preserving changes + two sweep-gated candidates. Raw tables:
+`outputs/borissal/v03_sweep/v03x*/` (gitignored).
+
+**Behavior-preserving (adopted outright):**
+- *Allocation clarity refactor*: the global-allocation "+10 bonus" trick
+  rewritten as an explicit two-step (per-tubelet guaranteed top-m, then
+  free budget by clip-wide top-k over the rest) — equivalent selection,
+  regression-covered; plus a `max_keep_per_frame_mult` CAP knob symmetric
+  to the floor (mult=1.0 provably degenerates to uniform; boundary tests).
+- *Luma-space coarse resize*: the recompute block-gate path resizes 1
+  luma channel instead of 3 RGB channels when no color channel is active
+  (linear ops commute; verified ~1e-7 coarse-score deltas, gate top-k
+  indices identical on real+random clips).
+
+**Sweep-gated (judged on top of the v0.3 preset, 16-clip semantic +
+4-clip cov + clean latency):**
+
+| candidate | paired recall | cov/uniq | latency (clean, normalized) | verdict |
+|---|---|---|---|---|
+| `block_gate_source="pool"` | **0W-0L-16T — selections IDENTICAL** to recompute at 384 | Pareto-better vs v0.2 held | ~24 → **~17ms** (−7ms, single pipeline pass) | **ADOPT** |
+| `spatial_diff="frame"`+`agg="max"` (initial) | +0.0043, 10W-4L | — | +12ms → chain ~29ms (over budget) | TUNE |
+| same, TUNE: gate stays tubelet-granular | +0.0030, 8W-6L-2T | 8.179/8.133 vs 8.175/8.118 (one-axis trade) | +6ms → chain **~22ms** | **ADOPT (weakest accepted margin — re-check at scale)** |
+| `spatial_frame_mean` | +0.0014, 9W-4L-3T | — | — | dominated by max variant |
+| `max_keep_per_frame_mult=2.0` | 0W-0L-16T — never binds (block gate already caps exposure ~2x share) | — | free | keep OFF; safety knob for pathological concentration / block_size=1 deployments |
+
+**TUNE record (frame-granular spatial)**: the initial variant recomputed
+the coherence gate per frame (~2x coherence cost, +12ms total). Coherence
+is a smoothed regional texture statistic, so per-frame recompute buys
+nothing: the TUNE computes the gate once from tubelet-mean gradients and
+applies it to the frame-aggregated magnitude (+6ms total). The paired
+margin softened after the TUNE (10W-4L → 8W-6L-2T) but stays positive;
+accepted under the non-degradation rule with an explicit scale-run
+re-check flag.
+
+**Updated `v0_3()` preset** (v2): + `block_gate_source="pool"`,
+`spatial_diff="frame"`, `spatial_agg="max"`. Recall 0.354 (16-clip,
+ratio 0.25) vs v0.2 0.325; clean-normalized latency ~22ms (was ~24.5);
+tests 80/80; jit.trace + ONNX PASS. The pool adoption also supersedes the
+luma-resize optimization on the preset path (recompute retained for
+`block_gate_source="recompute"` users).

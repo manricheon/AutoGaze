@@ -213,6 +213,15 @@ class BorissalConfig:
             fusion_norm="peak",
             coherence_gate=True,
             dog_blob_weight=0.5,
+            # v0.3.x follow-up round (2026-07-19): pooled block gate --
+            # identical selections to the recompute path on the whole held-out
+            # set at 384, ~7ms cheaper (single pipeline pass); frame-granular
+            # spatial with max aggregation -- +0.003 recall (8W-6L-2T, the
+            # weakest accepted margin: re-check at scale), +5ms with the
+            # tubelet-granular gate TUNE.
+            block_gate_source="pool",
+            spatial_diff="frame",
+            spatial_agg="max",
         )
         base.update(overrides)
         return cls.v0_2(**base)

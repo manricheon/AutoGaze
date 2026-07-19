@@ -359,6 +359,8 @@ def test_v0_3_preset_contract():
     cfg = BorissalConfig.v0_3(scale=96)
     assert cfg.fusion_norm == "peak" and cfg.coherence_gate
     assert cfg.dog_blob_weight > 0 and cfg.coherence_downsample == 4
+    assert cfg.block_gate_source == "pool"
+    assert cfg.spatial_diff == "frame" and cfg.spatial_agg == "max"
     sel = Borissal(cfg).select(_structured_video(), gazing_ratio=0.25)
     idx = sel.keep_index
     valid = idx[:, 1:] >= 0
@@ -391,8 +393,9 @@ def test_max_cap_bounds_concentration_keeps_budget():
 
 def test_block_gate_pool_mode_contract_and_changes_selection():
     video = _structured_video()
-    rec = Borissal(BorissalConfig.v0_3(scale=96)).select(video, gazing_ratio=0.25)
-    pool = Borissal(BorissalConfig.v0_3(scale=96, block_gate_source="pool")).select(
+    rec = Borissal(BorissalConfig.v0_3(scale=96, block_gate_source="recompute")).select(
+        video, gazing_ratio=0.25)
+    pool = Borissal(BorissalConfig.v0_3(scale=96)).select(   # preset default = pool
         video, gazing_ratio=0.25)
     assert not torch.equal(rec.keep_mask, pool.keep_mask)
     assert torch.equal(rec.num_keep, pool.num_keep)     # exact budget invariant
