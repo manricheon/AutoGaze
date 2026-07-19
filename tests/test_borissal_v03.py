@@ -439,3 +439,20 @@ def test_spatial_frame_max_preserves_single_frame_detail():
         m = sel.keep_mask.reshape(1, 4, 6, 6)
         return int(m[:, :, 3:5, :].sum())
     assert band_b_count(sel_f) >= band_b_count(sel_t)
+
+
+def test_per_frame_counts_override_respected_and_contract_kept():
+    """E5: caller-supplied per-tubelet counts replace the allocation step only."""
+    video = _structured_video()
+    counts = torch.tensor([4, 20, 8, 4])                 # sums to 36 = 0.25 * 144
+    sel = Borissal(BorissalConfig.v0_3(scale=96)).select(
+        video, gazing_ratio=0.25, per_frame_counts=counts)
+    assert torch.equal(sel.per_frame_keep[0], counts)
+    assert int(sel.num_keep[0]) == 36
+    idx = sel.keep_index
+    valid = idx[:, 1:] >= 0
+    assert ((idx[:, 1:] > idx[:, :-1]) | ~valid).all()   # ascending contract
+    # spread is incompatible with an explicit counts override
+    with pytest.raises(ValueError):
+        Borissal(BorissalConfig.v0_3(scale=96)).select(
+            video, gazing_ratio=0.25, per_frame_counts=counts, spread_fraction=0.25)

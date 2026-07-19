@@ -245,11 +245,13 @@ class Borissal(nn.Module):
         patch_size: Optional[int] = None,
         spread_fraction: Optional[float] = None,
         temporal_state: Optional[dict] = None,
+        per_frame_counts: Optional[torch.Tensor] = None,
     ) -> Selection:
         """video: (B, T, C, H, W) float, already resized/normalized."""
         selection, _ = self._select_impl(
             video, gazing_ratio, motion_weight, per_frame_allocation, tubelet_size, patch_size,
             want_intermediates=False, spread_fraction=spread_fraction, temporal_state=temporal_state,
+            per_frame_counts=per_frame_counts,
         )
         return selection
 
@@ -264,6 +266,7 @@ class Borissal(nn.Module):
         patch_size: Optional[int] = None,
         spread_fraction: Optional[float] = None,
         temporal_state: Optional[dict] = None,
+        per_frame_counts: Optional[torch.Tensor] = None,
     ):
         """Same as `select`, but also returns the intermediate (pre-top-k) saliency
         maps -- useful for visualizing the motion/spatial/combined-score stages,
@@ -285,6 +288,7 @@ class Borissal(nn.Module):
         return self._select_impl(
             video, gazing_ratio, motion_weight, per_frame_allocation, tubelet_size, patch_size,
             want_intermediates=True, spread_fraction=spread_fraction, temporal_state=temporal_state,
+            per_frame_counts=per_frame_counts,
         )
 
     def _extra_channels(self, video: torch.Tensor, tub: torch.Tensor,
@@ -582,6 +586,7 @@ class Borissal(nn.Module):
         want_intermediates: bool,
         spread_fraction: Optional[float] = None,
         temporal_state: Optional[dict] = None,
+        per_frame_counts: Optional[torch.Tensor] = None,
     ):
         cfg = self.config
         tubelet_size = tubelet_size or cfg.tubelet_size
@@ -592,6 +597,8 @@ class Borissal(nn.Module):
         spread = cfg.spread_fraction if spread_fraction is None else spread_fraction
         if spread > 0 and alloc == "proportional":
             raise ValueError("spread_fraction requires uniform or global allocation")
+        if per_frame_counts is not None and spread > 0:
+            raise ValueError("per_frame_counts override is incompatible with spread_fraction")
         eps = cfg.eps
 
         # Explicit int() casts: under torch.jit.trace / torch.export, .shape components
@@ -627,7 +634,22 @@ class Borissal(nn.Module):
         # Per-tubelet budget allocation.
         m = None
         K_total = None
-        if alloc == "uniform":
+        if per_frame_counts is not None:
+            # E5 runtime override: the caller supplies the per-tubelet token
+            # counts directly (e.g. a learned/oracle temporal-allocation head).
+            # Only the ALLOCATION step is replaced -- patch ranking, block
+            # gate, packing and the Selection contract are untouched. Counts
+            # are data-dependent by nature: the trace/export caveat of the
+            # "proportional" mode (mobile review) applies identically.
+            k_per_frame = per_frame_counts.to(device=device, dtype=torch.long)
+            if k_per_frame.dim() == 1:
+                k_per_frame = k_per_frame.unsqueeze(0).expand(B, T_grid)
+            if k_per_frame.shape != (B, T_grid):
+                raise ValueError(
+                    f"per_frame_counts must be (T_grid,) or (B, T_grid); got {tuple(per_frame_counts.shape)}")
+            k_per_frame = k_per_frame.clamp(1, N_pf)
+            alloc = "counts"  # falls through to the generic variable-k top-k branch
+        elif alloc == "uniform":
             k = min(max(1, round(ratio * N_pf)), N_pf)
             k_per_frame = torch.full((B, T_grid), k, dtype=torch.long, device=device)
         elif alloc == "proportional":
