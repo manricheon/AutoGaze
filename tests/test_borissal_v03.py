@@ -364,3 +364,73 @@ def test_v0_3_preset_contract():
     valid = idx[:, 1:] >= 0
     assert ((idx[:, 1:] > idx[:, :-1]) | ~valid).all()   # ascending contract
     assert sel.per_frame_keep.sum(-1).eq(sel.num_keep).all()
+
+
+def test_max_cap_mult1_equals_uniform_share():
+    """cap = 1x uniform share exposes exactly K_total candidates -> every
+    tubelet keeps its uniform share (global alloc degenerates to uniform)."""
+    cfg = BorissalConfig.v0_3(scale=96, block_size=1, max_keep_per_frame_mult=1.0)
+    sel = Borissal(cfg).select(_structured_video(), gazing_ratio=0.25)
+    assert sel.per_frame_keep.eq(sel.per_frame_keep[0, 0]).all()
+    assert int(sel.num_keep[0]) == round(0.25 * 4 * 36)
+
+
+def test_max_cap_bounds_concentration_keeps_budget():
+    cfg = BorissalConfig.v0_3(scale=96, block_size=1, max_keep_per_frame_mult=1.5)
+    base = BorissalConfig.v0_3(scale=96, block_size=1)
+    K = round(0.25 * 4 * 36)
+    cap = round(1.5 * K / 4)
+    sel = Borissal(cfg).select(_structured_video(), gazing_ratio=0.25)
+    ref = Borissal(base).select(_structured_video(), gazing_ratio=0.25)
+    assert int(sel.num_keep[0]) == K                    # exact budget kept
+    assert sel.per_frame_keep.max() <= cap              # cap enforced
+    m = max(1, round(0.25 * K / 4))
+    assert sel.per_frame_keep.min() >= m                # floor still holds
+    assert int(ref.num_keep[0]) == K
+
+
+def test_block_gate_pool_mode_contract_and_changes_selection():
+    video = _structured_video()
+    rec = Borissal(BorissalConfig.v0_3(scale=96)).select(video, gazing_ratio=0.25)
+    pool = Borissal(BorissalConfig.v0_3(scale=96, block_gate_source="pool")).select(
+        video, gazing_ratio=0.25)
+    assert not torch.equal(rec.keep_mask, pool.keep_mask)
+    assert torch.equal(rec.num_keep, pool.num_keep)     # exact budget invariant
+    idx = pool.keep_index
+    valid = idx[:, 1:] >= 0
+    assert ((idx[:, 1:] > idx[:, :-1]) | ~valid).all()  # ascending contract
+
+
+def test_spatial_frame_max_preserves_single_frame_detail():
+    """Two COMPETING texture bands: band A is textured in every frame, band
+    B only in one frame of each tubelet pair. The tubelet-mean spatial
+    signal halves band B (motion blur), so A outranks B; frame-level max
+    sees both at full sharpness, shifting budget toward B -- the selection
+    must differ. (A single salient region would NOT discriminate the modes:
+    halved magnitude doesn't change the ranking when nothing competes.)"""
+    torch.manual_seed(0)
+    B, T, size = 1, 8, 96
+    v = torch.full((B, T, 3, size, size), 0.5)
+    band_a = torch.rand(3, 12, size)
+    band_b = torch.rand(3, 12, size) * 2.0 - 0.5   # 2x contrast: sharp-in-one-
+    # frame B must OUTRANK steady A under frame-max, but lose to it once the
+    # tubelet mean halves its gradient (0.5x contrast-equivalent)
+    for t in range(T):                                  # test helper: loop OK
+        v[:, t, :, 20:32, :] = band_a                    # steady texture
+        if t % 2 == 0:
+            v[:, t, :, 60:72, :] = band_b                # blinks: 1 of 2 frames
+    # motion_weight=0 isolates the SPATIAL channel: band B blinking also
+    # fires frame-diff motion identically in both modes, which would
+    # otherwise saturate the budget inside band B regardless of spatial.
+    tub_cfg = _v02_uniform(scale=96, motion_weight=0.0)
+    frm_cfg = _v02_uniform(scale=96, motion_weight=0.0,
+                           spatial_diff="frame", spatial_agg="max")
+    sel_t = Borissal(tub_cfg).select(v, gazing_ratio=0.25)
+    sel_f = Borissal(frm_cfg).select(v, gazing_ratio=0.25)
+    assert not torch.equal(sel_t.keep_mask, sel_f.keep_mask)
+    assert torch.equal(sel_t.num_keep, sel_f.num_keep)
+    # budget share of the blinking band (grid rows 3..4) must not DROP
+    def band_b_count(sel):
+        m = sel.keep_mask.reshape(1, 4, 6, 6)
+        return int(m[:, :, 3:5, :].sum())
+    assert band_b_count(sel_f) >= band_b_count(sel_t)

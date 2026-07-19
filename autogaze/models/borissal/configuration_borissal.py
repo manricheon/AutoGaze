@@ -136,6 +136,28 @@ class BorissalConfig:
     a flooded motion map loses fusion weight)."""
     fusion_entropy_floor: float = 0.3
 
+    # --- v0.3.x follow-up candidates (2026-07-19 review; sweep-gated like the
+    # rest of the bank unless marked behavior-preserving) ---
+    block_gate_source: Literal["recompute", "pool"] = "recompute"
+    """"recompute" (v0.2 behavior): the coarse block-gate signal reruns the
+    whole saliency pipeline on a 1/b-resized clip. "pool" (candidate):
+    block-pool the fine per-patch scores instead -- one pipeline pass, ~5ms
+    cheaper; the recompute path's resize-low-pass noise suppression is
+    largely redundant once the coherence gate is on."""
+    spatial_diff: Literal["tubelet", "frame"] = "tubelet"
+    """Granularity of the spatial/edge signal, mirroring motion_diff:
+    "tubelet" differentiates the 2-frame mean (slight motion blur);
+    "frame" measures each raw frame then aggregates per tubelet."""
+    spatial_agg: Literal["mean", "max"] = "mean"
+    """Aggregation for spatial_diff="frame": "max" keeps detail that is
+    sharp in at least one frame of the tubelet."""
+    max_keep_per_frame_mult: float = 0.0
+    """Global-allocation per-tubelet CAP as a multiple of the uniform share
+    (0 = off). E.g. 2.0: no tubelet may take more than 2x its uniform share
+    of K_total -- bounds free-budget monopolization symmetric to the
+    min_keep_per_frame_ratio floor. Clamped so the exact budget stays
+    feasible (cap >= ceil(K_total / T_grid) and >= the floor m)."""
+
     score_ema_alpha: float = 0.0
     """Temporal score EMA over tubelets (0 = off): S_t = a*S_{t-1} + (1-a)*S_t,
     loop-free within a clip; streaming carries one state map via

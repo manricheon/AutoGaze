@@ -385,14 +385,23 @@ class Borissal(nn.Module):
                 motion.reshape(B * T_grid, 1, H, W), kernel_size=ksz, stride=1, padding=ksz // 2
             ).view(B, T_grid, H, W)
 
-        # Spatial: gradient / edge energy.
+        # Spatial: gradient / edge energy. Source granularity (v0.3.x knob,
+        # mirrors motion_diff): "tubelet" (default) measures the 2-frame MEAN
+        # -- a slight motion blur that smears fast movers' edges and halves
+        # detail present in only one frame; "frame" measures each raw frame
+        # and aggregates per tubelet afterwards ("max" keeps anything sharp
+        # in at least one frame). Selection stays tubelet-granular either way
+        # (downstream token-grid contract) -- only the SIGNAL granularity
+        # changes.
+        spatial_src = tub if cfg.spatial_diff == "tubelet" else gray
+        Ts = int(spatial_src.shape[1])
         if cfg.spatial_op == "grad":
-            dy = F.pad(tub[:, :, 1:, :] - tub[:, :, :-1, :], (0, 0, 0, 1))
-            dx = F.pad(tub[:, :, :, 1:] - tub[:, :, :, :-1], (0, 1, 0, 0))
+            dy = F.pad(spatial_src[:, :, 1:, :] - spatial_src[:, :, :-1, :], (0, 0, 0, 1))
+            dx = F.pad(spatial_src[:, :, :, 1:] - spatial_src[:, :, :, :-1], (0, 1, 0, 0))
         elif cfg.spatial_op == "sobel":
-            flat = tub.reshape(B * T_grid, 1, H, W)
-            dx = F.conv2d(flat, self._sobel_x, padding=1).view(B, T_grid, H, W)
-            dy = F.conv2d(flat, self._sobel_y, padding=1).view(B, T_grid, H, W)
+            flat = spatial_src.reshape(B * Ts, 1, H, W)
+            dx = F.conv2d(flat, self._sobel_x, padding=1).view(B, Ts, H, W)
+            dy = F.conv2d(flat, self._sobel_y, padding=1).view(B, Ts, H, W)
         else:
             raise ValueError(f"unknown spatial_op: {cfg.spatial_op}")
         spatial = torch.sqrt(dx * dx + dy * dy + eps)
@@ -400,6 +409,9 @@ class Borissal(nn.Module):
             spatial = spatial * coherence_gate_map(
                 dx, dy, cfg.coherence_kernel, cfg.coherence_gamma, eps,
                 downsample=cfg.coherence_downsample)
+        if cfg.spatial_diff == "frame":
+            grouped = spatial.view(B, T_grid, tubelet_size, H, W)
+            spatial = grouped.mean(dim=2) if cfg.spatial_agg == "mean" else grouped.amax(dim=2)
 
         # Pixel -> patch pooling.
         pool = F.avg_pool2d if cfg.pooling == "avg" else F.max_pool2d
@@ -500,18 +512,41 @@ class Borissal(nn.Module):
         two-pass (v0.3) can run it twice on identically-shaped inputs."""
         L = T_grid * N_pf
         if alloc == "global":
+            neg = torch.finfo(sel_scores.dtype).min
+            # Optional per-tubelet CAP (v0.3.x allocation knob): each tubelet
+            # exposes at most cap = mult x its uniform share to the global
+            # top-k, so no single moment can monopolize the free budget.
+            # cap >= ceil(K_total / T_grid) keeps the exact budget feasible.
+            cap_mult = self.config.max_keep_per_frame_mult
+            if cap_mult > 0:
+                share = (K_total + T_grid - 1) // T_grid
+                cap = min(N_pf, max(share, m, int(round(cap_mult * K_total / T_grid))))
+                _, cidx = sel_scores.topk(cap, dim=-1)
+                exposed = torch.zeros(B, T_grid, N_pf, dtype=torch.bool, device=device)
+                exposed.scatter_(-1, cidx, torch.ones_like(cidx, dtype=torch.bool))
+                sel_scores = sel_scores.masked_fill(~exposed, neg)
             _, gidx = sel_scores.topk(m, dim=-1)
             guaranteed = torch.zeros(B, T_grid, N_pf, dtype=torch.bool, device=device)
             guaranteed.scatter_(-1, gidx, torch.ones_like(gidx, dtype=torch.bool))
-            global_scores = (sel_scores + 10.0 * guaranteed.to(sel_scores.dtype)).reshape(B, L)
             if spread > 0:
+                # hybrid path keeps the single-score-vector bonus form (the
+                # stratified bucket helper needs one comparable vector)
+                global_scores = (sel_scores + 10.0 * guaranteed.to(sel_scores.dtype)).reshape(B, L)
                 keep_mask_flat = _hybrid_topk(global_scores, K_total, spread,
                                               (T_grid, H_grid, W_grid))
-            else:
-                _, kidx = global_scores.topk(K_total, dim=-1)
-                keep_mask_flat = torch.zeros(B, L, dtype=torch.bool, device=device)
-                keep_mask_flat.scatter_(1, kidx, torch.ones_like(kidx, dtype=torch.bool))
-            return keep_mask_flat.reshape(B, T_grid, N_pf)
+                return keep_mask_flat.reshape(B, T_grid, N_pf)
+            # Explicit two-step allocation (equivalent to the former
+            # +10.0-bonus single top-k, refactored for clarity): (1) every
+            # tubelet's guaranteed top-m is kept outright; (2) the remaining
+            # free budget K_total - T_grid*m goes to a clip-wide top-k over
+            # everything not already guaranteed.
+            keep = guaranteed.reshape(B, L).clone()
+            k_free = K_total - T_grid * m  # config/shape-derived, trace-safe
+            if k_free > 0:
+                free = sel_scores.masked_fill(guaranteed, neg).reshape(B, L)
+                _, fidx = free.topk(k_free, dim=-1)
+                keep.scatter_(1, fidx, torch.ones_like(fidx, dtype=torch.bool))
+            return keep.reshape(B, T_grid, N_pf)
         if spread > 0 and alloc == "uniform":
             k_u = int(k_per_frame[0, 0].item())
             return _hybrid_topk(
@@ -629,15 +664,34 @@ class Borissal(nn.Module):
             Hc, Wc = H_grid // b, W_grid // b
             Nc = Hc * Wc
             A = b * b
-            # Coarse signal: the SAME saliency pipeline on a 1/b-resized clip --
-            # the resize's low-pass naturally kills fine noise motion/texture.
-            video_small = F.interpolate(
-                video.reshape(B * T, C, H, W), scale_factor=1.0 / b,
-                mode="bilinear", align_corners=False,
-            ).view(B, T, C, H // b, W // b)
-            coarse_score = self._saliency_scores(
-                video_small, tubelet_size, patch_size, motion_weight_setting
-            )["score"]  # (B, T_grid, Hc, Wc)
+            if cfg.block_gate_source == "pool":
+                # v0.3.x candidate: derive the coarse signal by block-pooling
+                # the FINE per-patch scores instead of recomputing the whole
+                # pipeline on a resized clip -- one pipeline pass instead of
+                # two. The recompute path's anti-noise role (resize low-pass)
+                # is largely covered by the coherence gate since v0.3.
+                coarse_score = F.avg_pool2d(
+                    scores_flat.reshape(B * T_grid, 1, H_grid, W_grid),
+                    kernel_size=b, stride=b,
+                ).view(B, T_grid, Hc, Wc)
+            else:
+                # Coarse signal: the SAME saliency pipeline on a 1/b-resized
+                # clip -- the resize's low-pass naturally kills fine noise
+                # motion/texture. The resize runs in LUMA space when no color
+                # channel is active (mean over channels and bilinear resize
+                # commute; 1 channel instead of C to interpolate, and the
+                # coarse pass's own luma step becomes a no-op).
+                if cfg.color_rarity_weight > 0.0:
+                    src, Cs = video, C
+                else:
+                    src, Cs = video.mean(dim=2, keepdim=True), 1
+                video_small = F.interpolate(
+                    src.reshape(B * T, Cs, H, W), scale_factor=1.0 / b,
+                    mode="bilinear", align_corners=False,
+                ).view(B, T, Cs, H // b, W // b)
+                coarse_score = self._saliency_scores(
+                    video_small, tubelet_size, patch_size, motion_weight_setting
+                )["score"]  # (B, T_grid, Hc, Wc)
 
             kb_pf = ((k_per_frame + A - 1) // A).clamp(max=Nc)  # ceil-div, gate fully open if cap >= capacity
             kb_max = int(kb_pf.max().item())
