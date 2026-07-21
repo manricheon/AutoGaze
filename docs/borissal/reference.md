@@ -197,7 +197,7 @@ experimental/per-domain switches.
 | `coherence_gate` (+`coherence_kernel`, `coherence_gamma`) | off | multiplies the gradient channel by (1 − structure-tensor coherence)^γ: suppresses gratings/straight edges, spares isotropic object micro-structure |
 | `signature_weight` | 0 | image-signature (sign-of-DCT via fixed matmul) appearance channel: fires on spatially sparse foreground support |
 | `color_rarity_weight` (+`color_bins_per_axis`, `color_bin_sigma`) | 0 | global color rarity (soft-binned histogram contrast): object interiors with rare colors fire uniformly; first use of color in the v0 line |
-| `dog_blob_weight` | 0 | multi-scale difference-of-boxes blob channel: the cheapest interior filler |
+| `dog_blob_weight` | 0 | **영역(region) 채널** — multi-scale difference-of-boxes (DoG): fires on object BODIES/regions, the third layer beside motion (movement) and edge (contour); cheapest interior filler |
 | `fusion_norm` (+`fusion_entropy_floor`) | none | content-adaptive channel fusion: "peak" (Itti N(·)) or "entropy" (bounded inverse-entropy gate; a pan-flooded motion map loses fusion weight automatically) |
 | `score_ema_alpha` | 0 | temporal score EMA across tubelets (loop-free); streaming state via `select(..., temporal_state=...)` |
 | `select_hysteresis_eps` | 0 | pre-topk bonus for patches kept in the previous tubelet (one-step vectorized approximation) |
