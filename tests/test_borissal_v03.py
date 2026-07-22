@@ -491,3 +491,44 @@ def test_motion_stride_recovers_signal_at_32f():
     _, inter3 = m3.select_with_intermediates(v, gazing_ratio=0.25)
     # wider stride sees larger displacement -> stronger pre-norm motion energy
     assert inter["motion_norm"].sum() != inter3["motion_norm"].sum()
+
+
+def _cube_coherence(sel):
+    """4-neighbor selected-fraction of selected patches (1 = perfect cubes)."""
+    import torch.nn.functional as F
+    Tg = int(sel.grid_thw[0, 0]); Hg = int(sel.grid_thw[0, 1]); Wg = int(sel.grid_thw[0, 2])
+    k = sel.keep_mask[0].reshape(Tg, Hg, Wg).float()
+    pad = F.pad(k, (1, 1, 1, 1))
+    n = (pad[:, :-2, 1:-1] + pad[:, 2:, 1:-1] + pad[:, 1:-1, :-2] + pad[:, 1:-1, 2:]) / 4
+    return n[k > 0.5].mean().item()
+
+
+def test_score_coarsen_default_is_noop():
+    """score_coarsen=1 (default) leaves selection unchanged."""
+    video = _structured_video()
+    a = Borissal(_v02_uniform(scale=96)).select(video, gazing_ratio=0.25)
+    b = Borissal(_v02_uniform(scale=96, score_coarsen=1)).select(video, gazing_ratio=0.25)
+    assert torch.equal(a.keep_mask, b.keep_mask)
+
+
+def test_v0_5_makes_selection_more_cube_coherent():
+    """v0.5 (score_coarsen=2) yields denser cubes than plain v0.3 fine top-k."""
+    video = _structured_video()
+    scattered = Borissal(BorissalConfig.v0_3(scale=96, block_size=1)).select(
+        video, gazing_ratio=0.25)
+    cubes = Borissal(BorissalConfig.v0_5(scale=96)).select(video, gazing_ratio=0.25)
+    assert _cube_coherence(cubes) > _cube_coherence(scattered)
+    # contract intact
+    idx = cubes.keep_index
+    valid = idx[:, 1:] >= 0
+    assert ((idx[:, 1:] > idx[:, :-1]) | ~valid).all()
+    assert cubes.per_frame_keep.sum(-1).eq(cubes.num_keep).all()
+
+
+def test_v0_5_motion_weight_knob_shifts_selection():
+    """motion_weight is tunable on v0.5 (the intended tuning axis)."""
+    video = _structured_video()
+    hi = Borissal(BorissalConfig.v0_5(scale=96, motion_weight=0.5)).select(video, gazing_ratio=0.25)
+    lo = Borissal(BorissalConfig.v0_5(scale=96, motion_weight=0.0)).select(video, gazing_ratio=0.25)
+    assert not torch.equal(hi.keep_mask, lo.keep_mask)
+    assert torch.equal(hi.per_frame_keep, lo.per_frame_keep)   # budget unchanged

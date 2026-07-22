@@ -645,6 +645,24 @@ class Borissal(nn.Module):
             ema_state = None if temporal_state is None else temporal_state.get("ema")
             S = apply_score_ema(S, cfg.score_ema_alpha, ema_state)
 
+        # v0.5 coarse-cube coherence (inspired by saliency-v3.1): pool the
+        # selection score to a 1/c grid and repeat_interleave back, so every
+        # c x c block shares one score. Uniform top-k then keeps whole c x c
+        # CUBES (coherent object chunks) instead of scattered fine patches --
+        # the same "prefer meaningful blobs over isolated micro-patches" goal
+        # as the block gate, but enforced harder (full cubes) and computed on
+        # the score itself. Token grid stays H_grid x W_grid (downstream
+        # positions unchanged). Pair with block_size=1 (the two coherence
+        # mechanisms are redundant). c=1 (default) is a no-op / bit-identical.
+        if cfg.score_coarsen > 1:
+            c = cfg.score_coarsen
+            if H_grid % c != 0 or W_grid % c != 0:
+                raise ValueError(
+                    f"score_coarsen={c} requires grid {H_grid}x{W_grid} divisible by c")
+            Sc = F.avg_pool2d(S.reshape(B * T_grid, 1, H_grid, W_grid), c, c)
+            S = (Sc.repeat_interleave(c, dim=2).repeat_interleave(c, dim=3)
+                 .reshape(B, T_grid, H_grid, W_grid))
+
         # Per-tubelet budget allocation.
         m = None
         K_total = None

@@ -105,6 +105,15 @@ class BorissalConfig:
     # picks top-ceil(k/b^2) blocks, then the fine pass top-k's within them.
     block_size: int = 1
 
+    # --- v0.5: coarse-cube coherence (saliency-v3.1-inspired) ---
+    # score_coarsen c > 1: pool the final selection score to a 1/c grid then
+    # repeat_interleave back, so each c x c block shares one score and top-k
+    # keeps whole c x c CUBES -- dense coherent object chunks instead of
+    # scattered fine patches. Same goal as block_size but harder (full cubes)
+    # and cheaper (no separate coarse pass). Pair with block_size=1. c=1
+    # (default) is a no-op. Grid dims must be divisible by c.
+    score_coarsen: int = 1
+
     # --- v0.3 candidate bank (docs/borissal/v03-design.md). ALL OFF by
     # default: with every knob at its default the pipeline takes the legacy
     # blend path and is bit-identical to v0.2 (regression-tested). Adoption
@@ -260,6 +269,29 @@ class BorissalConfig:
         at high frame counts is a separate, downstream-side concern (frame count
         should track a clip's temporal content, not the token budget)."""
         base = dict(motion_diff_stride="auto")
+        base.update(overrides)
+        return cls.v0_3(**base)
+
+    @classmethod
+    def v0_5(cls, **overrides) -> "BorissalConfig":
+        """The Borissal v0.5 preset: v0.3 + coarse-cube coherence
+        (`score_coarsen=2`, replacing the block gate with `block_size=1`).
+
+        Motivated by two findings: (1) for a downstream whose encoder is itself
+        a temporal/video model (V-JEPA), the selector should preserve coherent
+        object/appearance regions rather than scattered patches -- the encoder
+        already supplies motion; and (2) the saliency-v3.1 mechanism (compute
+        score at 12x12, repeat_interleave to 24x24) enforces dense c x c token
+        cubes, which a captioner grounds objects from more reliably. v0.5 makes
+        that cube coherence the core selection prior. Built on v0.3 (NOT v0.4,
+        which pushed toward motion -- the wrong direction for this downstream).
+
+        motion_weight is left at the v0.3 default (0.5) here and is meant to be
+        TUNED ON TOP OF v0.5 against the real downstream (caption -> QA), not the
+        SigLIP-recall proxy (which mispredicted the v0.4 regression). Candidates:
+        {0.5, 0.35, 0.25, 0.15, 0.0, "auto"} -- lower / auto emphasize static
+        appearance (objects, text) over motion."""
+        base = dict(score_coarsen=2, block_size=1)
         base.update(overrides)
         return cls.v0_3(**base)
 
