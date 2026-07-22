@@ -1059,3 +1059,38 @@ scope: long-form originals with true dead time (static shots, blackness,
 credits) and captioner-based judging. Also recorded: SigLIP2 MAP
 attention shows border attention-sink artifacts (visible in the recall-
 anatomy visualization) — part of the single-encoder bias budget.
+
+## Borissal v0.4 (2026-07-22): frame-rate-aware motion — fixes high-frame-rate selection
+
+User observation: running v0.3 selection on 32-frame input then attaching an
+encoder+LLM performed WORSE than expected, even though DENSE (no selection)
+benefits from more frames. Diagnosed to a frame-rate dependence in v0.3's
+motion channel, not a redundancy-only issue.
+
+**Root cause (measured, 16 clips):** v0.3's `motion_diff="frame"` differences
+consecutive frames (fixed stride 1). Decoding a clip to more frames makes
+adjacent frames more similar, so |f_t − f_{t−1}| shrinks: mean frame-diff
+magnitude 0.176 (16f) → 0.115 (32f), a 35% drop. The quantile noise floor
+then eats a larger fraction of the weakened signal, so selection under-covers
+motion/action at high frame rates. DENSE keeps everything so it is immune;
+SELECTION depends on this signal, so it degrades. This is separate from (and
+compounds with) token redundancy: 32f@0.25 = 2× tokens for only +12% unique
+spatial coverage and higher adjacent-tubelet overlap (0.603→0.641), diluting
+the downstream — but token count should track a clip's temporal content, a
+downstream-side decision, whereas the motion weakening is a selector bug.
+
+**Fix — `BorissalConfig.v0_4()` = v0.3 + `motion_diff_stride="auto"`:** the
+diff stride scales with frame count, `stride = max(1, round(T /
+motion_ref_frames))` (ref = 16), so the effective temporal gap — and thus the
+motion magnitude — is constant regardless of decode density. Verified: motion
+signal ~0.40 flat across 8/16/24/32/48f (vs v0.3's 0.60→0.21), and 32f
+independent action-locus recall 0.770 → 0.830 (+0.060). AT THE 16-FRAME
+REFERENCE v0.4 IS BIT-IDENTICAL TO v0.3 (auto stride = 1; regression-tested);
+8f is also stride 1. Only ≥24f inputs change. v0.3 stays the frozen
+16f-validated baseline; v0.4 is the frame-count-robust deployment preset.
+84/84 tests, jit.trace + ONNX export PASS. `motion_diff_stride` (int|"auto")
+and `motion_ref_frames` are exposed knobs on plain BorissalConfig too.
+
+Not yet done: end-to-end downstream (caption→QA) confirmation that the
+recovered motion signal translates to better description at 32f — the
+action-locus recall gain is a strong proxy, not the final referee.
