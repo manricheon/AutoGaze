@@ -1094,3 +1094,45 @@ and `motion_ref_frames` are exposed knobs on plain BorissalConfig too.
 Not yet done: end-to-end downstream (caption→QA) confirmation that the
 recovered motion signal translates to better description at 32f — the
 action-locus recall gain is a strong proxy, not the final referee.
+
+## Borissal v0.5 (2026-07-22): cube coherence + appearance-first + grid coherence, for V-JEPA/description
+
+Driven by a downstream finding (V-JEPA 2.1-L encoder + Qwen3.5-2B captioner
+-> external-LLM QA): v0.4 (motion-strengthened) performed WORSE downstream
+than v0.3, while selector-side semantic recall was neutral -- a clean case of
+the proxy mispredicting the real referee. Diagnosis (measured): v0.4 traded
+high-EDGE patches (static objects/text, recall 0.207) for high-MOTION patches
+(0.097->0.218), a 19% selection swap. For a downstream whose ENCODER IS ITSELF
+A TEMPORAL MODEL (V-JEPA), motion is redundant -- the encoder infers dynamics
+from token positions; the selector's job is to preserve APPEARANCE/OBJECT/TEXT
+identity, which V-JEPA cannot invent for unselected patches. So v0.4 fed the
+encoder what it already knew and starved what it needed.
+
+**v0.5 = v0.3 (NOT v0.4) + three changes:**
+1. **Cube coherence** (`score_coarsen=2`): pool the selection score to 12x12
+   and repeat_interleave back, so each 2x2 shares one score and top-k keeps
+   whole 2x2 CUBES (saliency-v3.1-inspired). Coherent object chunks a captioner
+   grounds better; replaces the block gate (`block_size=1`); same coherence
+   (0.769) as the block gate, harder-enforced.
+2. **Appearance-first** (`motion_weight="auto"` default): per-clip motion/
+   appearance energy ratio (32f mean ~0.34, static clips ~0.03) self-adapts the
+   balance -- lower motion, more object/text, adapting to frame rate and scene.
+   Tune vs the real caption->QA (candidates {0.5,0.35,0.25,0.15,0.0,"auto"});
+   do NOT trust SigLIP recall (it missed the v0.4 regression).
+3. **Grid coherence** (`coherence_at_grid=True`): structure-tensor products
+   pooled straight to the patch grid, gate applied to the pooled spatial map --
+   no pixel-res products/upsample/multiply. Selection IoU 0.923 vs the pixel
+   path.
+   Plus `spatial_diff="tubelet"` (drop frame-spatial: +0.003 recall for +8ms,
+   moot under cube coherence).
+
+Speed (Mac CPU, all changes combined): 16f 19.9->10.8ms (45% faster), 32f
+40.3->23.0ms (43% faster). 88/88 tests, jit.trace + ONNX PASS. Every change is
+an individually toggleable knob (`score_coarsen`, `motion_weight`,
+`coherence_at_grid`, `spatial_diff`); v0.3/v0.4 unchanged.
+
+Lineage: v0.3 (16f description baseline, frozen) / v0.4 (frame-rate-aware
+motion -- action or image-encoder downstreams) / v0.5 (cube coherence +
+appearance-first + fast -- V-JEPA/temporal-encoder + captioner downstreams).
+Standalone builds: dist/borissal_v0{3,4,5}.py. NOT yet done: confirm on the
+actual V-JEPA+Qwen QA that v0.5's appearance-first selection beats v0.3.

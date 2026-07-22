@@ -176,7 +176,7 @@ design.md "Description-task alignment"). Caveat: that sweet spot was
 measured on a single clip; it stays a runtime override rather than a baked
 preset default until the scale run confirms it on real data.
 
-### v0.3 candidate knobs and the `v0_3()` preset
+### v0.3–v0.5 presets and candidate knobs
 
 All OFF by default; with every knob off the pipeline is bit-identical to
 v0.2. The 2026-07-19 sweep (`scripts/sweep_borissal_v03.py`; verdicts in
@@ -201,6 +201,9 @@ experimental/per-domain switches.
 | `fusion_norm` (+`fusion_entropy_floor`) | none | content-adaptive channel fusion: "peak" (Itti N(·)) or "entropy" (bounded inverse-entropy gate; a pan-flooded motion map loses fusion weight automatically) |
 | `score_ema_alpha` | 0 | temporal score EMA across tubelets (loop-free); streaming state via `select(..., temporal_state=...)` |
 | `select_hysteresis_eps` | 0 | pre-topk bonus for patches kept in the previous tubelet (one-step vectorized approximation) |
+| `motion_diff_stride` (+`motion_ref_frames`) | 1 | v0.4: frame-rate-aware motion diff. "auto" scales the diff stride with frame count so motion magnitude stays constant across decode densities |
+| `score_coarsen` | 1 | v0.5: pool the score to a 1/c grid + repeat_interleave -> whole c×c CUBES (dense coherent chunks); pair with block_size=1 |
+| `coherence_at_grid` | off | v0.5: compute+apply the coherence gate at the patch grid (much cheaper, ~identical) instead of pixel resolution |
 
 ## 4. Output: `Selection`
 
