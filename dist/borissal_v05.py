@@ -544,12 +544,14 @@ class BorissalConfig:
         that cube coherence the core selection prior. Built on v0.3 (NOT v0.4,
         which pushed toward motion -- the wrong direction for this downstream).
 
-        motion_weight is left at the v0.3 default (0.5) here and is meant to be
-        TUNED ON TOP OF v0.5 against the real downstream (caption -> QA), not the
+        motion_weight DEFAULTS TO "auto" (per-clip motion/appearance energy ratio;
+        32f mean ~0.34, static clips ~0.03) so the appearance-vs-motion balance
+        self-adapts to frame rate and scene. Still validate against the real
+        downstream (caption -> QA), not the
         SigLIP-recall proxy (which mispredicted the v0.4 regression). Candidates:
         {0.5, 0.35, 0.25, 0.15, 0.0, "auto"} -- lower / auto emphasize static
         appearance (objects, text) over motion."""
-        base = dict(score_coarsen=2, block_size=1)
+        base = dict(score_coarsen=2, block_size=1, motion_weight="auto")
         base.update(overrides)
         return cls.v0_3(**base)
 
