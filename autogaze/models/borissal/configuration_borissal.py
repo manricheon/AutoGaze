@@ -131,6 +131,13 @@ class BorissalConfig:
     multi-orientation object micro-structure. Pixel-res, closed form."""
     coherence_kernel: int = 5
     coherence_gamma: float = 1.0
+    # v0.5: compute+apply the coherence gate at the PATCH GRID (structure
+    # tensor products pooled straight to the grid, gate multiplies the pooled
+    # spatial map) instead of at pixel resolution. Much cheaper (~10ms->~1ms at
+    # 384^2, no upsample/pixel-multiply) with a near-identical regional gate.
+    # False (default) = pixel-res path (v0.3/v0.4). Ignores coherence_kernel/
+    # coherence_downsample (window = patch_size).
+    coherence_at_grid: bool = False
     # Sweep TUNE (2026-07-18): pixel-res stride-1 smoothing costs ~45ms at
     # 384^2 (latency-gate FAIL); averaging the gradient PRODUCTS into ds x ds
     # blocks first is valid structure-tensor windowing at ~1/ds^2 the cost.
@@ -293,7 +300,8 @@ class BorissalConfig:
         SigLIP-recall proxy (which mispredicted the v0.4 regression). Candidates:
         {0.5, 0.35, 0.25, 0.15, 0.0, "auto"} -- lower / auto emphasize static
         appearance (objects, text) over motion."""
-        base = dict(score_coarsen=2, block_size=1, motion_weight="auto")
+        base = dict(score_coarsen=2, block_size=1, motion_weight="auto",
+                    coherence_at_grid=True)
         base.update(overrides)
         return cls.v0_3(**base)
 

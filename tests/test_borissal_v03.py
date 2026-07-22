@@ -532,3 +532,20 @@ def test_v0_5_motion_weight_knob_shifts_selection():
     lo = Borissal(BorissalConfig.v0_5(scale=96, motion_weight=0.0)).select(video, gazing_ratio=0.25)
     assert not torch.equal(hi.keep_mask, lo.keep_mask)
     assert torch.equal(hi.per_frame_keep, lo.per_frame_keep)   # budget unchanged
+
+
+def test_coherence_at_grid_matches_pixel_closely_and_traces():
+    """v0.5's grid-resolution coherence gate selects near-identically to the
+    pixel-res gate (regional statistic) and stays trace-safe."""
+    video = _structured_video()
+    px = Borissal(BorissalConfig.v0_5(scale=96, coherence_at_grid=False)).select(
+        video, gazing_ratio=0.25)
+    gr = Borissal(BorissalConfig.v0_5(scale=96)).select(video, gazing_ratio=0.25)
+    iou = (px.keep_mask & gr.keep_mask).sum() / (px.keep_mask | gr.keep_mask).sum()
+    assert iou > 0.5   # similar (real 384 clips: 0.92; small synthetic grid is coarser). random ~0.14
+    assert torch.equal(gr.per_frame_keep, px.per_frame_keep)
+    class _W(torch.nn.Module):
+        def __init__(s, m): super().__init__(); s.m = m
+        def forward(s, v): r = s.m.select(v, gazing_ratio=0.25); return r.keep_index
+    tr = torch.jit.trace(_W(Borissal(BorissalConfig.v0_5(scale=96)).eval()), video, check_trace=False)
+    assert tr is not None

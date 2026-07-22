@@ -97,6 +97,31 @@ def coherence_gate_map(dx: torch.Tensor, dy: torch.Tensor, kernel: int,
     return gate
 
 
+def coherence_gate_grid(dx: torch.Tensor, dy: torch.Tensor, patch_size: int,
+                        gamma: float, eps: float) -> torch.Tensor:
+    """Grid-resolution structure-tensor coherence gate (v0.5).
+
+    The pixel-res `coherence_gate_map` computes/applies the gate at full
+    resolution, then everything is patch-pooled anyway -- wasteful. Here the
+    gradient PRODUCTS are pooled straight to the patch grid (the pooling
+    window IS the structure-tensor window = patch_size), coherence is computed
+    at grid resolution, and the returned (B, T, H//p, W//p) gate multiplies the
+    already-pooled `spatial_p`. No ds intermediate, no upsample, no pixel-res
+    multiply -- ~10ms -> ~1ms at 384^2, with a near-identical regional gate
+    (coherence is a smoothed texture statistic, so grid resolution suffices).
+    """
+    b, t, h, w = (int(x) for x in dx.shape)
+
+    def _poolg(x):
+        return F.avg_pool2d(
+            x.reshape(b * t, 1, h, w), kernel_size=patch_size, stride=patch_size
+        ).view(b, t, h // patch_size, w // patch_size)
+
+    a, c, bb = _poolg(dx * dx), _poolg(dy * dy), _poolg(dx * dy)
+    coherence = ((a - c) ** 2 + 4.0 * bb * bb) / ((a + c) ** 2 + eps)
+    return (1.0 - coherence).clamp(min=0.0, max=1.0) ** gamma
+
+
 def dct_matrix(n: int, device, dtype) -> torch.Tensor:
     """Orthonormal DCT-II basis as a constant (n, n) matrix -- the FFT-free,
     delegate-native (matmul) route to the DCT. Tiny at grid resolution."""
@@ -389,6 +414,13 @@ class BorissalConfig:
     multi-orientation object micro-structure. Pixel-res, closed form."""
     coherence_kernel: int = 5
     coherence_gamma: float = 1.0
+    # v0.5: compute+apply the coherence gate at the PATCH GRID (structure
+    # tensor products pooled straight to the grid, gate multiplies the pooled
+    # spatial map) instead of at pixel resolution. Much cheaper (~10ms->~1ms at
+    # 384^2, no upsample/pixel-multiply) with a near-identical regional gate.
+    # False (default) = pixel-res path (v0.3/v0.4). Ignores coherence_kernel/
+    # coherence_downsample (window = patch_size).
+    coherence_at_grid: bool = False
     # Sweep TUNE (2026-07-18): pixel-res stride-1 smoothing costs ~45ms at
     # 384^2 (latency-gate FAIL); averaging the gradient PRODUCTS into ds x ds
     # blocks first is valid structure-tensor windowing at ~1/ds^2 the cost.
@@ -551,7 +583,8 @@ class BorissalConfig:
         SigLIP-recall proxy (which mispredicted the v0.4 regression). Candidates:
         {0.5, 0.35, 0.25, 0.15, 0.0, "auto"} -- lower / auto emphasize static
         appearance (objects, text) over motion."""
-        base = dict(score_coarsen=2, block_size=1, motion_weight="auto")
+        base = dict(score_coarsen=2, block_size=1, motion_weight="auto",
+                    coherence_at_grid=True)
         base.update(overrides)
         return cls.v0_3(**base)
 
@@ -1045,21 +1078,23 @@ class Borissal(nn.Module):
         if cfg.spatial_diff == "frame":
             grouped = spatial.view(B, T_grid, tubelet_size, H, W)
             spatial = grouped.mean(dim=2) if cfg.spatial_agg == "mean" else grouped.amax(dim=2)
-            if cfg.coherence_gate:
-                # TUNE (2026-07-19 sweep): the gate stays TUBELET-granular
-                # even for frame-granular spatial -- coherence is a smoothed
-                # regional texture statistic, so recomputing it per frame
-                # (~2x coherence cost, ~+6ms) buys nothing; tubelet-mean
-                # gradients suffice and keep the frame signal affordable.
-                dyg = F.pad(tub[:, :, 1:, :] - tub[:, :, :-1, :], (0, 0, 0, 1))
-                dxg = F.pad(tub[:, :, :, 1:] - tub[:, :, :, :-1], (0, 1, 0, 0))
+
+        # Coherence gate gradients are always TUBELET-granular (coherence is a
+        # smoothed regional texture statistic; per-frame recompute buys nothing
+        # -- 2026-07-19 sweep). For frame-granular spatial they are recomputed
+        # from the tubelet mean; for tubelet spatial dx/dy already are that.
+        if cfg.coherence_gate:
+            if cfg.spatial_diff == "frame":
+                dyc = F.pad(tub[:, :, 1:, :] - tub[:, :, :-1, :], (0, 0, 0, 1))
+                dxc = F.pad(tub[:, :, :, 1:] - tub[:, :, :, :-1], (0, 1, 0, 0))
+            else:
+                dxc, dyc = dx, dy
+            # v0.3/v0.4: pixel-resolution gate on the pixel-res spatial map.
+            # v0.5 (coherence_at_grid): deferred to AFTER patch pooling below.
+            if not cfg.coherence_at_grid:
                 spatial = spatial * coherence_gate_map(
-                    dxg, dyg, cfg.coherence_kernel, cfg.coherence_gamma, eps,
+                    dxc, dyc, cfg.coherence_kernel, cfg.coherence_gamma, eps,
                     downsample=cfg.coherence_downsample)
-        elif cfg.coherence_gate:
-            spatial = spatial * coherence_gate_map(
-                dx, dy, cfg.coherence_kernel, cfg.coherence_gamma, eps,
-                downsample=cfg.coherence_downsample)
 
         # Pixel -> patch pooling.
         pool = F.avg_pool2d if cfg.pooling == "avg" else F.max_pool2d
@@ -1067,6 +1102,13 @@ class Borissal(nn.Module):
         motion_p = motion_p.view(B, T_grid, H_grid, W_grid)
         spatial_p = pool(spatial.reshape(B * T_grid, 1, H, W), kernel_size=patch_size, stride=patch_size)
         spatial_p = spatial_p.view(B, T_grid, H_grid, W_grid)
+
+        # v0.5 grid-resolution coherence: gate the POOLED spatial map with a
+        # structure tensor computed straight at the patch grid -- avoids the
+        # pixel-res products/upsample/multiply of the pixel path (~10ms -> ~1ms).
+        if cfg.coherence_gate and cfg.coherence_at_grid:
+            spatial_p = spatial_p * coherence_gate_grid(
+                dxc, dyc, patch_size, cfg.coherence_gamma, eps)
 
         # v0.3 motion center-surround: BEFORE the noise floor (spec section 3
         # ordering -- center-surround first, then dead-zone shrinkage).

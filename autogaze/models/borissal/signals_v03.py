@@ -79,6 +79,31 @@ def coherence_gate_map(dx: torch.Tensor, dy: torch.Tensor, kernel: int,
     return gate
 
 
+def coherence_gate_grid(dx: torch.Tensor, dy: torch.Tensor, patch_size: int,
+                        gamma: float, eps: float) -> torch.Tensor:
+    """Grid-resolution structure-tensor coherence gate (v0.5).
+
+    The pixel-res `coherence_gate_map` computes/applies the gate at full
+    resolution, then everything is patch-pooled anyway -- wasteful. Here the
+    gradient PRODUCTS are pooled straight to the patch grid (the pooling
+    window IS the structure-tensor window = patch_size), coherence is computed
+    at grid resolution, and the returned (B, T, H//p, W//p) gate multiplies the
+    already-pooled `spatial_p`. No ds intermediate, no upsample, no pixel-res
+    multiply -- ~10ms -> ~1ms at 384^2, with a near-identical regional gate
+    (coherence is a smoothed texture statistic, so grid resolution suffices).
+    """
+    b, t, h, w = (int(x) for x in dx.shape)
+
+    def _poolg(x):
+        return F.avg_pool2d(
+            x.reshape(b * t, 1, h, w), kernel_size=patch_size, stride=patch_size
+        ).view(b, t, h // patch_size, w // patch_size)
+
+    a, c, bb = _poolg(dx * dx), _poolg(dy * dy), _poolg(dx * dy)
+    coherence = ((a - c) ** 2 + 4.0 * bb * bb) / ((a + c) ** 2 + eps)
+    return (1.0 - coherence).clamp(min=0.0, max=1.0) ** gamma
+
+
 def dct_matrix(n: int, device, dtype) -> torch.Tensor:
     """Orthonormal DCT-II basis as a constant (n, n) matrix -- the FFT-free,
     delegate-native (matmul) route to the DCT. Tiny at grid resolution."""
