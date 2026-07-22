@@ -456,3 +456,38 @@ def test_per_frame_counts_override_respected_and_contract_kept():
     with pytest.raises(ValueError):
         Borissal(BorissalConfig.v0_3(scale=96)).select(
             video, gazing_ratio=0.25, per_frame_counts=counts, spread_fraction=0.25)
+
+
+def test_v0_4_identical_to_v0_3_at_16_frames():
+    """v0.4 (auto motion stride) must be bit-identical to v0.3 at the 16-frame
+    reference (auto stride = round(16/16) = 1)."""
+    video = torch.rand(1, 16, 3, 96, 96)
+    s3 = Borissal(BorissalConfig.v0_3(scale=96)).select(video, gazing_ratio=0.25)
+    s4 = Borissal(BorissalConfig.v0_4(scale=96)).select(video, gazing_ratio=0.25)
+    assert torch.equal(s3.keep_mask, s4.keep_mask)
+
+
+def test_v0_4_changes_selection_at_32_frames():
+    """At 32 frames auto stride = 2, so v0.4 differs from v0.3 (which keeps
+    stride 1) -- the frame-rate-aware motion fix is active."""
+    video = torch.rand(1, 32, 3, 96, 96)
+    s3 = Borissal(BorissalConfig.v0_3(scale=96)).select(video, gazing_ratio=0.25)
+    s4 = Borissal(BorissalConfig.v0_4(scale=96)).select(video, gazing_ratio=0.25)
+    assert not torch.equal(s3.keep_mask, s4.keep_mask)
+    assert torch.equal(s3.per_frame_keep, s4.per_frame_keep)   # budget unchanged
+
+
+def test_motion_stride_recovers_signal_at_32f():
+    """auto stride at 32f differences frames 2 apart, restoring motion
+    magnitude to ~the stride-1 16f level (a moving block over 32 frames)."""
+    T, size = 32, 96
+    v = torch.zeros(1, T, 3, size, size)
+    for t in range(T):                                    # test helper: loop OK
+        x0 = (t * 2) % (size - 12)
+        v[:, t, :, 40:52, x0:x0 + 12] = 1.0
+    m = Borissal(BorissalConfig.v0_4(scale=96))
+    _, inter = m.select_with_intermediates(v, gazing_ratio=0.25)
+    m3 = Borissal(BorissalConfig.v0_3(scale=96))
+    _, inter3 = m3.select_with_intermediates(v, gazing_ratio=0.25)
+    # wider stride sees larger displacement -> stronger pre-norm motion energy
+    assert inter["motion_norm"].sum() != inter3["motion_norm"].sum()

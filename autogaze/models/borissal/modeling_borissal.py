@@ -364,8 +364,22 @@ class Borissal(nn.Module):
         #    tubelet -- catches fast intra-tubelet motion that tubelet
         #    averaging cancels. Both are pure slice ops (fully vectorized).
         if cfg.motion_diff == "frame" and T > 1 and tubelet_size > 1:
-            fdiff = (gray[:, 1:] - gray[:, :-1]).abs()          # (B, T-1, H, W)
-            fdiff = torch.cat([fdiff[:, :1], fdiff], dim=1)      # (B, T, H, W); frame 0 <- forward diff
+            # Frame-rate-aware diff stride (v0.4): consecutive-frame diff
+            # (stride 1) UNDER-registers motion when frames are sampled densely
+            # -- at 2x the frame rate, adjacent frames are ~2x more similar, so
+            # |f_t - f_{t-1}| shrinks (measured: 0.176 -> 0.115 going 16f->32f).
+            # "auto" scales the stride with frame count so the effective temporal
+            # gap (and thus the motion magnitude) stays constant regardless of
+            # how many frames the clip was decoded to; at the 16-frame reference
+            # this is stride 1, so 16f behavior is unchanged (bit-identical).
+            if cfg.motion_diff_stride == "auto":
+                stride = max(1, round(T / cfg.motion_ref_frames))
+            else:
+                stride = max(1, int(cfg.motion_diff_stride))
+            stride = min(stride, T - 1)
+            fdiff = (gray[:, stride:] - gray[:, :-stride]).abs()  # (B, T-stride, H, W)
+            pad = fdiff[:, :1].expand(B, stride, H, W)            # first `stride` frames <- forward diff
+            fdiff = torch.cat([pad, fdiff], dim=1)                # (B, T, H, W)
             if cfg.motion_consistency == "double_diff" and T > 2:
                 # Temporal AND (double-difference): real motion persists across
                 # consecutive diffs; single-frame spikes (flicker/compression

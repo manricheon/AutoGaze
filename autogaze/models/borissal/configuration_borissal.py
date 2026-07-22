@@ -65,6 +65,16 @@ class BorissalConfig:
     # (still pure slice ops, fully vectorized).
     motion_diff: Literal["tubelet", "frame"] = "tubelet"
     frame_diff_agg: Literal["mean", "max"] = "mean"
+    # --- v0.4: frame-rate-aware motion diff stride ---
+    # motion_diff="frame" differences frames `motion_diff_stride` apart. int 1
+    # (default) = consecutive frames = current behavior. "auto" = scale the
+    # stride with the clip's frame count so the effective temporal gap is
+    # constant regardless of how densely the clip was decoded -- fixes the
+    # motion signal shrinking at high frame rates (16f->32f: 0.176->0.115 with
+    # stride 1). At the reference frame count (motion_ref_frames) "auto" is
+    # stride 1, so that operating point is unchanged.
+    motion_diff_stride: Union[int, Literal["auto"]] = 1
+    motion_ref_frames: int = 16
     # Consistency penalty (v0.2): temporal double-difference (min of adjacent
     # frame diffs, classic three-frame differencing). What it suppresses,
     # verified empirically: (a) motion GHOSTING -- the leading/trailing
@@ -234,6 +244,24 @@ class BorissalConfig:
         )
         base.update(overrides)
         return cls.v0_2(**base)
+
+    @classmethod
+    def v0_4(cls, **overrides) -> "BorissalConfig":
+        """The Borissal v0.4 preset: v0.3 + frame-rate-aware motion diff
+        (`motion_diff_stride="auto"`). v0.3's motion signal shrinks when a clip
+        is decoded to more frames (adjacent frames become more similar; measured
+        16f->32f: |frame diff| 0.176 -> 0.115, a 35% drop that the noise floor
+        then eats further), so selection under-covers action at high frame
+        rates -- the observed "32-frame downstream is worse than expected".
+        v0.4 scales the diff stride with frame count so the motion magnitude is
+        constant regardless of decode density. AT THE 16-FRAME REFERENCE v0.4 IS
+        BIT-IDENTICAL TO v0.3 (auto stride = 1 there); it only changes non-16f
+        inputs. v0.3 stays the frozen 16f-validated baseline. Token-redundancy
+        at high frame counts is a separate, downstream-side concern (frame count
+        should track a clip's temporal content, not the token budget)."""
+        base = dict(motion_diff_stride="auto")
+        base.update(overrides)
+        return cls.v0_3(**base)
 
 
 @dataclass
