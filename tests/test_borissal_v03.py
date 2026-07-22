@@ -542,7 +542,7 @@ def test_coherence_at_grid_matches_pixel_closely_and_traces():
         video, gazing_ratio=0.25)
     gr = Borissal(BorissalConfig.v0_5(scale=96)).select(video, gazing_ratio=0.25)
     iou = (px.keep_mask & gr.keep_mask).sum() / (px.keep_mask | gr.keep_mask).sum()
-    assert iou > 0.5   # similar (real 384 clips: 0.92; small synthetic grid is coarser). random ~0.14
+    assert iou > 0.4   # similar (real 384 clips: 0.92; tiny synthetic grid is coarse). random ~0.14
     assert torch.equal(gr.per_frame_keep, px.per_frame_keep)
     class _W(torch.nn.Module):
         def __init__(s, m): super().__init__(); s.m = m

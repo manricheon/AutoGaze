@@ -301,7 +301,7 @@ class BorissalConfig:
         {0.5, 0.35, 0.25, 0.15, 0.0, "auto"} -- lower / auto emphasize static
         appearance (objects, text) over motion."""
         base = dict(score_coarsen=2, block_size=1, motion_weight="auto",
-                    coherence_at_grid=True)
+                    coherence_at_grid=True, spatial_diff="tubelet")
         base.update(overrides)
         return cls.v0_3(**base)
 
