@@ -1180,3 +1180,38 @@ Bottom line: **patch16 OneVision-family towers attach cleanly today (proven).**
 The specific `so400m-patch14-384` tower attaches for v0.3 at scale=378 +
 block_size=1 (6px caveat); v0.5's cube coherence needs an odd-grid variant
 first; and post-merge selection needs the deferred merge remap.
+
+## Content-adaptivity probe: length x scene-density allocation (2026-07-23, Mac)
+
+Question (user): should the selector allocate DIFFERENTLY by content length or
+scene-transition density? Probe: `scripts/borissal_bucket_probe.py` +
+`plot_bucket_probe.py`, reusing E5 machinery (SigLIP2 oracle source, DINOv2
+recall judge, hard-cut scene composites) plus a new training-free
+motion-proportional allocator. Buckets: LENGTH {short 16f / mid 32f /
+longform_deadtime 32f = 16f active ++ 16f frozen tail} x SCENE {single / 2-cut /
+4-cut}. Allocators on frozen v0.3 scores: uniform / oracle_sig / motion_prop,
+all forced to the SAME exact token budget (`fix_total`) for a fair comparison.
+
+**Verdict: uniform allocation is robust everywhere; content-adaptive TEMPORAL
+allocation does not beat it on the proxy, and motion-concentration HURTS
+(PROXY-LEVEL, confirm on CUDA QA).** Full write-up:
+`outputs/borissal/bucket_probe/VERDICT.md`.
+- **Decisive cell (the un-retired E5 condition, longform_deadtime):** motion_prop
+  pulled 99.7% of budget off the frozen tail (tail frac 0.003 vs 0.500) and
+  recall got WORSE (0.345 vs 0.379). Per-frame recall rewards COVERAGE; starving
+  static frames misses their own top patches. E5 negative now extends to real
+  dead-time.
+- **Oracle ~= uniform** everywhere (deadtime 4W-4L); on the frozen tail SigLIP
+  attention still kept ~half the budget (0.502) -- the teacher itself won't
+  concentrate.
+- **Scene axis:** motion_prop degrades monotonically with cuts (single -0.013 /
+  two -0.048 / four -0.038, 0W-4L at four_scene) -- more scenes = coverage
+  matters more.
+
+Ranked candidate rules (all "confirm on CUDA QA"): (1) keep uniform default
+across all lengths/densities; (2) do NOT ship motion-proportional allocation;
+(3) further deprioritize a learned temporal allocator. Scope: tested ALLOCATION
+only (not frame-count / motion_weight / cube on-off per bucket -- those are
+selection-CONTENT knobs, a separate follow-on). Judge was DINOv2 only (CLIP-L
+too slow on CPU; re-run `--judges dinov2 clip` on CUDA for a language-aligned
+cross-check).
