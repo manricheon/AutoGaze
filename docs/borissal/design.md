@@ -1136,3 +1136,47 @@ motion -- action or image-encoder downstreams) / v0.5 (cube coherence +
 appearance-first + fast -- V-JEPA/temporal-encoder + captioner downstreams).
 Standalone builds: dist/borissal_v0{3,4,5}.py. NOT yet done: confirm on the
 actual V-JEPA+Qwen QA that v0.5's appearance-first selection beats v0.3.
+
+## OneVision-2 (per-frame SigLIP -> Qwen) attach verification (2026-07-23, Mac)
+
+Question: does the selector attach to a LLaVA-OneVision-2 style path (selected
+tokens -> per-frame SigLIP tower -> Qwen LLM), the way it already targets
+V-JEPA? Verified on Mac/CPU (`scripts/eval_onevision_attach.py`,
+`tests/test_borissal_onevision.py`, new adapter `adapters.to_onevision_frame_indices`).
+
+**The mechanism is sound and PROVEN at patch16.** The selector's within-tubelet
+spatial index `n = h*W_grid + w` is the same raster order a SigLIP tower emits
+per frame, so it passes through 1:1 with NO spatial remap. The only bridging is
+temporal: Borissal decides per TUBELET, so each tubelet's spatial mask is
+duplicated to its `tubelet_size` frames (a per-frame encoder sees both frames of
+a tubelet with an identical mask). Cross-checked two ways at
+`google/siglip2-base-patch16-384` (24x24=576): the adapter's per-frame indices
+produce token-for-token identical gathers to the known-good semantic-gate path
+(`keep_mask.reshape().repeat_interleave`). v0.3 and v0.5 both attach at patch16.
+
+**But the TRUE OneVision tower is SigLIP `so400m-patch14-384` -> 27x27 (odd),
+and three core constraints bite on the odd grid** (measured, not the optimistic
+"bit-identical floor" story -- the core ASSERTS divisibility, it does not floor):
+1. **Resolution.** `384 % 14 != 0` -> the selector's divisibility guard
+   (modeling_borissal.py:635) REJECTS 384 at patch14. SigLIP's conv instead
+   floors 384->27 (drops the trailing 6px). To get 27x27 the selector must run
+   at `scale=378` (=27*14), which drops those 6px UP FRONT -> a ~6px spatial
+   offset vs what SigLIP encoded from 384. Small but real; the clean fix (future
+   work, core change, out of this verification's scope) is to relax the guard to
+   crop-to-multiple like the conv.
+2. **`block_size` (v0.3 default 2)** requires an even grid -> raises on 27.
+   v0.3 attaches to 27x27 only with `block_size=1`.
+3. **Cube coherence (`score_coarsen=2`, v0.5's headline)** requires an even grid
+   -> INCOMPATIBLE with 27x27 as-is. v0.5 does not attach to a patch14 OneVision
+   tower without an odd-grid cube strategy (e.g. coarsen 27->9, or pad/crop).
+
+Also deferred (documented, not built): the fine(27x27)->Qwen-merged(2x2
+`spatial_merge`) index remap. This verification intercepts PRE-merge tokens,
+where the spatial order matches directly; selecting in the post-2x2-merge token
+space would force whole-superpatch selection and needs a new adapter
+(`to_onevision_frame_indices` raises on `spatial_merge_size != 1`).
+
+Bottom line: **patch16 OneVision-family towers attach cleanly today (proven).**
+The specific `so400m-patch14-384` tower attaches for v0.3 at scale=378 +
+block_size=1 (6px caveat); v0.5's cube coherence needs an odd-grid variant
+first; and post-merge selection needs the deferred merge remap.

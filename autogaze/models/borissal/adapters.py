@@ -123,6 +123,92 @@ def to_videomae_gazing_info(
     }
 
 
+def to_onevision_frame_indices(
+    selection: Selection,
+    tubelet_size: int,
+    spatial_merge_size: int = 1,
+) -> dict:
+    """Bridge to a LLaVA-OneVision-2 style PER-FRAME vision path (each frame
+    encoded independently by a SigLIP tower into H_grid*W_grid raster-order
+    patch tokens, later merged/pooled by the Qwen side).
+
+    Borissal's within-tubelet spatial index `n = h*W_grid + w` is the SAME
+    raster order a SigLIP tower emits per frame, so it passes through 1:1 with
+    NO spatial remap (proven against the SigLIP2 semantic gate's gather path).
+    The only bridging needed is temporal: Borissal decides once per TUBELET,
+    so each tubelet's spatial selection is DUPLICATED to both of its frames
+    (that is what selecting a tubelet means physically) -- the SigLIP grid
+    must therefore match `H_grid == W_grid` at the encoder's own patch size.
+
+    Interception is PRE-MERGE: indices address the encoder-native fine grid
+    (e.g. 27x27 for patch14-384). Mapping the fine grid through OneVision/Qwen's
+    2x2 spatial merge into the LLM token stream is a separate, lossy design step
+    (it would force whole-2x2-superpatch selection) and is intentionally out of
+    scope here; `spatial_merge_size != 1` raises so callers can't silently
+    assume the merged-space remap exists.
+
+    Requires an unpadded, batch-uniform, tubelet-uniform keep count (Borissal's
+    default `per_frame_allocation="uniform"`), so the per-frame index tensor has
+    a well-defined constant width `k`.
+
+    Returns a dict:
+      - `frame_keep_index` (B, num_frames, k) long -- ascending per-frame
+        spatial indices into that frame's H_grid*W_grid grid
+      - `frame_mask` (B, num_frames, N_pf) bool
+      - `num_keep_each_frame` (num_frames,) long -- constant `k`
+      - `num_tokens_each_frame` int -- N_pf = H_grid*W_grid
+      - `num_frames` int -- T_grid * tubelet_size
+      - `grid_hw` (H_grid, W_grid) tuple
+    """
+    if spatial_merge_size != 1:
+        raise NotImplementedError(
+            "to_onevision_frame_indices intercepts PRE-merge tokens only; the "
+            "fine->merged (2x2 spatial_merge) index remap is future work -- see docstring")
+    if (selection.keep_index < 0).any():
+        raise NotImplementedError(
+            "to_onevision_frame_indices requires unpadded selection (uniform allocation)")
+    per_frame_keep = selection.per_frame_keep                # (B, T_grid)
+    if not torch.equal(per_frame_keep, per_frame_keep[0:1].expand_as(per_frame_keep)):
+        raise NotImplementedError(
+            "requires a batch-uniform per-tubelet keep count (uniform allocation)")
+    k0 = per_frame_keep[0, 0]
+    if not torch.equal(per_frame_keep[0], k0.expand_as(per_frame_keep[0])):
+        raise NotImplementedError(
+            "requires a constant per-tubelet keep count across tubelets "
+            "(uniform allocation) for a fixed per-frame index width")
+
+    B = selection.keep_index.shape[0]
+    T_grid, H_grid, W_grid = (int(x) for x in selection.grid_thw[0].tolist())
+    N_pf = H_grid * W_grid
+    k = int(k0)
+    num_frames = T_grid * tubelet_size
+
+    kept = selection.keep_index                              # (B, K) ascending t*N_pf + n
+    t = kept // N_pf                                         # (B, K) tubelet index
+    n = kept % N_pf                                          # (B, K) per-frame spatial index
+    # Ascending t-major order + constant k means each contiguous k-block is one
+    # tubelet; verify before relying on the reshape.
+    t_tub = t.reshape(B, T_grid, k)
+    expected_t = torch.arange(T_grid, device=kept.device).view(1, T_grid, 1)
+    if not torch.equal(t_tub, expected_t.expand_as(t_tub)):
+        raise AssertionError("keep_index is not contiguous t-major with constant k per tubelet")
+    n_tub = n.reshape(B, T_grid, k)                          # (B, T_grid, k) ascending within tubelet
+
+    # duplicate each tubelet's spatial selection to its `tubelet_size` frames
+    frame_keep_index = n_tub.repeat_interleave(tubelet_size, dim=1)  # (B, num_frames, k)
+    frame_mask = torch.zeros(B, num_frames, N_pf, dtype=torch.bool, device=kept.device)
+    frame_mask.scatter_(2, frame_keep_index, True)
+
+    return {
+        "frame_keep_index": frame_keep_index,
+        "frame_mask": frame_mask,
+        "num_keep_each_frame": torch.full((num_frames,), k, dtype=torch.long, device=kept.device),
+        "num_tokens_each_frame": N_pf,
+        "num_frames": num_frames,
+        "grid_hw": (H_grid, W_grid),
+    }
+
+
 def to_autogaze_gazing_info(selection: Selection, scale: int, tubelet_size: int) -> dict:
     """Optional compatibility bridge to the legacy AutoGaze gaze-model output
     contract (autogaze/models/autogaze/autogaze.py forward return dict), for
