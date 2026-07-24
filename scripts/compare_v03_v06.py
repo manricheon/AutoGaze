@@ -37,9 +37,14 @@ from autogaze.models.borissal.video_io import (  # noqa: E402
 from autogaze.models.borissal.viz import render_overlay  # noqa: E402
 
 RATIOS = [0.15, 0.25, 0.5, 0.75, 1.0]
-SELECTORS = {"v0.3": lambda s: BorissalConfig.v0_3(scale=s),
-             "v0.6": lambda s: BorissalConfig.v0_6(scale=s)}
-COLORS = {"v0.3": "#5B6B7B", "v0.6": "#C0392B"}
+# v0.6-uniform vs v0.6-global isolates the ALLOCATION lever (same features,
+# only the token-distribution mode differs); v0.3 is the frozen baseline.
+SELECTORS = {
+    "v0.3": lambda s: BorissalConfig.v0_3(scale=s),
+    "v0.6-uniform": lambda s: BorissalConfig.v0_6(scale=s, per_frame_allocation="uniform"),
+    "v0.6-global": lambda s: BorissalConfig.v0_6(scale=s),   # default (global)
+}
+COLORS = {"v0.3": "#5B6B7B", "v0.6-uniform": "#E08A1E", "v0.6-global": "#C0392B"}
 
 
 def recall_vark(encoder, tokens, frame_mask, top_frac=0.1):
@@ -99,14 +104,15 @@ def main():
     out = {"args": vars(args), "n_clips": len(videos), "recalls": recalls, "summary": summary}
     (out_dir / "results.json").write_text(json.dumps(out, indent=2))
 
-    # print table
-    print(f"\n{'ratio':>7} | " + " | ".join(f"{n:>8}" for n in SELECTORS) + " |   v0.6-v0.3   W-L")
-    print("-" * 56)
+    # print table: means per selector + the allocation-lever delta (global-uniform)
+    print(f"\n{'ratio':>6} | " + " | ".join(f"{n:>12}" for n in SELECTORS)
+          + " | global-uniform (alloc lever)")
+    print("-" * 78)
     for r in RATIOS:
-        cells = " | ".join(f"{np.mean(recalls[n][r]):8.4f}" for n in SELECTORS)
-        d = [a - b for a, b in zip(recalls["v0.6"][r], recalls["v0.3"][r])]
+        cells = " | ".join(f"{np.mean(recalls[n][r]):12.4f}" for n in SELECTORS)
+        d = [a - b for a, b in zip(recalls["v0.6-global"][r], recalls["v0.6-uniform"][r])]
         wl = f"{sum(x>1e-6 for x in d)}W-{sum(x<-1e-6 for x in d)}L"
-        print(f"{r:>7} | {cells} | {np.mean(d):+8.4f}  {wl}")
+        print(f"{r:>6} | {cells} | {np.mean(d):+8.4f}  {wl}")
 
     # line chart: recall vs ratio, both selectors, with per-clip spread band
     fig, ax = plt.subplots(figsize=(8, 5))

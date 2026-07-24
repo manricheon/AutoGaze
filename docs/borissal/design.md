@@ -1379,3 +1379,31 @@ Everything is proxy-contradicted but saliency-v3.1-faithful; v0.6 is now a
 complete non-learned port to A/B against saliency-v3.1 on the real downstream.
 Recover v0.5 with all v0.6 flags off + `luma_mode="mean"` +
 `per_frame_allocation="uniform"`.
+
+### v0.3 vs v0.6, allocation lever (uniform vs global), 32f (2026-07-24)
+
+`scripts/compare_v03_v06.py --limit 24 --num-frames 32` (SigLIP2 variable-k
+recall; center_crop off). v0.6-uniform vs v0.6-global isolates the allocation
+lever (same features, only token distribution differs).
+
+| ratio | v0.3 | v0.6-uniform | v0.6-global |
+|---|---|---|---|
+| 0.15 | 0.1909 | 0.1780 | 0.1805 |
+| 0.25 | 0.3033 | 0.2847 | 0.2909 |
+| 0.5  | 0.5399 | 0.5127 | 0.5229 |
+| 0.75 | 0.7589 | 0.7319 | 0.7334 |
+| 1.0  | 1.0000 | 0.8578 | 1.0000 |
+
+- **v0.3 > v0.6 on the proxy at every ratio** (~0.01-0.03) -- EXPECTED: every v0.6
+  change opposes the SigLIP-recall proxy (which mis-ranked v0.4/motion_weight).
+  Not the verdict; v0.6 is the saliency-v3.1 port, judged downstream.
+- **global >= uniform at EVERY ratio** (0.1805>0.1780 ... 1.0>0.858). This FLIPS
+  Track B's "uniform > global" (measured on v0.3/v0.5 scores): with v0.6's richer
+  signal stack (keyframe boost etc.), content-adaptive allocation wins even on
+  the proxy -- validating the global default beyond the downstream argument.
+- ANOMALY: v0.6-uniform at ratio 1.0 recalls 0.858, not 1.0 (should keep all).
+  cube (score_coarsen=2) + laplacian_gate under uniform+ratio1.0 doesn't retain
+  the full set -- an edge-case to investigate (global correctly hits 1.0).
+
+center_crop: added to load_video as an option but EXCLUDED from v0.6 and this
+comparison (off by default; the user chose to exclude it).
