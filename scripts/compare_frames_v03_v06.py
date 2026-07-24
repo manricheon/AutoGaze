@@ -94,9 +94,9 @@ def main():
     for ax, r in zip(axes[0], RATIOS):
         vals = [np.mean(rec[n][f][r]) for n, f in conds]
         errs = [np.std(rec[n][f][r]) for n, f in conds]
-        bars = ax.bar(range(len(conds)), vals, yerr=errs, capsize=3,
-                      color=[COLORS[n] for n, _ in conds],
-                      alpha=[1.0 if f == 16 else 0.55 for _, f in conds])
+        from matplotlib.colors import to_rgba
+        facecolors = [to_rgba(COLORS[n], 1.0 if f == 16 else 0.5) for n, f in conds]
+        bars = ax.bar(range(len(conds)), vals, yerr=errs, capsize=3, color=facecolors)
         for i, v in enumerate(vals):
             ax.text(i, v, f"{v:.3f}", ha="center", va="bottom", fontsize=8)
         ax.set_xticks(range(len(conds))); ax.set_xticklabels(labels, fontsize=9)
