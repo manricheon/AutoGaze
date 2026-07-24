@@ -161,6 +161,49 @@ def static_appearance_guard(luma_grid: torch.Tensor, motion_norm_grid: torch.Ten
     return s_t * laplacian_energy(luma_grid)
 
 
+def keyframe_weight(luma_grid: torch.Tensor, gop: int, tubelet_size: int,
+                    scene_thresh: float, scene_tau: float, eps: float) -> torch.Tensor:
+    """Per-tubelet mechanical-GOP keyframe weight, pixel/index-only (v0.6).
+
+    The selector receives N already-decoded frames with NO codec metadata, so
+    real I-frame positions are unavailable. This approximates a codec's keyframe
+    structure from the incoming frames alone, two ways combined:
+      - PERIODIC: assume a fixed GOP (`gop` frames) -> every gop-th tubelet is a
+        pseudo-keyframe. Pure index math -> trace/ONNX-safe, data-independent.
+      - SCENE-CUT (soft): a tubelet whose luma jumps sharply from the previous
+        one (content discontinuity = a codec would place an I-frame there) gets
+        a continuous weight sigmoid((rel_jump - scene_thresh)/scene_tau) --
+        continuous, so NO data-dependent branch (stays trace-safe). Handles the
+        "a totally different frame appears mid-stream" case off the GOP grid.
+
+    Returns (B, T_grid) in [0, 1]: 1 at periodic keyframes and hard cuts, ~0
+    elsewhere. Used both to boost keyframe tubelets' token ALLOCATION and to add
+    their appearance-edge score (see `keyframe_prior`).
+    """
+    b, t, h, w = (int(x) for x in luma_grid.shape)
+    kf_tub = max(1, gop // tubelet_size)
+    t_idx = torch.arange(t, device=luma_grid.device)
+    periodic = (t_idx % kf_tub == 0).to(luma_grid.dtype).view(1, t)          # (1, T)
+    # soft scene-cut from per-tubelet luma jump, relative to the clip mean jump
+    diff = (luma_grid[:, 1:] - luma_grid[:, :-1]).abs().mean(dim=(2, 3))      # (B, T-1)
+    diff = F.pad(diff, (1, 0), value=0.0)                                     # (B, T); t=0 -> 0
+    rel = diff / (diff.mean(dim=1, keepdim=True) + eps)                       # relative jump
+    scene_soft = torch.sigmoid((rel - scene_thresh) / scene_tau)             # (B, T) in (0,1)
+    return torch.maximum(periodic, scene_soft)                              # (B, T)
+
+
+def keyframe_prior(luma_grid: torch.Tensor, gop: int, tubelet_size: int,
+                   scene_thresh: float, scene_tau: float, eps: float) -> torch.Tensor:
+    """Keyframe appearance-edge ENERGY map = keyframe_weight * |lap(luma)|, so
+    keyframe tubelets carry more edge score (better intra-tubelet spatial pick
+    once they also get more budget). The caller min-max normalizes it and adds
+    it like any other channel. See `keyframe_weight` for the weight definition.
+    """
+    b, t, h, w = (int(x) for x in luma_grid.shape)
+    kfw = keyframe_weight(luma_grid, gop, tubelet_size, scene_thresh, scene_tau, eps)
+    return kfw.view(b, t, 1, 1) * laplacian_energy(luma_grid)
+
+
 def dct_matrix(n: int, device, dtype) -> torch.Tensor:
     """Orthonormal DCT-II basis as a constant (n, n) matrix -- the FFT-free,
     delegate-native (matmul) route to the DCT. Tiny at grid resolution."""

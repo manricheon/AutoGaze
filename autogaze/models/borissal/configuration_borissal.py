@@ -162,6 +162,19 @@ class BorissalConfig:
     static_guard_thresh: float = 0.05
     static_guard_tau: float = 0.02
     # (3) center_bias is re-validated in v0.6 (existing knob above), not new code.
+    # (4) Mechanical-GOP keyframe prior: the selector gets N already-decoded
+    # frames with NO codec metadata, so real I-frame positions are unavailable.
+    # Approximate a codec's keyframe structure from the incoming frames: a
+    # periodic pseudo-keyframe every `keyframe_gop` frames PLUS soft scene-cut
+    # detection (a tubelet whose luma jumps sharply off the GOP grid). Adds
+    # luma-edge score there so cleaner keyframe-like frames win a bit more
+    # budget. Different gate than static_guard (periodic+scene-cut vs low-motion).
+    keyframe_prior: bool = False
+    keyframe_gop: int = 8
+    keyframe_weight: float = 0.5         # appearance-edge SCORE boost at keyframes
+    keyframe_alloc_boost: float = 1.0    # extra token ALLOCATION share at keyframes (uniform only)
+    keyframe_scene_thresh: float = 2.0  # scene-cut fires above this x mean luma jump
+    keyframe_scene_tau: float = 0.5
 
     signature_weight: float = 0.0
     """Image-signature (sign-of-DCT, fixed matmul) appearance channel weight;

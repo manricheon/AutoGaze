@@ -641,3 +641,67 @@ def test_v0_6_traces_with_both_knobs_on():
         def forward(s, v): return s.m.select(v, gazing_ratio=0.25).keep_index
     tr = torch.jit.trace(_W(Borissal(cfg).eval()), video, check_trace=False)
     assert tr is not None
+
+
+# ---------------------------------------------------------------------------
+# v0.6: mechanical-GOP keyframe prior (periodic + soft scene-cut, pixel-only)
+# ---------------------------------------------------------------------------
+from autogaze.models.borissal.signals_v03 import keyframe_prior  # noqa: E402
+
+
+def test_keyframe_prior_periodic_fires_on_gop_tubelets():
+    # 8 tubelets, gop=8 frames, tubelet_size=2 -> keyframe every 4 tubelets: {0,4}
+    luma = torch.rand(1, 8, 6, 6)
+    kf = keyframe_prior(luma, gop=8, tubelet_size=2, scene_thresh=99.0, scene_tau=0.5, eps=1e-6)
+    energy = kf.reshape(1, 8, -1).sum(-1)  # per-tubelet total guard energy
+    # scene_thresh huge -> scene term ~0, so only periodic tubelets carry energy
+    fired = (energy[0] > 1e-6).nonzero().flatten().tolist()
+    assert fired == [0, 4], f"periodic keyframes should be tubelets 0 and 4, got {fired}"
+
+
+def test_keyframe_prior_responds_to_scene_cut():
+    # tubelet 3 is a hard scene cut (totally different content) off the GOP grid
+    luma = torch.zeros(1, 8, 6, 6)
+    luma[:, :3] = 0.2
+    luma[:, 3:] = 0.9              # abrupt jump at tubelet 3
+    kf = keyframe_prior(luma, gop=8, tubelet_size=2, scene_thresh=2.0, scene_tau=0.3, eps=1e-6)
+    # even though luma is flat within each side (laplacian ~0), the scene weight
+    # is nonzero at t=3; verify the per-tubelet keyframe weight, not the energy.
+    # reconstruct weight by probing with a textured luma:
+    yy, xx = torch.meshgrid(torch.arange(6), torch.arange(6), indexing="ij")
+    tex = ((yy + xx) % 2).float().view(1, 1, 6, 6).expand(1, 8, 6, 6).clone()
+    lum2 = tex * 0.2
+    lum2[:, 3:] = tex[:, 3:] * 0.9 + 0.5   # scene change at t=3, still textured
+    kf2 = keyframe_prior(lum2, gop=8, tubelet_size=2, scene_thresh=2.0, scene_tau=0.3, eps=1e-6)
+    e = kf2.reshape(1, 8, -1).sum(-1)[0]
+    assert e[3] > e[2], "scene-cut tubelet must get more keyframe energy than its static neighbor"
+
+
+def test_keyframe_prior_trace_safe_shape():
+    luma = torch.rand(2, 8, 12, 12)
+    kf = keyframe_prior(luma, gop=16, tubelet_size=2, scene_thresh=2.0, scene_tau=0.5, eps=1e-6)
+    assert kf.shape == luma.shape
+
+
+def test_v0_6_keyframe_prior_reallocates_to_keyframes_and_traces():
+    video = _structured_video()
+    base = Borissal(BorissalConfig.v0_5(scale=96)).select(video, gazing_ratio=0.25)
+    kf = Borissal(BorissalConfig.v0_6(scale=96, static_guard=False, laplacian_gate=False,
+                                      center_bias=0.0, keyframe_prior=True, keyframe_gop=8)
+                  ).select(video, gazing_ratio=0.25)
+    assert not torch.equal(base.scores, kf.scores)
+    # allocation must actually move tokens toward the periodic keyframe tubelets
+    # (base is uniform; keyframe run must NOT be uniform, and same total budget)
+    assert torch.equal(base.per_frame_keep, torch.full_like(base.per_frame_keep, base.per_frame_keep[0, 0]))
+    assert not torch.equal(kf.per_frame_keep, base.per_frame_keep), "keyframe tubelets must get more tokens"
+    assert int(kf.num_keep[0]) == int(base.num_keep[0]), "total budget unchanged"
+    # keyframe tubelet 0 (periodic) should hold more than a non-keyframe tubelet
+    assert kf.per_frame_keep[0, 0] > kf.per_frame_keep[0, 1]
+    # keyframe_prior is OPT-IN, not part of the v0.6 all-on default
+    assert BorissalConfig.v0_6(scale=96).keyframe_prior is False
+    class _W(torch.nn.Module):
+        def __init__(s, m): super().__init__(); s.m = m
+        def forward(s, v): return s.m.select(v, gazing_ratio=0.25).keep_index
+    cfg = BorissalConfig.v0_6(scale=96, keyframe_prior=True)
+    tr = torch.jit.trace(_W(Borissal(cfg).eval()), video, check_trace=False)
+    assert tr is not None

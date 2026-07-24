@@ -1305,3 +1305,31 @@ static_guard ALONE is the proxy-best. This is a clear proxy warning that the two
 regressive knobs are the risky components; the all-on default rests entirely on
 saliency-v3.1's downstream evidence and MUST be confirmed on CUDA QA (where, if
 that evidence doesn't transfer, static-only is the proxy-backed fallback).
+
+### v0.6 mechanical-GOP keyframe prior (2026-07-24)
+
+The deployed selector receives N ALREADY-DECODED frames with NO codec metadata,
+so real I-frame positions are unavailable -- everything must be computed from the
+incoming frames. `keyframe_prior` (opt-in, OFF by default) approximates a codec's
+keyframe structure from pixels+indices alone:
+- **periodic** pseudo-keyframe every `keyframe_gop` frames (default 8) -> pure
+  index math, trace/ONNX-safe;
+- **soft scene-cut**: a tubelet whose luma jumps sharply off the GOP grid gets a
+  continuous `sigmoid((rel_jump - thresh)/tau)` weight -- no data-dependent
+  branch, so still trace-safe -- handling "a totally different frame appears
+  mid-stream".
+
+`keyframe_weight = max(periodic, scene_soft)` drives TWO effects: (1) adds
+appearance-edge score (|lap(luma)|) at keyframe tubelets, and (2) **reallocates
+token budget toward them** under uniform allocation -- the actual "allocate a bit
+more to keyframes" (score alone is inert when every tubelet keeps a fixed count).
+Measured (16f, gop=8): base uniform [144]x8 -> keyframe [212,121,122,122,211,...],
+same total 1152; tubelets 0 and 4 (every gop/tubelet_size=4 tubelets) get ~47%
+more. New primitives `keyframe_weight`/`keyframe_prior`; knobs `keyframe_prior`,
+`keyframe_gop`, `keyframe_weight` (score), `keyframe_alloc_boost` (allocation),
+`keyframe_scene_thresh/tau`. Rationale: I-frames are the sharpest, scene-
+representative frames -> cleaner appearance for the captioner -> better
+action/risk QA from the text. This is a decode-QUALITY axis, distinct from the
+content-saliency reallocation that Track B found neutral; the proxy can't judge
+it, so it needs downstream A/B on the real V-JEPA+Qwen->QA pipeline. Kept OPT-IN
+(not in the v0.6 all-on default) until confirmed there.

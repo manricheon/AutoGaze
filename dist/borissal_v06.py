@@ -181,6 +181,49 @@ def static_appearance_guard(luma_grid: torch.Tensor, motion_norm_grid: torch.Ten
     return s_t * laplacian_energy(luma_grid)
 
 
+def keyframe_weight(luma_grid: torch.Tensor, gop: int, tubelet_size: int,
+                    scene_thresh: float, scene_tau: float, eps: float) -> torch.Tensor:
+    """Per-tubelet mechanical-GOP keyframe weight, pixel/index-only (v0.6).
+
+    The selector receives N already-decoded frames with NO codec metadata, so
+    real I-frame positions are unavailable. This approximates a codec's keyframe
+    structure from the incoming frames alone, two ways combined:
+      - PERIODIC: assume a fixed GOP (`gop` frames) -> every gop-th tubelet is a
+        pseudo-keyframe. Pure index math -> trace/ONNX-safe, data-independent.
+      - SCENE-CUT (soft): a tubelet whose luma jumps sharply from the previous
+        one (content discontinuity = a codec would place an I-frame there) gets
+        a continuous weight sigmoid((rel_jump - scene_thresh)/scene_tau) --
+        continuous, so NO data-dependent branch (stays trace-safe). Handles the
+        "a totally different frame appears mid-stream" case off the GOP grid.
+
+    Returns (B, T_grid) in [0, 1]: 1 at periodic keyframes and hard cuts, ~0
+    elsewhere. Used both to boost keyframe tubelets' token ALLOCATION and to add
+    their appearance-edge score (see `keyframe_prior`).
+    """
+    b, t, h, w = (int(x) for x in luma_grid.shape)
+    kf_tub = max(1, gop // tubelet_size)
+    t_idx = torch.arange(t, device=luma_grid.device)
+    periodic = (t_idx % kf_tub == 0).to(luma_grid.dtype).view(1, t)          # (1, T)
+    # soft scene-cut from per-tubelet luma jump, relative to the clip mean jump
+    diff = (luma_grid[:, 1:] - luma_grid[:, :-1]).abs().mean(dim=(2, 3))      # (B, T-1)
+    diff = F.pad(diff, (1, 0), value=0.0)                                     # (B, T); t=0 -> 0
+    rel = diff / (diff.mean(dim=1, keepdim=True) + eps)                       # relative jump
+    scene_soft = torch.sigmoid((rel - scene_thresh) / scene_tau)             # (B, T) in (0,1)
+    return torch.maximum(periodic, scene_soft)                              # (B, T)
+
+
+def keyframe_prior(luma_grid: torch.Tensor, gop: int, tubelet_size: int,
+                   scene_thresh: float, scene_tau: float, eps: float) -> torch.Tensor:
+    """Keyframe appearance-edge ENERGY map = keyframe_weight * |lap(luma)|, so
+    keyframe tubelets carry more edge score (better intra-tubelet spatial pick
+    once they also get more budget). The caller min-max normalizes it and adds
+    it like any other channel. See `keyframe_weight` for the weight definition.
+    """
+    b, t, h, w = (int(x) for x in luma_grid.shape)
+    kfw = keyframe_weight(luma_grid, gop, tubelet_size, scene_thresh, scene_tau, eps)
+    return kfw.view(b, t, 1, 1) * laplacian_energy(luma_grid)
+
+
 def dct_matrix(n: int, device, dtype) -> torch.Tensor:
     """Orthonormal DCT-II basis as a constant (n, n) matrix -- the FFT-free,
     delegate-native (matmul) route to the DCT. Tiny at grid resolution."""
@@ -504,6 +547,19 @@ class BorissalConfig:
     static_guard_thresh: float = 0.05
     static_guard_tau: float = 0.02
     # (3) center_bias is re-validated in v0.6 (existing knob above), not new code.
+    # (4) Mechanical-GOP keyframe prior: the selector gets N already-decoded
+    # frames with NO codec metadata, so real I-frame positions are unavailable.
+    # Approximate a codec's keyframe structure from the incoming frames: a
+    # periodic pseudo-keyframe every `keyframe_gop` frames PLUS soft scene-cut
+    # detection (a tubelet whose luma jumps sharply off the GOP grid). Adds
+    # luma-edge score there so cleaner keyframe-like frames win a bit more
+    # budget. Different gate than static_guard (periodic+scene-cut vs low-motion).
+    keyframe_prior: bool = False
+    keyframe_gop: int = 8
+    keyframe_weight: float = 0.5         # appearance-edge SCORE boost at keyframes
+    keyframe_alloc_boost: float = 1.0    # extra token ALLOCATION share at keyframes (uniform only)
+    keyframe_scene_thresh: float = 2.0  # scene-cut fires above this x mean luma jump
+    keyframe_scene_tau: float = 0.5
 
     signature_weight: float = 0.0
     """Image-signature (sign-of-DCT, fixed matmul) appearance channel weight;
@@ -1297,19 +1353,37 @@ class Borissal(nn.Module):
             S = S * laplacian_texture_gate(
                 motion_p, cfg.laplacian_gate_r0, cfg.laplacian_gate_tau, eps)
 
+        # luma at the patch grid, shared by the static guard and keyframe prior.
+        if cfg.static_guard or cfg.keyframe_prior:
+            luma_grid = F.avg_pool2d(
+                tub.reshape(B * T_grid, 1, H, W), kernel_size=patch_size, stride=patch_size
+            ).view(B, T_grid, H_grid, W_grid)
+
         # v0.6 (saliency-v3.1 stage 6): regime-switched static appearance guard.
         # Where a tubelet is ~static (globally-normalized motion ~0), add back
         # min-max-normalized appearance edge energy so static-informative
         # content survives top-k. Additive, weighted; high-motion tubelets get
         # s_t ~ 0 and are untouched. Off by default.
         if cfg.static_guard:
-            luma_grid = F.avg_pool2d(
-                tub.reshape(B * T_grid, 1, H, W), kernel_size=patch_size, stride=patch_size
-            ).view(B, T_grid, H_grid, W_grid)
             motion_gn = _minmax_norm_global(motion_p, eps)
             guard = static_appearance_guard(
                 luma_grid, motion_gn, cfg.static_guard_thresh, cfg.static_guard_tau)
             S = S + cfg.static_guard_weight * _minmax_norm(guard, eps)
+
+        # v0.6: mechanical-GOP keyframe prior (pixel/index-only, no codec meta).
+        # Two effects at periodic pseudo-keyframes (every `keyframe_gop` frames)
+        # + soft scene-cut tubelets: (1) add appearance-edge SCORE here (better
+        # intra-tubelet pick), and (2) expose the per-tubelet keyframe weight so
+        # the allocator gives these tubelets MORE tokens (the actual "allocate a
+        # bit more to keyframes" -- score alone is inert under uniform counts).
+        # Different gate than static_guard (periodic+scene-cut vs low-motion).
+        kf_weight_out = None
+        if cfg.keyframe_prior:
+            kf_weight_out = keyframe_weight(
+                luma_grid, cfg.keyframe_gop, tubelet_size,
+                cfg.keyframe_scene_thresh, cfg.keyframe_scene_tau, eps)
+            kf_energy = kf_weight_out.view(B, T_grid, 1, 1) * laplacian_energy(luma_grid)
+            S = S + cfg.keyframe_weight * _minmax_norm(kf_energy, eps)
 
         # v0.2 center bias (conditional, off by default): additive Gaussian
         # center prior -- the classical composition prior from saliency
@@ -1326,6 +1400,7 @@ class Borissal(nn.Module):
             "spatial_norm": spatial_n,
             "w": w,
             "noise_floor_tau": tau,
+            "keyframe_weight": kf_weight_out,
         }
 
     def _allocate_and_topk(self, sel_scores, alloc, k_per_frame, m, K_total,
@@ -1478,6 +1553,16 @@ class Borissal(nn.Module):
         elif alloc == "uniform":
             k = min(max(1, round(ratio * N_pf)), N_pf)
             k_per_frame = torch.full((B, T_grid), k, dtype=torch.long, device=device)
+            # v0.6 keyframe allocation: give periodic/scene-cut keyframe tubelets
+            # MORE tokens (the actual "allocate a bit more to keyframes"). Base
+            # uniform share scaled by (1 + boost * keyframe_weight), renormalized
+            # to the exact same total budget so nothing else changes.
+            if cfg.keyframe_prior and sal.get("keyframe_weight") is not None:
+                K_total_u = k * T_grid
+                kfw = sal["keyframe_weight"].to(device)          # (B, T_grid) in [0,1]
+                raw = (1.0 + cfg.keyframe_alloc_boost * kfw)
+                raw = raw * (K_total_u / raw.sum(dim=-1, keepdim=True).clamp_min(eps))
+                k_per_frame = _largest_remainder(raw, K_total_u, min_val=1, max_val=N_pf)
         elif alloc == "proportional":
             total_budget = min(max(1, round(ratio * L)), L)
             energy = S.reshape(B, T_grid, -1).sum(dim=-1)
