@@ -749,8 +749,19 @@ class BorissalConfig:
         regressed recall; static_guard won). The proxy is not the arbiter; the
         real caption->QA on CUDA is, and saliency-v3.1 runs all three. To recover
         the exact v0.5 behavior, disable them explicitly:
-        `BorissalConfig.v0_6(static_guard=False, laplacian_gate=False, center_bias=0.0)`."""
-        base = dict(static_guard=True, laplacian_gate=True, center_bias=0.3)
+        `BorissalConfig.v0_6(static_guard=False, laplacian_gate=False, center_bias=0.0,
+        keyframe_prior=False, per_frame_allocation="uniform")`.
+
+        ALLOCATION (2026-07-24): v0.6 defaults to `per_frame_allocation="global"`
+        (clip-wide top-K + per-tubelet floor) -- CONTENT-ADAPTIVE, matching
+        saliency-v3.1's stage-7 (clip-wide top-K + min-1 guarantee), NOT v0.5's
+        uniform. Track B found uniform > global on the SigLIP proxy, but
+        saliency-v3.1 (global) is much better downstream, so the proxy mis-ranked
+        allocation too; global lets the signal boosts (keyframe/static/center)
+        flow into content-adaptive per-tubelet counts. Also enables the keyframe
+        prior by default (all newly-introduced features on)."""
+        base = dict(static_guard=True, laplacian_gate=True, center_bias=0.3,
+                    keyframe_prior=True, per_frame_allocation="global")
         base.update(overrides)
         return cls.v0_5(**base)
 

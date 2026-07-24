@@ -1333,3 +1333,26 @@ action/risk QA from the text. This is a decode-QUALITY axis, distinct from the
 content-saliency reallocation that Track B found neutral; the proxy can't judge
 it, so it needs downstream A/B on the real V-JEPA+Qwen->QA pipeline. Kept OPT-IN
 (not in the v0.6 all-on default) until confirmed there.
+
+### v0.6 default: all features ON + content-adaptive allocation (2026-07-24)
+
+Decision (user): make ALL newly-introduced features default-on (adds
+keyframe_prior to static_guard/laplacian_gate/center_bias) AND switch token
+allocation to CONTENT-ADAPTIVE. Key realization: saliency-v3.1's stage-7
+(clip-wide top-K + min-1 floor) IS content-adaptive = borissal's
+`per_frame_allocation="global"`, whereas borissal defaulted to UNIFORM. So the
+allocation MODE was itself a difference from the downstream-superior
+saliency-v3.1. Track B found uniform > global on the SigLIP proxy, but the proxy
+mis-ranked here too (as it did for the knobs) -- saliency-v3.1 (global) wins
+downstream. So v0.6 default is now `per_frame_allocation="global"`: the signal
+boosts (keyframe/static/center) raise per-tubelet scores, and global top-K turns
+that into content-adaptive per-tubelet token counts (concentrate where the
+score is high; the floor guarantees every tubelet keeps >=1 for coverage). Under
+global, the keyframe SCORE boost naturally reallocates budget to keyframes (the
+uniform-only keyframe alloc path is dormant). Measured v0.6 default (16f): counts
+non-uniform e.g. [164,220,100,128,44,168,184,144], same total 1152.
+
+Recover exact v0.5 with `v0_6(static_guard=False, laplacian_gate=False,
+center_bias=0.0, keyframe_prior=False, per_frame_allocation="uniform")`. All
+proxy-contradicted (uniform, no-knobs) but saliency-v3.1-aligned; arbiter is the
+downstream V-JEPA+Qwen->action/risk-QA.

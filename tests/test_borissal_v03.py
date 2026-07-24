@@ -593,19 +593,23 @@ def test_static_appearance_guard_fires_only_on_static_tubelets():
     assert guard[:, 1].abs().max() < 1e-4, "moving tubelet is untouched (s_t ~ 0)"
 
 
-def test_v0_6_default_enables_all_three_knobs():
-    """v0.6 DEFAULT = all three saliency-v3.1 knobs ON (2026-07-24 decision,
-    matching saliency-v3.1's own config)."""
+def test_v0_6_default_enables_all_features_and_global_alloc():
+    """v0.6 DEFAULT = all saliency-v3.1 features ON + content-adaptive (global)
+    allocation matching saliency-v3.1's stage-7 (2026-07-24 decision)."""
     cfg = BorissalConfig.v0_6(scale=96)
     assert cfg.static_guard and cfg.laplacian_gate and cfg.center_bias > 0.0
+    assert cfg.keyframe_prior
+    assert cfg.per_frame_allocation == "global"
 
 
-def test_v0_6_all_knobs_off_recovers_v0_5():
-    """Explicitly disabling every v0.6 knob must recover exact v0.5 behavior."""
+def test_v0_6_all_features_off_recovers_v0_5():
+    """Disabling every v0.6 feature AND restoring uniform allocation must
+    recover exact v0.5 behavior."""
     video = _structured_video()
     s5 = Borissal(BorissalConfig.v0_5(scale=96)).select(video, gazing_ratio=0.25)
     s6off = Borissal(BorissalConfig.v0_6(
-        scale=96, static_guard=False, laplacian_gate=False, center_bias=0.0
+        scale=96, static_guard=False, laplacian_gate=False, center_bias=0.0,
+        keyframe_prior=False, per_frame_allocation="uniform",
     )).select(video, gazing_ratio=0.25)
     assert torch.equal(s5.scores, s6off.scores)
     assert torch.equal(s5.keep_mask, s6off.keep_mask)
@@ -618,7 +622,8 @@ def test_v0_6_static_guard_changes_scores_on_static_clip():
     video = frame.expand(1, 16, 3, 96, 96).contiguous()
     base = Borissal(BorissalConfig.v0_5(scale=96)).select(video, gazing_ratio=0.25)
     guarded = Borissal(BorissalConfig.v0_6(scale=96, static_guard=True, laplacian_gate=False,
-                                           center_bias=0.0, static_guard_weight=1.0)
+                                           center_bias=0.0, keyframe_prior=False,
+                                           static_guard_weight=1.0)
                        ).select(video, gazing_ratio=0.25)
     assert not torch.equal(base.scores, guarded.scores)
 
@@ -627,7 +632,8 @@ def test_v0_6_laplacian_gate_changes_scores():
     video = _structured_video()
     base = Borissal(BorissalConfig.v0_5(scale=96)).select(video, gazing_ratio=0.25)
     gated = Borissal(BorissalConfig.v0_6(scale=96, static_guard=False, laplacian_gate=True,
-                                         center_bias=0.0)).select(video, gazing_ratio=0.25)
+                                         center_bias=0.0, keyframe_prior=False)
+                     ).select(video, gazing_ratio=0.25)
     assert not torch.equal(base.scores, gated.scores)
     # gate is a (0,1) multiplier -> it can only hold or lower scores
     assert (gated.scores <= base.scores + 1e-6).all()
@@ -687,7 +693,8 @@ def test_v0_6_keyframe_prior_reallocates_to_keyframes_and_traces():
     video = _structured_video()
     base = Borissal(BorissalConfig.v0_5(scale=96)).select(video, gazing_ratio=0.25)
     kf = Borissal(BorissalConfig.v0_6(scale=96, static_guard=False, laplacian_gate=False,
-                                      center_bias=0.0, keyframe_prior=True, keyframe_gop=8)
+                                      center_bias=0.0, keyframe_prior=True, keyframe_gop=8,
+                                      per_frame_allocation="uniform")
                   ).select(video, gazing_ratio=0.25)
     assert not torch.equal(base.scores, kf.scores)
     # allocation must actually move tokens toward the periodic keyframe tubelets
@@ -697,8 +704,8 @@ def test_v0_6_keyframe_prior_reallocates_to_keyframes_and_traces():
     assert int(kf.num_keep[0]) == int(base.num_keep[0]), "total budget unchanged"
     # keyframe tubelet 0 (periodic) should hold more than a non-keyframe tubelet
     assert kf.per_frame_keep[0, 0] > kf.per_frame_keep[0, 1]
-    # keyframe_prior is OPT-IN, not part of the v0.6 all-on default
-    assert BorissalConfig.v0_6(scale=96).keyframe_prior is False
+    # keyframe_prior IS part of the v0.6 all-on default (2026-07-24)
+    assert BorissalConfig.v0_6(scale=96).keyframe_prior is True
     class _W(torch.nn.Module):
         def __init__(s, m): super().__init__(); s.m = m
         def forward(s, v): return s.m.select(v, gazing_ratio=0.25).keep_index
