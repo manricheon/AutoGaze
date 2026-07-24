@@ -175,6 +175,11 @@ class BorissalConfig:
     keyframe_alloc_boost: float = 1.0    # extra token ALLOCATION share at keyframes (uniform only)
     keyframe_scene_thresh: float = 2.0  # scene-cut fires above this x mean luma jump
     keyframe_scene_tau: float = 0.5
+    # (5) Luma conversion (saliency-v3.1 stage 1): "mean" = plain channel mean
+    # (v0.3-v0.5); "bt601" = 0.299R+0.587G+0.114B perceptual weights (emphasize
+    # green/structure, classic CV grayscale). Feeds ALL signals (motion, spatial,
+    # static guard, keyframe) since they derive from this luma.
+    luma_mode: Literal["mean", "bt601"] = "mean"
 
     signature_weight: float = 0.0
     """Image-signature (sign-of-DCT, fixed matmul) appearance channel weight;
@@ -376,7 +381,8 @@ class BorissalConfig:
         flow into content-adaptive per-tubelet counts. Also enables the keyframe
         prior by default (all newly-introduced features on)."""
         base = dict(static_guard=True, laplacian_gate=True, center_bias=0.3,
-                    keyframe_prior=True, per_frame_allocation="global")
+                    keyframe_prior=True, per_frame_allocation="global",
+                    luma_mode="bt601")
         base.update(overrides)
         return cls.v0_5(**base)
 

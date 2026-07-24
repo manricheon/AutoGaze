@@ -1356,3 +1356,26 @@ Recover exact v0.5 with `v0_6(static_guard=False, laplacian_gate=False,
 center_bias=0.0, keyframe_prior=False, per_frame_allocation="uniform")`. All
 proxy-contradicted (uniform, no-knobs) but saliency-v3.1-aligned; arbiter is the
 downstream V-JEPA+Qwen->action/risk-QA.
+
+### v0.6 = maximal saliency-v3.1 port (2026-07-24)
+
+Per user ("include as much as possible"), added the last missing faithful
+element -- BT.601 luma (stage 1, `luma_mode="bt601"`: 0.299R+0.587G+0.114B,
+feeds all signals). v0.6 default now maps to ALL 7 saliency-v3.1 stages:
+
+| saliency-v3.1 stage | v0.6 default |
+|---|---|
+| 1 BT.601 luma | `luma_mode="bt601"` |
+| 2 frame-diff motion | motion (frame-diff, v0.4-aware available) |
+| 3 patch/tubelet/2x2-block 12x12 | `score_coarsen=2` cube |
+| 4 Laplacian texture suppression | `laplacian_gate` |
+| 5 Gaussian center bias | `center_bias=0.3` |
+| 6 static keyframe edge guard | `static_guard` + `keyframe_prior` |
+| 7 top-K + min-1 floor + 24x24 expand | `per_frame_allocation="global"` + cube |
+
+NOT ported: the uncertain stage-2 "center crop" (the user flagged it as maybe
+not real; input is already square-resized) -- omitted pending confirmation.
+Everything is proxy-contradicted but saliency-v3.1-faithful; v0.6 is now a
+complete non-learned port to A/B against saliency-v3.1 on the real downstream.
+Recover v0.5 with all v0.6 flags off + `luma_mode="mean"` +
+`per_frame_allocation="uniform"`.

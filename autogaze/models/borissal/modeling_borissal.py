@@ -360,7 +360,12 @@ class Borissal(nn.Module):
         T_grid = T // tubelet_size
         H_grid, W_grid = H // patch_size, W // patch_size
 
-        gray = video.mean(dim=2)  # (B, T, H, W)
+        if cfg.luma_mode == "bt601":                                  # saliency-v3.1 stage 1
+            wl = torch.tensor([0.299, 0.587, 0.114], device=video.device,
+                              dtype=video.dtype).view(1, 1, 3, 1, 1)
+            gray = (video * wl).sum(dim=2)  # (B, T, H, W)
+        else:
+            gray = video.mean(dim=2)  # (B, T, H, W)
         tub = gray.view(B, T_grid, tubelet_size, H, W).mean(dim=2)  # (B, T_grid, H, W)
 
         # Motion (codec-residual proxy). Two granularities:

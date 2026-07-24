@@ -600,19 +600,27 @@ def test_v0_6_default_enables_all_features_and_global_alloc():
     assert cfg.static_guard and cfg.laplacian_gate and cfg.center_bias > 0.0
     assert cfg.keyframe_prior
     assert cfg.per_frame_allocation == "global"
+    assert cfg.luma_mode == "bt601"
 
 
 def test_v0_6_all_features_off_recovers_v0_5():
-    """Disabling every v0.6 feature AND restoring uniform allocation must
-    recover exact v0.5 behavior."""
+    """Disabling every v0.6 feature AND restoring uniform allocation + mean luma
+    must recover exact v0.5 behavior."""
     video = _structured_video()
     s5 = Borissal(BorissalConfig.v0_5(scale=96)).select(video, gazing_ratio=0.25)
     s6off = Borissal(BorissalConfig.v0_6(
         scale=96, static_guard=False, laplacian_gate=False, center_bias=0.0,
-        keyframe_prior=False, per_frame_allocation="uniform",
+        keyframe_prior=False, per_frame_allocation="uniform", luma_mode="mean",
     )).select(video, gazing_ratio=0.25)
     assert torch.equal(s5.scores, s6off.scores)
     assert torch.equal(s5.keep_mask, s6off.keep_mask)
+
+
+def test_bt601_luma_changes_scores_vs_mean():
+    video = _structured_video()
+    mean_l = Borissal(_v02_uniform(scale=96, luma_mode="mean")).select(video, gazing_ratio=0.25)
+    bt601 = Borissal(_v02_uniform(scale=96, luma_mode="bt601")).select(video, gazing_ratio=0.25)
+    assert not torch.equal(mean_l.scores, bt601.scores)
 
 
 def test_v0_6_static_guard_changes_scores_on_static_clip():
