@@ -593,30 +593,41 @@ def test_static_appearance_guard_fires_only_on_static_tubelets():
     assert guard[:, 1].abs().max() < 1e-4, "moving tubelet is untouched (s_t ~ 0)"
 
 
-def test_v0_6_defaults_bit_identical_to_v0_5():
-    """A plain v0_6() must equal v0_5() -- every v0.6 knob is opt-in."""
+def test_v0_6_default_enables_all_three_knobs():
+    """v0.6 DEFAULT = all three saliency-v3.1 knobs ON (2026-07-24 decision,
+    matching saliency-v3.1's own config)."""
+    cfg = BorissalConfig.v0_6(scale=96)
+    assert cfg.static_guard and cfg.laplacian_gate and cfg.center_bias > 0.0
+
+
+def test_v0_6_all_knobs_off_recovers_v0_5():
+    """Explicitly disabling every v0.6 knob must recover exact v0.5 behavior."""
     video = _structured_video()
     s5 = Borissal(BorissalConfig.v0_5(scale=96)).select(video, gazing_ratio=0.25)
-    s6 = Borissal(BorissalConfig.v0_6(scale=96)).select(video, gazing_ratio=0.25)
-    assert torch.equal(s5.scores, s6.scores)
-    assert torch.equal(s5.keep_mask, s6.keep_mask)
+    s6off = Borissal(BorissalConfig.v0_6(
+        scale=96, static_guard=False, laplacian_gate=False, center_bias=0.0
+    )).select(video, gazing_ratio=0.25)
+    assert torch.equal(s5.scores, s6off.scores)
+    assert torch.equal(s5.keep_mask, s6off.keep_mask)
 
 
 def test_v0_6_static_guard_changes_scores_on_static_clip():
     # a static clip (all frames identical, structured) -> motion ~0 everywhere
-    # -> the static guard fires and must move the scores.
+    # -> the static guard fires and must move the scores vs v0.5.
     frame = _structured_video()[:, :1]              # (1,1,3,96,96)
     video = frame.expand(1, 16, 3, 96, 96).contiguous()
-    base = Borissal(BorissalConfig.v0_6(scale=96)).select(video, gazing_ratio=0.25)
-    guarded = Borissal(BorissalConfig.v0_6(scale=96, static_guard=True,
-                                           static_guard_weight=1.0)).select(video, gazing_ratio=0.25)
+    base = Borissal(BorissalConfig.v0_5(scale=96)).select(video, gazing_ratio=0.25)
+    guarded = Borissal(BorissalConfig.v0_6(scale=96, static_guard=True, laplacian_gate=False,
+                                           center_bias=0.0, static_guard_weight=1.0)
+                       ).select(video, gazing_ratio=0.25)
     assert not torch.equal(base.scores, guarded.scores)
 
 
 def test_v0_6_laplacian_gate_changes_scores():
     video = _structured_video()
-    base = Borissal(BorissalConfig.v0_6(scale=96)).select(video, gazing_ratio=0.25)
-    gated = Borissal(BorissalConfig.v0_6(scale=96, laplacian_gate=True)).select(video, gazing_ratio=0.25)
+    base = Borissal(BorissalConfig.v0_5(scale=96)).select(video, gazing_ratio=0.25)
+    gated = Borissal(BorissalConfig.v0_6(scale=96, static_guard=False, laplacian_gate=True,
+                                         center_bias=0.0)).select(video, gazing_ratio=0.25)
     assert not torch.equal(base.scores, gated.scores)
     # gate is a (0,1) multiplier -> it can only hold or lower scores
     assert (gated.scores <= base.scores + 1e-6).all()

@@ -345,11 +345,14 @@ class BorissalConfig:
           as a winner, but it has been off/untested since v0.2. Enable via
           override to sweep it in the v0.5 signal stack.
 
-        All three are PROXY-screened on Mac (semantic recall + V-JEPA coverage)
-        for no-regression, but the arbiter remains the real caption->QA on CUDA
-        (recall has mis-ranked before). Enable per-knob, e.g.
-        `BorissalConfig.v0_6(static_guard=True, static_guard_weight=0.5)`."""
-        base = dict()
+        DEFAULT = all three ON (2026-07-24 decision), matching saliency-v3.1's
+        own configuration -- its downstream-validated success is the evidence,
+        chosen OVER the Mac proxy screen (where laplacian_gate/center_bias
+        regressed recall; static_guard won). The proxy is not the arbiter; the
+        real caption->QA on CUDA is, and saliency-v3.1 runs all three. To recover
+        the exact v0.5 behavior, disable them explicitly:
+        `BorissalConfig.v0_6(static_guard=False, laplacian_gate=False, center_bias=0.0)`."""
+        base = dict(static_guard=True, laplacian_gate=True, center_bias=0.3)
         base.update(overrides)
         return cls.v0_5(**base)
 

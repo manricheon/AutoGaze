@@ -1258,3 +1258,28 @@ it is encouraging, not decisive). saliency-v3.1's downstream success is external
 evidence for these knobs; the arbiter is borissal's own V-JEPA 2.1-L + Qwen QA.
 Standalone: `dist/borissal_v06.py` (exposes v0_3..v0_6). Sweep:
 `scripts/sweep_borissal_v06.py`; full results `outputs/borissal/v06_sweep/`.
+
+### v0.6 default = all knobs ON; gazing-ratio comparison (2026-07-24)
+
+Decision (user): make the v0.6 DEFAULT preset enable all three knobs
+(`static_guard=True, laplacian_gate=True, center_bias=0.3`), matching
+saliency-v3.1's own configuration. This chooses saliency-v3.1's downstream-
+validated success OVER the Mac proxy screen (where laplacian_gate/center_bias
+regressed recall). `v0_6()` therefore no longer equals `v0_5()`; recover exact
+v0.5 with `v0_6(static_guard=False, laplacian_gate=False, center_bias=0.0)`.
+
+Gazing-ratio proxy comparison of the all-on default
+(`scripts/compare_ratios_v06.py`, SigLIP2, 16 clips):
+
+| ratio | 0.15 | 0.25 | 0.5 | 0.75 | 1.0 |
+|---|---|---|---|---|---|
+| recall | 0.194 | 0.292 | 0.518 | 0.739 | 1.000 |
+| gist | 0.809 | 0.861 | 0.931 | 0.972 | 1.000 |
+
+recall/gist rise MONOTONICALLY with ratio -- the proxy shows NO 0.75 dip, so
+the downstream 0.75 dip reported earlier is a downstream (V-JEPA masking)
+phenomenon, not a selector artifact (matches the prior nested-budget finding).
+recall > ratio at low ratios (0.194>0.15, 0.292>0.25, 0.518>0.5) = the selector
+beats random by front-loading the important patches; near ratio 1.0 there is no
+headroom to beat random. Overlays confirm perfectly nested growth
+(0.15 subset 0.25 subset ... subset 1.0). PROXY-LEVEL; CUDA QA remains the arbiter.
