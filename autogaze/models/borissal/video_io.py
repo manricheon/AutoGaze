@@ -17,15 +17,31 @@ def sample_frame_indices(total_frames: int, num_frames: int) -> np.ndarray:
     return np.round(idx).astype(np.int64)
 
 
+def _resize_or_center_crop(img: "Image.Image", size: int, center_crop: bool) -> "Image.Image":
+    """Squish-resize to (size, size) (default) or aspect-preserving resize of the
+    shorter side to `size` followed by a center crop (saliency-v3.1 stage-2
+    resize+center-crop preprocessing)."""
+    if not center_crop:
+        return img.resize((size, size), Image.BILINEAR)
+    w, h = img.size
+    scale = size / min(w, h)
+    rw, rh = max(size, round(w * scale)), max(size, round(h * scale))
+    img = img.resize((rw, rh), Image.BILINEAR)
+    left, top = (rw - size) // 2, (rh - size) // 2
+    return img.crop((left, top, left + size, top + size))
+
+
 def load_video(
     path: str,
     num_frames: int = 16,
     size: int = 384,
     mean=IMAGENET_MEAN,
     std=IMAGENET_STD,
+    center_crop: bool = False,
 ) -> torch.Tensor:
-    """Decode a video file, sample `num_frames` frames, resize to (size, size),
-    and normalize. Returns a (1, T, 3, size, size) float32 tensor."""
+    """Decode a video file, sample `num_frames` frames, resize to (size, size)
+    (or aspect-preserving resize + center crop if `center_crop`), and normalize.
+    Returns a (1, T, 3, size, size) float32 tensor."""
     import av  # local import: keep av optional for pure-tensor callers/tests
 
     container = av.open(path)
@@ -41,7 +57,7 @@ def load_video(
 
     indices = sample_frame_indices(total, num_frames)
     resized = [
-        np.array(Image.fromarray(frames[i]).resize((size, size), Image.BILINEAR))
+        np.array(_resize_or_center_crop(Image.fromarray(frames[i]), size, center_crop))
         for i in indices
     ]
     arr = np.stack(resized).astype(np.float32) / 255.0  # (T, H, W, C)
