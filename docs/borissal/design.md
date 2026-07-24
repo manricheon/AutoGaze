@@ -1215,3 +1215,46 @@ only (not frame-count / motion_weight / cube on-off per bucket -- those are
 selection-CONTENT knobs, a separate follow-on). Judge was DINOv2 only (CLIP-L
 too slow on CPU; re-run `--judges dinov2 clip` on CUDA for a language-aligned
 cross-check).
+
+## v0.6 — saliency-v3.1-inspired knobs (2026-07-24, Mac proxy screen)
+
+User shared the 7-stage spec of saliency-v3.1 (their downstream-validated best).
+Differential vs v0.3-v0.5: its 12x12->24x24 cube = v0.5; texture suppression =
+borissal's coherence gate (different mechanism); min-1 temporal floor = uniform.
+Genuinely new / underused -> v0.6 (all OFF by default, `v0_6()` == `v0_5()`):
+- **static_guard** (stage 6): regime-switched static appearance guard. v0.5
+  blends appearance globally via motion_weight; this injects |lap(luma)| edge
+  energy ONLY where a tubelet is static (s_t = sigmoid((thresh-m_t)/tau) on
+  globally-normed motion), so text/documents/held shots survive top-k. New
+  primitive `static_appearance_guard`.
+- **laplacian_gate** (stage 4): Laplacian-to-motion texture gate,
+  R=|lap(motion)|/motion, sigmoid-suppress. A DIFFERENT mechanism than the
+  structure-tensor coherence gate. New primitive `laplacian_texture_gate`.
+- **center_bias** (stage 5): re-validated existing knob (off since v0.2).
+
+**Proxy screen (SigLIP2 gist+recall, 16 held-out clips, ratio 0.25):**
+
+| variant | recall | gist | recall W-L vs v0.5 |
+|---|---|---|---|
+| v0.5 | 0.3425 | 0.8785 | — |
+| **v0.6+static** | **0.3541** | **0.8952** | 8W-7L |
+| v0.6+laplacian | 0.2990 | 0.8855 | 3W-13L |
+| v0.6+center | 0.3130 | 0.8470 | 8W-8L |
+
+- **static_guard is the sole proxy WIN** (recall +0.012, gist +0.017) --
+  consistent with the appearance-first lesson (this downstream wants appearance,
+  not motion). The v0.6 default-candidate; carry to CUDA QA.
+- **laplacian_gate REGRESSES recall (-0.044, 3W-13L)** -- the coherence gate
+  already suppresses texture; stacking a second suppressor over-kills. Keep OFF
+  unless CUDA QA says otherwise.
+- **center_bias regresses on average (recall -0.030, gist -0.032)** -- InternVid
+  subjects are often off-center; the composition prior misfires here. saliency-
+  v3.1 ships it as a winner in THEIR pipeline, so this is a data/domain mismatch,
+  not a refutation -- flag for domain-specific CUDA QA, keep OFF by default.
+
+Caveats: PROXY ONLY (recall mis-ranked v0.4/motion_weight before; it also favors
+concentration, and static_guard adds static-structure coverage -- recall liking
+it is encouraging, not decisive). saliency-v3.1's downstream success is external
+evidence for these knobs; the arbiter is borissal's own V-JEPA 2.1-L + Qwen QA.
+Standalone: `dist/borissal_v06.py` (exposes v0_3..v0_6). Sweep:
+`scripts/sweep_borissal_v06.py`; full results `outputs/borissal/v06_sweep/`.

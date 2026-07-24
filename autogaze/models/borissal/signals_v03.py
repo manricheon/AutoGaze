@@ -104,6 +104,63 @@ def coherence_gate_grid(dx: torch.Tensor, dy: torch.Tensor, patch_size: int,
     return (1.0 - coherence).clamp(min=0.0, max=1.0) ** gamma
 
 
+def laplacian_energy(grid_map: torch.Tensor) -> torch.Tensor:
+    """|Laplacian| (2nd-derivative edge energy) of a grid map (v0.6).
+
+    Discrete 3x3 Laplacian [[0,1,0],[1,-4,1],[0,1,0]] convolution, abs value.
+    High where brightness changes are dense/complex (fine texture, text, object
+    edges), ~0 on flat regions. Computed at grid resolution (cheap; matches the
+    v0.5 grid-signal rule). Shared substrate for the texture gate and the static
+    appearance guard below.
+    """
+    b, t, h, w = (int(x) for x in grid_map.shape)
+    kernel = torch.tensor(
+        [[0.0, 1.0, 0.0], [1.0, -4.0, 1.0], [0.0, 1.0, 0.0]],
+        device=grid_map.device, dtype=grid_map.dtype).view(1, 1, 3, 3)
+    # reflect padding so a flat map stays exactly 0 (zero-pad would fabricate
+    # edge energy at the border and read as false texture there).
+    x = F.pad(grid_map.reshape(b * t, 1, h, w), (1, 1, 1, 1), mode="reflect")
+    lap = F.conv2d(x, kernel)
+    return lap.abs().view(b, t, h, w)
+
+
+def laplacian_texture_gate(motion_grid: torch.Tensor, r0: float, tau: float,
+                           eps: float) -> torch.Tensor:
+    """High-frequency texture-suppression gate via Laplacian-to-motion ratio
+    (v0.6, saliency-v3.1 stage 4). Distinct from the structure-tensor
+    `coherence_gate_*`: here R = |lap(motion)| / (motion + eps) measures how much
+    fine 2nd-derivative structure a region carries RELATIVE to its motion.
+    Regions dense in texture but poor in motion (R high -- busy backgrounds,
+    checkerboards, dense foliage) are suppressed: gate = sigmoid(-(R - r0)/tau)
+    in (0,1), multiplied onto the score. Overlaps the coherence gate in intent
+    -- sweep them exclusively, do not stack blindly.
+    """
+    lap = laplacian_energy(motion_grid)
+    R = lap / (motion_grid + eps)
+    return torch.sigmoid(-(R - r0) / tau)
+
+
+def static_appearance_guard(luma_grid: torch.Tensor, motion_norm_grid: torch.Tensor,
+                            thresh: float, tau: float) -> torch.Tensor:
+    """Regime-switched static appearance guard (v0.6, saliency-v3.1 stage 6).
+
+    Where a tubelet has ~no motion (static slide / keyframe / locked shot), the
+    motion signal carries nothing, so informative STATIC structure (text,
+    document glyphs, a person's outline) would be dropped. This adds appearance
+    edge energy back IN PROPORTION to how static the tubelet is: per-tubelet
+    static weight s_t = sigmoid((thresh - m_t)/tau) with m_t the tubelet's mean
+    (globally-normalized) motion; guard = s_t * |lap(luma)|. High-motion tubelets
+    get s_t ~ 0 -> untouched (motion still drives them). This is the surgical
+    "motion present -> motion; motion absent -> appearance edge" regime switch,
+    vs the global motion_weight blend. The caller min-max normalizes and weights
+    this like any other channel.
+    """
+    b, t, h, w = (int(x) for x in luma_grid.shape)
+    m_t = motion_norm_grid.reshape(b, t, -1).mean(dim=-1).view(b, t, 1, 1)  # (B,T,1,1)
+    s_t = torch.sigmoid((thresh - m_t) / tau)
+    return s_t * laplacian_energy(luma_grid)
+
+
 def dct_matrix(n: int, device, dtype) -> torch.Tensor:
     """Orthonormal DCT-II basis as a constant (n, n) matrix -- the FFT-free,
     delegate-native (matmul) route to the DCT. Tiny at grid resolution."""

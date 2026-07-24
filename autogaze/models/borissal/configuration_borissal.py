@@ -143,6 +143,26 @@ class BorissalConfig:
     # blocks first is valid structure-tensor windowing at ~1/ds^2 the cost.
     coherence_downsample: int = 4
 
+    # --- v0.6: saliency-v3.1-inspired refinements (all OFF by default) ---
+    # (1) Laplacian texture gate (stage 4): suppress fine texture that is dense
+    # in 2nd-derivative structure but poor in motion. R = |lap(motion)|/motion;
+    # gate = sigmoid(-(R - r0)/tau). A DIFFERENT mechanism than coherence_gate
+    # (structure-tensor) -- sweep them exclusively, don't stack.
+    laplacian_gate: bool = False
+    laplacian_gate_r0: float = 1.0
+    laplacian_gate_tau: float = 0.5
+    # (2) Static appearance guard (stage 6): where a tubelet is ~static (motion
+    # ~0), add back appearance edge energy (|lap(luma)|) so static-informative
+    # content (text, documents, held outlines) survives top-k. Regime-switched
+    # by per-tubelet static weight s_t = sigmoid((thresh - m_t)/tau) on globally-
+    # normalized motion; high-motion tubelets untouched. Added like a channel
+    # (min-max normalized, weighted by static_guard_weight).
+    static_guard: bool = False
+    static_guard_weight: float = 0.5
+    static_guard_thresh: float = 0.05
+    static_guard_tau: float = 0.02
+    # (3) center_bias is re-validated in v0.6 (existing knob above), not new code.
+
     signature_weight: float = 0.0
     """Image-signature (sign-of-DCT, fixed matmul) appearance channel weight;
     0 = off. Fires on spatially sparse foreground support."""
@@ -304,6 +324,34 @@ class BorissalConfig:
                     coherence_at_grid=True, spatial_diff="tubelet")
         base.update(overrides)
         return cls.v0_3(**base)
+
+    @classmethod
+    def v0_6(cls, **overrides) -> "BorissalConfig":
+        """The Borissal v0.6 preset: v0.5 + three saliency-v3.1-inspired knobs,
+        ALL OFF by default (so a plain `v0_6()` is bit-identical to `v0_5()` --
+        the additions are opt-in and sweep-gated).
+
+        saliency-v3.1 (the user's downstream-validated best) contributed three
+        things v0.5 lacked, confirmed against the v0.3-v0.5 stack:
+        - `static_guard`: regime-switched static appearance guard. v0.5 blends
+          appearance globally (motion_weight); this instead injects |lap(luma)|
+          edge energy ONLY where a tubelet is static, so text/documents/held
+          shots survive top-k. Aligns with the v0.4-regression lesson (this
+          downstream wants appearance, not motion).
+        - `laplacian_gate`: Laplacian-to-motion texture suppression -- a
+          different mechanism than the structure-tensor `coherence_gate`; sweep
+          them exclusively, never stacked.
+        - `center_bias`: re-validated (existing knob) -- saliency-v3.1 ships it
+          as a winner, but it has been off/untested since v0.2. Enable via
+          override to sweep it in the v0.5 signal stack.
+
+        All three are PROXY-screened on Mac (semantic recall + V-JEPA coverage)
+        for no-regression, but the arbiter remains the real caption->QA on CUDA
+        (recall has mis-ranked before). Enable per-knob, e.g.
+        `BorissalConfig.v0_6(static_guard=True, static_guard_weight=0.5)`."""
+        base = dict()
+        base.update(overrides)
+        return cls.v0_5(**base)
 
 
 @dataclass

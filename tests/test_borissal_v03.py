@@ -549,3 +549,84 @@ def test_coherence_at_grid_matches_pixel_closely_and_traces():
         def forward(s, v): r = s.m.select(v, gazing_ratio=0.25); return r.keep_index
     tr = torch.jit.trace(_W(Borissal(BorissalConfig.v0_5(scale=96)).eval()), video, check_trace=False)
     assert tr is not None
+
+
+# ---------------------------------------------------------------------------
+# v0.6: Laplacian texture gate + static appearance guard (saliency-v3.1 stage 4/6)
+# ---------------------------------------------------------------------------
+from autogaze.models.borissal.signals_v03 import (  # noqa: E402
+    laplacian_energy, laplacian_texture_gate, static_appearance_guard,
+)
+
+
+def test_laplacian_energy_zero_on_flat_high_on_texture():
+    flat = torch.full((1, 2, 8, 8), 0.5)
+    assert laplacian_energy(flat).abs().max() < 1e-6
+    # checkerboard = densest high-frequency texture -> large laplacian energy
+    yy, xx = torch.meshgrid(torch.arange(8), torch.arange(8), indexing="ij")
+    chec = ((yy + xx) % 2).float().view(1, 1, 8, 8).expand(1, 2, 8, 8)
+    assert laplacian_energy(chec).mean() > laplacian_energy(flat).mean() + 1.0
+    assert laplacian_energy(flat).shape == flat.shape
+
+
+def test_laplacian_texture_gate_suppresses_high_ratio():
+    # region A: checkerboard texture, tiny motion -> high R -> suppressed (~0)
+    yy, xx = torch.meshgrid(torch.arange(8), torch.arange(8), indexing="ij")
+    chec = ((yy + xx) % 2).float().view(1, 1, 8, 8) * 0.05 + 0.01  # small motion, high texture
+    gate_tex = laplacian_texture_gate(chec, r0=1.0, tau=0.5, eps=1e-6)
+    # region B: smooth ramp with real motion magnitude, low texture -> pass (~1)
+    ramp = torch.linspace(0.2, 0.8, 8).view(1, 1, 1, 8).expand(1, 1, 8, 8).contiguous()
+    gate_smooth = laplacian_texture_gate(ramp, r0=1.0, tau=0.5, eps=1e-6)
+    assert (gate_tex >= 0).all() and (gate_tex <= 1).all()
+    assert gate_tex.mean() < gate_smooth.mean(), "dense-texture/low-motion must be suppressed more"
+
+
+def test_static_appearance_guard_fires_only_on_static_tubelets():
+    # luma with a clear edge (informative static structure)
+    luma = torch.zeros(1, 2, 8, 8)
+    luma[:, :, :, 4:] = 1.0  # a vertical edge -> nonzero laplacian
+    # tubelet 0 static (motion ~0), tubelet 1 fully moving (motion ~1)
+    motion_norm = torch.zeros(1, 2, 8, 8)
+    motion_norm[:, 1] = 1.0
+    guard = static_appearance_guard(luma, motion_norm, thresh=0.05, tau=0.02)
+    assert guard[:, 0].abs().sum() > 0, "static tubelet keeps its edge energy"
+    assert guard[:, 1].abs().max() < 1e-4, "moving tubelet is untouched (s_t ~ 0)"
+
+
+def test_v0_6_defaults_bit_identical_to_v0_5():
+    """A plain v0_6() must equal v0_5() -- every v0.6 knob is opt-in."""
+    video = _structured_video()
+    s5 = Borissal(BorissalConfig.v0_5(scale=96)).select(video, gazing_ratio=0.25)
+    s6 = Borissal(BorissalConfig.v0_6(scale=96)).select(video, gazing_ratio=0.25)
+    assert torch.equal(s5.scores, s6.scores)
+    assert torch.equal(s5.keep_mask, s6.keep_mask)
+
+
+def test_v0_6_static_guard_changes_scores_on_static_clip():
+    # a static clip (all frames identical, structured) -> motion ~0 everywhere
+    # -> the static guard fires and must move the scores.
+    frame = _structured_video()[:, :1]              # (1,1,3,96,96)
+    video = frame.expand(1, 16, 3, 96, 96).contiguous()
+    base = Borissal(BorissalConfig.v0_6(scale=96)).select(video, gazing_ratio=0.25)
+    guarded = Borissal(BorissalConfig.v0_6(scale=96, static_guard=True,
+                                           static_guard_weight=1.0)).select(video, gazing_ratio=0.25)
+    assert not torch.equal(base.scores, guarded.scores)
+
+
+def test_v0_6_laplacian_gate_changes_scores():
+    video = _structured_video()
+    base = Borissal(BorissalConfig.v0_6(scale=96)).select(video, gazing_ratio=0.25)
+    gated = Borissal(BorissalConfig.v0_6(scale=96, laplacian_gate=True)).select(video, gazing_ratio=0.25)
+    assert not torch.equal(base.scores, gated.scores)
+    # gate is a (0,1) multiplier -> it can only hold or lower scores
+    assert (gated.scores <= base.scores + 1e-6).all()
+
+
+def test_v0_6_traces_with_both_knobs_on():
+    video = _structured_video()
+    cfg = BorissalConfig.v0_6(scale=96, static_guard=True, laplacian_gate=True, center_bias=0.2)
+    class _W(torch.nn.Module):
+        def __init__(s, m): super().__init__(); s.m = m
+        def forward(s, v): return s.m.select(v, gazing_ratio=0.25).keep_index
+    tr = torch.jit.trace(_W(Borissal(cfg).eval()), video, check_trace=False)
+    assert tr is not None

@@ -114,3 +114,33 @@ v0.3는 동결된 16f 기준선으로 유지, v0.4가 프레임 수 강건한 �
 action/이미지-인코더용) · v0.5(큐브 응집+외형 우선+빠름, V-JEPA/설명 권장).
 단일 배포본: `dist/borissal_v0{3,4,5}.py`. 미완: 실제 V-JEPA+Qwen QA로
 v0.5의 외형 우선 선택이 v0.3를 이기는지 확정.
+
+## v0.6 — saliency-v3.1 정제 반영 (2026-07-24, Mac 프록시)
+
+saliency-v3.1(사용자의 다운스트림 검증 best) 7단계와 대조: 12×12→24×24 큐브는
+v0.5, 텍스처 억제는 coherence gate(방식만 다름), min-1 floor는 uniform이 이미 커버.
+진짜 새것 3개를 v0.6 개별 노브로(전부 기본 OFF → `v0_6()`==`v0_5()`):
+1. **정적 가드**(`static_guard`): 모션 ~0인 튜블렛에만 luma Laplacian 엣지 가산 →
+   정적 텍스트/문서/정지 피사체 보존. v0.5의 전역 motion_weight 블렌드보다 외과적.
+2. **Laplacian 텍스처 게이트**(`laplacian_gate`): R=Laplacian/모션 비율로 억제
+   (coherence gate와 다른 메커니즘).
+3. **center bias 재검증**(기존 노브).
+
+**프록시 스윕(SigLIP2 recall/gist, held-out 16클립, ratio 0.25):**
+
+| 변형 | recall | gist | vs v0.5 |
+|---|---|---|---|
+| v0.5 | 0.3425 | 0.8785 | — |
+| **v0.6+static** | **0.3541** | **0.8952** | 8W-7L |
+| v0.6+laplacian | 0.2990 | 0.8855 | 3W-13L |
+| v0.6+center | 0.3130 | 0.8470 | 8W-8L |
+
+- **정적 가드만 프록시 승리**(recall·gist 둘 다↑) — appearance-first 교훈과 정합.
+  v0.6 기본후보, CUDA QA로 확정.
+- **Laplacian은 recall 회귀**(−0.044) — coherence gate가 이미 텍스처 억제, 겹치면
+  과억제. 기본 OFF.
+- **center bias 평균 하락** — InternVid 피사체 비중앙. saliency-v3.1 파이프라인에선
+  승자이나 데이터/도메인 불일치 → 도메인별 CUDA QA로 재판정, 기본 OFF.
+
+프록시 한계: recall은 v0.4/motion_weight를 오판한 전례·응집 선호. 최종 심판은
+borissal 자신의 V-JEPA 2.1-L+Qwen QA. 배포본 `dist/borissal_v06.py`.

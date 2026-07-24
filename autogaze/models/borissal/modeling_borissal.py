@@ -26,7 +26,9 @@ from .signals_v03 import (
     dog_blob,
     fused_blend,
     image_signature,
+    laplacian_texture_gate,
     motion_center_surround,
+    static_appearance_guard,
 )
 
 
@@ -526,6 +528,29 @@ class Borissal(nn.Module):
                     cfg.fusion_norm, cfg.fusion_entropy_floor, eps)
             beta = cfg.score_norm_blend
             S = beta * S + (1.0 - beta) * S_global
+
+        # v0.6 (saliency-v3.1 stage 4): Laplacian-to-motion texture gate.
+        # Multiplicative, like the coherence gate but a distinct mechanism
+        # (2nd-derivative energy relative to motion, not structure-tensor
+        # coherence). Uses the pre-normalization pooled motion map so R is
+        # magnitude-meaningful. Off by default.
+        if cfg.laplacian_gate:
+            S = S * laplacian_texture_gate(
+                motion_p, cfg.laplacian_gate_r0, cfg.laplacian_gate_tau, eps)
+
+        # v0.6 (saliency-v3.1 stage 6): regime-switched static appearance guard.
+        # Where a tubelet is ~static (globally-normalized motion ~0), add back
+        # min-max-normalized appearance edge energy so static-informative
+        # content survives top-k. Additive, weighted; high-motion tubelets get
+        # s_t ~ 0 and are untouched. Off by default.
+        if cfg.static_guard:
+            luma_grid = F.avg_pool2d(
+                tub.reshape(B * T_grid, 1, H, W), kernel_size=patch_size, stride=patch_size
+            ).view(B, T_grid, H_grid, W_grid)
+            motion_gn = _minmax_norm_global(motion_p, eps)
+            guard = static_appearance_guard(
+                luma_grid, motion_gn, cfg.static_guard_thresh, cfg.static_guard_tau)
+            S = S + cfg.static_guard_weight * _minmax_norm(guard, eps)
 
         # v0.2 center bias (conditional, off by default): additive Gaussian
         # center prior -- the classical composition prior from saliency
