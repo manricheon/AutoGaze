@@ -35,11 +35,12 @@ from autogaze.models.borissal.viz import render_overlay  # noqa: E402
 
 VARIANTS = {
     "v0.5": lambda s: BorissalConfig.v0_5(scale=s),
-    "v0.6+static": lambda s: BorissalConfig.v0_6(scale=s, static_guard=True, static_guard_weight=0.5),
-    "v0.6+laplacian": lambda s: BorissalConfig.v0_6(scale=s, laplacian_gate=True),
-    "v0.6+center": lambda s: BorissalConfig.v0_6(scale=s, center_bias=0.3),
+    "v0.6-all": lambda s: BorissalConfig.v0_6(scale=s),          # DEFAULT: all three ON
+    "v0.6+static": lambda s: BorissalConfig.v0_6(scale=s, static_guard=True, laplacian_gate=False, center_bias=0.0),
+    "v0.6+laplacian": lambda s: BorissalConfig.v0_6(scale=s, static_guard=False, laplacian_gate=True, center_bias=0.0),
+    "v0.6+center": lambda s: BorissalConfig.v0_6(scale=s, static_guard=False, laplacian_gate=False, center_bias=0.3),
 }
-COLORS = {"v0.5": "#5B6B7B", "v0.6+static": "#2E8B8B",
+COLORS = {"v0.5": "#5B6B7B", "v0.6-all": "#C0392B", "v0.6+static": "#2E8B8B",
           "v0.6+laplacian": "#E08A1E", "v0.6+center": "#9B5BA5"}
 
 

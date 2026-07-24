@@ -1283,3 +1283,25 @@ recall > ratio at low ratios (0.194>0.15, 0.292>0.25, 0.518>0.5) = the selector
 beats random by front-loading the important patches; near ratio 1.0 there is no
 headroom to beat random. Overlays confirm perfectly nested growth
 (0.15 subset 0.25 subset ... subset 1.0). PROXY-LEVEL; CUDA QA remains the arbiter.
+
+### v0.5 vs v0.6-all (combined) proxy comparison (2026-07-24)
+
+Direct comparison of the new all-on default against v0.5 and each knob alone
+(`scripts/sweep_borissal_v06.py --out-dir outputs/borissal/v06_compare`,
+SigLIP2, 16 clips, ratio 0.25):
+
+| variant | recall | gist | recall W-L vs v0.5 |
+|---|---|---|---|
+| v0.5 | 0.3425 | 0.8785 | — |
+| v0.6-all (default) | 0.2925 | 0.8608 | 4W-12L |
+| v0.6+static only | 0.3541 | 0.8952 | 8W-7L |
+| v0.6+laplacian | 0.2990 | 0.8855 | 3W-13L |
+| v0.6+center | 0.3130 | 0.8470 | 8W-8L |
+
+**Proxy ranking: static-only > v0.5 > center > laplacian > all-on.** The all-on
+default is the proxy-WORST (recall -0.050 vs v0.5): laplacian_gate and
+center_bias each regress recall, and combined they swamp static_guard's gain.
+static_guard ALONE is the proxy-best. This is a clear proxy warning that the two
+regressive knobs are the risky components; the all-on default rests entirely on
+saliency-v3.1's downstream evidence and MUST be confirmed on CUDA QA (where, if
+that evidence doesn't transfer, static-only is the proxy-backed fallback).
