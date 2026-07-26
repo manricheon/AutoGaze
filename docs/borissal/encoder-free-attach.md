@@ -206,6 +206,113 @@ Qwen `prune_stage="llm"`과 같은 누출이 구조적으로 존재하고, 코�
 통과시킬 것. Tier A 모델은 대부분 remote code이므로, 어댑터를 쓰기 전에 "패치 임베딩 뒤에
 공간 혼합이 있는지"를 소스에서 직접 확인해야 한다(층 수 0인지, attention이 패치 간인지).
 
+## 6.5 목표를 "비전 토큰 줄이기"로 넓히면 — 메커니즘별 후보 지도
+
+encoder-free는 "누출 없이 측정한다"는 실험 위생 때문에 좋은 것이고, **실제 목적은 LLM에
+들어가는 비전 토큰을 줄이는 것**이다. 그 관점에서는 훨씬 넓은 빅테크 계열이 후보가 된다.
+다만 **계열마다 "패치를 줄이면 무엇이 줄어드는가"가 다르다** — 이게 후보를 고르는 유일하게
+중요한 축이므로 메커니즘별로 정리한다. (params/라이선스는 HF API, `tf`는 설치된 5.5.0에서
+실측, 기하는 로컬 config에서 실측.)
+
+### M1. 네이티브 동적해상도 + spatial merge — 토큰 ∝ 픽셀
+**패치를 줄이면 LLM 토큰이 1:1로 줄어든다. 우리가 원하는 유일한 형태이고, 구현한 경로가 여기.**
+
+| 모델 | params | 라이선스 | arch / tf | 기하(실측) | 메모 |
+|---|---|---|---|---|---|
+| **Qwen3-VL-2B** ✅구현완료 | 2.13B | apache-2.0 | `qwen3_vl` ✅ | **patch 16**, merge 2, temporal 2 | `attach_qwen3vl.py` |
+| Qwen3.5-2B | 2.27B | apache-2.0 | `qwen3_5` ✅ | 동일 | 같은 코드 동작 |
+| Mistral-Small-3.2-24B | 24.01B | apache-2.0 | `mistral3` ✅ | patch **14**, merge 2, image≤1540 | Pixtral 타워. §아래 patch-14 항목 |
+| GLM-4.6V | **107.71B** | MIT | `glm4v_moe` ✅ (`glm46v`도 등록) | patch **14**, merge 2 | MIT인데 107B → CUDA 다중GPU |
+| Kimi-VL-A3B-Instruct | 16.41B (A3B) | MIT | `kimi_vl` ❌ | ? | MoE 활성 3B. remote code |
+| Llama 4 Scout | 108.64B (17B활성/16E) | other(gated) | `llama4` ✅ | patch 14, image 448, 34층 | early fusion, 비전 토큰이 시퀀스에 들어감 |
+
+### M2. 풀링으로 **고정 토큰 수** — 토큰 수가 입력과 무관하게 상수
+⚠️ **트랩: 패치를 줄여도 LLM 토큰이 하나도 안 줄어든다.** 인코더 연산만 절감된다. LLM
+비용을 줄이려면 풀링 *뒤* 토큰을 줄여야 하고, 그건 borissal의 선택 단위가 아니다.
+
+| 모델 | params | 라이선스 | arch / tf | 고정 토큰 수 |
+|---|---|---|---|---|
+| Gemma 3 (4B/12B/27B) | 4.30B(4b) | gemma(gated) | `gemma3` ✅ | **`mm_tokens_per_image=256` 실측** (SigLIP 896² → 4096 패치 → avgpool → 256) |
+| Gemma 3n | — | gemma | `gemma3n` ✅ | 동일 계열 |
+| Molmo-7B-D | 8.02B | apache-2.0 | `molmo` ❌ | 크롭별 인코딩 후 풀링 |
+| **NVILA-8B-HD-Video** | — | **cc-by-nc-4.0** | `nvila` ❌ | "scale-then-compress" 공간 풀링 |
+
+**단, NVILA-HD-Video는 예외적으로 특별하다**: HF 태그가 `AutoGaze`이고 arXiv id가 이 레포의
+논문(2603.12254)이다 — **이미 AutoGaze 선택을 소비하도록 만들어진 모델**이고, README대로
+SigLIP *앞*과 LLM 앞 양쪽에서 패치를 제거한다. 즉 M2 계열이면서도 토큰 절감이 실제로 성립하는
+유일한 사례다. borissal은 **기존 `adapters.to_autogaze_gazing_info`로 오늘 붙는다**(uniform
+할당 전용). 레퍼런스 통합으로 반드시 목록에 남길 것. 라이선스가 cc-by-nc라 연구용.
+
+### M3. AnyRes / 타일링 — 토큰 ∝ 타일 수
+타일 단위 드롭(거침) 또는 타일 내 패치 드롭. 타일마다 고정 토큰이므로 실질적으로 M1+M2 혼합.
+
+| 모델 | params | 라이선스 | arch / tf | 기하(실측) |
+|---|---|---|---|---|
+| InternVL3.5-8B | 8.53B | apache-2.0 | `internvl_chat` / `internvl` ✅ | patch 14, tile 448, **`downsample_ratio=0.5`(2×2 unshuffle) → `image_seq_length=256`/타일** |
+| granite-vision-3.3-2b | 2.98B | apache-2.0 | `llava_next` ✅ | LLaVA-NeXT AnyRes |
+| LLaVA-OneVision | — | apache-2.0 | `llava_onevision` ✅ | patch 14, image 384 → **27×27 홀수**(기존 미해결 항목) |
+| DeepSeek-VL2-small | 16.15B | other | `deepseek_vl_v2` ❌ (tf엔 v1/hybrid만) | 타일링 |
+| Ovis2-2B | 2.46B | apache-2.0 | `ovis` / `ovis2` ✅ | patch 14, image 224 |
+| Phi-4-multimodal | 5.57B | MIT | `phi4mm` / `phi4_multimodal` ✅ | 동적 멀티크롭 + LoRA 어댑터 |
+| SmolVLM2-2.2B | 2.25B | apache-2.0 | `smolvlm` ✅ | **patch 32**, image 224 + pixel shuffle. 비디오 지원 |
+
+### M4. 쿼리 리샘플러(Perceiver / Q-Former) — 고정 N 쿼리
+⚠️ **어태치가 무의미하다.** 패치가 쿼리로 압축되므로 선택 대상이 LLM 토큰과 무관해진다.
+
+| 모델 | params | 라이선스 | arch / tf | 근거 |
+|---|---|---|---|---|
+| Aria | 25.31B | apache-2.0 | `aria` ✅ | `max_value_projector_patch_to_query_dict=256` 실측 = 패치→고정 쿼리 |
+| Idefics2 | — | apache-2.0 | `idefics2` ✅ | perceiver resampler |
+| BLIP-2 / InstructBLIP | — | — | `blip-2`,`instructblip` ✅ | Q-Former 32 쿼리 |
+
+### M5. Cross-attention 주입 — 비전 토큰이 LLM 시퀀스에 아예 없음
+프루닝은 cross-attn의 KV를 줄인다. 시퀀스 길이는 안 줄지만 비전측 연산·메모리는 줄어든다.
+**다른 계약**이라 별도 어댑터가 필요하고, 우리의 NLL 지표는 그대로 쓸 수 있다.
+
+| 모델 | params | 라이선스 | arch / tf | 기하(실측) |
+|---|---|---|---|---|
+| Llama-3.2-11B/90B-Vision | 10.67B | llama3.2(gated) | `mllama` ✅ | patch 14, image 448, 32층, merge 없음 |
+
+### ★ 이 조사에서 나온 가장 실용적인 발견: patch 16은 운이 좋았다
+
+로컬 config 실측 결과 **Qwen 계열만 patch 16이고, Mistral3 / GLM-4V / InternVL / LLaVA-OneVision /
+mllama / Llama 4 / Ovis2는 전부 patch 14**다. 즉 우리가 어태치를 그렇게 깨끗하게 붙일 수 있었던
+건 patch16 + merge2가 borissal의 (16px, tubelet 2, `score_coarsen=2`)와 우연히 정확히 일치했기
+때문이다.
+
+하지만 patch 14가 곧 막힘은 아니다 — **네이티브 동적해상도 계열은 해상도를 `patch × merge = 28`의
+배수로 반올림**하므로, borissal을 `patch_size=14`, `scale = 28의 배수`로 돌리면 그리드가 짝수로
+나와 큐브 coherence가 그대로 성립한다. `to_qwen3vl_video_tokens(spatial_merge_size=2)`의 산술은
+patch 크기와 무관하므로 **그대로 재사용된다**. 실측(v0.5, 16f, ratio 0.25, `partial_blocks="strict"`):
+
+| scale | 그리드 | 병합 그리드 | 토큰 | 부분 블록 |
+|---|---|---|---|---|
+| 336 (28×12) | 8×24×24 | 8×12×12 | 288/1152 | 0 |
+| **392 (28×14)** | 8×28×28 | 8×14×14 | 392/1568 | 0 |
+| 448 (28×16) | 8×32×32 | 8×16×16 | 512/2048 | 0 |
+
+(`tests/test_borissal_attach_qwen3vl.py::test_patch14_native_resolution_recipe`가 잠근다.)
+
+진짜로 막히는 건 **해상도가 고정된 타워**뿐이다. 두 실패 모드 모두 실측 확인:
+`scale=384, patch=14` → `ValueError: H,W (384,384) must be divisible by patch_size (14)`;
+우회한 `scale=378` → 27×27이 되어 `ValueError: score_coarsen=2 requires grid 27x27 divisible by c`.
+즉 LLaVA-OneVision `so400m-patch14-384`는 여전히 막혀 있다(기존 미해결 항목 그대로) — 고치려면
+divisibility guard를 conv처럼 crop-to-multiple로 완화하고 홀수 그리드용 큐브 전략을 정해야 한다.
+
+### 실행 우선순위 (이 절의 결론)
+
+1. **M1만이 "토큰 감소 = LLM 비용 감소"를 만족한다.** 구현된 Qwen 경로가 정확히 여기 있고,
+   확장 1순위는 **Mistral-Small-3.2-24B**(apache-2.0, `mistral3` tf 내장, patch14/merge2 →
+   `scale=392`로 즉시 가능)와 **GLM-4.6V**(MIT, tf 내장, 단 107B라 다중 GPU).
+2. **NVILA-8B-HD-Video는 별도 트랙으로 반드시 포함.** 이미 AutoGaze를 먹는 레퍼런스 통합이고
+   `to_autogaze_gazing_info`가 이미 있다. v0.x 선택을 원논문 파이프라인과 직접 비교할 수 있는
+   유일한 지점.
+3. **M2/M4는 목록에만 남기고 건드리지 않는다** — 패치를 줄여도 LLM 토큰이 안 줄어드니
+   우리 주장(토큰 예산 절감)을 시험할 수 없다. Gemma 3의 `mm_tokens_per_image=256`이 그 대표
+   사례다. (다만 M2에서도 *인코더* 연산 절감은 유효하므로, 모바일/엣지 관점에서는 재방문 가치가 있다.)
+4. **M5(mllama)는 계약이 달라 별도 어댑터**가 필요하지만, NLL 지표는 재사용 가능하므로
+   여력이 있으면 좋은 대조군이다.
+
 ## 7. CUDA A/B 계획
 
 `scripts/eval_mllm_attach.py`를 그대로 쓰되 gemma4 어댑터를 추가한 뒤:

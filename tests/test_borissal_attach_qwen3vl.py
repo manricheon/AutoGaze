@@ -252,3 +252,35 @@ def test_pruning_actually_changes_the_prediction(qwen, clip):
     assert pruned_logits.shape[1] < dense_logits.shape[1]
     # compare the shared text tail (last token's prediction)
     assert not torch.allclose(pruned_logits[:, -1], dense_logits[:, -1])
+
+
+# --- patch-14 native-resolution families (Mistral3 / GLM-4V / InternVL) --------
+
+@pytest.mark.parametrize("scale,expect_grid", [(336, 24), (392, 28), (448, 32)])
+def test_patch14_native_resolution_recipe(scale, expect_grid):
+    """Most non-Qwen towers use patch 14, not 16. Native dynamic-resolution
+    families round the image to a multiple of `patch*merge = 28`, so running the
+    selector at patch_size=14 with a 28-multiple scale yields an EVEN patch grid,
+    which keeps cube coherence (and therefore whole merged tokens) valid. The
+    merged-token arithmetic is patch-size agnostic, so the same adapter applies.
+    """
+    video = torch.rand(1, 8, 3, scale, scale)
+    cfg = BorissalConfig.v0_5(scale=scale, patch_size=14, per_frame_allocation="uniform")
+    sel = Borissal(cfg).select(video, gazing_ratio=0.25)
+    assert [int(x) for x in sel.grid_thw[0]] == [4, expect_grid, expect_grid]
+    out = to_qwen3vl_video_tokens(sel, 2, "strict")          # raises if any block is split
+    assert out["n_partial_blocks"] == 0
+    assert out["merged_grid"] == (4, expect_grid // 2, expect_grid // 2)
+    assert int(out["num_keep_tokens"][0]) == out["num_tokens_total"] // 4
+
+
+def test_fixed_resolution_patch14_towers_still_blocked():
+    """The recorded OneVision `so400m-patch14-384` limitation, pinned as a test so
+    it is not mistaken for solved: 384 is not a multiple of 14, and the 378
+    workaround gives an odd 27x27 grid that cube coherence cannot use."""
+    with pytest.raises(ValueError, match="divisible by patch_size"):
+        Borissal(BorissalConfig.v0_5(scale=384, patch_size=14)).select(
+            torch.rand(1, 8, 3, 384, 384), gazing_ratio=0.25)
+    with pytest.raises(ValueError, match="score_coarsen=2 requires grid 27x27"):
+        Borissal(BorissalConfig.v0_5(scale=378, patch_size=14)).select(
+            torch.rand(1, 8, 3, 378, 378), gazing_ratio=0.25)
