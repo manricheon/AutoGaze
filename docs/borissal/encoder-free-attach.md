@@ -127,15 +127,84 @@ borissal은 tubelet(2프레임) 단위로 결정하므로 `to_onevision_frame_in
    **업그레이드 후 기존 경로 회귀 확인이 필요하다**(Qwen3-VL 어태치 테스트 13개 +
    export 14개 + 전체 스위트가 그 회귀 게이트다).
 
-## 6. 대안 후보
+## 6. 후보 모델 (오픈소스/오픈웨이트, 2026-07 기준)
 
-| 모델 | encoder-free? | 규모 | 비고 |
-|---|---|---|---|
-| **gemma-4-12B (unified)** | **예** (ViT 0층) | 12B, bf16 24GB | 본 설계의 1순위. transformers 업그레이드 필요 |
-| `gemma-4-E2B-it` | 아니오 (150M ViT) | 2.3B eff / 5.1B w-emb, bf16 ~10GB | patch16 + 토큰 예산 {70,140,280,560,1120} → 어태치는 가능. 16GB에선 빡빡 |
-| `gemma-4-26B-A4B` / 31B | 아니오 (550M ViT) | MoE / dense | CUDA 전용 |
-| `Mono-InternVL-2B` | 사실상 (LLM 내부 visual expert MoE + 직접 patchify) | 1.8B active | **이미지 전용**, remote code. 비디오는 프레임별로만 |
-| `Qwen3.5-Omni` | 아니오 | 30B MoE (A3B) | 맥 경로 아님 |
+파라미터 수·라이선스·아키텍처 문자열은 **HF Hub API에서 직접 조회한 값**이고, transformers
+지원 여부는 이 레포의 **설치된 5.5.0에서 실제 확인**했다. "?"는 확인 못 한 항목 — 추측으로
+채우지 않는다.
+
+bf16 메모리 ≈ params × 2 GB. 이 맥(16GB)에서 torch로 돌 수 있는 것은 대략 **≤ 5B**.
+
+### Tier A — 진짜 encoder-free (연속 패치 → LLM). 1순위 어태치 대상
+
+패치가 선형사영으로 곧장 들어가므로 **프루닝 = 순수 정보 제거**. 단, "encoder-free"라도
+패치 임베딩 뒤에 트랜스포머 층이 있으면(§Tier A 주석) 그 층에서 공간 혼합이 일어나 누출이
+생긴다 — Gemma 4 unified만 층이 0개임을 확인했다.
+
+| 모델 | HF repo | params | 라이선스 | arch | tf 5.5.0 | 비디오 | 어태치 메모 |
+|---|---|---|---|---|---|---|---|
+| **Gemma 4 12B Unified** | `google/gemma-4-12B` | **11.96B** | apache-2.0 | `gemma4_unified` | ❌ | 프레임열 | **ViT 0층 확인.** 16px→Linear→3×3 pool→280 soft tokens → `score_coarsen=3`. §2–3 |
+| **NEO 1.5 2B** | `Paranioar/NEO1_5-2B-SFT` | ~2B (LLM: Qwen3, 40층/hidden 2048) | apache-2.0 | `neo_chat` (remote code) | 원격코드 | **multi-image & video**(레포 주장; config엔 video 필드 없음) | **이 맥에서 돌 만한 유일한 encoder-free 후보(bf16 ~4GB).** config 실측: `patch_size=16`, **`downsample_ratio=0.5` → 2×2 병합이므로 `score_coarsen=2`**(Qwen과 동일!), native dynamic resolution(`min/max_pixels`). ⚠️ `vision_config`에 `NEOVisionModel`이 **존재**하고 `num_hidden_layers` 필드가 없어 **층 수 미확인** — 층이 있으면 누출-free가 아니다 |
+| NEO 1.5 9B | `Paranioar/NEO1_5-9B-SFT` | ~9B | apache-2.0 | `neo_chat` | 원격코드 | 동일 | CUDA. NEO 1.0(2B/9B, 2025-10, arXiv 2510.14979)도 공개 |
+| EVEv2.0 | `BAAI/EVE-7B-HD-v2.0` | **14.16B** | apache-2.0 | `eve-qwen2` | ❌ | 이미지 | **이름은 7B지만 실측 14.2B** — LLM의 모든 linear/norm을 modality별로 분리해 두 배가 됨. 임의 종횡비 |
+| SAIL-7B | `ByteDance-Seed/SAIL-7B` | ~7B | apache-2.0 | `mistral` | AutoModel 로드 가능 | 미언급 | raw pixel + 단일 트랜스포머. `vision_patch_size` 존재, 값 미확인 |
+| VoRA-7B | `Hon-Wong/VoRA-7B-Instruct` | 7.62B | **라이선스 표기 없음** | `vora` (remote code) | 원격코드 | 이미지 | vision을 LoRA로 LLM에 내재화, 추론 시 병합. 라이선스 없음 = 사용 전 확인 필요 |
+| Fuyu-8B | `adept/fuyu-8b` | 9.41B | **cc-by-nc-4.0(비상업)** | `fuyu` | **✅ 내장** | 이미지 | 원조. 실측 `patch_size=30`, `image_size=300` → 10×10=100 패치. transformers 내장이라 **배관 실험용으로는 가장 싸다** |
+| Mono-InternVL-2B | `OpenGVLab/Mono-InternVL-2B` | 3.11B | MIT | `internvl_chat` + MoE | 원격코드 | 이미지(프레임별) | LLM 내부 visual expert MoE + 직접 patchify. Mono-InternVL-1.5는 arXiv 2507.12566 |
+| HoVLE | `OpenGVLab/HoVLE` | 2.61B | MIT | `internvl_chat` | 원격코드 | 이미지 | "holistic embedding module"이 **트랜스포머 층을 포함** → 공간 혼합 있음, 누출-free 아님 |
+| BREEN | ? | ? | ? | ? | ❌ | ? | learnable query 방식 → 패치 통과가 아니라 질의 압축. **선택 대상이 패치가 아니게 되므로 어태치 부적합** |
+| NaViL | ? | ? | ? | ? | ❌ | ? | native MLLM 스케일링 연구(arXiv 2510.08565). 웨이트 공개 여부 미확인 |
+
+### Tier B — 이산(VQ) 토크나이저 통합 모델. 어태치는 되지만 누출-free가 아니다
+
+이미지를 **VQ 코드북 토큰**으로 바꾸는 계열. 토큰 시퀀스에서 행을 빼는 것 자체는 쉽지만,
+**VQ 토크나이저가 이미지 전체를 보는 CNN**이라 인접 토큰이 receptive field를 공유한다 →
+Qwen `prune_stage="llm"`과 같은 누출이 구조적으로 존재하고, 코드북 인덱스라 "패치 일부만
+넣기"가 불가능하다. 선택 단위는 VQ 다운샘플 배수(패치 16px이 아님)를 따른다. 게다가 대부분
+생성 지향이라 캡션 품질이 주 타깃이 아니다. **Tier A가 막힐 때의 대안으로만 기록.**
+
+| 모델 | HF repo | params | 라이선스 | arch | tf 5.5.0 |
+|---|---|---|---|---|---|
+| Emu3-Chat | `BAAI/Emu3-Chat` | 8.49B | apache-2.0 | `Emu3` | ✅ (`emu3`) |
+| Emu3.5 | `BAAI/Emu3.5` | **34.10B** | apache-2.0 | `Emu3` | ✅ |
+| Chameleon-7B | `facebook/chameleon-7b` | 7.04B | other(**gated**) | `chameleon` | ✅ |
+| BAGEL-7B-MoT | `ByteDance-Seed/BAGEL-7B-MoT` | 14.69B | apache-2.0 | `bagel` | ❌ (`bagel-mot` 라이브러리) |
+| Show-o2-1.5B | `showlab/show-o2-1.5B` | ~1.5B | apache-2.0 | diffusers | ❌ | 
+| Janus-Pro-7B | `deepseek-ai/Janus-Pro-7B` | ~7B | MIT | `multi_modality` | `janus` 있음 |
+
+⚠️ **Janus 계열은 encoder-free가 아니다**: 로컬 `JanusConfig` 확인 결과 이해(understanding)
+경로에 `vision_config`(24층, patch16, 384)가 붙어 있다 — VQ는 생성 쪽 전용. 즉 "통합 모델"이
+곧 "encoder-free"는 아니므로 이 표에 두되 Tier A로 올리지 않는다.
+
+### Tier C — 최소 인코더(작은 ViT). 오늘 당장 붙는 실용 후보
+
+| 모델 | HF repo | params | 라이선스 | arch | tf 5.5.0 | 메모 |
+|---|---|---|---|---|---|---|
+| **Qwen3-VL-2B** | `Qwen/Qwen3-VL-2B-Instruct` | **2.13B** | apache-2.0 | `qwen3_vl` | ✅ | **이미 구현·검증 완료**(`attach_qwen3vl.py`). 로컬 캐시 4.0GB |
+| Qwen3.5-2B | `Qwen/Qwen3.5-2B` | **2.27B** | apache-2.0 | `qwen3_5` | ✅ | 같은 기하, deepstack 없음. 같은 코드로 동작 |
+| gemma-4-E2B-it | `google/gemma-4-E2B-it` | **5.12B** | apache-2.0 | `gemma4` | ✅ | 150M ViT, patch16, 토큰 예산 {70,140,280,560,1120}. bf16 ~10GB로 16GB엔 빡빡 |
+| gemma-4-26B-A4B / 31B | `google/gemma-4-26B-A4B` | **26.54B** MoE / 31B | apache-2.0 | `gemma4` | ✅ | 550M ViT. CUDA 전용 |
+| SmolVLM-256M | `HuggingFaceTB/SmolVLM-256M-Instruct` | 256M | apache-2.0 | `smolvlm` | ✅ | 로컬 캐시 494MB. 아주 싼 배관 실험용 |
+| Qwen3.5-Omni | — | 30B MoE (A3B) | — | `qwen3_omni_moe` | ✅ | 맥 경로 아님 |
+
+### 정리 — 실제로 무엇을 할 것인가
+
+1. **CUDA 1순위: Gemma 4 12B Unified.** ViT 0층이 확인된 유일한 모델이라 "버린 패치에
+   들어있던 정보량"을 오염 없이 재는 유일한 후보. transformers 상향이 선행.
+2. **맥에서 시도해볼 유일한 encoder-free: `NEO1_5-2B-SFT`** (bf16 ~4GB, apache-2.0).
+   좋은 소식: `patch_size=16` + `downsample_ratio=0.5`라 **선택 단위가 Qwen과 똑같은 2×2**
+   → `to_qwen3vl_video_tokens`의 인덱스 산술을 거의 그대로 재사용할 수 있다.
+   확인 필요: (a) `NEOVisionModel`의 층 수(config에 없음 — 층이 있으면 누출-free가 아니라
+   Qwen의 `prune_stage="llm"`과 같은 등급이 된다), (b) 비디오 프레임을 실제로 어떻게 넣는지
+   (config에 video 필드가 없어 멀티이미지로 처리할 가능성), (c) remote code 신뢰 확인.
+3. **배관 검증용 최저비용: Fuyu-8B**(transformers 내장, patch 30). 단 cc-by-nc라
+   실험/연구용만.
+4. **Tier B는 보류.** 누출-free가 아니고 선택 단위가 VQ 격자에 묶인다 — Qwen 경로로 이미
+   같은 성질의 실험(`prune_stage="llm"`)을 할 수 있으므로 추가 가치가 낮다.
+
+각 후보를 실제로 채택하기 전 **§7의 필수 게이트(keep-all == vanilla forward)** 를 먼저
+통과시킬 것. Tier A 모델은 대부분 remote code이므로, 어댑터를 쓰기 전에 "패치 임베딩 뒤에
+공간 혼합이 있는지"를 소스에서 직접 확인해야 한다(층 수 0인지, attention이 패치 간인지).
 
 ## 7. CUDA A/B 계획
 
