@@ -1433,6 +1433,19 @@ remainder 0, and since remainders sum to the deficit with each < 1, the
 top-`deficit` remainders are all strictly positive, so every +1 lands below
 capacity.
 
+**The leak was not confined to ratio 1.0** -- measured shortfall for
+v0.6+uniform (16f, 384): ratios 0.15/0.25/0.5 exact, then **0.75 -> 3342/3456
+(96.7%)**, 0.9 -> 3778/4144 (91.2%), 1.0 -> 4072/4608 (88.4%). Chart:
+`outputs/borissal/ratio1_budget_fix.png` (gitignored).
+
+CONSEQUENCE for a published table: the **`v0.6-uniform` column of the
+"v0.3 vs v0.6, allocation lever, 32f" table above is contaminated at ratios 0.75
+and 1.0** -- it was scoring a selection that silently held fewer tokens than the
+column header claims, so part of the "global >= uniform at EVERY ratio" gap at
+those two ratios is this bug rather than the allocation mode. The conclusion at
+ratios 0.15-0.5 (where the budget was exact) stands unchanged, and those are the
+deployment-relevant ones. Re-run the 0.75/1.0 cells before citing them.
+
 Verified: budget exact for all presets x {uniform, global} x ratio
 {0.15, 0.25, 0.5, 0.75, 0.9, 1.0}; ratio 1.0 returns the full ascending index
 range everywhere. Surgical -- over 3000 random allocations the new code is
