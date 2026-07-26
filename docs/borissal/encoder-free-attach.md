@@ -20,6 +20,9 @@ Borissal을 **인코더 없는 멀티모달 LLM**에 직접 붙이는 설계. �
 | **2. VLM 자체 ViT (Qwen3-VL / Qwen3.5)** | VLM 내장 ViT | **이번 라운드 구현·검증 완료.** `attach_qwen3vl(prune_stage="encoder")`, keep-all이 vanilla forward와 비트 일치 |
 | **3. 인코더 없음 (Gemma 4 unified, NEO)** | 없음 | 설계서 = 이 문서. "인코더 앞"이 곧 패치 사영 직전 |
 
+다운스트림 스택 전체(인코더 × LLM)의 다양화 계획과 통제된 비교 설계는
+**`downstream-stacks.md`** 에 있다. 이 문서는 그중 **variant 3(인코더 없음)의 상세 설계**다.
+
 세 variant의 선택 로직은 **동일**하다: borissal이 (t,h,w) 그리드에서 패치를 고르고, 그
 부분집합만 다음 단계로 들어간다. 달라지는 것은 **부분집합을 받는 쪽의 계약**뿐이다 —
 V-JEPA는 `keep_index` gather + position_mask, Qwen은 patch row 인덱싱 +

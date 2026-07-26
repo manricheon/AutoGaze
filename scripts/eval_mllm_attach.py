@@ -60,6 +60,12 @@ PROMPT = "Describe this video in detail: the setting, the objects, and what happ
 # selector is doing anything at all).
 SELECTORS = {
     "v0.3": lambda s: BorissalConfig.v0_3(scale=s),
+    # v0.4 (frame-rate-aware motion) LOST against V-JEPA+Qwen, but that downstream's
+    # encoder is a temporal model, where motion is redundant. On a per-frame or
+    # weakly-temporal encoder the selected patches are the ONLY route for motion
+    # information, so v0.4 is expected to do better -- the pre-registered hypothesis
+    # in docs/borissal/downstream-stacks.md. Keep it in every sweep.
+    "v0.4": lambda s: BorissalConfig.v0_4(scale=s),
     "v0.5": lambda s: BorissalConfig.v0_5(scale=s),
     "v0.6": lambda s: BorissalConfig.v0_6(scale=s),                      # all-on default (global alloc)
     # proxy-best variant: static_guard alone (the only knob that won the SigLIP
@@ -145,7 +151,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--videos-dir", default=str(REPO_ROOT / "videos" / "internvid_eval16"))
     p.add_argument("--model", default="Qwen/Qwen3-VL-2B-Instruct")
-    p.add_argument("--configs", default="v0.3,v0.5,v0.6,random")
+    p.add_argument("--configs", default="v0.3,v0.4,v0.5,v0.6,random")
     p.add_argument("--ratios", default="0.25")
     p.add_argument("--num-frames", type=int, default=16)
     p.add_argument("--scale", type=int, default=384)
