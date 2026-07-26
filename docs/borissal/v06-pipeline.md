@@ -225,11 +225,24 @@ v0.3 = 채택된 후보 조합 { fusion_norm="peak", coherence_gate(ds=4), dog_b
 | 모바일 내보내기 | jit.trace + ONNX-17 | 데이터 의존 분기 없음 |
 | 학습 가중치 | 없음 | 고전 신호만. 동결 사전학습 모델도 쓰지 않는다 |
 
-시각화 페이지(`v06-pipeline.html`, 미추적)의 단계별 지도는 `select_with_intermediates`와
-v0.6 손질 노브를 **누적으로 켜가며** 실제로 계산한 것이다 — JS 재구현이 아니므로 실제 코드와
-어긋날 수 없다. 필요하면 같은 방식으로 다시 만들면 된다: v0.5 상태에서 시작해
-`laplacian_gate → static_guard → keyframe_prior → center_bias` 순으로 하나씩 켜고 각 단계의
-`_saliency_scores(...)["score"]`를 저장, 마지막에 `score_coarsen` 큐브와 `keep_mask`를 얹는다.
+시각화 페이지(`v06-pipeline.html`)는 base64 이미지와 내부 대조 절을 담고 있어 **추적하지
+않는다**. 대신 생성기가 레포에 있으므로 **재현 가능하다**:
+
+```bash
+uv run python scripts/gen_v06_pipeline_sim.py out.json
+# out.json을 v06-pipeline.html의 <script type="application/json" id="simdata"> 자리에 주입
+```
+
+지도는 `select_with_intermediates`와 `_saliency_scores`를 **실제로 호출**해 얻은 값이다 — JS
+재구현이 아니므로 실제 코드와 어긋날 수 없다. 손질 단계는 v0.5 상태에서
+`laplacian_gate → static_guard → keyframe_prior → center_bias`를 **누적으로** 켜며 각 단계의
+점수를 저장하고, 마지막에 `score_coarsen` 큐브와 `keep_mask`를 얹는다. 단
+`luma_mode="bt601"`은 전 단계에 켜두어 손질 효과만 분리했으므로, 첫 점수 칸은 "v0.5 + bt601"이며
+순정 v0.5는 아니다.
+
+**UI 규약**: 패널은 `원본 → 직전 → 이 단계 → 변화량` 순이고 현재 단계가 가장 넓다.
+`고른 결과` 단계는 프레임 위에 keep 마스크를 CSS multiply로 얹어 보여주며, 버려진 칸도
+맥락을 위해 희미하게 남긴다(0.30 배). 같은 합성을 스트립 썸네일에도 적용한다.
 
 ⚠️ 로컬 지표(SigLIP2 recall)상 v0.6 전체 켜기는 v0.5보다 낮다(0.2925 vs 0.3425). 현재 기본값은
 외부 다운스트림 증거를 로컬 지표보다 신뢰한 의도적 베팅이며 아직 독립 검증 전이다 —
