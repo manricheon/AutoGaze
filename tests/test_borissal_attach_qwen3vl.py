@@ -292,3 +292,55 @@ def test_fixed_resolution_patch14_towers_still_blocked():
     with pytest.raises(ValueError, match="score_coarsen=2 requires grid 27x27"):
         Borissal(BorissalConfig.v0_5(scale=378, patch_size=14)).select(
             torch.rand(1, 8, 3, 378, 378), gazing_ratio=0.25)
+
+
+# --- VTC / AutoGaze multi-scale artifact seam -----------------------------------
+
+def test_autogaze_multiscale_seam_matches_vtc_layout():
+    """Lock the geometry that lets borissal feed the VTC gaze-ov-bridge
+    (/Users/mrc/Documents/VTC) with no new code.
+
+    VTC decodes AutoGaze `gazing_pos` with scales (28,56,112,224) at patch 14 ->
+    grids 2/4/8/16 -> 340 tokens per FRAME, the 224-scale block occupying local
+    ids 84..339. Running the selector at scale=224/patch_size=14 gives a 16x16
+    grid that coincides with that finest scale, and `to_videomae_gazing_info`
+    already applies the scale offset and the tubelet->frame duplication.
+
+    Verified once against VTC's own `decode_flat_id`: every emitted id decoded to
+    scale 224 with valid row/col, and the decoded (tubelet,row,col) set equalled
+    the selector's own keep_index. This test pins the arithmetic so drift here
+    cannot silently break that seam. NOTE: `to_autogaze_gazing_info` is NOT the
+    right adapter for this path -- it emits borissal's own single-scale index.
+    """
+    from autogaze.models.borissal.adapters import to_videomae_gazing_info
+
+    SCALES, PATCH, TUB = (28, 56, 112, 224), 14, 2
+    tokens_per_frame = sum((s // PATCH) ** 2 for s in SCALES)
+    fine_grid = max(SCALES) // PATCH
+    assert (tokens_per_frame, fine_grid) == (340, 16), "VTC layout constants changed"
+    fine_offset = tokens_per_frame - fine_grid ** 2
+    assert fine_offset == 84
+
+    video = torch.rand(1, 8, 3, 224, 224)
+    sel = Borissal(BorissalConfig.v0_6(scale=224, patch_size=PATCH,
+                                       per_frame_allocation="uniform")).select(video, gazing_ratio=0.25)
+    assert [int(x) for x in sel.grid_thw[0]] == [4, fine_grid, fine_grid]
+
+    info = to_videomae_gazing_info(sel, tubelet_size=TUB, scales=SCALES, patch_size=PATCH)
+    assert info["num_vision_tokens_each_frame"] == tokens_per_frame
+    assert info["num_frames"] == 4 * TUB
+
+    gp = info["gazing_pos"][0]
+    # every id must land inside the finest-scale band of its frame
+    local = gp % tokens_per_frame
+    assert bool((local >= fine_offset).all()), "ids must sit in the 224-scale block"
+    # decoded (tubelet, row, col) must equal the selector's own selection
+    frame = gp // tokens_per_frame
+    within = local - fine_offset
+    decoded = {(int(f) // TUB, int(w) // fine_grid, int(w) % fine_grid)
+               for f, w in zip(frame, within)}
+    keep = sel.keep_index[0][sel.keep_index[0] >= 0]
+    n_pf = fine_grid ** 2
+    own = {(int(i) // n_pf, (int(i) % n_pf) // fine_grid, (int(i) % n_pf) % fine_grid) for i in keep}
+    assert decoded == own
+    assert len(gp) == len(own) * TUB, "each tubelet must duplicate to its frames"

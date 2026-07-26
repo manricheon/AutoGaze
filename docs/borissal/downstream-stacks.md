@@ -136,6 +136,75 @@ params/라이선스는 HF API, 기하는 config 실측. `?`는 미확인(추측�
 | V-JEPA + 다른 LLM | 높음 | 커넥터 학습(§5) |
 | LLaVA-OneVision so400m-384 | 막힘 | 384 % 14 ≠ 0, 우회 시 27×27 홀수 |
 
+## 6.5 참고: VTC (`/Users/mrc/Documents/VTC`) — sparse 입력 계약이 이미 쪼개져 있다
+
+사용자가 지목한 로컬 코드베이스. `projects/gaze-ov-bridge`가 **셀렉터 → OneVision** 브리지이고
+(미완성, bridge-core는 순수 파이썬/numpy만), 여기서 가장 중요한 발견은 **sparse 입력을 받게
+하는 방식이 우리 것과 구조적으로 다른 게 이미 하나 더 있다**는 것이다.
+
+### 계약 3종 (이게 "여러 개로 쪼갤 수 있다"의 실체)
+
+| 계약 | 방식 | 모델 수술 | 위치 정보 | 구현 위치 |
+|---|---|---|---|---|
+| **C1. 제자리 index-drop** | 네이티브 그리드 유지, 행만 제거 + 위치신호 gather + attention 세그먼트 재구성 | **필요** | **원래 위치 보존** | 우리: `attach_qwen3vl._pruned_vision_forward`, `vjepa2_sparse.sparse_encoder_forward` |
+| **C2. 캔버스 repack** | 선택된 14×14 패치를 **dense 224×224 캔버스(16×16=256 슬롯)에 다시 채워 넣기** → 인코더는 평범한 꽉 찬 입력을 받는다 | **불필요(0)** | 인코더의 위치 임베딩은 **캔버스 슬롯**을 가리킴 → 원래 위치는 `patch_positions=[t,h,w]`로 **별도 전달** | VTC `ov_pack.build_ov_pack_plan` + `ov_patch_extract` |
+| **C3. anchor-scale 블록 선택** | 멀티스케일 선택을 **112 anchor**로 모은 뒤 네이티브 2×2로 확장 → 모델 자체 타일링 규약에 맞춘 payload | 불필요 | 정수 `src_positions` | VTC `selector_112_anchor` + `geometry` |
+
+**C2가 전략적으로 중요하다.** 모델을 전혀 건드리지 않으므로 **어떤 인코더에도 붙는다** —
+가변 길이 입력을 안 받는 타워, conv stem의 receptive field가 겹치는 타워, 고정 해상도 타워
+(so400m-patch14-384처럼 C1이 막힌 것들)까지 전부 커버한다. 대가는 위치다: 인코더가 보는
+위치가 캔버스 슬롯이라 공간 관계가 뭉개지고, 그걸 복구하려면 `patch_positions`를 소비하는
+쪽에서 위치를 다시 주입하거나 적응 학습이 필요하다. **즉 C1은 정확하지만 침습적, C2는
+무침습적이지만 위치를 잃는다** — 두 계약을 같은 셀렉터로 A/B하면 "위치 정보가 실제로 얼마나
+중요한가"를 직접 측정할 수 있다.
+
+VTC가 강제하는 규율 두 개는 우리 것과 정확히 같은 방향이다:
+- `validate_no_native_union`: **AutoGaze 토큰 1개 = OV 토큰 1개**. coarse 토큰을 네이티브
+  그리드 union으로 부풀리지 않는다(= 예산 정확성).
+- Project A 스케일 역할 분담: `112` anchor / `224` fine evidence / `56` region prior /
+  `28` frame-global prior, **hard union은 명시적 ablation으로만**.
+
+### ★ 검증된 연결 지점 — borissal → VTC는 새 코드 없이 붙는다
+
+VTC의 아티팩트 교환 구조(`artifacts/autogaze/<video_id>/gazing_pos.npy` + `if_padded_gazing.npy`
+→ `decoded_entries.json`)는 **환경 간에 모델 패키지를 import하지 않는다**는 정책 위에 있다.
+그래서 borissal은 torch/transformers/VLM을 한 레포에 몰아넣을 필요 없이 **아티팩트만 내보내면**
+된다. 기하가 정확히 맞는다:
+
+| | 값 |
+|---|---|
+| VTC 레이아웃 | scales (28, 56, 112, 224), patch 14 → grid 2/4/8/16 → **340 tokens/frame**, 224-스케일 블록은 local id **84..339** |
+| borissal 설정 | `scale=224, patch_size=14` → `grid_thw = [8, 16, 16]` = **VTC 최정밀 스케일 그리드와 동일** |
+| 브리지 | **`to_videomae_gazing_info(sel, tubelet_size=2, scales=(28,56,112,224), patch_size=14)`** — 이미 존재하고 scales/patch를 인자로 받는다 |
+
+실측 검증(양쪽 코드베이스를 함께 import해서 왕복):
+- 내보낸 `gazing_pos` 1024개 전부가 VTC의 `decode_flat_id`로 **scale=224 / 유효한 16×16
+  row·col**로 디코드됨 (malformed 0).
+- 디코드된 (tubelet, row, col) 집합이 borissal 자신의 `keep_index` 집합과 **완전 일치**
+  (512 tubelet-위치 → 튜블렛 2프레임 복제 후 1024 프레임-위치).
+
+⚠️ **함정**: 이름이 비슷한 `to_autogaze_gazing_info`는 **borissal 자신의 단일스케일 인덱스**
+(`t*N_pf + h*W + w`)를 내보내므로 VTC의 `decode_flat_id`가 오해한다. VTC 경로에는 반드시
+**`to_videomae_gazing_info`** 를 쓸 것(멀티스케일 오프셋 + 튜블렛→프레임 복제를 이미 처리한다).
+
+⚠️ 참고: `score_coarsen=2`의 부분 블록 제약은 **Qwen 특이사항**이다(2×2 merge 때문). OV-Encoder는
+patch14에 merge가 없으므로 VTC 경로에서는 부분 블록이 아무 의미가 없다 — 224/patch14에서
+partial=8이 나오더라도 무해하다.
+
+### 여기서 가져올 것 / 우리가 줄 것
+
+가져올 것:
+1. **C2(캔버스 repack)를 우리 계약 목록에 추가** — C1이 막히는 타워를 전부 열어준다.
+2. **아티팩트 교환 패턴** — `eval_mllm_attach.py`에 `--dump-artifacts` 를 붙여 borissal 선택을
+   VTC 스키마로 떨어뜨리면, 무거운 다운스트림은 각자 환경에서 돌 수 있다.
+3. **프로파일 스키마** (`profile_schema.py`: 토큰 수 / 압축비 / 단계별 timing / 메모리) —
+   우리 하네스의 리포팅보다 정돈돼 있다.
+
+줄 것:
+1. **v0.6 셀렉터 자체** — VTC는 지금 AutoGaze 출력을 소비하는 쪽이고, 셀렉터는 이 레포에 있다.
+2. **인코더 앞 C1 구현 레퍼런스** — `attach_qwen3vl`의 keep-all == vanilla forward 게이트는
+   어떤 C1 구현에도 적용할 수 있는 정확성 기준이다.
+
 ## 7. 실행 순서
 
 1. **지금 있는 것으로 D1 arm A를 먼저 끝낸다** — Qwen3-VL로 v0.3/v0.5/v0.6/v0.4/random ×
