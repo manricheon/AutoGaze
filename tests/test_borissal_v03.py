@@ -720,3 +720,71 @@ def test_v0_6_keyframe_prior_reallocates_to_keyframes_and_traces():
     cfg = BorissalConfig.v0_6(scale=96, keyframe_prior=True)
     tr = torch.jit.trace(_W(Borissal(cfg).eval()), video, check_trace=False)
     assert tr is not None
+
+
+# --- budget exactness / ratio-1.0 keep-all (design.md ANOMALY 2026-07-24) -----
+
+@pytest.mark.parametrize("preset", ["v0_3", "v0_4", "v0_5", "v0_6"])
+@pytest.mark.parametrize("alloc", ["uniform", "global"])
+def test_ratio_one_keeps_every_patch(preset, alloc):
+    """gazing_ratio=1.0 must keep the FULL patch set for every preset.
+
+    Regression for the recorded ANOMALY: v0.6-uniform kept 4072/4608 because
+    the keyframe allocation boost pushed keyframe tubelets past the per-tubelet
+    capacity N_pf and `_largest_remainder`'s trailing clamp threw the excess
+    away instead of redistributing it.
+    """
+    video = _structured_video()
+    cfg = getattr(BorissalConfig, preset)(scale=96, per_frame_allocation=alloc)
+    sel = Borissal(cfg).select(video, gazing_ratio=1.0)
+    t, h, w = (int(x) for x in sel.grid_thw[0])
+    total = t * h * w
+    idx = sel.keep_index[0]
+    assert int(sel.num_keep[0]) == total
+    assert torch.equal(idx, torch.arange(total, dtype=idx.dtype)), "keep_index must be the full ascending range"
+    assert int(sel.per_frame_keep[0].sum()) == total
+
+
+@pytest.mark.parametrize("preset", ["v0_3", "v0_5", "v0_6"])
+@pytest.mark.parametrize("alloc", ["uniform", "global"])
+@pytest.mark.parametrize("ratio", [0.15, 0.25, 0.5, 0.75, 0.9, 1.0])
+def test_budget_is_exact_and_indices_unique(preset, alloc, ratio):
+    """per_frame_keep must sum to num_keep, and keep_index must be unique+ascending,
+    at every ratio -- the invariant the ratio-1.0 bug broke silently."""
+    video = _structured_video()
+    cfg = getattr(BorissalConfig, preset)(scale=96, per_frame_allocation=alloc)
+    sel = Borissal(cfg).select(video, gazing_ratio=ratio)
+    n = int(sel.num_keep[0])
+    idx = sel.keep_index[0][: n]
+    assert int(sel.per_frame_keep[0].sum()) == n
+    assert int(torch.unique(idx).numel()) == n
+    assert (idx[1:] > idx[:-1]).all()
+
+
+def test_largest_remainder_matches_plain_hamilton_when_no_bound_is_hit():
+    """The capacity fix must be surgical: identical to plain Hamilton rounding
+    whenever nothing clamps, and budget-exact when something does."""
+    from autogaze.models.borissal.modeling_borissal import _largest_remainder
+
+    def plain_hamilton(raw, total):
+        floor = raw.floor()
+        base = floor.long()
+        deficit = total - base.sum(dim=-1)
+        rank = (raw - floor).argsort(dim=-1, descending=True).argsort(dim=-1)
+        return base + (rank < deficit.unsqueeze(-1)).long()
+
+    torch.manual_seed(1)
+    n_clamped = 0
+    for _ in range(200):
+        t, cap = 8, 64
+        total = int(torch.randint(t, t * cap + 1, (1,)))
+        raw = 1.0 + 0.5 * torch.rand(1, t)
+        raw = raw * (total / raw.sum(-1, keepdim=True))
+        got = _largest_remainder(raw, total, 1, cap)
+        assert int(got.sum()) == total, "budget must be exact even when rows saturate"
+        assert int(got.min()) >= 1 and int(got.max()) <= cap
+        if bool((raw > cap).any() or (raw < 1).any()):
+            n_clamped += 1
+        else:
+            assert torch.equal(got, plain_hamilton(raw, total)), "must not perturb the unclamped path"
+    assert n_clamped > 0, "test vector never exercised the saturating branch"

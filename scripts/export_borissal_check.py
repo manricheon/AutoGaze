@@ -95,6 +95,17 @@ def main():
         # + DoG blob -- verdicts in docs/borissal/design.md)
         "v0.3": (Borissal(BorissalConfig.v0_3(scale=args.scale)).eval(),
                  "uniform", 0.0),
+        # v0.5 (cube coherence + appearance-first + grid coherence)
+        "v0.5": (Borissal(BorissalConfig.v0_5(scale=args.scale)).eval(),
+                 "uniform", 0.0),
+        # v0.6 all-on default -- the saliency-v3.1 port. Covers the two paths no
+        # other case reaches: the keyframe ALLOCATION boost (_largest_remainder ->
+        # _waterfill, added for the ratio-1.0 capacity fix) and global allocation
+        # as a preset default. Both must stay static-graph exportable.
+        "v0.6": (Borissal(BorissalConfig.v0_6(scale=args.scale)).eval(),
+                 "global", 0.0),
+        "v0.6-u": (Borissal(BorissalConfig.v0_6(scale=args.scale)).eval(),
+                   "uniform", 0.0),
     }
 
     rows = []

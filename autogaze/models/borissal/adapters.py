@@ -13,7 +13,7 @@ from typing import Optional
 
 import torch
 
-from .modeling_borissal import Selection
+from .modeling_borissal import Selection, _pack_gazing_mask
 
 
 def to_canonical_keep_indices(selection: Selection) -> list:
@@ -240,4 +240,124 @@ def to_autogaze_gazing_info(selection: Selection, scale: int, tubelet_size: int)
         "scales": [scale],
         "frame_sampling_rate": tubelet_size,
         "num_vision_tokens_each_frame": N_pf,
+    }
+
+
+def to_qwen3vl_video_tokens(
+    selection: Selection,
+    spatial_merge_size: int = 2,
+    partial_blocks: str = "strict",
+) -> dict:
+    """Bridge to the Qwen3-VL / Qwen3.5 video path (`qwen3_vl`, `qwen3_5`).
+
+    This family's video geometry coincides with Borissal's by construction:
+    `patch_size=16`, `temporal_patch_size=2`, `spatial_merge_size=2`, so
+    `video_grid_thw == Selection.grid_thw` whenever the selector runs at
+    `patch_size=16, tubelet_size=2`. No resampling, no odd-grid problem (the
+    OneVision `so400m-patch14` 27x27 headache does not arise at patch16).
+
+    ORDERING (verified against `Qwen3VLVideoProcessor`, not assumed): the
+    processor's `permute(0, 1, 4, 7, 5, 8, 3, 2, 6, 9)` emits patches grouped
+    `spatial_merge_size**2` at a time, one group per 2x2 spatial block, with the
+    groups raster-ordered over `(t, h//m, w//m)`. The vision tower's patch
+    merger folds each consecutive group into one LLM token, so
+
+        llm_token_index = t*(Hm*Wm) + (h//m)*Wm + (w//m),   Hm=H/m, Wm=W/m
+        qwen_patch_index = llm_token_index*m**2 + (h%m)*m + (w%m)
+
+    Borissal's own flat order is `t*(H*W) + h*W + w`, so the two differ and the
+    remap below is required -- passing Borissal indices straight into Qwen would
+    silently scramble the selection.
+
+    PARTIAL BLOCKS. A merged token is one 2x2 patch block, so selection is only
+    lossless in this space when whole blocks are kept. Cube coherence
+    (`score_coarsen=2`) makes every block's score identical, which is necessary
+    but NOT sufficient: top-k stops when the budget runs out, so a per-unit
+    budget that is not a multiple of `m**2` cuts its last block. Measured at
+    ratio 0.25, 16f, 384: v0.5 and the v0.6 DEFAULT (global allocation, budget
+    1152 = 288*4) give 0 partial blocks, while v0.6 with
+    `per_frame_allocation="uniform"` gives 8 -- one per tubelet, because the
+    keyframe allocation boost hands out per-tubelet counts like 211/121 that are
+    not multiples of 4. v0.3 (`score_coarsen=1`) has no block structure at all.
+    `partial_blocks`:
+      - `"strict"` (default): raise if any block is partially selected -- use
+        with `score_coarsen=2` so the mapping is exact.
+      - `"any"`: keep the merged token if >=1 of its patches was selected
+        (over-keeps: the realised token budget EXCEEDS the requested ratio).
+      - `"full"`: keep the merged token only if all m**2 patches were selected
+        (under-keeps: the realised budget is BELOW the requested ratio).
+    The realised count is always reported as `num_keep_tokens` -- report it, do
+    not assume `ratio * n_tokens`.
+
+    Returns a dict:
+      - `keep_token_index` (B, K_tok) long -- ascending LLM vision-token indices, -1 padded
+      - `token_keep_mask` (B, T_grid*Hm*Wm) bool
+      - `token_coords` (B, K_tok, 3) long -- (t, hm, wm) per kept token, -1 padded (for mrope)
+      - `qwen_patch_index` (B, K_patch) long -- ascending indices into the
+        processor's `pixel_values_videos` patch rows, -1 padded (pre-encoder pruning)
+      - `num_keep_tokens` (B,) long
+      - `merged_grid` (T_grid, Hm, Wm) tuple
+      - `num_tokens_total` int -- T_grid*Hm*Wm (the unpruned LLM vision token count)
+      - `n_partial_blocks` int -- how many blocks were partially selected (0 under `score_coarsen=2`)
+    """
+    if partial_blocks not in ("strict", "any", "full"):
+        raise ValueError(f"partial_blocks must be strict|any|full, got {partial_blocks!r}")
+    m = int(spatial_merge_size)
+    if m < 1:
+        raise ValueError(f"spatial_merge_size must be >= 1, got {m}")
+
+    T_grid, H_grid, W_grid = (int(x) for x in selection.grid_thw[0].tolist())
+    if H_grid % m or W_grid % m:
+        raise ValueError(
+            f"grid {H_grid}x{W_grid} must be divisible by spatial_merge_size={m}; "
+            f"run the selector at a scale whose patch grid is a multiple of {m}")
+    B = selection.keep_mask.shape[0]
+    Hm, Wm = H_grid // m, W_grid // m
+    device = selection.keep_mask.device
+
+    # (B, T, Hm, m, Wm, m) -> per-block selected-patch count (B, T, Hm, Wm)
+    patch_mask = selection.keep_mask.reshape(B, T_grid, Hm, m, Wm, m)
+    per_block = patch_mask.sum(dim=(3, 5))
+    n_partial = int(((per_block > 0) & (per_block < m * m)).sum())
+    if partial_blocks == "strict" and n_partial:
+        raise ValueError(
+            f"{n_partial} of {T_grid * Hm * Wm} 2x2 blocks are only partially selected, so the "
+            f"selection cannot be expressed exactly in Qwen's merged-token space. Use a preset "
+            f"with score_coarsen={m} (v0.5/v0.6), or pass partial_blocks='any'/'full' and report "
+            f"the realised token count.")
+    token_mask = (per_block > 0) if partial_blocks in ("strict", "any") else (per_block == m * m)
+    token_mask = token_mask.reshape(B, T_grid * Hm * Wm)
+
+    keep_token_index, _ = _pack_gazing_mask(token_mask)
+    num_keep_tokens = token_mask.sum(dim=-1)
+
+    # (t, hm, wm) per kept token, -1 on padding (mrope needs the 3D coordinate)
+    valid = keep_token_index >= 0
+    safe = keep_token_index.clamp_min(0)
+    t_i = safe // (Hm * Wm)
+    hm_i = (safe % (Hm * Wm)) // Wm
+    wm_i = safe % Wm
+    token_coords = torch.stack([t_i, hm_i, wm_i], dim=-1)
+    token_coords = token_coords.masked_fill(~valid.unsqueeze(-1), -1)
+
+    # Patch rows in the PROCESSOR's order (pre-encoder pruning). Derived from the
+    # patch mask itself rather than from the tokens, so it stays correct under the
+    # 'any'/'full' policies where blocks are not whole.
+    qwen_order_mask = patch_mask.permute(0, 1, 2, 4, 3, 5).reshape(B, -1)
+    if partial_blocks != "strict":
+        # keep the patch iff its BLOCK survived, so kept rows stay in intact
+        # m**2 groups (the patch merger consumes consecutive groups)
+        blk = token_mask.reshape(B, T_grid * Hm * Wm, 1).expand(B, T_grid * Hm * Wm, m * m)
+        qwen_order_mask = blk.reshape(B, -1)
+    qwen_patch_index, _ = _pack_gazing_mask(qwen_order_mask)
+
+    return {
+        "keep_token_index": keep_token_index,
+        "token_keep_mask": token_mask,
+        "token_coords": token_coords,
+        "qwen_patch_index": qwen_patch_index,
+        "num_keep_tokens": num_keep_tokens,
+        "merged_grid": (T_grid, Hm, Wm),
+        "num_tokens_total": T_grid * Hm * Wm,
+        "n_partial_blocks": n_partial,
     }

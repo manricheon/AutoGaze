@@ -1407,3 +1407,137 @@ lever (same features, only token distribution differs).
 
 center_crop: added to load_video as an option but EXCLUDED from v0.6 and this
 comparison (off by default; the user chose to exclude it).
+
+## Budget-exactness fix: ratio-1.0 keep-all (2026-07-26)
+
+The ANOMALY recorded above ("v0.6-uniform at ratio 1.0 recalls 0.858, not 1.0")
+was a real bug, found and fixed. Not cube/laplacian interaction as guessed --
+**`_largest_remainder` applied its `clamp(min_val, max_val)` AFTER the
+budget-exact rounding**, so any per-tubelet allocation above the capacity `N_pf`
+was silently discarded instead of redistributed. v0.6's keyframe allocation
+boost is the only preset path that pushes past capacity, which is why only
+v0.6-uniform showed it. Measured before the fix (16f, 384, ratio 1.0): kept
+4072/4608, `per_frame_keep = [576, 493, 485, 488, 576, 485, 485, 484]` -- the two
+576 entries are exactly the periodic keyframe tubelets (gop 8 / tubelet 2),
+saturated at capacity with their surplus thrown away.
+
+Fix: new `_waterfill(raw, total, min_val, max_val)` enforces the bounds BEFORE
+rounding, redistributing the residual proportionally to remaining headroom
+(add) / footroom (remove). Branch-free (both terms always computed, the
+inapplicable one multiplied by zero) so the op sequence stays static for
+jit.trace / ONNX. A deadband (|residual| > 1e-3) keeps float normalization noise
+from perturbing the fractional parts and flipping near-tied largest-remainder
+ranks -- without it, recorded preset allocations shifted for no reason. Rounding
+cannot then break the upper bound: a row with `floor(raw) == max_val` has
+remainder 0, and since remainders sum to the deficit with each < 1, the
+top-`deficit` remainders are all strictly positive, so every +1 lands below
+capacity.
+
+Verified: budget exact for all presets x {uniform, global} x ratio
+{0.15, 0.25, 0.5, 0.75, 0.9, 1.0}; ratio 1.0 returns the full ascending index
+range everywhere. Surgical -- over 3000 random allocations the new code is
+bit-identical to plain Hamilton rounding whenever no bound is hit (0
+differences) while the old code leaked budget in 433 of them. `proportional`
+allocation shared the same latent bug and is fixed by the same change; v0.3/v0.4/
+v0.5 never reach `_largest_remainder` (their `k_per_frame` is a constant fill),
+so they are untouched. Tests 108 -> 153; `export_borissal_check.py` extended with
+v0.5, v0.6-global and v0.6-uniform cases (the only ones exercising the keyframe
+allocation path) -- 14/14 jit.trace + ONNX PASS.
+
+## Qwen3-VL / Qwen3.5 true-token-drop attach (2026-07-26)
+
+First attach that puts a Borissal selection into a real MLLM and **drops** the
+unselected vision tokens, rather than scoring the selection with a frozen
+encoder proxy. Motivation: every v0.4-v0.6 verdict is proxy-based and the proxy
+has mis-ranked twice, so `design.md` has a growing stack of "confirm on CUDA QA"
+items with no code path to confirm them.
+
+**The geometry coincides exactly.** Qwen3-VL and Qwen3.5 both use
+`patch_size=16`, `temporal_patch_size=2`, `spatial_merge_size=2` (read from the
+local configs), so `video_grid_thw == Selection.grid_thw` when the selector runs
+at patch16/tubelet2, and **v0.5/v0.6's cube coherence (`score_coarsen=2`) selects
+exactly at the granularity of Qwen's merged LLM token**. The patch14/27x27 odd-grid
+problems that blocked the OneVision `so400m` tower do not arise here.
+
+**Ordering was verified, not assumed.** The video processor's
+`permute(0, 1, 4, 7, 5, 8, 3, 2, 6, 9)` emits patches grouped `merge**2` at a
+time (one group per 2x2 block), groups raster-ordered over `(t, h//m, w//m)`. So
+`llm_token = t*(Hm*Wm) + (h//m)*Wm + (w//m)` and
+`qwen_patch = llm_token*m**2 + (h%m)*m + (w%m)`. Borissal's own order is
+`t*(H*W) + h*W + w`, so the two differ -- passing Borissal indices straight in
+would silently scramble the selection. `adapters.to_qwen3vl_video_tokens` does
+the remap; a test replays the processor's permute independently and checks the
+addressed patch set is identical to `Selection.keep_index`.
+
+**Video placeholders come in per-frame runs** (`<|vision_end|><timestamp>
+<|vision_start|>` between them), not one contiguous block -- measured, and it is
+why naive placeholder trimming would misalign.
+
+**mrope is handled by column deletion, not reimplementation.** `get_rope_index`
+advances the post-vision position counter by `max(h, w) // merge` -- grid-derived,
+NOT token-count-derived. So dense position ids are computed with the model's own
+`compute_3d_position_ids` and the dropped columns are deleted: exact, and every
+text position after the vision block is provably unchanged by pruning, which is
+what makes a pruned run positionally comparable to the dense one.
+
+**Two prune stages, and the difference is the whole point:**
+- `prune_stage="llm"`: full ViT, drop before the language model. Surviving tokens
+  have already attended to the dropped ones -- information LEAKS in, so a good
+  score does not prove the discarded pixels were unnecessary.
+- `prune_stage="encoder"`: only selected patches enter the ViT. Leak-free and
+  saves encoder compute -- this is the setting that actually tests AutoGaze's
+  claim. Implemented by mirroring the vision forward: `patch_embed` is a Conv3d
+  with kernel == stride (per-row, so pre-indexing is exact), both position
+  signals are computed for the full grid then gathered (kept patches keep their
+  absolute positions), and `cu_seqlens` is rebuilt from kept patches per temporal
+  slice. Requires whole 2x2 blocks because the patch merger folds consecutive
+  `merge**2` rows.
+
+**Correctness gate: keep-all reproduces the vanilla forward bit-exactly**
+(max|diff| = 0.0) for BOTH stages on `tiny-random-qwen3-vl`. This single test
+covers placeholder accounting, mrope column selection, deepstack wiring and the
+reimplemented vision forward at once. The two stages differ from each other under
+real pruning, confirming the encoder path is genuinely leak-free rather than
+accidentally equivalent. A separate test zeroes `deepstack_visual_embeds` and
+asserts the logits change -- guarding the silent-failure mode where passing
+`inputs_embeds` to the public forward would drop deepstack injection entirely
+(Qwen3-VL-2B injects at layers 5/11/17, Qwen3.5-2B at none).
+
+**Partial blocks.** Cube coherence makes every block's score identical, which is
+necessary but not sufficient: top-k stops when the budget runs out, so a per-unit
+budget that is not a multiple of `m**2` cuts its last block. At the deployment
+scale (16f, 384 -> 1152 merged tokens) v0.3, v0.5 and the v0.6 default all give 0
+partial blocks at ratio 0.25; partials appear at tiny grids, and for
+v0.6+`per_frame_allocation="uniform"` where the keyframe boost hands out counts
+like 211/121 that are not multiples of 4. The adapter's `strict` policy raises
+rather than silently approximating; `any`/`full` over/under-keep and always report
+the realised count.
+
+**Harness**: `scripts/eval_mllm_attach.py`. Primary metric is the teacher-forced
+NLL of the DENSE caption under each pruned input -- one forward pass, no
+sampling, no judge model, and no ground-truth captions needed (the local clips
+carry no metadata, only mp4s), which is the "Frame-Voyager-style caption-loss
+ranking" deferred in the theory survey. `nll_delta` vs dense is the
+description-relevant information the selection discarded, in nats/token. Smoke-run
+end-to-end on real clips with the tiny model (both stages, generation included);
+the real 2B run is CUDA work. Tests 153 -> 166.
+
+Encoder-free (`gemma4_unified`) attach design: `encoder-free-attach.md`.
+
+## 16f vs 32f: frame count does not change the v0.3-vs-v0.6 picture (2026-07-24, logged 2026-07-26)
+
+Result from `scripts/compare_frames_v03_v06.py` (committed 2026-07-24, verdict
+previously unlogged). SigLIP2 variable-k recall, 24 clips:
+
+| | 16f r0.25 | 32f r0.25 | 16f r0.5 | 32f r0.5 |
+|---|---|---|---|---|
+| v0.3 | 0.3056 | 0.3033 | 0.5431 | 0.5399 |
+| v0.6 | 0.2905 | 0.2909 | 0.5221 | 0.5229 |
+
+Both presets are flat across frame count (|delta| <= 0.002) and the v0.3 > v0.6
+proxy gap is unchanged, so the v0.3-vs-v0.6 question is not frame-rate dependent
+and does not need re-litigating at 32f. NOTE the clip set: this table and the
+`v0.3 vs v0.6 / allocation lever` table above use `videos/internvid_pilot` (24
+clips), whereas the v0.6 knob sweep and ratio tables use the held-out
+`videos/internvid_eval16` -- **the two families of table are not directly
+comparable**, only internally.

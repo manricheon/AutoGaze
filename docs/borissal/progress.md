@@ -1208,3 +1208,73 @@ limit — model vs training vs data?"):**
   revisit multi-scale (summary tokens = downstream-contract change)
   only if the scale run's captioner-side results say gist/recon gaps
   matter.
+
+---
+
+## 2026-07-26 — MLLM true-token-drop attach; ratio-1.0 budget bug fixed; encoder-free design spec
+
+Answered the user's question "can we build a real downstream on this Mac?" and
+then built the attach path it implies. Full design/measurement records in
+`design.md` (three new sections) and `encoder-free-attach.md`.
+
+**The honest answer on Mac feasibility** (Apple M1 / 16GB, torch 2.13+MPS,
+transformers 5.5.0): "pick an encoder (V-JEPA / SigLIP2 / DINOv2) + bolt on
+Qwen3.5-2B" is NOT possible without training a connector -- an LLM only
+understands its own vision tower's embeddings. What IS possible with zero
+training is **token pruning inside a pretrained VLM**, and
+`Qwen/Qwen3-VL-2B-Instruct` is already fully cached (4.0 GB) with geometry that
+matches Borissal exactly (patch16 / temporal_patch2 / spatial_merge2 <-> v0.5/v0.6
+`score_coarsen=2`). Per user decision the Mac downstream RUN is skipped; this
+round delivers the code, the tests, and the CUDA runbook.
+
+**1. Real bug fixed first (blocked the attach's own correctness gate).** The
+recorded ratio-1.0 ANOMALY was `_largest_remainder` clamping AFTER budget-exact
+rounding, silently discarding allocation above per-tubelet capacity (v0.6's
+keyframe boost was the only preset path to exceed it): 4072/4608 patches at
+gazing_ratio=1.0. New `_waterfill` enforces bounds before rounding and
+redistributes the residual, branch-free for trace/ONNX, with a deadband so float
+noise cannot perturb recorded preset allocations. Bit-identical to the old code
+whenever no bound is hit (0/3000 random trials differ) while the old code leaked
+budget in 433/3000. `proportional` had the same latent bug. Tests 108 -> 153;
+export check extended to v0.5/v0.6-global/v0.6-uniform, 14/14 PASS.
+
+**2. True token drop into Qwen3-VL / Qwen3.5.** New
+`adapters.to_qwen3vl_video_tokens` (patch -> merged-token remap, verified against
+an independent replay of the processor's permute) and
+`autogaze/models/borissal/attach_qwen3vl.py` (eval-only, outside the traced core).
+Two stages: `llm` (full ViT then drop -- leaks, surviving tokens saw the dropped
+ones) and `encoder` (only selected patches enter the ViT -- leak-free, the setting
+that actually tests the AutoGaze claim). mrope is handled by computing dense
+position ids with the model's own code and deleting dropped columns, which is
+exact because Qwen's post-vision position advance is grid-derived, not
+token-count-derived. **Gate: keep-all reproduces the vanilla forward bit-exactly
+(max|diff| 0.0) for both stages**, and deepstack is asserted to actually reach the
+LLM. 13 new tests on the cached 32 MB `tiny-random-qwen3-vl` (skip if absent),
+total 166 green.
+
+**3. Harness** `scripts/eval_mllm_attach.py`: primary metric = teacher-forced NLL
+of the DENSE caption under each pruned input (deterministic, one forward, no judge
+model, no ground-truth captions -- the local clips are mp4-only). Smoked
+end-to-end on real clips with the tiny model, both stages, generation included.
+Real-model run is CUDA work.
+
+**4. Encoder-free design spec** (`encoder-free-attach.md`): `google/gemma-4-12B`
+is `gemma4_unified` and its vision config has **no `num_hidden_layers` and no
+`hidden_size`** -- there is no vision transformer at all (16px patches ->
+`Linear(3*16^2, 3840)` -> (x,y) coordinate embedding -> 3x3 average pool -> 280
+soft tokens -> LLM). Zero patch-to-patch attention before the LLM, so pruning is
+pure information removal and the leak distinction disappears. Maps to Borissal
+`score_coarsen=3`. Two blockers keep it on CUDA: 12B bf16 ~= 24 GB > 16 GB, and
+**transformers 5.5.0 registers `gemma4`/`_text`/`_vision`/`_audio` but NOT
+`gemma4_unified`** (upgrade required; the pin `>=5.5,<6` allows it, and the 166
+tests + 14 export cases are the regression gate for that upgrade).
+
+**5. Logged a previously-unrecorded result**: 16f-vs-32f (committed 2026-07-24)
+is flat for both v0.3 and v0.6 (|delta| <= 0.002), so frame count does not change
+the v0.3-vs-v0.6 proxy picture. Also flagged in design.md that the
+`internvid_pilot` (24-clip) tables and the held-out `internvid_eval16` tables are
+NOT directly comparable.
+
+Next: run `eval_mllm_attach.py` on CUDA with the real 2B, `--prune-stage encoder`,
+and let it arbitrate the v0.6 all-on bet (proxy-worst, adopted purely on
+saliency-v3.1's downstream evidence).

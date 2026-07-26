@@ -114,6 +114,10 @@ def build_selection(spec: str, video: torch.Tensor, ratio: float, spread: float 
         return Borissal(BorissalConfig.v0_3(scale=scale, per_frame_allocation="uniform",
                                             block_size=1)).select(video, gazing_ratio=ratio,
                                                                   spread_fraction=spread)
+    if spec == "v0.5":
+        return Borissal(BorissalConfig.v0_5(scale=scale, per_frame_allocation="uniform",
+                                            block_size=1)).select(video, gazing_ratio=ratio,
+                                                                  spread_fraction=spread)
     if spec == "v0.1":
         return Borissal(BorissalConfig(scale=scale)).select(video, gazing_ratio=ratio,
                                                             spread_fraction=spread)

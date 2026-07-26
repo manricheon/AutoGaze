@@ -197,3 +197,73 @@ Verdict branches:
 - **Gates missed without collapse** → diagnose via the deferred §7.8
   items (REAL-X predictor calibration, EVAL-X audit, Frame-Voyager
   caption-loss ranking) before touching the recipe.
+
+---
+
+## Step 10 — MLLM token-drop A/B (2026-07-26; the non-learned v0.x arbiter)
+
+Independent of the v1 scale run above. This is what settles the "confirm on CUDA
+QA" backlog for v0.4/v0.5/v0.6 — above all the v0.6 all-on default, which is
+proxy-WORST (SigLIP recall 0.2925 vs v0.5 0.3425) and was adopted purely on
+saliency-v3.1's downstream evidence. See design.md "Qwen3-VL / Qwen3.5
+true-token-drop attach".
+
+**Assets to carry in** (offline machines):
+```bash
+hf download Qwen/Qwen3-VL-2B-Instruct --local-dir <B>/Qwen3-VL-2B-Instruct
+# optional cross-check with the family matching the existing CUDA captioner:
+hf download Qwen/Qwen3.5-2B          --local-dir <B>/Qwen3.5-2B
+# plumbing tests only (32 MB, no real weights needed):
+hf download optimum-intel-internal-testing/tiny-random-qwen3-vl --local-dir <B>/tiny-qwen3-vl
+```
+Then `export HF_HUB_OFFLINE=1` and pass `--model <local path>`.
+
+**Smoke gate first** (must pass before trusting any number):
+```bash
+HF_HUB_OFFLINE=1 uv run pytest tests/test_borissal_attach_qwen3vl.py -v   # 13 passed
+# keep-all == vanilla forward is the gate that catches every plumbing error
+uv run python scripts/export_borissal_check.py                            # 14/14 PASS
+uv run pytest tests/ -q                                                   # 166 passed
+```
+
+**The run** (`--prune-stage encoder` is the scientifically meaningful one — only
+selected patches enter the ViT, so nothing leaks through vision attention):
+```bash
+uv run python scripts/eval_mllm_attach.py \
+    --videos-dir videos/internvid_eval16 \
+    --model <B>/Qwen3-VL-2B-Instruct \
+    --configs v0.3,v0.5,v0.6,v0.6-static,v0.6-uniform,random \
+    --ratios 0.15,0.25,0.5 --prune-stage encoder --partial-blocks strict \
+    --num-frames 16 --scale 384 --generate
+```
+`--scale` must be a multiple of `patch*merge = 32` so the selector grid and the
+processor grid coincide (384 -> grid (8,24,24) -> 1152 merged tokens; ratio 0.25
+-> 288). `--partial-blocks strict` is safe at this scale (0 partial blocks
+measured for v0.3/v0.5/v0.6); drop to `any` only if it raises, and then read
+`n_tokens`, never the requested ratio.
+
+**Reading it**: `nll_delta` = caption NLL increase vs the dense (unpruned) run,
+in nats/token — the description-relevant information the selection threw away.
+Lower is better; `dense` is 0 by construction. `random` at the same budget is the
+control: if a preset does not beat `random`, the saliency is not earning its
+keep. Report paired per-clip comparisons (`per_clip` in results.json), not just
+means — the held-out set has high per-clip variance (recall spread 0.23–0.45 in
+the pilot).
+
+Verdict branches:
+- **v0.6 all-on wins** → saliency-v3.1's downstream evidence transfers; the
+  proxy is confirmed unreliable for these knobs and the current default stands.
+- **v0.6-static wins** → the proxy was right about `laplacian_gate` /
+  `center_bias` regressing; revert the default to static-only (the proxy-backed
+  fallback already recorded in design.md).
+- **v0.3/v0.5 win** → the whole saliency-v3.1 port is a domain mismatch; keep
+  v0.5 as the deploy preset and record v0.6 as a negative result.
+- **Nothing beats `random`** → the selection signal itself is not description-
+  relevant at these budgets; escalate to the E4 auxiliary-distill trigger
+  (design.md "Open items") rather than tuning more knobs.
+
+Cross-check worth running once: the same clips through `--prune-stage llm`. A
+large gap between the two stages quantifies how much the ViT was silently
+smuggling in from dropped patches — useful context for any deployment that
+prunes before its encoder. Encoder-free (`gemma4_unified`) follow-up:
+`encoder-free-attach.md`.

@@ -72,12 +72,58 @@ def _minmax_norm_global(x: torch.Tensor, eps: float) -> torch.Tensor:
     return normed.reshape_as(x)
 
 
+def _waterfill(raw: torch.Tensor, total_budget: int, min_val: int, max_val: int,
+               eps: float = 1e-6, iters: int = 2) -> torch.Tensor:
+    """Clamp a float allocation into [min_val, max_val] WITHOUT losing budget.
+
+    A plain `.clamp()` on a budget-exact allocation silently drops whatever sits
+    above the per-row capacity (the ratio-1.0 bug: v0.6's keyframe boost pushed
+    keyframe tubelets past N_pf, the clamp threw the excess away, and the clip
+    kept 4072/4608 patches at gazing_ratio=1.0). Instead the residual is
+    redistributed proportionally to the remaining headroom (add) / footroom
+    (remove), so the row sum stays == total_budget.
+
+    Branch-free by construction (both the add and the remove term are always
+    computed; the inapplicable one is multiplied by zero) so the op sequence is
+    static under jit.trace / ONNX export. One pass already zeroes the residual
+    whenever `total_budget` is feasible (T_grid*min_val <= total <= T_grid*max_val),
+    since a headroom-proportional share can never exceed a row's own headroom;
+    the second pass is float-error margin.
+    """
+    out = raw
+    for _ in range(iters):
+        out = out.clamp(min=min_val, max=max_val)
+        resid = total_budget - out.sum(dim=-1, keepdim=True)
+        # Deadband: `raw` is normalized to the budget in float, so an untruncated
+        # row sum carries ~1e-4 of rounding noise. Redistributing THAT would
+        # perturb the fractional parts and flip near-tied largest-remainder
+        # ranks, changing recorded preset behaviour for no reason. Real clamp
+        # loss is integer-scale (whole patches), so the two are separable, and
+        # sub-deadband residue is absorbed exactly by the integer stage below.
+        active = (resid.abs() > 1e-3).to(out.dtype)
+        pos = resid.clamp_min(0.0) * active
+        neg = (-resid).clamp_min(0.0) * active
+        head = (max_val - out).clamp_min(0.0)
+        foot = (out - min_val).clamp_min(0.0)
+        out = out + head * (pos / head.sum(dim=-1, keepdim=True).clamp_min(eps)) \
+                  - foot * (neg / foot.sum(dim=-1, keepdim=True).clamp_min(eps))
+    return out.clamp(min=min_val, max=max_val)
+
+
 def _largest_remainder(raw: torch.Tensor, total_budget: int, min_val: int, max_val: int) -> torch.Tensor:
     """Round per-row fractional allocations to integers summing to total_budget (Hamilton's method).
 
     raw: (B, T_grid) float, each row's values sum to ~total_budget.
-    Returns (B, T_grid) long, clamped to [min_val, max_val].
+    Returns (B, T_grid) long in [min_val, max_val] summing EXACTLY to total_budget
+    (assuming the budget is feasible for the row length and the bounds).
+
+    The bounds are enforced BEFORE rounding, via `_waterfill`; clamping after the
+    fact is what used to leak budget. Rounding itself cannot then violate the
+    upper bound: a row with `floor(raw) == max_val` has remainder 0, and since
+    the remainders sum to `deficit` with each < 1, the top-`deficit` remainders
+    are all strictly positive -- so every +1 lands on a row below capacity.
     """
+    raw = _waterfill(raw, total_budget, min_val, max_val)
     floor = raw.floor()
     remainder = raw - floor
     base = floor.long()
