@@ -16,17 +16,20 @@ better; `dense` is the floor by construction.
 Report `nll_delta = nll(config) - nll(dense)`: the description-relevant
 information the selection threw away, in nats/token.
 
-PRUNE STAGE matters for interpretation (see attach_qwen3vl):
-  --prune-stage llm      full ViT, drop before the LLM. Surviving tokens have
-                         already attended to the dropped ones -> leaks.
-  --prune-stage encoder  only selected patches enter the ViT. Leak-free; this is
-                         the setting that tests "fewer patches in, no info loss".
-                         Needs whole 2x2 blocks (score_coarsen=2: v0.5/v0.6).
+PRUNE STAGE (see attach_qwen3vl):
+  --prune-stage encoder  DEFAULT and the actual method: only selected patches
+                         enter the ViT, exactly as AutoGaze prunes before NVILA's
+                         SigLIP. Leak-free. Needs whole 2x2 blocks
+                         (score_coarsen=2: v0.5/v0.6).
+  --prune-stage llm      diagnostic only: full ViT, drop before the LLM. Surviving
+                         tokens already attended to the dropped ones, so a good
+                         score proves nothing about the discarded pixels. Useful
+                         only to quantify how much the ViT smuggles through.
 
 Usage (CUDA is the intended host; --limit 1 --smoke is the Mac plumbing check):
   uv run python scripts/eval_mllm_attach.py --videos-dir videos/internvid_eval16 \
       --configs v0.3,v0.5,v0.6,v0.6-static,random --ratios 0.25,0.5 \
-      --prune-stage encoder --generate
+      --generate
 Outputs: outputs/borissal/mllm_attach/{results.json, nll_vs_ratio.png, captions.json}
 """
 
@@ -146,7 +149,9 @@ def main():
     p.add_argument("--ratios", default="0.25")
     p.add_argument("--num-frames", type=int, default=16)
     p.add_argument("--scale", type=int, default=384)
-    p.add_argument("--prune-stage", choices=["llm", "encoder"], default="llm")
+    p.add_argument("--prune-stage", choices=["encoder", "llm"], default="encoder",
+                   help="'encoder' IS the method (select before the vision tower, as AutoGaze "
+                        "does before NVILA's SigLIP); 'llm' is a diagnostic upper bound only")
     p.add_argument("--partial-blocks", choices=["strict", "any", "full"], default="any",
                    help="'any' by default so v0.3 (score_coarsen=1) is runnable; the realised "
                         "token count is always reported, so read n_tokens, not the ratio")

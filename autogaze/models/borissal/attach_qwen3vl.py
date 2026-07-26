@@ -102,7 +102,7 @@ def build_pruned_inputs(
     inputs: dict,
     keep_token_index: Optional[torch.Tensor] = None,
     *,
-    prune_stage: str = "llm",
+    prune_stage: str = "encoder",
     qwen_patch_index: Optional[torch.Tensor] = None,
 ) -> PrunedInputs:
     """Assemble a forward pass in which only `keep_token_index` vision tokens exist.
@@ -111,8 +111,11 @@ def build_pruned_inputs(
     `pixel_values_videos`, `video_grid_thw`; `mm_token_type_ids` is used if
     present). `keep_token_index` is `to_qwen3vl_video_tokens(...)["keep_token_index"]`
     (1, K) -- ascending merged-token indices; `None` keeps everything (the
-    identity case used as the correctness gate). `qwen_patch_index` is required
-    for `prune_stage="encoder"`.
+    identity case used as the correctness gate).
+
+    `qwen_patch_index` is only needed for `prune_stage="encoder"` when blocks may
+    be partial (`partial_blocks="any"/"full"`); with whole blocks it is derived
+    from `keep_token_index` here, so the default path needs no extra argument.
 
     Position ids are NOT recomputed from the pruned sequence. They are computed
     once on the DENSE sequence with the model's own `compute_3d_position_ids`,
@@ -188,8 +191,13 @@ def build_pruned_inputs(
         deep = [d[keep] for d in deep]
     else:
         if qwen_patch_index is None:
-            raise ValueError("prune_stage='encoder' needs qwen_patch_index (from to_qwen3vl_video_tokens)")
-        qpi = qwen_patch_index.reshape(-1)
+            # Whole-block case: each kept merged token is backed by exactly its own
+            # m**2 consecutive patch rows (see to_qwen3vl_video_tokens). Under the
+            # 'any'/'full' policies blocks can be partial, so pass the adapter's
+            # `qwen_patch_index` explicitly there.
+            qpi = (keep[:, None] * (m * m) + torch.arange(m * m, device=device)).reshape(-1)
+        else:
+            qpi = qwen_patch_index.reshape(-1)
         qpi = qpi[qpi >= 0].to(device)
         if qpi.numel() != keep.numel() * m * m:
             raise ValueError(

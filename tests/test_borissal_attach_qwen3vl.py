@@ -209,14 +209,22 @@ def test_adapter_rejects_bad_arguments(clip):
 
 # --- guardrails ---------------------------------------------------------------
 
-def test_encoder_stage_requires_whole_blocks_and_patch_index(qwen, clip):
-    from autogaze.models.borissal.attach_qwen3vl import build_pruned_inputs
+def test_encoder_stage_derives_patch_index_and_rejects_partial_blocks(qwen, clip):
+    """`encoder` is the default stage, so the whole-block patch index is derived
+    from the kept tokens -- the derived path must match the adapter's explicit one
+    exactly, and a short/partial patch index must still be rejected."""
+    from autogaze.models.borissal.attach_qwen3vl import build_pruned_inputs, pruned_forward
     proc, model = qwen
     inputs = _processor_inputs(proc, clip)
     sel = _selection(clip, "v0_5", ratio=0.5)
     tok = to_qwen3vl_video_tokens(sel, 2, "strict")
-    with pytest.raises(ValueError, match="qwen_patch_index"):
-        build_pruned_inputs(model, inputs, tok["keep_token_index"], prune_stage="encoder")
+    with torch.no_grad():
+        derived = build_pruned_inputs(model, inputs, tok["keep_token_index"])       # stage defaults to encoder
+        explicit = build_pruned_inputs(model, inputs, tok["keep_token_index"],
+                                       prune_stage="encoder",
+                                       qwen_patch_index=tok["qwen_patch_index"])
+        assert derived.prune_stage == "encoder", "encoder must be the default stage"
+        assert torch.equal(pruned_forward(model, derived)[0], pruned_forward(model, explicit)[0])
     with pytest.raises(ValueError, match="whole"):
         build_pruned_inputs(model, inputs, tok["keep_token_index"], prune_stage="encoder",
                             qwen_patch_index=tok["qwen_patch_index"][:, :-4])
