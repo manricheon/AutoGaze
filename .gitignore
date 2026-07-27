@@ -181,3 +181,4 @@ checkpoints/
 
 # v0.6 pipeline artifact: carries base64 stage maps + internal comparison section
 docs/borissal/v06-pipeline.html
+docs/borissal/v07-pipeline.html
