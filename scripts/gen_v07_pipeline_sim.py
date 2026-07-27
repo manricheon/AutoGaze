@@ -32,7 +32,7 @@ from autogaze.models.borissal.video_io import load_video, unnormalize          #
 
 SCALE, FRAMES, PATCH, TUB = 384, 32, 16, 2
 RATIOS = [0.25, 0.5, 0.75]
-FRAME_PX = 128
+FRAME_PX = 120
 GAMMA, PCT = 0.62, (5, 95)
 
 TIER_RGBA = {                       # categorical, validated family hues
@@ -59,7 +59,7 @@ def _png(img):
     b = io.BytesIO(); img.save(b, "PNG", optimize=True); return b.getvalue()
 
 
-def _jpg(img, q=55):
+def _jpg(img, q=50):
     b = io.BytesIO()
     img.convert("RGB").save(b, "JPEG", quality=q, optimize=True, progressive=True)
     return b.getvalue()
@@ -207,6 +207,9 @@ def main(out_json):
     specs = [
         ("0TjQiQFeum0_t0.1-4.0_fps15.9.mp4", "움직임 많음"),
         ("A9J1gkw9BI0_t1.2-4.8_fps17.8.mp4", "장면 전환 있음"),
+        ("385Yc-AJOeg_t5.0-11.6_fps9.6.mp4", "식사 · 잔동작"),
+        ("l9080Uwsw8s_t24.0-30.6_fps9.6.mp4", "스트리머 · 고정 테두리"),
+        ("sMWfQv1ERGs_t45.2-78.0_fps1.9.mp4", "저fps 급변 + 자막"),
         ("gSH74lYC7lI_t10.8-15.6_fps13.2.mp4", "거의 정지"),
     ]
     clips = [build_clip(REPO / "videos/internvid_eval16" / n, lab) for n, lab in specs]
