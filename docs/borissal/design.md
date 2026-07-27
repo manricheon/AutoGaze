@@ -1554,3 +1554,33 @@ and does not need re-litigating at 32f. NOTE the clip set: this table and the
 clips), whereas the v0.6 knob sweep and ratio tables use the held-out
 `videos/internvid_eval16` -- **the two families of table are not directly
 comparable**, only internally.
+
+## The per-tubelet floor is inert at deployment ratios (2026-07-27)
+
+`min_keep_per_frame_ratio = 0.25` reads like it locks a quarter of the budget away
+from the global competition. Measured, it does not: the floor only RESERVES
+capacity, so when the clip-wide top-k would have given a tubelet at least `m`
+anyway, the outcome is bit-identical to a min-1 floor. Sweeping three clips x four
+ratios (32f, 384, v0.6 default) against `min_keep_per_frame_ratio=0.0`:
+
+| clip | 0.05 | 0.10 | 0.15 | 0.25 |
+|---|---|---|---|---|
+| motion-heavy (`0TjQiQFeum0`) | **binds** | – | – | – |
+| scene-cut (`A9J1gkw9BI0`) | – | – | – | – |
+| near-static (`gSH74lYC7lI`) | **binds** | **binds** | **binds** | – |
+
+So at the deployment budgets (0.25–0.5) the allocation is already as
+content-adaptive as an unconstrained global top-k, and the floor is doing nothing.
+It engages exactly where it was designed to: **low budgets and low-motion content**,
+where an unconstrained top-k starts starving whole moments (min-1 floor gave a
+tubelet 1 patch at ratio 0.05, and 16 where ours forces 22 at 0.15).
+
+Consequences worth carrying:
+- Do not attribute the v0.6 allocation spread to the floor -- at ratio 0.25 the
+  spread (84–248 vs a 144 uniform share) comes entirely from the global top-k.
+- The floor is a **coverage guarantee for the tail of the ratio range**, not a
+  regularizer on normal runs. If a downstream ever runs at ratio < 0.15, it is the
+  knob that decides whether quiet moments survive at all.
+- `max_keep_per_frame_mult` (the anti-monopoly cap) has the mirror-image property:
+  `k_gate` saturates at `N_pf` from ratio 0.5 up, so that one is inert at HIGH
+  ratios. Both guards are low-ratio devices.
