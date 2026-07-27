@@ -321,3 +321,12 @@ keyframe_prior / per_frame_counts / non-uniform alloc) raise at select time.
 Gate results and the honest caveats (control wins on the local NLL judge) are in
 design.md "Borissal v0.7 Datdol"; deploy default remains v0.5 until the CUDA
 V-JEPA A/B.
+
+Tubelet sizes: `tubelet_size=2` is the designed default (V-JEPA tubelet and
+Qwen temporal-fold alignment). `tubelet_size=1` is supported and contract-
+tested -- it is the per-frame-encoder configuration (OneVision/SigLIP paths;
+`to_onevision_frame_indices` needs no frame duplication there) and is NOT
+grid-compatible with Qwen's `temporal_patch_size=2`. Low-budget scene-priority
+override: `anchor_fraction=1.0` reaches 100% site coverage from ratio 0.15
+(vs 0.25 for the default 0.5) at a measured cost in per-frame recall -- see
+design.md "v0.7 follow-up review".

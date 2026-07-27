@@ -1665,3 +1665,122 @@ NOT shown is separation from RANDOM on any local judge -- the runbook's
 and its escalation (E4 trigger consideration) applies to the v0.x line as a
 whole, not to Datdol specifically, since v0.5 sits in the same boat. Deploy
 default stays v0.5 until the CUDA run; v0.7 is the challenger it carries.
+
+## v0.7 follow-up review: 12x12-native signals, full-site coverage, tubelet sizes (2026-07-28)
+
+Three user questions, answered with measurements. Presets unchanged by
+prior agreement; raw outputs under outputs/borissal/v07_review/ (gitignored).
+
+### Q1 -- "compute AND select at 12x12, expand to 24x24" (the chunky variant)
+
+The current line computes SIGNALS at the 24x24 patch grid and only SELECTS at
+the 12x12 cube grid. The proposed variant coarsens the signals too
+(patch_size=32), then expands each kept 32px patch to its 2x2 patch-16
+children -- final mask stays on the 24x24 grid (contract unchanged), budget
+exactly 4x coarse, so comparisons are same-ratio fair. Wired as eval-only
+`coarse:v0.x` specs + `expand_selection_2x` (semantic/coverage/NLL harnesses).
+
+Results (eval16; NLL = 16 clips at ratio 0.25, encoder stage):
+
+| axis | coarse:v0.5 vs v0.5 | coarse:v0.7 vs v0.7 |
+|---|---|---|
+| NLL mean (nats/tok) | +0.0323 vs +0.0280 (WORSE) | +0.0277 vs +0.0257 (WORSE) |
+| NLL paired | coarse wins 5/16 (p=0.96) | coarse wins 7/16 (p=0.77) |
+| SigLIP recall@0.25 | 0.330 vs 0.343 | 0.301 vs 0.316 |
+| SigLIP gist@0.25 | 0.871 vs 0.879 | 0.870 vs 0.899 |
+| V-JEPA uniqueness | **8.231 vs 8.189 (BETTER)** | 7.974 vs 8.063 (worse) |
+| latency 16f | 9.7 vs 9.8 ms (~nil) | 11.6 vs 11.8 ms (~nil) |
+
+**Verdict: NEGATIVE by the pre-registered rule** (coarse had to win NLL mean
+AND pairs; it lost both, for both lineages -- coarse:v0.5 lands below random).
+The "signals fine, selection chunky" split of the current design stands.
+One honest footnote: coarse:v0.5 posted the best V-JEPA uniqueness of any
+config measured so far (8.231) -- chunky selections are less predictable from
+the remainder -- so the axes genuinely disagreed and the judge decided. No
+latency argument either way (pixel-res work dominates).
+
+### Q2 -- full-site coverage ("every position selected at least once")
+
+Definitions and mechanism recorded in the theory section below. Measured
+site-coverage (fraction of the 144 spatial sites selected at least once
+anywhere in the clip; 8 clips):
+
+| config | r=0.05 | 0.10 | 0.15 | 0.25 |
+|---|---|---|---|---|
+| v0.5 | 18% | 28% | 36% | 48% |
+| v0.7 (anchor_fraction 0.5) | 28% | 48% | 65% | **100%** |
+| v0.7 anchor_fraction=1.0 | 40% | 80% | **100%** | 100% |
+
+(The earlier single-clip 90% figure for v0.5 was an optimistic sample; the
+8-clip mean at 0.25 is 48%.) v0.7 already guarantees full coverage from
+ratio ~0.25 by construction; the open question was LOW budgets. A/B at low
+ratios, v0.7-cov = anchor_fraction 1.0:
+
+| axis | 0.10 | 0.15 | 0.25 (sanity) |
+|---|---|---|---|
+| gist cov vs base | **0.828 vs 0.806 (+0.022)** | **0.873 vs 0.844 (+0.029)** | identical |
+| recall cov vs base | 0.106 vs 0.141 (-0.035) | 0.156 vs 0.199 (-0.043) | identical |
+| NLL @0.15 (8 clips) | -- | +0.0433 vs +0.0417, cov wins 3/8 | -- |
+
+**Verdict: the theory's trade-off prediction is confirmed directionally --
+forcing coverage raises gist (scene summary) and costs per-frame recall,
+exactly as pre-stated -- but the caption judge does not reward the trade at
+0.15 (slightly negative, n=8).** Default anchor_fraction=0.5 stands;
+anchor_fraction=1.0 is recorded as a legitimate knob for gist-priority /
+scene-level use cases at low budgets, not as a recommended override.
+Sanity held: at 0.25 both settings produce IDENTICAL selections (anchor pool
+saturates all 144 sites either way).
+
+### Q3 -- tubelet sizes
+
+tubelet_size=2 is a design input, not an accident: it matches V-JEPA's
+tubelet embedding and Qwen's temporal_patch_size=2 fold (the cube/merge
+alignment chain). tubelet_size=1 WORKS and is now contract-tested
+(tests: contract at tub 1 and 2, tubelet-1 novelty frame-rate stability) --
+it is the per-frame-encoder configuration (OneVision/SigLIP stacks;
+`to_onevision_frame_indices` then needs no frame duplication) and is NOT
+grid-compatible with Qwen's temporal fold. Note in reference.md.
+
+### Spatial coverage: definition, mechanism, theoretical effects
+
+Self-contained section (written to be lifted into the artifact later).
+
+**Definitions.** A *site* is one spatial position of the cube grid -- at
+384/patch16/c=2 the screen is 12x12 = 144 sites, independent of time.
+*Site coverage* = fraction of sites selected at least once at ANY tubelet.
+The final mask always leaves on the 24x24 patch-16 grid regardless.
+
+**Mechanism.** v0.7's anchor pool selects, per site, the single tubelet
+where that site's appearance is best -- so K_a >= Sc structurally implies
+100% coverage. Pure score top-k (v0.5) has no such guarantee: a low-score
+site (flat corner, plain wall) can lose every round and never be seen at
+all. The top-k lineage's analogue is `spread_fraction` (a stratified
+skeleton; measured semantics-neutral on real data), and the original
+AutoGaze's analogue is its fixed coarse-scale share (~26% of per-frame
+tokens reserved for global gist).
+
+**Theoretical effects.**
+(a) *Coverage lower-bounds gist.* A caption needs scene context ("in a
+kitchen", "in a forest"); a site never selected must be INVENTED by the
+captioner. Datdol's gist advantage over v0.5 (0.899/0.957 vs 0.879/0.949)
+and the E-B gist gains (+0.022/+0.029 at low ratios) are both consistent
+with this.
+(b) *Structured spread vs scatter.* Coverage objectives optimize toward
+uniform scatter (facility-location / D-optimal -- the P1 pathology in the
+theory notes). Full-site anchoring takes the coverage BENEFIT while
+structuring the spread: exactly once per site in space, at the best moment
+in time, in whole cubes -- avoiding P1's spatio-temporal confetti.
+(c) *The trade.* At low budgets, forced coverage spends cubes on weak sites,
+so concentration metrics (per-frame recall) drop while scene metrics (gist)
+rise -- measured exactly so. Whether the trade pays depends on the referee:
+SigLIP gist says yes, caption NLL at 0.15 says slightly no. The two
+referees disagree in the direction this line has learned to expect
+(per-frame proxies punish temporal/spatial dispersion differently than a
+captioner does).
+(d) *Encoder-temporality interaction.* A fully-temporal encoder (V-JEPA)
+can propagate a site seen ONCE across the whole clip via spatio-temporal
+attention, so one covered look is worth a lot; a per-frame encoder must
+re-see the site in every frame it wants to use it, so single-shot coverage
+is worth less. Prediction: the coverage trade pays off more on the V-JEPA
+stack than on the Qwen-attach judge used here -- another item the CUDA A/B
+can settle (downstream-stacks.md hypothesis family).
