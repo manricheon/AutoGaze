@@ -287,3 +287,40 @@ def test_gpu_smoke_invariants():
     idx = sel.keep_index[0][:n]
     assert (idx[1:] > idx[:-1]).all() and n % 4 == 0
     assert int(sel.per_frame_keep[0].sum()) == n
+
+
+# --- tubelet_size support (review round E-C) ------------------------------------
+
+@pytest.mark.parametrize("tub", [1, 2])
+def test_tubelet_sizes_contract(tub):
+    """tubelet_size=2 is the designed default (V-JEPA tubelet / Qwen temporal
+    fold alignment); tubelet_size=1 must also satisfy the full contract --
+    it is the per-frame-encoder configuration (OneVision/SigLIP stacks), NOT
+    compatible with Qwen's temporal_patch_size=2 grid."""
+    torch.manual_seed(0)
+    v = torch.rand(1, 8, 3, SIZE, SIZE)
+    sel = Borissal(BorissalConfig.v0_7(scale=SIZE, tubelet_size=tub)).select(v, gazing_ratio=0.25)
+    T, H, W = (int(x) for x in sel.grid_thw[0])
+    assert T == 8 // tub
+    n = int(sel.num_keep[0])
+    idx = sel.keep_index[0][:n]
+    assert n % 4 == 0 and (idx[1:] > idx[:-1]).all()
+    assert int(torch.unique(idx).numel()) == n
+    assert int(sel.per_frame_keep[0].sum()) == n
+    assert (sel.per_frame_keep[0] >= 4).all()          # floor holds per tubelet
+    full = Borissal(BorissalConfig.v0_7(scale=SIZE, tubelet_size=tub)).select(v, gazing_ratio=1.0)
+    assert int(full.num_keep[0]) == T * H * W          # ratio 1.0 keeps all
+
+
+def test_tubelet1_novelty_still_framerate_stable():
+    """The median-deviation novelty must stay frame-rate stable at tubelet 1
+    too (T_grid doubles but the canonical reference is still clip-level)."""
+    torch.manual_seed(4)
+    base = torch.rand(1, 8, 3, SIZE, SIZE)
+    m = Borissal(BorissalConfig.v0_7(scale=SIZE, tubelet_size=1))
+    def mag(v):
+        sal = m._saliency_scores(v, 1, 16, 0.0)
+        lg = sal["luma_grid"]
+        return float(appearance_novelty(lg, temporal_median_grid(lg)).mean())
+    n8, n16 = mag(base), mag(base.repeat_interleave(2, dim=1))
+    assert abs(n16 - n8) / max(n8, 1e-6) < 0.5

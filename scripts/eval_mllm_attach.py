@@ -77,6 +77,8 @@ SELECTORS = {
     # v0.7 "Datdol" anchor-novelty: motion = when to update, appearance = what
     # to represent. Whole-cube selection -> partial_blocks strict-safe.
     "v0.7": lambda s: BorissalConfig.v0_7(scale=s),
+    # E-B(review): full-site coverage even at low budgets -- K_a = min(K_cubes, Sc)
+    "v0.7-cov": lambda s: BorissalConfig.v0_7(scale=s, anchor_fraction=1.0),
 }
 
 
@@ -91,8 +93,18 @@ def _token_selection(name, video, scale, ratio, merge, partial_blocks, generator
         k = max(1, round(ratio * n_tok))
         idx = torch.randperm(n_tok, generator=generator)[:k].sort().values.unsqueeze(0)
         return idx, (idx[0][:, None] * merge * merge + torch.arange(merge * merge)).reshape(1, -1), 0
-    cfg = SELECTORS[name](scale)
-    sel = Borissal(cfg).select(video, gazing_ratio=ratio)
+    if name.startswith("coarse:"):
+        # 12x12-native signals+selection, expanded 2x back to the patch-16 grid
+        import sys as _sys
+        _sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        from eval_borissal_semantic import expand_selection_2x
+        base = name[len("coarse:"):]
+        cfg = SELECTORS[base](scale)
+        cfg = type(cfg)(**{**cfg.__dict__, "patch_size": 32})
+        sel = expand_selection_2x(Borissal(cfg).select(video, gazing_ratio=ratio))
+    else:
+        cfg = SELECTORS[name](scale)
+        sel = Borissal(cfg).select(video, gazing_ratio=ratio)
     out = to_qwen3vl_video_tokens(sel, merge, partial_blocks)
     return out["keep_token_index"], out["qwen_patch_index"], out["n_partial_blocks"]
 
@@ -184,7 +196,9 @@ def main():
         torch.float32 if device.type == "cpu" else torch.bfloat16)
     ratios = [float(r) for r in args.ratios.split(",") if r]
     configs = [c for c in args.configs.split(",") if c]
-    unknown = [c for c in configs if c not in SELECTORS and c != "random"]
+    unknown = [c for c in configs
+               if c not in SELECTORS and c != "random"
+               and not (c.startswith("coarse:") and c[len("coarse:"):] in SELECTORS)]
     if unknown:
         raise SystemExit(f"unknown configs {unknown}; known: {sorted(SELECTORS) + ['random']}")
 

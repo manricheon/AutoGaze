@@ -48,6 +48,59 @@ def build_encoder(device: torch.device):
     return model.to(device), processor
 
 
+def expand_selection_2x(sel):
+    """patch-32 Selection (grid T x 12 x 12) -> patch-16 Selection (T x 24 x 24).
+
+    The user-proposed "compute AND select at the coarse grid, then just expand"
+    variant: each selected 32px patch becomes its 2x2 block of 16px children,
+    so the FINAL mask stays on the patch-16 grid (downstream contract unchanged)
+    and the budget is exactly 4x the coarse count -- same-ratio comparisons
+    against native patch-16 selectors are apples to apples. Eval-only helper.
+    """
+    from autogaze.models.borissal.modeling_borissal import Selection, _pack_gazing_mask
+    B = sel.keep_mask.shape[0]
+    T, Hc, Wc = (int(x) for x in sel.grid_thw[0])
+    H, W = Hc * 2, Wc * 2
+    N_pf = H * W
+
+    def up(x):
+        return (x.view(B, T, Hc, 1, Wc, 1).expand(B, T, Hc, 2, Wc, 2)
+                .reshape(B, T * N_pf))
+
+    keep_mask = up(sel.keep_mask)
+    scores = up(sel.scores)
+    keep_index, is_padded = _pack_gazing_mask(keep_mask)
+    idx = keep_index.clamp(min=0)
+    t_c = idx // N_pf
+    rem = idx % N_pf
+    coords = torch.stack([t_c, rem // W, rem % W], dim=-1)
+    coords = coords.masked_fill(is_padded.unsqueeze(-1), -1)
+    km3 = keep_mask.view(B, T, N_pf)
+    grid = torch.tensor([T, H, W], dtype=sel.grid_thw.dtype,
+                        device=sel.grid_thw.device).unsqueeze(0).expand(B, 3).clone()
+    return Selection(grid_thw=grid, scores=scores, keep_mask=keep_mask,
+                     keep_index=keep_index, keep_coords=coords,
+                     num_keep=km3.sum(dim=(1, 2)), per_frame_keep=km3.sum(dim=-1))
+
+
+def build_selection_coarse(base: str, video: torch.Tensor, ratio: float, spread: float):
+    """Run a preset at patch_size=32 (native 12x12 grid). score_coarsen presets
+    would need a 6x6-divisible grid times 2 -- 12 works for c=2."""
+    from autogaze.models.borissal import Borissal, BorissalConfig
+    scale = video.shape[-1]
+    preset = base.replace(".", "_")
+    if not (base.startswith("v0.") and hasattr(BorissalConfig, preset)):
+        raise ValueError(f"coarse: unsupported base {base!r}")
+    cfg = getattr(BorissalConfig, preset)(scale=scale, patch_size=32)
+    if cfg.selection_mode == "anchor_novelty":
+        if spread > 0:
+            raise ValueError("coarse anchor preset owns allocation; --spread does not apply")
+        return Borissal(cfg).select(video, gazing_ratio=ratio)
+    cfg = getattr(BorissalConfig, preset)(scale=scale, patch_size=32,
+                                          per_frame_allocation="uniform", block_size=1)
+    return Borissal(cfg).select(video, gazing_ratio=ratio, spread_fraction=spread)
+
+
 def build_selection(spec: str, video: torch.Tensor, ratio: float, spread: float):
     from autogaze.models.borissal import Borissal, BorissalConfig, BorissalV1, BorissalV1Config
     from autogaze.models.borissal.modeling_borissal_v1 import _selection_from_scores
@@ -73,11 +126,23 @@ def build_selection(spec: str, video: torch.Tensor, ratio: float, spread: float)
     if spec == "v0.2":
         cfg = BorissalConfig.v0_2(scale=scale, per_frame_allocation="uniform", block_size=1)
         return Borissal(cfg).select(video, gazing_ratio=ratio, spread_fraction=spread)
-    preset = spec.replace(".", "_")
-    if spec.startswith("v0.") and hasattr(BorissalConfig, preset):
+    if spec.startswith("coarse:"):
+        # signals AND selection at the 12x12 grid (patch 32), expanded 2x after
+        inner = build_selection_coarse(spec[len("coarse:"):], video, ratio, spread)
+        return expand_selection_2x(inner)
+    base, _, ov = spec.partition(",")
+    overrides = {}
+    for kv in filter(None, ov.split(",")):
+        k, val = kv.split("=", 1)
+        try:
+            overrides[k.strip()] = float(val) if "." in val else int(val)
+        except ValueError:
+            overrides[k.strip()] = val.strip()
+    preset = base.replace(".", "_")
+    if base.startswith("v0.") and hasattr(BorissalConfig, preset):
         # generic preset dispatch (v0.3 .. v0.7). anchor_novelty presets own
         # their allocation and reject spread -- pass overrides only where legal.
-        cfg = getattr(BorissalConfig, preset)(scale=scale)
+        cfg = getattr(BorissalConfig, preset)(scale=scale, **overrides)
         if cfg.selection_mode == "anchor_novelty":
             if spread > 0:
                 raise ValueError(f"{spec} owns its allocation; --spread does not apply")
@@ -86,7 +151,7 @@ def build_selection(spec: str, video: torch.Tensor, ratio: float, spread: float)
         # allocation + block_size=1 -- so "v0.3" here is the v0.3 SIGNAL stack
         # under the eval-uniform convention, not the preset verbatim.
         cfg = getattr(BorissalConfig, preset)(scale=scale, per_frame_allocation="uniform",
-                                              block_size=1)
+                                              block_size=1, **overrides)
         return Borissal(cfg).select(video, gazing_ratio=ratio, spread_fraction=spread)
     raise ValueError(f"unknown selector spec: {spec}")
 

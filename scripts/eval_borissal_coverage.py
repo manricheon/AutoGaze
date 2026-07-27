@@ -77,6 +77,27 @@ def parse_config_spec(spec: str) -> BorissalConfig:
     raise ValueError(f"unknown base config: {base}")
 
 
+class _CoarseSelector:
+    """Runs a preset at patch_size=32 then expands the selection 2x back to the
+    patch-16 grid (the "compute at 12x12, expand only" review variant)."""
+
+    def __init__(self, base: str, scale: int):
+        from autogaze.models.borissal import Borissal, BorissalConfig as C
+        preset = base.replace(".", "_")
+        cfg = getattr(C, preset)(scale=scale, patch_size=32)
+        if cfg.selection_mode != "anchor_novelty":
+            cfg = getattr(C, preset)(scale=scale, patch_size=32,
+                                     per_frame_allocation="uniform", block_size=1)
+        self.model = Borissal(cfg)
+
+    def select(self, video, gazing_ratio, **kw):
+        import sys as _sys
+        from pathlib import Path as _P
+        _sys.path.insert(0, str(_P(__file__).resolve().parent))
+        from eval_borissal_semantic import expand_selection_2x
+        return expand_selection_2x(self.model.select(video, gazing_ratio=gazing_ratio))
+
+
 def random_keep_mask(video: torch.Tensor, cfg: BorissalConfig, ratio: float, seed: int = 0):
     """Uniform-random per-tubelet exact-k selection -- the sanity anchor every
     saliency config must beat for the metric to mean anything."""
@@ -175,6 +196,9 @@ def main():
         if spec == "random":
             cfg = BorissalConfig(scale=args.scale)
             selector = "random"
+        elif spec.startswith("coarse:"):
+            cfg = BorissalConfig(scale=args.scale)
+            selector = _CoarseSelector(spec[len("coarse:"):], args.scale)
         elif spec.startswith("v1:"):
             # trained learned-selector checkpoint (same Selection contract)
             from autogaze.models.borissal import BorissalV1, BorissalV1Config
