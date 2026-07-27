@@ -114,6 +114,39 @@ class BorissalConfig:
     # (default) is a no-op. Grid dims must be divisible by c.
     score_coarsen: int = 1
 
+    # --- v0.7 "Datdol" anchor-novelty selection (docs/borissal/design.md) ---
+    # selection_mode="anchor_novelty" replaces the single-score top-k with a
+    # codec-style split: motion stops being saliency and becomes "when to
+    # update"; appearance is "what to represent". Budget (in score_coarsen
+    # cubes) = ANCHOR pool (each spatial site once, at its best-appearance
+    # tubelet) + NOVELTY pool (deviation from the clip's temporal-median
+    # canonical state) + residual appearance. Requires score_coarsen > 1 and
+    # uniform allocation semantics; incompatible knobs raise at select time.
+    # "topk" (default) is the legacy path, bit-identical to before.
+    selection_mode: str = "topk"
+    anchor_fraction: float = 0.5
+    """Share of the cube budget offered to the anchor pool. The pool is
+    capped at Sc (one candidate per spatial site: 144 at 384/patch16/c=2), so
+    the effective K_a = min(round(anchor_fraction*K_cubes), Sc) -- above
+    ratio ~0.2 the cap binds and surplus flows to novelty/residual."""
+    anchor_novelty_lambda: float = 0.5
+    """Transit-contamination guard: anchors are ranked by A_g - lambda*N so a
+    background site does NOT anchor at the moment a mover passed through it
+    (that moment belongs to the novelty pool)."""
+    anchor_lap_weight: float = 0.5
+    """|laplacian(luma)| term in the anchor appearance score A_g -- the
+    static-text/document signal (same signal static_guard injects, here as a
+    ranking component instead of a score addition)."""
+    novelty_shortterm_weight: float = 0.3
+    """Weight of the short-term motion term (the v0.2 noise-floored frame-diff
+    chain) inside N, next to the primary frame-rate-independent
+    |luma - temporal_median| deviation."""
+    residual_appearance_weight: float = 0.4
+    """Appearance weight in the post-anchor ranking R = N + w*A_g: once
+    anchors are placed, changed cubes rank by novelty and unchanged cubes by
+    appearance -- this is the novelty->residual tier ordering as one
+    continuous score (single exact-budget topk)."""
+
     # --- v0.3 candidate bank (docs/borissal/v03-design.md). ALL OFF by
     # default: with every knob at its default the pipeline takes the legacy
     # blend path and is bit-identical to v0.2 (regression-tested). Adoption
@@ -383,6 +416,40 @@ class BorissalConfig:
         base = dict(static_guard=True, laplacian_gate=True, center_bias=0.3,
                     keyframe_prior=True, per_frame_allocation="global",
                     luma_mode="bt601")
+        base.update(overrides)
+        return cls.v0_5(**base)
+
+    @classmethod
+    def v0_7(cls, **overrides) -> "BorissalConfig":
+        """The Borissal v0.7 "Datdol" preset: anchor-novelty selection for a
+        TEMPORAL downstream encoder (V-JEPA family) + captioner.
+
+        Architectural change, not a knob combo: motion and appearance no
+        longer compete inside one saliency score. The cube budget splits into
+        an ANCHOR pool (each spatial site selected once, at the tubelet where
+        its appearance is best -- a temporal encoder does not need static
+        content re-selected every tubelet), a NOVELTY pool (deviation from
+        the clip's temporal-median canonical state -- frame-rate independent,
+        unlike consecutive-frame diffs), and a residual appearance tier that
+        absorbs surplus budget at high ratios (natural multi-anchor).
+
+        Built on v0.5's appearance stack (cube coherence, grid-res coherence
+        gate, DoG region channel) with three explicit pins that the mode
+        depends on: motion_weight=0.0 (the auto blend is the mechanism this
+        design REMOVES -- motion feeds only the novelty pool), block_size=1
+        (cube coherence owns spatial grouping), and bt601 luma (all signals
+        derive from it). Allocation is architecture-owned: per-tubelet counts
+        FOLLOW from where anchors/novelty land, so per_frame_allocation
+        stays "uniform" only as the no-op placeholder and incompatible knobs
+        (spread/hysteresis/keyframe_prior/block gate/per_frame_counts) raise
+        at select time rather than silently composing."""
+        base = dict(
+            selection_mode="anchor_novelty",
+            luma_mode="bt601",
+            motion_weight=0.0,
+            block_size=1,
+            per_frame_allocation="uniform",
+        )
         base.update(overrides)
         return cls.v0_5(**base)
 

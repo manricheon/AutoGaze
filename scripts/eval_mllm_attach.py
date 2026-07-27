@@ -74,6 +74,9 @@ SELECTORS = {
         scale=s, static_guard=True, laplacian_gate=False, center_bias=0.0,
         keyframe_prior=False, per_frame_allocation="uniform", luma_mode="mean"),
     "v0.6-uniform": lambda s: BorissalConfig.v0_6(scale=s, per_frame_allocation="uniform"),
+    # v0.7 "Datdol" anchor-novelty: motion = when to update, appearance = what
+    # to represent. Whole-cube selection -> partial_blocks strict-safe.
+    "v0.7": lambda s: BorissalConfig.v0_7(scale=s),
 }
 
 

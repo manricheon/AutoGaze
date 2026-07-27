@@ -106,6 +106,10 @@ def main():
                  "global", 0.0),
         "v0.6-u": (Borissal(BorissalConfig.v0_6(scale=args.scale)).eval(),
                    "uniform", 0.0),
+        # v0.7 "Datdol" anchor-novelty: exercises the median-via-topk,
+        # argmax-gather, masked-scatter union and boosted single-topk paths.
+        "v0.7": (Borissal(BorissalConfig.v0_7(scale=args.scale)).eval(),
+                 "uniform", 0.0),
     }
 
     rows = []

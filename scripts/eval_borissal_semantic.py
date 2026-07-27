@@ -67,9 +67,26 @@ def build_selection(spec: str, video: torch.Tensor, ratio: float, spread: float)
         model.load_state_dict(ckpt["state_dict"])
         return model.eval().select(video, gazing_ratio=ratio,
                                    per_frame_allocation="uniform", spread_fraction=spread)
-    if spec in ("v0.1", "v0.2"):
-        cfg = BorissalConfig.v0_2(scale=scale, per_frame_allocation="uniform", block_size=1) \
-            if spec == "v0.2" else BorissalConfig(scale=scale)
+    if spec == "v0.1":
+        return Borissal(BorissalConfig(scale=scale)).select(video, gazing_ratio=ratio,
+                                                            spread_fraction=spread)
+    if spec == "v0.2":
+        cfg = BorissalConfig.v0_2(scale=scale, per_frame_allocation="uniform", block_size=1)
+        return Borissal(cfg).select(video, gazing_ratio=ratio, spread_fraction=spread)
+    preset = spec.replace(".", "_")
+    if spec.startswith("v0.") and hasattr(BorissalConfig, preset):
+        # generic preset dispatch (v0.3 .. v0.7). anchor_novelty presets own
+        # their allocation and reject spread -- pass overrides only where legal.
+        cfg = getattr(BorissalConfig, preset)(scale=scale)
+        if cfg.selection_mode == "anchor_novelty":
+            if spread > 0:
+                raise ValueError(f"{spec} owns its allocation; --spread does not apply")
+            return Borissal(cfg).select(video, gazing_ratio=ratio)
+        # NOTE eval convention (pre-existing, from the v0.2 gate): uniform
+        # allocation + block_size=1 -- so "v0.3" here is the v0.3 SIGNAL stack
+        # under the eval-uniform convention, not the preset verbatim.
+        cfg = getattr(BorissalConfig, preset)(scale=scale, per_frame_allocation="uniform",
+                                              block_size=1)
         return Borissal(cfg).select(video, gazing_ratio=ratio, spread_fraction=spread)
     raise ValueError(f"unknown selector spec: {spec}")
 
@@ -101,13 +118,25 @@ def semantic_metrics(encoder, tokens: torch.Tensor, frame_mask: torch.Tensor,
     head's own attention: importance = where the language-aligned encoder
     actually LOOKS when summarizing the frame."""
     T, N, D = tokens.shape
-    k = int(frame_mask[0].sum().item())
-    assert frame_mask.sum(dim=-1).eq(k).all(), "requires uniform per-frame keep count"
-
+    counts = frame_mask.sum(dim=-1)
     pooled_all, attn = probe_pool(encoder, tokens, need_weights=True)      # (T, D), (T, N)
-    sel_idx = frame_mask.nonzero(as_tuple=False)[:, 1].reshape(T, k)
-    sel_tokens = tokens.gather(1, sel_idx.unsqueeze(-1).expand(-1, -1, D))
-    pooled_sel, _ = probe_pool(encoder, sel_tokens)
+    if bool(counts.eq(counts[0]).all()):
+        # uniform counts: one batched gather (the original fast path)
+        k = int(counts[0].item())
+        sel_idx = frame_mask.nonzero(as_tuple=False)[:, 1].reshape(T, k)
+        sel_tokens = tokens.gather(1, sel_idx.unsqueeze(-1).expand(-1, -1, D))
+        pooled_sel, _ = probe_pool(encoder, sel_tokens)
+    else:
+        # variable per-frame counts (v0.7 anchor-novelty): the MAP head takes
+        # arbitrary-length token subsets, so pool each frame's own subset.
+        # Eval-only code -- the python loop over T frames is acceptable here.
+        pooled_rows = []
+        for t in range(T):
+            sub = tokens[t][frame_mask[t]]                                 # (k_t, D)
+            if sub.shape[0] == 0:
+                sub = tokens[t][:1] * 0.0
+            pooled_rows.append(probe_pool(encoder, sub.unsqueeze(0))[0][0])
+        pooled_sel = torch.stack(pooled_rows, dim=0)
 
     pa = torch.nn.functional.normalize(pooled_all.float(), dim=-1)
     ps = torch.nn.functional.normalize(pooled_sel.float(), dim=-1)

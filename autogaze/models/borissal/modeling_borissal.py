@@ -19,7 +19,9 @@ import torch.nn.functional as F
 
 from .configuration_borissal import BorissalConfig
 from .signals_v03 import (
+    appearance_novelty,
     apply_score_ema,
+    cube_best_time,
     coherence_gate_map,
     coherence_gate_grid,
     color_rarity,
@@ -31,6 +33,7 @@ from .signals_v03 import (
     laplacian_texture_gate,
     motion_center_surround,
     static_appearance_guard,
+    temporal_median_grid,
 )
 
 
@@ -591,8 +594,10 @@ class Borissal(nn.Module):
             S = S * laplacian_texture_gate(
                 motion_p, cfg.laplacian_gate_r0, cfg.laplacian_gate_tau, eps)
 
-        # luma at the patch grid, shared by the static guard and keyframe prior.
-        if cfg.static_guard or cfg.keyframe_prior:
+        # luma at the patch grid, shared by the static guard, the keyframe
+        # prior, and the v0.7 anchor-novelty branch (canonical-state input).
+        luma_grid = None
+        if cfg.static_guard or cfg.keyframe_prior or cfg.selection_mode == "anchor_novelty":
             luma_grid = F.avg_pool2d(
                 tub.reshape(B * T_grid, 1, H, W), kernel_size=patch_size, stride=patch_size
             ).view(B, T_grid, H_grid, W_grid)
@@ -639,6 +644,12 @@ class Borissal(nn.Module):
             "w": w,
             "noise_floor_tau": tau,
             "keyframe_weight": kf_weight_out,
+            # v0.7 anchor-novelty inputs: PRE-normalization pooled maps (the
+            # branch needs cross-tubelet magnitudes -- per-tubelet min-max
+            # would make argmax-over-time meaningless) and the grid luma.
+            "motion_p": motion_p,
+            "spatial_p": spatial_p,
+            "luma_grid": luma_grid,
         }
 
     def _allocate_and_topk(self, sel_scores, alloc, k_per_frame, m, K_total,
@@ -696,6 +707,115 @@ class Borissal(nn.Module):
         keep_mask_grid.scatter_(-1, topk_idx, keep_within_topk)
         return keep_mask_grid
 
+    def _anchor_novelty_select(self, sal, ratio, B, T_grid, H_grid, W_grid,
+                               N_pf, L, device):
+        """v0.7 "Datdol" selection: anchor + novelty + residual, one exact topk.
+
+        Motion is not saliency here -- it only says WHEN to update; appearance
+        says WHAT to represent. Cube budget K_cubes splits into:
+          - ANCHOR: each spatial site once, at its best-appearance tubelet
+            (best judged by A_g - lambda*N so a background site does not
+            anchor at the moment a mover transited it);
+          - NOVELTY: deviation from the clip's temporal-median canonical
+            state (frame-rate independent) + a short-term motion term;
+          - RESIDUAL: surplus budget ranks by appearance everywhere, which at
+            high ratios re-selects sites at more tubelets (natural
+            multi-anchor -> duration evidence returns).
+        Implemented as ONE topk over C = R + 4*anchor_mask + 8*floor_mask
+        (the _hybrid_topk boosted pattern), so the budget is exact by
+        construction: floors (T_grid of them, K_cubes >= T_grid) always
+        survive, anchors next, the rest by R = N + w_res*A. All K's are
+        config/ratio-derived python ints -- static shapes, trace-safe; masks
+        are scattered with tensor bool sources (ONNX rule).
+
+        All maps enter GLOBALLY normalized (_minmax_norm_global): per-tubelet
+        min-max would equalize every tubelet's max and make both the
+        cross-time argmax and cross-time novelty comparisons meaningless.
+        """
+        cfg = self.config
+        eps = cfg.eps
+        c = cfg.score_coarsen
+        Hc, Wc = H_grid // c, W_grid // c
+        Sc = Hc * Wc                    # spatial cube sites
+        n_cubes = T_grid * Sc
+        cube_area = c * c
+
+        luma_grid = sal["luma_grid"]    # (B, T_grid, H_grid, W_grid)
+        motion_p = sal["motion_p"]      # pre-normalization, post noise floor
+        spatial_p = sal["spatial_p"]    # pre-normalization, coherence-gated
+
+        # Appearance A_g: gradient structure + region fill (DoG) + static
+        # text/edge energy -- the v0.5-line appearance stack, globally normed.
+        A = _minmax_norm_global(spatial_p, eps)
+        if cfg.dog_blob_weight > 0.0:
+            A = A + cfg.dog_blob_weight * _minmax_norm_global(dog_blob(luma_grid), eps)
+        if cfg.anchor_lap_weight > 0.0:
+            A = A + cfg.anchor_lap_weight * _minmax_norm_global(laplacian_energy(luma_grid), eps)
+
+        # Novelty N: primary = |luma - temporal median| (rate-independent);
+        # secondary = the noise-floored frame-diff chain (fast events).
+        canonical = temporal_median_grid(luma_grid)
+        N = _minmax_norm_global(appearance_novelty(luma_grid, canonical), eps)
+        if cfg.novelty_shortterm_weight > 0.0:
+            N = N + cfg.novelty_shortterm_weight * _minmax_norm_global(motion_p, eps)
+
+        def to_cube(x):
+            return F.avg_pool2d(
+                x.reshape(B * T_grid, 1, H_grid, W_grid), c, c
+            ).view(B, T_grid, Sc)
+
+        A_c, N_c = to_cube(A), to_cube(N)
+
+        # Budgets -- python ints from config + static shapes only.
+        K_patch = min(max(1, round(ratio * L)), L)
+        K_cubes = min(max(T_grid, int(round(K_patch / cube_area))), n_cubes)
+        K_a = min(int(round(cfg.anchor_fraction * K_cubes)), Sc)
+
+        # Post-anchor ranking: changed cubes by novelty, unchanged by appearance.
+        R = N_c + cfg.residual_appearance_weight * A_c          # (B, T_grid, Sc)
+
+        # Tier-boost margins DERIVED from the config weights (review fix): R is
+        # bounded by R_max = (1+w_short) + w_res*(1+w_dog+w_lap) after the
+        # global min-max norms, so anchor_boost > R_max guarantees every anchor
+        # outranks every non-anchor, and floor_boost > R_max + anchor_boost
+        # guarantees floors survive even against boosted anchors. Hard-coding
+        # 4.0/8.0 held for the defaults (R_max = 2.1) but silently broke the
+        # every-tubelet-covered contract under user weight overrides.
+        r_max = ((1.0 + max(0.0, cfg.novelty_shortterm_weight))
+                 + max(0.0, cfg.residual_appearance_weight)
+                 * (1.0 + max(0.0, cfg.dog_blob_weight) + max(0.0, cfg.anchor_lap_weight)))
+        anchor_boost = r_max + 1.0
+        floor_boost = r_max + anchor_boost + 1.0
+
+        anchor_mask = torch.zeros(B, T_grid, Sc, dtype=torch.bool, device=device)
+        if K_a > 0:
+            anchor_rank = A_c - cfg.anchor_novelty_lambda * N_c
+            best_val, best_t = cube_best_time(anchor_rank)      # (B, Sc) each
+            _, site_idx = best_val.topk(K_a, dim=-1)            # (B, K_a)
+            t_at = best_t.gather(1, site_idx)                   # (B, K_a)
+            flat_idx = t_at * Sc + site_idx
+            flat = anchor_mask.reshape(B, n_cubes)
+            flat.scatter_(1, flat_idx, torch.ones_like(flat_idx, dtype=torch.bool))
+            anchor_mask = flat.view(B, T_grid, Sc)
+
+        C0 = R + anchor_boost * anchor_mask.to(R.dtype)
+        # Floor: every tubelet's best cube survives (temporal coverage). If a
+        # tubelet holds an anchor, its floor mark lands ON that anchor (the
+        # +4.0 makes it the tubelet max), so anchored tubelets consume no
+        # extra slot. T_grid floor marks <= K_cubes by construction.
+        _, floor_idx = C0.topk(1, dim=-1)                       # (B, T_grid, 1)
+        floor_mask = torch.zeros_like(anchor_mask)
+        floor_mask.scatter_(-1, floor_idx, torch.ones_like(floor_idx, dtype=torch.bool))
+        C = (C0 + floor_boost * floor_mask.to(R.dtype)).reshape(B, n_cubes)
+
+        _, keep_idx = C.topk(K_cubes, dim=-1)
+        cube_keep = torch.zeros(B, n_cubes, dtype=torch.bool, device=device)
+        cube_keep.scatter_(1, keep_idx, torch.ones_like(keep_idx, dtype=torch.bool))
+
+        return (cube_keep.view(B, T_grid, Hc, 1, Wc, 1)
+                .expand(B, T_grid, Hc, c, Wc, c)
+                .reshape(B, T_grid, N_pf))
+
     def _select_impl(
         self,
         video: torch.Tensor,
@@ -720,6 +840,27 @@ class Borissal(nn.Module):
             raise ValueError("spread_fraction requires uniform or global allocation")
         if per_frame_counts is not None and spread > 0:
             raise ValueError("per_frame_counts override is incompatible with spread_fraction")
+        if cfg.selection_mode not in ("topk", "anchor_novelty"):
+            raise ValueError(f"unknown selection_mode: {cfg.selection_mode!r}")
+        if cfg.selection_mode == "anchor_novelty":
+            # Allocation and grouping are architecture-owned in this mode:
+            # per-tubelet counts FOLLOW from where anchors/novelty land, and
+            # the cube grid is the selection unit. Knobs that would silently
+            # fight that are rejected loudly instead of composing wrong.
+            if cfg.score_coarsen <= 1:
+                raise ValueError("anchor_novelty requires score_coarsen > 1 (the cube IS the selection unit)")
+            if alloc != "uniform":
+                raise ValueError("anchor_novelty owns allocation; per_frame_allocation must stay 'uniform'")
+            if spread > 0:
+                raise ValueError("anchor_novelty is incompatible with spread_fraction (anchors are the spread)")
+            if per_frame_counts is not None:
+                raise ValueError("anchor_novelty is incompatible with the per_frame_counts override")
+            if cfg.select_hysteresis_eps > 0:
+                raise ValueError("anchor_novelty is incompatible with select_hysteresis")
+            if cfg.block_size > 1:
+                raise ValueError("anchor_novelty is incompatible with the block gate (use score_coarsen cubes)")
+            if cfg.keyframe_prior:
+                raise ValueError("anchor_novelty is incompatible with keyframe_prior (its allocation boost is dead here)")
         eps = cfg.eps
 
         # Explicit int() casts: under torch.jit.trace / torch.export, .shape components
@@ -770,147 +911,153 @@ class Borissal(nn.Module):
             S = (Sc.repeat_interleave(c, dim=2).repeat_interleave(c, dim=3)
                  .reshape(B, T_grid, H_grid, W_grid))
 
-        # Per-tubelet budget allocation.
-        m = None
-        K_total = None
-        if per_frame_counts is not None:
-            # E5 runtime override: the caller supplies the per-tubelet token
-            # counts directly (e.g. a learned/oracle temporal-allocation head).
-            # Only the ALLOCATION step is replaced -- patch ranking, block
-            # gate, packing and the Selection contract are untouched. Counts
-            # are data-dependent by nature: the trace/export caveat of the
-            # "proportional" mode (mobile review) applies identically.
-            k_per_frame = per_frame_counts.to(device=device, dtype=torch.long)
-            if k_per_frame.dim() == 1:
-                k_per_frame = k_per_frame.unsqueeze(0).expand(B, T_grid)
-            if k_per_frame.shape != (B, T_grid):
-                raise ValueError(
-                    f"per_frame_counts must be (T_grid,) or (B, T_grid); got {tuple(per_frame_counts.shape)}")
-            k_per_frame = k_per_frame.clamp(1, N_pf)
-            alloc = "counts"  # falls through to the generic variable-k top-k branch
-        elif alloc == "uniform":
-            k = min(max(1, round(ratio * N_pf)), N_pf)
-            k_per_frame = torch.full((B, T_grid), k, dtype=torch.long, device=device)
-            # v0.6 keyframe allocation: give periodic/scene-cut keyframe tubelets
-            # MORE tokens (the actual "allocate a bit more to keyframes"). Base
-            # uniform share scaled by (1 + boost * keyframe_weight), renormalized
-            # to the exact same total budget so nothing else changes.
-            if cfg.keyframe_prior and sal.get("keyframe_weight") is not None:
-                K_total_u = k * T_grid
-                kfw = sal["keyframe_weight"].to(device)          # (B, T_grid) in [0,1]
-                raw = (1.0 + cfg.keyframe_alloc_boost * kfw)
-                raw = raw * (K_total_u / raw.sum(dim=-1, keepdim=True).clamp_min(eps))
-                k_per_frame = _largest_remainder(raw, K_total_u, min_val=1, max_val=N_pf)
-        elif alloc == "proportional":
-            total_budget = min(max(1, round(ratio * L)), L)
-            energy = S.reshape(B, T_grid, -1).sum(dim=-1)
-            energy_sum = energy.sum(dim=-1, keepdim=True).clamp_min(eps)
-            raw = (energy / energy_sum) * total_budget
-            k_per_frame = _largest_remainder(raw, total_budget, min_val=1, max_val=N_pf)
-        elif alloc == "global":
-            # v0.2: one clip-wide top-K_total with a guaranteed per-tubelet
-            # minimum m. The budget concentrates where the action is; the
-            # floor preserves temporal coverage (no tubelet ends up empty).
-            K_total = min(max(T_grid, round(ratio * L)), L)
-            m = max(1, int(round(cfg.min_keep_per_frame_ratio * K_total / T_grid)))
-            m = min(m, K_total // T_grid)
-            # Coarse-to-fine gate sizing under global allocation: worst-case
-            # capacity (K_total - (T-1)m) opens the gate almost fully and
-            # neuters coherence (found empirically). Instead allow up to 2x
-            # the uniform share per tubelet -- total gated capacity is then
-            # 2*K_total >= K_total, so the global topk always has enough
-            # finite candidates (exact budget preserved); concentration
-            # beyond 2x share spills to other tubelets' gated regions.
-            k_gate = min(N_pf, 2 * ((K_total + T_grid - 1) // T_grid))
-            k_per_frame = torch.full((B, T_grid), k_gate, dtype=torch.long, device=device)
+        if cfg.selection_mode == "anchor_novelty":
+            keep_mask_grid = self._anchor_novelty_select(
+                sal, ratio, B, T_grid, H_grid, W_grid, N_pf, L, device)
+            scores_flat = S.reshape(B, T_grid, N_pf)
+            coarse_score = None
         else:
-            raise ValueError(f"unknown per_frame_allocation: {alloc}")
-
-        scores_flat = S.reshape(B, T_grid, N_pf)
-
-        # v0.2 coherent-region selection (resize-based coarse-to-fine): a
-        # low-resolution saliency pass picks top-ceil(k/b^2) blocks per tubelet,
-        # then the fine top-k below runs only inside those blocks. Gate capacity
-        # ceil(k/b^2)*b^2 >= k guarantees the exact-k budget is unaffected.
-        # Fragmentation is hard-bounded to <= ceil(k/b^2) regions per tubelet.
-        coarse_score = None
-        block_mask = None
-        sel_scores = scores_flat
-        b = cfg.block_size
-        if b > 1:
-            if H_grid % b != 0 or W_grid % b != 0 or (H // b) % patch_size != 0 or (W // b) % patch_size != 0:
-                raise ValueError(
-                    f"block_size={b} incompatible with grid {H_grid}x{W_grid} "
-                    f"(needs H_grid,W_grid divisible by b and H/b,W/b divisible by patch_size)"
-                )
-            Hc, Wc = H_grid // b, W_grid // b
-            Nc = Hc * Wc
-            A = b * b
-            if cfg.block_gate_source == "pool":
-                # v0.3.x candidate: derive the coarse signal by block-pooling
-                # the FINE per-patch scores instead of recomputing the whole
-                # pipeline on a resized clip -- one pipeline pass instead of
-                # two. The recompute path's anti-noise role (resize low-pass)
-                # is largely covered by the coherence gate since v0.3.
-                coarse_score = F.avg_pool2d(
-                    scores_flat.reshape(B * T_grid, 1, H_grid, W_grid),
-                    kernel_size=b, stride=b,
-                ).view(B, T_grid, Hc, Wc)
+            # Per-tubelet budget allocation.
+            m = None
+            K_total = None
+            if per_frame_counts is not None:
+                # E5 runtime override: the caller supplies the per-tubelet token
+                # counts directly (e.g. a learned/oracle temporal-allocation head).
+                # Only the ALLOCATION step is replaced -- patch ranking, block
+                # gate, packing and the Selection contract are untouched. Counts
+                # are data-dependent by nature: the trace/export caveat of the
+                # "proportional" mode (mobile review) applies identically.
+                k_per_frame = per_frame_counts.to(device=device, dtype=torch.long)
+                if k_per_frame.dim() == 1:
+                    k_per_frame = k_per_frame.unsqueeze(0).expand(B, T_grid)
+                if k_per_frame.shape != (B, T_grid):
+                    raise ValueError(
+                        f"per_frame_counts must be (T_grid,) or (B, T_grid); got {tuple(per_frame_counts.shape)}")
+                k_per_frame = k_per_frame.clamp(1, N_pf)
+                alloc = "counts"  # falls through to the generic variable-k top-k branch
+            elif alloc == "uniform":
+                k = min(max(1, round(ratio * N_pf)), N_pf)
+                k_per_frame = torch.full((B, T_grid), k, dtype=torch.long, device=device)
+                # v0.6 keyframe allocation: give periodic/scene-cut keyframe tubelets
+                # MORE tokens (the actual "allocate a bit more to keyframes"). Base
+                # uniform share scaled by (1 + boost * keyframe_weight), renormalized
+                # to the exact same total budget so nothing else changes.
+                if cfg.keyframe_prior and sal.get("keyframe_weight") is not None:
+                    K_total_u = k * T_grid
+                    kfw = sal["keyframe_weight"].to(device)          # (B, T_grid) in [0,1]
+                    raw = (1.0 + cfg.keyframe_alloc_boost * kfw)
+                    raw = raw * (K_total_u / raw.sum(dim=-1, keepdim=True).clamp_min(eps))
+                    k_per_frame = _largest_remainder(raw, K_total_u, min_val=1, max_val=N_pf)
+            elif alloc == "proportional":
+                total_budget = min(max(1, round(ratio * L)), L)
+                energy = S.reshape(B, T_grid, -1).sum(dim=-1)
+                energy_sum = energy.sum(dim=-1, keepdim=True).clamp_min(eps)
+                raw = (energy / energy_sum) * total_budget
+                k_per_frame = _largest_remainder(raw, total_budget, min_val=1, max_val=N_pf)
+            elif alloc == "global":
+                # v0.2: one clip-wide top-K_total with a guaranteed per-tubelet
+                # minimum m. The budget concentrates where the action is; the
+                # floor preserves temporal coverage (no tubelet ends up empty).
+                K_total = min(max(T_grid, round(ratio * L)), L)
+                m = max(1, int(round(cfg.min_keep_per_frame_ratio * K_total / T_grid)))
+                m = min(m, K_total // T_grid)
+                # Coarse-to-fine gate sizing under global allocation: worst-case
+                # capacity (K_total - (T-1)m) opens the gate almost fully and
+                # neuters coherence (found empirically). Instead allow up to 2x
+                # the uniform share per tubelet -- total gated capacity is then
+                # 2*K_total >= K_total, so the global topk always has enough
+                # finite candidates (exact budget preserved); concentration
+                # beyond 2x share spills to other tubelets' gated regions.
+                k_gate = min(N_pf, 2 * ((K_total + T_grid - 1) // T_grid))
+                k_per_frame = torch.full((B, T_grid), k_gate, dtype=torch.long, device=device)
             else:
-                # Coarse signal: the SAME saliency pipeline on a 1/b-resized
-                # clip -- the resize's low-pass naturally kills fine noise
-                # motion/texture. The resize runs in LUMA space when no color
-                # channel is active (mean over channels and bilinear resize
-                # commute; 1 channel instead of C to interpolate, and the
-                # coarse pass's own luma step becomes a no-op).
-                if cfg.color_rarity_weight > 0.0:
-                    src, Cs = video, C
+                raise ValueError(f"unknown per_frame_allocation: {alloc}")
+
+            scores_flat = S.reshape(B, T_grid, N_pf)
+
+            # v0.2 coherent-region selection (resize-based coarse-to-fine): a
+            # low-resolution saliency pass picks top-ceil(k/b^2) blocks per tubelet,
+            # then the fine top-k below runs only inside those blocks. Gate capacity
+            # ceil(k/b^2)*b^2 >= k guarantees the exact-k budget is unaffected.
+            # Fragmentation is hard-bounded to <= ceil(k/b^2) regions per tubelet.
+            coarse_score = None
+            block_mask = None
+            sel_scores = scores_flat
+            b = cfg.block_size
+            if b > 1:
+                if H_grid % b != 0 or W_grid % b != 0 or (H // b) % patch_size != 0 or (W // b) % patch_size != 0:
+                    raise ValueError(
+                        f"block_size={b} incompatible with grid {H_grid}x{W_grid} "
+                        f"(needs H_grid,W_grid divisible by b and H/b,W/b divisible by patch_size)"
+                    )
+                Hc, Wc = H_grid // b, W_grid // b
+                Nc = Hc * Wc
+                A = b * b
+                if cfg.block_gate_source == "pool":
+                    # v0.3.x candidate: derive the coarse signal by block-pooling
+                    # the FINE per-patch scores instead of recomputing the whole
+                    # pipeline on a resized clip -- one pipeline pass instead of
+                    # two. The recompute path's anti-noise role (resize low-pass)
+                    # is largely covered by the coherence gate since v0.3.
+                    coarse_score = F.avg_pool2d(
+                        scores_flat.reshape(B * T_grid, 1, H_grid, W_grid),
+                        kernel_size=b, stride=b,
+                    ).view(B, T_grid, Hc, Wc)
                 else:
-                    src, Cs = video.mean(dim=2, keepdim=True), 1
-                video_small = F.interpolate(
-                    src.reshape(B * T, Cs, H, W), scale_factor=1.0 / b,
-                    mode="bilinear", align_corners=False,
-                ).view(B, T, Cs, H // b, W // b)
-                coarse_score = self._saliency_scores(
-                    video_small, tubelet_size, patch_size, motion_weight_setting
-                )["score"]  # (B, T_grid, Hc, Wc)
+                    # Coarse signal: the SAME saliency pipeline on a 1/b-resized
+                    # clip -- the resize's low-pass naturally kills fine noise
+                    # motion/texture. The resize runs in LUMA space when no color
+                    # channel is active (mean over channels and bilinear resize
+                    # commute; 1 channel instead of C to interpolate, and the
+                    # coarse pass's own luma step becomes a no-op).
+                    if cfg.color_rarity_weight > 0.0:
+                        src, Cs = video, C
+                    else:
+                        src, Cs = video.mean(dim=2, keepdim=True), 1
+                    video_small = F.interpolate(
+                        src.reshape(B * T, Cs, H, W), scale_factor=1.0 / b,
+                        mode="bilinear", align_corners=False,
+                    ).view(B, T, Cs, H // b, W // b)
+                    coarse_score = self._saliency_scores(
+                        video_small, tubelet_size, patch_size, motion_weight_setting
+                    )["score"]  # (B, T_grid, Hc, Wc)
 
-            kb_pf = ((k_per_frame + A - 1) // A).clamp(max=Nc)  # ceil-div, gate fully open if cap >= capacity
-            kb_max = int(kb_pf.max().item())
-            coarse_flat = coarse_score.reshape(B, T_grid, Nc)
-            _, blk_idx = coarse_flat.topk(kb_max, dim=-1)
-            blk_rank = torch.arange(kb_max, device=device).view(1, 1, kb_max).expand(B, T_grid, kb_max)
-            blk_keep = blk_rank < kb_pf.unsqueeze(-1)
-            block_mask = torch.zeros(B, T_grid, Nc, dtype=torch.bool, device=device)
-            block_mask.scatter_(-1, blk_idx, blk_keep)  # (B, T_grid, Nc)
+                kb_pf = ((k_per_frame + A - 1) // A).clamp(max=Nc)  # ceil-div, gate fully open if cap >= capacity
+                kb_max = int(kb_pf.max().item())
+                coarse_flat = coarse_score.reshape(B, T_grid, Nc)
+                _, blk_idx = coarse_flat.topk(kb_max, dim=-1)
+                blk_rank = torch.arange(kb_max, device=device).view(1, 1, kb_max).expand(B, T_grid, kb_max)
+                blk_keep = blk_rank < kb_pf.unsqueeze(-1)
+                block_mask = torch.zeros(B, T_grid, Nc, dtype=torch.bool, device=device)
+                block_mask.scatter_(-1, blk_idx, blk_keep)  # (B, T_grid, Nc)
 
-            fine_gate = (
-                block_mask.reshape(B, T_grid, Hc, 1, Wc, 1)
-                .expand(B, T_grid, Hc, b, Wc, b)
-                .reshape(B, T_grid, N_pf)
-            )
-            # finfo.min (not -inf) for mobile-backend safety.
-            sel_scores = scores_flat.masked_fill(~fine_gate, torch.finfo(scores_flat.dtype).min)
+                fine_gate = (
+                    block_mask.reshape(B, T_grid, Hc, 1, Wc, 1)
+                    .expand(B, T_grid, Hc, b, Wc, b)
+                    .reshape(B, T_grid, N_pf)
+                )
+                # finfo.min (not -inf) for mobile-backend safety.
+                sel_scores = scores_flat.masked_fill(~fine_gate, torch.finfo(scores_flat.dtype).min)
 
-        eps_h = cfg.select_hysteresis_eps
-        if eps_h > 0.0:
-            # v0.3 selection hysteresis -- ONE-STEP VECTORIZED approximation:
-            # the continuity bonus comes from the previous tubelet's
-            # PRE-hysteresis selection (the true recursive chain would need a
-            # sequential loop over tubelets, banned by the vectorization rule).
-            base_keep = self._allocate_and_topk(
+            eps_h = cfg.select_hysteresis_eps
+            if eps_h > 0.0:
+                # v0.3 selection hysteresis -- ONE-STEP VECTORIZED approximation:
+                # the continuity bonus comes from the previous tubelet's
+                # PRE-hysteresis selection (the true recursive chain would need a
+                # sequential loop over tubelets, banned by the vectorization rule).
+                base_keep = self._allocate_and_topk(
+                    sel_scores, alloc, k_per_frame, m, K_total, spread,
+                    B, T_grid, N_pf, H_grid, W_grid, device)
+                prev0 = None if temporal_state is None else temporal_state.get("prev_keep")
+                if prev0 is None:
+                    prev0 = torch.zeros(B, 1, N_pf, dtype=torch.bool, device=device)
+                else:
+                    prev0 = prev0.reshape(B, 1, N_pf)
+                prev = torch.cat([prev0, base_keep[:, :-1]], dim=1)
+                sel_scores = sel_scores + eps_h * prev.to(sel_scores.dtype)
+            keep_mask_grid = self._allocate_and_topk(
                 sel_scores, alloc, k_per_frame, m, K_total, spread,
                 B, T_grid, N_pf, H_grid, W_grid, device)
-            prev0 = None if temporal_state is None else temporal_state.get("prev_keep")
-            if prev0 is None:
-                prev0 = torch.zeros(B, 1, N_pf, dtype=torch.bool, device=device)
-            else:
-                prev0 = prev0.reshape(B, 1, N_pf)
-            prev = torch.cat([prev0, base_keep[:, :-1]], dim=1)
-            sel_scores = sel_scores + eps_h * prev.to(sel_scores.dtype)
-        keep_mask_grid = self._allocate_and_topk(
-            sel_scores, alloc, k_per_frame, m, K_total, spread,
-            B, T_grid, N_pf, H_grid, W_grid, device)
 
         per_frame_keep = keep_mask_grid.sum(dim=-1)  # (B, T_grid)
         num_keep = per_frame_keep.sum(dim=-1)        # (B,)

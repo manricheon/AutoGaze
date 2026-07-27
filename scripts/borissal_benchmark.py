@@ -42,6 +42,16 @@ ALLOCATIONS = ["uniform", "proportional"]
 def build_model(which: str, ratio: float, alloc: str, checkpoint: str = None):
     if which == "v0":
         return Borissal(BorissalConfig(gazing_ratio=ratio, per_frame_allocation=alloc))
+    if which.startswith("v0."):
+        # named preset (v0.2 .. v0.7). anchor_novelty presets own allocation.
+        cfg = getattr(BorissalConfig, which.replace(".", "_"))(gazing_ratio=ratio)
+        if cfg.selection_mode == "anchor_novelty":
+            if alloc != "uniform":
+                return None      # allocation is architecture-owned: skip duplicate rows
+        else:
+            cfg = getattr(BorissalConfig, which.replace(".", "_"))(
+                gazing_ratio=ratio, per_frame_allocation=alloc)
+        return Borissal(cfg)
     if checkpoint:
         ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
         model = BorissalV1(BorissalV1Config(**ckpt["config"]))
@@ -68,7 +78,10 @@ def peak_memory_mb(device: torch.device) -> float:
 
 
 def bench_one(which: str, device: torch.device, ratio: float, alloc: str, checkpoint: str = None):
-    model = build_model(which, ratio, alloc, checkpoint).to(device)
+    model = build_model(which, ratio, alloc, checkpoint)
+    if model is None:              # anchor_novelty: allocation is architecture-owned
+        return None
+    model = model.to(device)
     video = torch.rand(B, T, C, H, W, device=device)
 
     sync = (lambda: torch.mps.synchronize()) if device.type == "mps" else (
@@ -126,7 +139,8 @@ def run_profiler(device: torch.device):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--model", choices=["v0", "v1", "both"], default="v0")
+    p.add_argument("--model", default="v0",
+               help="v0 | v1 | both | a named preset like v0.5 / v0.7")
     p.add_argument("--checkpoint", default=None, help="v1 checkpoint .pt (optional; random init if omitted)")
     p.add_argument("--skip-profiler", action="store_true")
     args = p.parse_args()
@@ -149,6 +163,8 @@ def main():
             for ratio in RATIOS:
                 for alloc in ALLOCATIONS:
                     r = bench_one(which, device, ratio, alloc, args.checkpoint)
+                    if r is None:
+                        continue
                     all_results.append(r)
                     print(
                         f"{r['model']:5} {r['device']:6} {r['gazing_ratio']:<6} {r['per_frame_allocation']:12} "

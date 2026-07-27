@@ -359,3 +359,53 @@ def apply_score_ema(S: torch.Tensor, alpha: float, state=None) -> torch.Tensor:
     W = torch.where(col0, alpha ** i.view(-1, 1), W).tril()
     out = (W @ seq.reshape(b, n, h * w)).reshape(b, n, h, w)
     return out if state is None else out[:, 1:]
+
+
+# --- Borissal v0.7 "Datdol" (anchor-novelty) primitives ------------------------
+
+
+def temporal_median_grid(luma_grid: torch.Tensor) -> torch.Tensor:
+    """Per-cell temporal median of a (B, T, H, W) grid map -> (B, 1, H, W).
+
+    The canonical-appearance reference for the novelty channel: unlike a mean,
+    a median ignores a transient occluder that covers a cell for < T/2 of the
+    clip, so "deviation from median" fires on the OCCLUDER, not on the
+    background before/after it.
+
+    Mobile-safe median: topk(k = T//2 + 1) along time and take the k-th
+    largest (no sort/median/kthvalue ops -- same rule as the quantile noise
+    floor). For even T this is the LOWER of the two middle values, not their
+    mean -- pinned by test, do not compare against torch.median for even T.
+    k is derived from the static shape, so the graph stays trace-safe.
+    """
+    t = int(luma_grid.shape[1])
+    k = t // 2 + 1
+    return luma_grid.topk(k, dim=1).values[:, -1:]
+
+
+def appearance_novelty(luma_grid: torch.Tensor, canonical: torch.Tensor) -> torch.Tensor:
+    """|luma - canonical|: how far each cell is from the clip's canonical state.
+
+    The frame-rate-robust change signal: consecutive-frame diffs shrink as
+    decode density rises (the v0.4 lesson -- adjacent frames get more similar),
+    but the distance to a CLIP-LEVEL reference does not depend on how many
+    frames the interval was sliced into. Returned raw (no normalization);
+    the caller owns normalization so magnitudes stay comparable across cells
+    and tubelets (per-tubelet min-max would erase exactly the cross-time
+    comparability this channel exists to provide).
+    """
+    return (luma_grid - canonical).abs()
+
+
+def cube_best_time(score_cube: torch.Tensor):
+    """Best tubelet per spatial site: (B, T, Sc) -> (values (B, Sc), index (B, Sc)).
+
+    topk(1, dim=1), NOT max+eq masking: an eq-mask is multi-hot under exact
+    ties (flat regions -- the anchor pool's own target content), which would
+    double-count sites and corrupt the cube budget. topk returns exactly one
+    index per site by construction; determinism under ties is asserted by
+    test (repeat-call equality) rather than assumed lowest-index, since tie
+    order is backend-defined.
+    """
+    vals, idx = score_cube.topk(1, dim=1)
+    return vals[:, 0], idx[:, 0]

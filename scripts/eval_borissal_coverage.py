@@ -71,6 +71,9 @@ def parse_config_spec(spec: str) -> BorissalConfig:
         return BorissalConfig.v0_2(**overrides)
     if base == "v0.1":
         return BorissalConfig(**overrides)
+    preset = base.replace(".", "_")
+    if base.startswith("v0.") and hasattr(BorissalConfig, preset):
+        return getattr(BorissalConfig, preset)(**overrides)   # v0.3 .. v0.7
     raise ValueError(f"unknown base config: {base}")
 
 
