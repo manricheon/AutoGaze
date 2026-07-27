@@ -1784,3 +1784,28 @@ re-see the site in every frame it wants to use it, so single-shot coverage
 is worth less. Prediction: the coverage trade pays off more on the V-JEPA
 stack than on the Qwen-attach judge used here -- another item the CUDA A/B
 can settle (downstream-stacks.md hypothesis family).
+
+### Addendum: union coverage of the earlier presets (2026-07-28)
+
+User question: did the pre-Datdol presets have the whole-clip position
+coverage property? Measured (patch-position union over the clip, 6 clips,
+16f/384, mean / worst-clip):
+
+| preset | r=0.25 | r=0.5 |
+|---|---|---|
+| v0.2 | 52% / 29% | 74% / 55% |
+| v0.3 | 53% / 30% | 75% / 56% |
+| v0.5 | 50% / 27% | 76% / 52% |
+| v0.6 (global) | 52% / 33% | 73% / 56% |
+| v0.7 | 100% / 100% | 100% / 100% |
+
+No -- and worse than expected: even at HALF the token budget, the score-topk
+lineage never shows ~25% of the screen to the downstream at all (worst clip:
+48%), because per-tubelet top-k re-selects the same high-score positions
+every tubelet. This measurement also retroactively explains why RANDOM's
+gist beat every saliency config (0.946/0.985): independent per-position
+sampling gives random near-total union coverage, and gist is dominated by
+"was every region shown at least once". v0.7 is the only config with both
+saliency concentration and random-level coverage. Structural guarantee
+threshold: round(anchor_fraction*K_cubes) >= Sc -- at 16f that is ratio
+>= 0.25 (exactly at the boundary), at 32f ratio >= 0.125.
