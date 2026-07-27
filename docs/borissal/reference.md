@@ -302,3 +302,22 @@ Still not built: content-adaptive auto-tuning of v0's remaining knobs
 (CoreML/TFLite) export validation (ONNX-17 export passes for v0.2, v1,
 and v1+global+spread — see design.md "Mobile-export pre-check"), and the
 downstream processor→encoder→LLM attachment (separate track).
+
+## Borissal v0.7 "Datdol" (anchor-novelty) knobs
+
+`BorissalConfig.v0_7()` — selection_mode="anchor_novelty". Allocation is
+architecture-owned; incompatible knobs (spread / hysteresis / block gate /
+keyframe_prior / per_frame_counts / non-uniform alloc) raise at select time.
+
+| knob | default | meaning |
+|---|---|---|
+| `selection_mode` | "topk" | "anchor_novelty" switches to the Datdol split; "topk" = legacy path (bit-identical) |
+| `anchor_fraction` | 0.5 | share of the cube budget offered to anchors; capped at Sc (one candidate per spatial site) |
+| `anchor_novelty_lambda` | 0.5 | transit guard: anchors ranked by A − λ·N so movers' transit moments are excluded |
+| `anchor_lap_weight` | 0.5 | \|lap(luma)\| term in the anchor appearance score (static text/document signal) |
+| `novelty_shortterm_weight` | 0.3 | short-term (noise-floored frame-diff) term inside N, next to \|luma − temporal median\| |
+| `residual_appearance_weight` | 0.4 | appearance weight in the post-anchor ranking R = N + w·A (novelty→residual tier ordering) |
+
+Gate results and the honest caveats (control wins on the local NLL judge) are in
+design.md "Borissal v0.7 Datdol"; deploy default remains v0.5 until the CUDA
+V-JEPA A/B.

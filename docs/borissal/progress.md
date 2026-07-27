@@ -1278,3 +1278,34 @@ NOT directly comparable.
 Next: run `eval_mllm_attach.py` on CUDA with the real 2B, `--prune-stage encoder`,
 and let it arbitrate the v0.6 all-on bet (proxy-worst, adopted purely on
 saliency-v3.1's downstream evidence).
+
+---
+
+## 2026-07-27 — Borissal v0.7 "Datdol": anchor-novelty selector designed, built, gated
+
+User commissioned a fresh selector design for the V-JEPA 2.1-L + Qwen stack
+(torch/GPU, mobile-safe, ratio-robust), explicitly asking for an agent-review
+loop. Full record in design.md ("Borissal v0.7 Datdol").
+
+- **Architecture**: motion = when to update, appearance = what to represent —
+  budget splits into anchor (each site once, transit-guarded) / novelty
+  (|luma − temporal median|, frame-rate independent) / residual appearance.
+  One exact-budget boosted topk; every-tubelet floor; whole 2×2 cubes
+  (Qwen-merge aligned). `selection_mode="anchor_novelty"`, preset `v0_7`.
+- **Review loop**: 2 Plan agents attacked design v1 (6 HIGH/BLOCKER: anchor-pool
+  topk crash at ratio ≥0.5, per-tubelet-norm argmax degeneracy, judge validity,
+  eval plumbing, preset lineage leak, tie unsafety) — all fixed in v2 before
+  implementation. Post-implementation adversarial review: legacy path verified
+  bit-identical, 6 more findings fixed (config-derived boost margins, real
+  transit/hard-cut tests, benchmark/eval guards).
+- **Gates** (pre-registered): primary NLL judge fires ADOPT (v0.7 beats v0.5,
+  20/32 pairs, p=0.108 — recorded as not significant) **but random beats both
+  saliency configs** (P1-echo at caption level; all configs within ~0.005
+  nats/tok of each other on this slice-local judge). V-JEPA uniqueness
+  expectation failed for a structural reason (metric anti-aligned with dedup —
+  post-hoc, documented); coverage improved. SigLIP: gist at both ratios and mean
+  recall@0.5 beat v0.5 (paired split even, 8/16). Latency 11.7/22.7 ms (16f/32f) within budget (archived). Tests
+  171→192, export 16/16.
+- **Standing**: v0.5 stays deploy default; v0.7 is the challenger for the CUDA
+  V-JEPA A/B. The "nothing beats random locally" reading applies to the whole
+  v0.x line on this judge, not to Datdol alone.

@@ -1584,3 +1584,84 @@ Consequences worth carrying:
 - `max_keep_per_frame_mult` (the anti-monopoly cap) has the mirror-image property:
   `k_gate` saturates at `N_pf` from ratio 0.5 up, so that one is inert at HIGH
   ratios. Both guards are low-ratio devices.
+
+## Borissal v0.7 "Datdol" — anchor-novelty selection: design, gates, verdict (2026-07-27)
+
+New architecture, user-commissioned ("design it fresh, best selector for the
+selector -> V-JEPA 2.1-L -> Qwen3.5-2B description stack"), built with an
+agent-review loop (2 design reviewers pre-implementation, 1 adversarial code
+reviewer post; 12 findings total, all addressed -- see commit 28cf11f).
+
+**The idea.** Every v0.x selector made motion and appearance compete inside one
+saliency score (hence the motion_weight treadmill and the v0.4-vs-v0.5
+contradiction). Datdol removes the competition structurally: motion is WHEN to
+update, appearance is WHAT to represent. The cube budget splits into ANCHOR
+(each spatial site once, at its best-appearance tubelet, ranked by
+A - lambda*N so transit moments are excluded), NOVELTY (|luma - temporal
+median|, frame-rate independent by construction -- the v0.4 32f weakness is
+gone, pinned by test), and RESIDUAL appearance (surplus at high ratios ->
+natural multi-anchor). One exact-budget boosted topk; floors guarantee every
+tubelet >= 1 cube. selection_mode="anchor_novelty"; legacy path bit-identical
+(verified via `git diff -w` review + full suite).
+
+**Gates (all pre-registered in the plan before any number was seen).**
+
+1. PRIMARY -- Qwen3-VL-2B teacher-forced dense-caption NLL, 16 held-out clips
+   x ratios {0.25, 0.5}, prune_stage=encoder, strict whole-cube blocks:
+
+   | config | mean nll_delta (nats/tok) | paired wins vs v0.5 |
+   |---|---|---|
+   | dense | 0 (base 0.4053) | — |
+   | random | +0.01758 | — |
+   | **v0.7** | **+0.02124** | **20/32 (win rate 0.625)** |
+   | v0.5 | +0.02274 | — |
+
+   Pre-registered rule (mean better AND win rate > 0.5): **fires ADOPT**.
+   Honest caveats, recorded with the result: (a) the paired edge is NOT
+   significant (one-sided sign test p = 0.108); (b) **random beats both
+   saliency configs** (19/32 vs each, p = 0.189) -- a P1-echo at the caption
+   level: on THIS judge (slice-local ViT + LLM) no config separates from
+   random at these budgets; all differences are ~0.002-0.005 nats/token on a
+   0.405 base. The pre-registration anticipated the judge limitation (it
+   decides the Qwen-attach question only); it did not anticipate the control
+   winning. Both facts stand.
+
+2. V-JEPA pair axis (vitl-256, 4 clips): pre-registered expectation
+   ("uniqueness rises") **FAILED** -- uniqueness 8.06/8.21 vs v0.5's
+   8.19/8.31 at ratios 0.25/0.5 (both >> random 7.83/7.95); coverage
+   IMPROVED (8.14 vs 8.23 at 0.25, better than random's 8.15). Post-hoc
+   mechanism, clearly labeled as post-hoc: the uniqueness metric predicts the
+   SELECTION from the REST, and an anchor design deliberately leaves
+   duplicates of anchored static content in the rest -- so anchors are
+   predictable BY CONSTRUCTION. The metric is anti-aligned with dedup
+   designs, one step worse than the review's "quasi-tautological" warning.
+   Neither uniqueness direction on this metric can validate or refute the
+   dedup mechanism; only the real V-JEPA-stack run can.
+
+3. SigLIP reference axis (16 clips; pre-registered as reference-only because
+   per-frame recall structurally penalizes temporal concentration):
+   recall@0.25 0.3161 (v0.5 0.3425, random 0.2499) -- the expected penalty;
+   recall@0.5 mean 0.6071 vs v0.5's 0.5944 -- mean-better on the
+   adversarial-to-Datdol proxy, though the paired split is exactly even
+   (8/16), i.e. driven by a few clips; gist better than v0.5 at BOTH ratios
+   (0.8985/0.9571 vs 0.8785/0.9486) -- anchors act as the gist providers the
+   spread knob was supposed to be. For symmetry: RANDOM's gist is higher than
+   both saliency configs (0.9456/0.9854), consistent with the
+   nothing-separates-from-random theme on this judge.
+
+4. Latency (idle machine, interleaved medians; archived run): 16f 11.7 ms,
+   32f 22.7 ms -- both within the <= 25 ms budget (+1.7/+2.5 ms vs v0.5). MPS slower than
+   CPU at these tensor sizes (kernel-launch bound; CUDA is the GPU target).
+   Contract tests across ratios {0.15..1.0} incl. the K_a > Sc boundary;
+   jit.trace + ONNX PASS (16/16 export checks: 8 cases x 2); tests 171 -> 192.
+   Latency archived: outputs/borissal/v07_gate/latency_interleaved.txt (gitignored).
+
+**Verdict.** v0_7 stands as a preset: it meets its pre-registered primary
+rule against the incumbent, wins the 0.5-ratio proxy it was expected to lose,
+improves gist and V-JEPA coverage, stays in budget, and is ratio-robust by
+construction. It is the candidate to send to the CUDA V-JEPA A/B. What it has
+NOT shown is separation from RANDOM on any local judge -- the runbook's
+"nothing beats random" branch (Step 10) was written for exactly this reading,
+and its escalation (E4 trigger consideration) applies to the v0.x line as a
+whole, not to Datdol specifically, since v0.5 sits in the same boat. Deploy
+default stays v0.5 until the CUDA run; v0.7 is the challenger it carries.
