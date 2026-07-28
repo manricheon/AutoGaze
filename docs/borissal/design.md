@@ -1983,3 +1983,32 @@ instantly). DO NOT USE to rank v0.7-line variants. Ratios 0.5/0.75 queued
 (user request) to check whether the inversion persists across budgets.
 Artifacts: outputs/borissal/claude_screen/{captions.json, judge_jobs_025,
 judge_verdicts_025, screen_report_025.json}.
+
+
+## 2026-07-29 -- Masked-frame screen: full 3-ratio verdict (pilot CLOSED)
+
+User-requested extension to ratios 0.5 and 0.75 completed (total: 320
+captions, 920 blinded order-swapped verdicts across three ratios).
+
+  ratio  selector-vs-random scores      notes
+  0.25   0.75-0.85 (all crush random)   intra ranking INVERTED vs NLL (-0.80)
+  0.5    0.80-0.93 (all crush random)   IDENTICAL-selection pairs differ by
+                                        0.11 -> noise floor >= inter-config gap
+  0.75   0.42-0.50 (~coin flip)          swap agreement 63%; discrimination gone
+
+The 0.5 round contained a built-in control: anchor saturation makes
+af=0.25 IDENTICAL to the default at that budget, yet their screen scores
+differed by 0.11 -- direct measurement of the noise floor, proving the
+0.25 "ranking" differences (same magnitude) were readability bias + noise,
+not signal. At 0.75 only a quarter of each frame is dark, so any policy
+leaves the scene fully readable and the screen saturates into ties.
+
+FINAL SCOPE (recorded): the Claude-relative-description screen is adopted
+as a LOW-BUDGET SANITY / BUG DETECTOR -- run at ratio 0.25 (optionally
+0.5) where selector-vs-random discrimination is unambiguous and
+input-pipeline bugs (e.g. the black-frame regression) are caught in one
+batch. It is NOT a knob-ranking instrument at any ratio, and it is
+uninformative above ~0.5 budget. Knob ranking stays with the on-stack
+generation+judge pipeline (Stage B/C).
+Artifacts: outputs/borissal/claude_screen/{captions_raw.jsonl,
+judge_{jobs,verdicts}_{025,05,075}.jsonl, screen_report_{025,05,075}.json}.
