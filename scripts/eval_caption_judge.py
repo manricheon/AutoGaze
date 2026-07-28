@@ -226,6 +226,47 @@ def cmd_gemini(args):
                 print(f"  judged {i + 1}/{len(todo)}", flush=True)
 
 
+def cmd_gemini_cli(args):
+    """Judge via the gemini CLI (OAuth login, no API key/billing). Frames go
+    in as @file references; -p runs non-interactive. Resumable like `gemini`."""
+    import re
+    import subprocess
+    import time
+    done = set()
+    vpath = Path(args.verdicts)
+    if vpath.exists():
+        done = {json.loads(l)["id"] for l in vpath.read_text().splitlines() if l}
+    jobs = [json.loads(l) for l in Path(args.jobs).read_text().splitlines() if l]
+    todo = [j for j in jobs if j["id"] not in done]
+    print(f"{len(todo)} pending of {len(jobs)}")
+    with vpath.open("a") as f:
+        for i, job in enumerate(todo):
+            refs = " ".join(f"@{REPO_ROOT / rel}" for rel in job["frames"])
+            prompt = (f"These are 8 timestamped frames of one video: {refs}\n\n"
+                      + job["prompt"])
+            try:
+                out = subprocess.run(
+                    ["gemini", "-m", args.model, "-p", prompt],
+                    capture_output=True, text=True, timeout=180, cwd=str(REPO_ROOT))
+                m = re.search(r"\{.*\}", out.stdout, re.DOTALL)
+                if not m:
+                    raise ValueError(f"no JSON in output: {out.stdout[-200:]!r} "
+                                     f"stderr={out.stderr[-200:]!r}")
+                v = json.loads(m.group(0))
+                rec = {"id": job["id"], "axes": {a: v.get(a, "tie") for a in AXES},
+                       "overall": v.get("overall", "tie"),
+                       "reason": v.get("reason", ""), "judge": f"gemini-cli:{args.model}"}
+            except Exception as e:  # noqa: BLE001 -- quota etc.: log & continue
+                print(f"  [{job['id']}] {e}")
+                time.sleep(10)
+                continue
+            f.write(json.dumps(rec) + "\n")
+            f.flush()
+            if (i + 1) % 10 == 0:
+                print(f"  judged {i + 1}/{len(todo)}", flush=True)
+            time.sleep(args.pause)
+
+
 # ------------------------------------------------------------- aggregate ----
 
 def _sign_test(wins, losses):
@@ -332,13 +373,18 @@ def main():
     q.add_argument("--verdicts", required=True)
     q.add_argument("--model", default="gemini-2.5-flash")
     q.add_argument("--rpm", type=float, default=8)
+    q = sub.add_parser("gemini-cli")
+    q.add_argument("--jobs", required=True)
+    q.add_argument("--verdicts", required=True)
+    q.add_argument("--model", default="gemini-2.5-flash")
+    q.add_argument("--pause", type=float, default=2.0)
     q = sub.add_parser("aggregate")
     q.add_argument("--jobs", required=True)
     q.add_argument("--verdicts", required=True)
     q.add_argument("--out", default=None)
     args = p.parse_args()
-    {"prepare": cmd_prepare, "prepare-qc": cmd_prepare_qc,
-     "gemini": cmd_gemini, "aggregate": cmd_aggregate}[args.cmd](args)
+    {"prepare": cmd_prepare, "prepare-qc": cmd_prepare_qc, "gemini": cmd_gemini,
+     "gemini-cli": cmd_gemini_cli, "aggregate": cmd_aggregate}[args.cmd](args)
 
 
 if __name__ == "__main__":
