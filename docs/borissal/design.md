@@ -1911,3 +1911,25 @@ Two lessons worth the embarrassment:
 
 Re-run queue (fixed pipeline): reproducibility gate -> QC captions ->
 Stage A NLL screen (deduped 5 configs).
+
+
+## 2026-07-29 -- Judge validation suite PASSED (fixed pipeline); repro gate re-passed
+
+Fixed-input reproducibility gate: caption identity 15/15 = 100% on MPS, NLL
+bit-repeatable; and on REAL input the NLL effect sizes are ~16x the
+black-input era (5-clip eval16: v0.7 +0.272 vs random +0.433 nats/tok --
+the selector CRUSHES random where the void tables had shown a near-tie).
+
+Judge = claude-sonnet session agents, 20 dev clips, 78 order-swapped
+comparisons, 156 verdicts, zero malformed. Pre-registered criteria:
+dense-vs-random@0.1 100% (>=80 needed); foreign-caption 100% loss (>=90);
+shuffle NEVER wins temporal (15W/21T on the axis -- ties are all
+static-ish clips where order is genuinely immaterial); order-swap
+agreement 94% (>=80); verbosity probe: concise dense beats padded caption
+100% -- direct evidence the anti-length rubric holds. Length-bias r
+undefined this round (all decisions same direction); it arms in Stage B.
+Aggregate bug found & fixed during the run: overall=tie verdicts were
+counted as MISSING, not ties (tri-state outcome now).
+
+Judge is cleared for Stage B scoring. Artifacts: outputs/borissal/judge_qc/
+qc_report.json, v08_sweep/qc_{jobs,verdicts}.jsonl.

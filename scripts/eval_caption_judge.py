@@ -309,12 +309,12 @@ def cmd_aggregate(args):
         v = json.loads(line)
         verdicts.setdefault(v["id"], []).append(v)
 
-    def first_wins(job, v):
-        """verdict('A'|'B'|'tie') -> did job['first'] win this call?"""
+    def first_outcome(job, v):
+        """verdict('A'|'B'|'tie') -> 'win'|'loss'|'tie' for job['first']."""
         w = v["overall"]
         if w not in ("A", "B"):
-            return None
-        return (job["a_is"] == job["first"]) == (w == "A")
+            return "tie"
+        return "win" if (job["a_is"] == job["first"]) == (w == "A") else "loss"
 
     # regroup swapped pairs by comparison key
     comps = {}
@@ -331,17 +331,18 @@ def cmd_aggregate(args):
             if jid not in verdicts:
                 continue
             job = jobs[jid]
-            calls = [first_wins(job, v) for v in verdicts[jid]]
-            calls = [c for c in calls if c is not None]
-            if calls:  # majority within repeats of one order
-                vs.append(sum(calls) > len(calls) / 2)
+            calls = [first_outcome(job, v) for v in verdicts[jid]]
+            # majority within repeats of one order; tie on no majority
+            top = max(("win", "loss", "tie"), key=calls.count)
+            vs.append(top if calls.count(top) > len(calls) / 2 else "tie")
         if len(vs) < len(orders):
             n_missing += 1
             continue
         if len(vs) == 2:
             swap_total += 1
             swap_agree += vs[0] == vs[1]
-        outcome = "tie" if len(set(vs)) > 1 else ("win" if vs[0] else "loss")
+        # order-swapped pair must agree to count as a decision; else tie
+        outcome = vs[0] if len(set(vs)) == 1 else "tie"
         r = results.setdefault((tag, key[4]), {"win": 0, "loss": 0, "tie": 0})
         r[outcome] += 1
         jid0 = orders[min(orders)]
