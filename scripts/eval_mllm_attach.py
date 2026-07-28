@@ -170,6 +170,56 @@ def _caption_nll(model, inputs_with_caption, n_caption_tokens, keep, patch_idx, 
 
 
 @torch.no_grad()
+def _greedy_generate_pruned_cached(model, inputs, keep, patch_idx, stage,
+                                   max_new_tokens, tokenizer):
+    """KV-cached greedy decode on a pruned prompt (2026-07-29, prereg A5).
+
+    One full prompt pass with use_cache=True, then one single-token forward
+    per step. Deepstack injection happens during the prompt pass (vision
+    positions live in the cache afterwards), so decode steps pass
+    deepstack_visual_embeds=None with an all-False visual_pos_mask -- the
+    same shape the dense generate path uses. Verified caption-identical to
+    the uncached loop on the smoke set before adoption (bf16 cache numerics
+    could in principle flip near-tie tokens; the identity gate checks that).
+    """
+    pruned = build_pruned_inputs(model, inputs, keep, prune_stage=stage,
+                                qwen_patch_index=patch_idx if stage == "encoder" else None)
+    inner = model.model if hasattr(model, "model") else model
+    embed = inner.get_input_embeddings()
+    out = inner.language_model(
+        input_ids=None, position_ids=pruned.position_ids,
+        attention_mask=pruned.attention_mask, inputs_embeds=pruned.inputs_embeds,
+        visual_pos_masks=pruned.visual_pos_masks,
+        deepstack_visual_embeds=pruned.deepstack_visual_embeds,
+        use_cache=True)
+    past = out.past_key_values
+    logits = model.lm_head(out.last_hidden_state[:, -1:])
+    attn = pruned.attention_mask
+    pos = pruned.position_ids
+    eos = {tokenizer.eos_token_id, getattr(model.config, "eos_token_id", None)}
+    out_ids = []
+    for _ in range(max_new_tokens):
+        nxt = int(logits[0, -1].argmax())
+        if nxt in eos:
+            break
+        out_ids.append(nxt)
+        tok = torch.tensor([[nxt]], device=pruned.input_ids.device)
+        attn = torch.cat([attn, torch.ones_like(tok)], dim=1)
+        step_pos = None
+        if pos is not None:
+            step_pos = pos[..., -1:] + 1
+            pos = torch.cat([pos, step_pos], dim=-1)
+        out = inner.language_model(
+            input_ids=None, position_ids=step_pos, attention_mask=attn,
+            inputs_embeds=embed(tok),
+            visual_pos_masks=torch.zeros_like(tok, dtype=torch.bool),
+            deepstack_visual_embeds=None,
+            past_key_values=past, use_cache=True)
+        past = out.past_key_values
+        logits = model.lm_head(out.last_hidden_state)
+    return tokenizer.decode(out_ids, skip_special_tokens=True).strip()
+
+
 def _greedy_generate_pruned(model, inputs, keep, patch_idx, stage, max_new_tokens, tokenizer):
     """Greedy decode on a pruned prompt (no KV cache: the pruned path assembles
     inputs_embeds/position_ids itself, and re-running a short prompt is cheap
@@ -225,6 +275,8 @@ def main():
     p.add_argument("--system-prompt", default=None,
                    help="optional system message prepended to the chat template")
     p.add_argument("--generate", action="store_true", help="also greedy-decode each pruned config")
+    p.add_argument("--kv-cache", action="store_true",
+                   help="use the KV-cached greedy decoder (prereg A5; verified caption-identical)")
     p.add_argument("--device", default=None)
     p.add_argument("--dtype", default=None, choices=[None, "float32", "bfloat16", "float16"])
     p.add_argument("--smoke", action="store_true", help="plumbing only: 1 clip, 16 new tokens")
@@ -328,7 +380,8 @@ def main():
                          "ratio": ratio, "n_partial_blocks": n_partial,
                          "sec": round(time.time() - t0, 3)}
                 if args.generate:
-                    entry["caption"] = _greedy_generate_pruned(
+                    gen_fn = _greedy_generate_pruned_cached if args.kv_cache else _greedy_generate_pruned
+                    entry["caption"] = gen_fn(
                         model, inputs.to(device), keep, patch_idx, args.prune_stage,
                         args.max_new_tokens, proc.tokenizer)
                 row["results"][f"{name}@{ratio}"] = entry
