@@ -1884,3 +1884,30 @@ Design decisions of record:
   5-check validation suite (incl foreign-caption swap and a verbosity probe)
   before any real scoring, and a length-bias monitor (|r|>0.4 = gamed)
   runs over every round.
+
+
+## 2026-07-29 -- CRITICAL correction: all prior mllm_attach NLL numbers are void
+
+The new caption judge caught it within its first QC batch: 20/20 dense
+captions described "a black screen" while the frozen judge frames showed real
+scenes. `_processor_inputs` fed [0,1] floats to the Qwen processor, whose
+default do_rescale multiplied by 1/255 again -- pixel_values collapsed to a
+constant -1.0 (std 0.002). Every eval_mllm_attach run before 2026-07-29
+scored a BLACK video: the v07_gate and v07_sg NLL tables, the review round's
+E-A/E-B NLL cells, and the "random beats saliency on NLL at 0.5" (P1-echo)
+claim are all void. The cube-default decision keeps its SigLIP support
+(separate, unaffected pipeline) but loses its NLL-tie support until re-run.
+The artifact's NLL cells are likewise void pending re-measurement.
+
+Two lessons worth the embarrassment:
+1. Teacher-forced NLL produced PLAUSIBLE-LOOKING deltas on black input,
+   because the reference caption was generated from the same black input --
+   a self-consistent closed loop measuring nothing about the video. A judge
+   that never looks at the pixels cannot catch this class of bug.
+2. The frame-grounded generation judge caught it in its very first batch,
+   before any tuning decision consumed the numbers. Fix: uint8 input +
+   a tripwire (RuntimeError if pixel_values std < 0.05). Verified: dense
+   caption now describes the actual scene.
+
+Re-run queue (fixed pipeline): reproducibility gate -> QC captions ->
+Stage A NLL screen (deduped 5 configs).

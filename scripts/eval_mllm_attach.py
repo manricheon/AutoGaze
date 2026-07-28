@@ -133,8 +133,21 @@ def _token_selection(name, video, scale, ratio, merge, partial_blocks, generator
 
 
 def _processor_inputs(proc, rgb_frames, text):
-    return proc(text=[text], videos=[rgb_frames], return_tensors="pt",
-                do_sample_frames=False, do_resize=False)
+    import numpy as np
+    # The processor's do_rescale (x 1/255) applies to whatever numeric array it
+    # gets. Feeding [0,1] floats double-rescales to ~0 and the model sees a
+    # BLACK video -- this exact bug voided every mllm_attach result before
+    # 2026-07-29 (caught by the caption judge: 20/20 dense captions described
+    # "a black screen" while the frozen frames showed real scenes). Feed uint8.
+    if rgb_frames.dtype != np.uint8:
+        rgb_frames = (rgb_frames * 255.0).round().clip(0, 255).astype(np.uint8)
+    out = proc(text=[text], videos=[rgb_frames], return_tensors="pt",
+               do_sample_frames=False, do_resize=False)
+    pv = out["pixel_values_videos"]
+    if float(pv.std()) < 0.05:
+        raise RuntimeError(f"pixel_values collapsed (std={float(pv.std()):.4f}) -- "
+                           "input scaling bug, refusing to eval on garbage")
+    return out
 
 
 @torch.no_grad()

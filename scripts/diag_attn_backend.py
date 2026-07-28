@@ -90,8 +90,10 @@ def main():
     for path in clips:
         video = load_video(str(path), num_frames=args.num_frames, size=args.scale)
         rgb = unnormalize(video)[0].permute(0, 2, 3, 1).clamp(0, 1).float().cpu().numpy()
+        rgb = (rgb * 255.0).round().clip(0, 255).astype("uint8")  # uint8: avoid double-rescale
         vin = proc(text=["x"], videos=[rgb], return_tensors="pt",
                    do_sample_frames=False, do_resize=False)
+        assert float(vin["pixel_values_videos"].std()) > 0.05, "input scaling bug"
         pv = vin["pixel_values_videos"].to(device)
         grid = vin["video_grid_thw"].to(device)
 
