@@ -84,6 +84,28 @@ SELECTORS = {
 }
 
 
+def _parse_spec(name):
+    """'base,k=v,k=v' -> (base, overrides dict). Values cast like
+    eval_borissal_semantic.build_selection: float if '.', else int, else str."""
+    base, _, ov = name.partition(",")
+    overrides = {}
+    for kv in filter(None, ov.split(",")):
+        k, val = kv.split("=", 1)
+        try:
+            overrides[k.strip()] = float(val) if "." in val else int(val)
+        except ValueError:
+            overrides[k.strip()] = val.strip()
+    return base, overrides
+
+
+def _selector_config(name, scale):
+    base, overrides = _parse_spec(name)
+    cfg = SELECTORS[base](scale)
+    if overrides:
+        cfg = type(cfg)(**{**cfg.__dict__, **overrides})
+    return cfg
+
+
 def _token_selection(name, video, scale, ratio, merge, partial_blocks, generator):
     """-> (keep_token_index (1,K), qwen_patch_index (1,K*m^2) or None, n_partial)."""
     if name == "random":
@@ -100,12 +122,11 @@ def _token_selection(name, video, scale, ratio, merge, partial_blocks, generator
         import sys as _sys
         _sys.path.insert(0, str(REPO_ROOT / "scripts"))
         from eval_borissal_semantic import expand_selection_2x
-        base = name[len("coarse:"):]
-        cfg = SELECTORS[base](scale)
+        cfg = _selector_config(name[len("coarse:"):], scale)
         cfg = type(cfg)(**{**cfg.__dict__, "patch_size": 32})
         sel = expand_selection_2x(Borissal(cfg).select(video, gazing_ratio=ratio))
     else:
-        cfg = SELECTORS[name](scale)
+        cfg = _selector_config(name, scale)
         sel = Borissal(cfg).select(video, gazing_ratio=ratio)
     out = to_qwen3vl_video_tokens(sel, merge, partial_blocks)
     return out["keep_token_index"], out["qwen_patch_index"], out["n_partial_blocks"]
@@ -179,6 +200,10 @@ def main():
                    help="'any' by default so v0.3 (score_coarsen=1) is runnable; the realised "
                         "token count is always reported, so read n_tokens, not the ratio")
     p.add_argument("--limit", type=int, default=0, help="0 = all clips")
+    p.add_argument("--clips-file", default=None,
+                   help="text file with one clip filename per line (e.g. a dev split "
+                        "extracted from docs/borissal/evalset_manifest.json); restricts "
+                        "--videos-dir to exactly those clips, in file order")
     p.add_argument("--max-new-tokens", type=int, default=96)
     p.add_argument("--generate", action="store_true", help="also greedy-decode each pruned config")
     p.add_argument("--device", default=None)
@@ -197,12 +222,23 @@ def main():
              "float16": torch.float16}.get(args.dtype) or (
         torch.float32 if device.type == "cpu" else torch.bfloat16)
     ratios = [float(r) for r in args.ratios.split(",") if r]
-    configs = [c for c in args.configs.split(",") if c]
-    unknown = [c for c in configs
-               if c not in SELECTORS and c != "random"
-               and not (c.startswith("coarse:") and c[len("coarse:"):] in SELECTORS)]
+    # ';' separates specs so a spec can carry ',k=v' overrides
+    # (e.g. "v0.7;v0.7,anchor_fraction=0.75;random"); a plain comma list
+    # without '=' keeps working as before.
+    sep = ";" if (";" in args.configs or "=" in args.configs) else ","
+    configs = [c.strip() for c in args.configs.split(sep) if c.strip()]
+
+    def _known(c):
+        if c == "random":
+            return True
+        if c.startswith("coarse:"):
+            c = c[len("coarse:"):]
+        return _parse_spec(c)[0] in SELECTORS
+
+    unknown = [c for c in configs if not _known(c)]
     if unknown:
-        raise SystemExit(f"unknown configs {unknown}; known: {sorted(SELECTORS) + ['random']}")
+        raise SystemExit(f"unknown configs {unknown}; known: {sorted(SELECTORS) + ['random']} "
+                         f"(+ ',k=v' overrides, ';'-separated)")
 
     cfg = AutoConfig.from_pretrained(args.model)
     merge = cfg.vision_config.spatial_merge_size
@@ -217,6 +253,13 @@ def main():
     model = model_cls.from_pretrained(args.model, dtype=dtype).to(device).eval()
 
     clips = sorted(Path(args.videos_dir).glob("*.mp4"))
+    if args.clips_file:
+        wanted = [n.strip() for n in Path(args.clips_file).read_text().splitlines() if n.strip()]
+        by_name = {c.name: c for c in clips}
+        missing = [n for n in wanted if n not in by_name]
+        if missing:
+            raise SystemExit(f"--clips-file names not in --videos-dir: {missing[:5]}")
+        clips = [by_name[n] for n in wanted]
     if args.limit:
         clips = clips[: args.limit]
     if not clips:
