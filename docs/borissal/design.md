@@ -1957,3 +1957,29 @@ with the existing harness. Pixel masking != true token drop, so this is
 an information-sufficiency proxy for SCREENING only; its adoption gate
 is rank correlation with the real-stack results on dev-20
 (scripts/make_masked_frames.py; pilot running).
+
+
+## 2026-07-29 -- Masked-frame screen pilot @0.25: STRONG coarse signal, INVERTED fine ranking
+
+The user-proposed Claude-relative-description screen (mask dropped patches in
+the frozen judge frames; same captioner for masked and original frames; judge
+with the existing harness) completed its 0.25 pilot: 120 captions, 360
+blinded order-swapped verdicts, order-swap agreement 89%.
+
+Result, per spec (vs-random score = wins+ties/2 over 20 clips):
+af=0.25 0.85 > af=0.25+fine 0.82 > v0.7 0.80 > fine 0.75; all four crush
+random. Spearman vs the on-stack NLL ranking: -0.80 -- INVERTED. The config
+that is worst on the real stack (af=0.25, coverage broken) reads BEST through
+pixel masks: fewer anchors concentrate the budget into large contiguous
+bright regions that a human-like viewer integrates easily, while full-site
+coverage scatters small patches ("swiss cheese") that read poorly as pixels
+but feed the encoder better. The known caveat -- pixel masking != true token
+drop -- is not a minor distortion; in the v0.7-line regime it flips the sign.
+
+VERDICT (adoption gate): adopted with scope limits. USE as a sanity/bug
+detector (selector-vs-random discrimination is unambiguous; this class of
+screen catches input-pipeline bugs like the black-frame regression
+instantly). DO NOT USE to rank v0.7-line variants. Ratios 0.5/0.75 queued
+(user request) to check whether the inversion persists across budgets.
+Artifacts: outputs/borissal/claude_screen/{captions.json, judge_jobs_025,
+judge_verdicts_025, screen_report_025.json}.
