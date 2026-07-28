@@ -267,6 +267,28 @@ def cmd_gemini_cli(args):
             time.sleep(args.pause)
 
 
+def cmd_verify_frames(args):
+    """Integrity check after a cross-server copy: every manifest frame must
+    exist under --root with a matching sha256-16. Exit 1 on any mismatch."""
+    import hashlib as _h
+    manifest = json.loads((Path(args.manifest)).read_text())
+    root = Path(args.root)
+    bad, n = [], 0
+    for clip in manifest["clips"]:
+        for fr in clip["frames"]:
+            n += 1
+            fp = root / fr["file"]
+            if not fp.exists():
+                bad.append(f"MISSING {fr['file']}")
+            elif _h.sha256(fp.read_bytes()).hexdigest()[:16] != fr["sha256"]:
+                bad.append(f"HASH MISMATCH {fr['file']}")
+    for b in bad[:20]:
+        print(b)
+    print(f"{n - len(bad)}/{n} frames verified" + (f", {len(bad)} BAD" if bad else " -- all good"))
+    if bad:
+        raise SystemExit(1)
+
+
 # ------------------------------------------------------------- aggregate ----
 
 def _sign_test(wins, losses):
@@ -378,13 +400,17 @@ def main():
     q.add_argument("--verdicts", required=True)
     q.add_argument("--model", default="gemini-2.5-flash")
     q.add_argument("--pause", type=float, default=2.0)
+    q = sub.add_parser("verify-frames")
+    q.add_argument("--manifest", default=str(MANIFEST))
+    q.add_argument("--root", default=str(REPO_ROOT))
     q = sub.add_parser("aggregate")
     q.add_argument("--jobs", required=True)
     q.add_argument("--verdicts", required=True)
     q.add_argument("--out", default=None)
     args = p.parse_args()
     {"prepare": cmd_prepare, "prepare-qc": cmd_prepare_qc, "gemini": cmd_gemini,
-     "gemini-cli": cmd_gemini_cli, "aggregate": cmd_aggregate}[args.cmd](args)
+     "gemini-cli": cmd_gemini_cli, "verify-frames": cmd_verify_frames,
+     "aggregate": cmd_aggregate}[args.cmd](args)
 
 
 if __name__ == "__main__":
