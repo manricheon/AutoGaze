@@ -1933,3 +1933,27 @@ counted as MISSING, not ties (tri-state outcome now).
 
 Judge is cleared for Stage B scoring. Artifacts: outputs/borissal/judge_qc/
 qc_report.json, v08_sweep/qc_{jobs,verdicts}.jsonl.
+
+
+## 2026-07-29 -- Stage A complete (fixed pipeline); Stage B roster locked
+
+dev-20, NLL@0.25 (real input; means, pairwise all statistical ties vs
+default so the judge decides): fine+lambda=0.25 0.2408 < fine+wst=0.5
+0.2420 < fine+lambda=0.75 0.2443 < DEFAULT(cube) 0.2451 < ... <
+random 0.3449. Default beats random 15/20 (p=0.021) -- the first
+statistically significant NLL result in the project's history, and the
+"random wins NLL" era is formally closed as a bug artifact. Breaking
+site coverage (anchor_fraction=0.25) costs +0.056 nats -- the coverage
+theory's first direct on-stack confirmation. The fine grid sweeps the
+top-3 once lambda/wst are tuned; SigLIP is flat across lambda/wst (the
+knobs only matter on the caption axis). Stage B roster (pre-registered
+rule, top-3 + default + random): fine+l0.25, fine+wst0.5, fine+l0.75,
+v0.7 default, random -- generation on dev-60 @0.25 launched.
+
+Also opened (user proposal): the Claude-relative-description screen --
+mask dropped patches in the 8 frozen judge frames, caption masked vs
+original frames with the same captioner (family bias cancels), judge
+with the existing harness. Pixel masking != true token drop, so this is
+an information-sufficiency proxy for SCREENING only; its adoption gate
+is rank correlation with the real-stack results on dev-20
+(scripts/make_masked_frames.py; pilot running).
