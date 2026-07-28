@@ -1809,3 +1809,43 @@ sampling gives random near-total union coverage, and gist is dominated by
 saliency concentration and random-level coverage. Structural guarantee
 threshold: round(anchor_fraction*K_cubes) >= Sc -- at 16f that is ratio
 >= 0.25 (exactly at the boundary), at 32f ratio >= 0.125.
+
+## signal_grid knob: the TRUE 12x12-native variant, now v0.7's default (2026-07-28)
+
+**Correction first.** The review round's `coarse:v0.x` rejection tested the
+WRONG variant: `patch_size=32` INHERITED `score_coarsen=2`, so its selection
+unit was 6x6 = 64px double-coarsened chunks (36 sites), not the user's
+proposal (signals AND selection at 12x12 = 32px chunks, 144 sites). The
+NEGATIVE verdict applies to the 64px variant only; the user's actual variant
+was untested until now.
+
+**Implementation.** New first-class knob `signal_grid` (anchor_novelty only,
+misuse on the topk path raises):
+- `"cube"` -- the WHOLE signal pipeline runs at patch_size*score_coarsen
+  (32px -> 12x12); the anchor/novelty maps ARE the cube maps (no re-pool).
+  Selection unit (12x12 cubes) and the final patch-16 output contract are
+  unchanged. **v0_7's default, by user decision** ("이전 모델 개발에서 12x12
+  계산이 더 잘 됐다").
+- `"fine"` -- signals at the 24x24 patch grid, cube-averaged: the original
+  Datdol formulation, kept as the comparison knob.
+Both modes pass the full contract suite (tests 195 -> 202), trace+ONNX, and
+the cube default preserves 100% union coverage at ratio 0.25. cube-vs-fine
+selections agree on 78% of decisions at 0.25.
+
+**Standalone file**: dist/borissal_v07.py (built by build_standalone.py,
+force-added like v03-v06), verified bit-identical to the package for both
+signal grids; v0_3..v0_6 presets ship in the same file.
+
+**Gate results (cube vs fine).** SigLIP 16 clips: at ratio 0.25 cube wins
+BOTH metrics (gist 0.8993 vs 0.8985, 11/16 paired; recall 0.3223 vs 0.3161,
+12/16) -- the deployment-ratio evidence supports the user's intuition; at 0.5
+fine is slightly ahead (recall 0.6071 vs 0.5959, gist 7/16). NLL judge
+(16 clips, 0.25): statistical tie -- fine better on mean (+0.02568 vs
++0.02650, diff 0.0008 nats/tok), cube better on pairs (9/16, p=0.40), both
+beat random (+0.02780). Latency (idle, interleaved): cube 11.4/23.2 ms
+(16f/32f) ~= fine 12.0/23.4 -- no cost either way. Verdict: no evidence
+against the cube default and the 0.25-ratio proxy favors it; **cube stands
+as v0_7's default (user decision), fine remains the comparison knob.** The
+V-JEPA axis was NOT re-measured for true-cube (the earlier coarse number was
+the 64px variant -- do not reuse it); add cube-vs-fine to the CUDA A/B
+matrix.

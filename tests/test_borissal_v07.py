@@ -68,11 +68,13 @@ def test_best_time_is_found_not_first():
 
 # --- contract -------------------------------------------------------------------
 
+@pytest.mark.parametrize("sg", ["cube", "fine"])
 @pytest.mark.parametrize("ratio", [0.15, 0.25, 0.5, 0.75, 1.0])
-def test_contract_all_ratios(ratio):
+def test_contract_all_ratios(ratio, sg):
     """Ascending, unique, exact 4*K_cubes budget; ratio sweep crosses the
-    K_a > Sc boundary (Sc=9 here) that crashed design v1."""
-    sel = _model().select(_clip(), gazing_ratio=ratio)
+    K_a > Sc boundary (Sc=9 here) that crashed design v1. Both signal grids:
+    "cube" (12x12-native, v0_7 default per user decision) and "fine"."""
+    sel = _model(signal_grid=sg).select(_clip(), gazing_ratio=ratio)
     T_grid, Hg, Wg = (int(x) for x in sel.grid_thw[0])
     L = T_grid * Hg * Wg
     n = int(sel.num_keep[0])
@@ -93,11 +95,20 @@ def test_every_tubelet_keeps_at_least_one_cube():
     assert (sel.per_frame_keep[0] >= 4).all(), "floor: no empty tubelet"
 
 
-def test_whole_cubes_qwen_strict():
+@pytest.mark.parametrize("sg", ["cube", "fine"])
+def test_whole_cubes_qwen_strict(sg):
     from autogaze.models.borissal.adapters import to_qwen3vl_video_tokens
-    sel = _model().select(_clip(), gazing_ratio=0.25)
+    sel = _model(signal_grid=sg).select(_clip(), gazing_ratio=0.25)
     out = to_qwen3vl_video_tokens(sel, 2, "strict")   # raises on partial blocks
     assert out["n_partial_blocks"] == 0
+
+
+def test_signal_grid_misuse_raises():
+    with pytest.raises(ValueError, match="anchor_novelty knob"):
+        Borissal(BorissalConfig.v0_5(scale=SIZE, signal_grid="cube")).select(
+            _clip(), gazing_ratio=0.25)
+    with pytest.raises(ValueError, match="signal_grid"):
+        _model(signal_grid="nonsense").select(_clip(), gazing_ratio=0.25)
 
 
 def test_batch_and_single_tubelet():
@@ -131,6 +142,7 @@ def test_incompatible_knobs_raise():
 def test_preset_contract_pins():
     c = BorissalConfig.v0_7(scale=SIZE)
     assert c.selection_mode == "anchor_novelty"
+    assert c.signal_grid == "cube"          # 12x12-native signals are the default
     assert c.motion_weight == 0.0          # the auto blend is REMOVED, not inherited
     assert c.block_size == 1 and c.score_coarsen == 2
     assert c.luma_mode == "bt601" and c.per_frame_allocation == "uniform"

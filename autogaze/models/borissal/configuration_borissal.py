@@ -146,6 +146,16 @@ class BorissalConfig:
     anchors are placed, changed cubes rank by novelty and unchanged cubes by
     appearance -- this is the novelty->residual tier ordering as one
     continuous score (single exact-budget topk)."""
+    signal_grid: str = "fine"
+    """Where the anchor/novelty SIGNALS are computed (anchor_novelty only).
+    "cube": the whole signal pipeline runs at patch_size*score_coarsen (e.g.
+    32px -> 12x12) -- the chunky variant, v0_7's DEFAULT (user decision
+    2026-07-28); selection unit and the final patch-16 output contract are
+    unchanged. "fine": signals at the patch grid (24x24), then cube-averaged
+    -- the original Datdol formulation, kept as the comparison knob. NOTE:
+    the 2026-07-28 review's "coarse" rejection tested a DIFFERENT variant
+    (patch32 + inherited score_coarsen=2 = 64px double-coarsened chunks) and
+    does not apply to "cube"."""
 
     # --- v0.3 candidate bank (docs/borissal/v03-design.md). ALL OFF by
     # default: with every knob at its default the pipeline takes the legacy
@@ -449,6 +459,7 @@ class BorissalConfig:
             motion_weight=0.0,
             block_size=1,
             per_frame_allocation="uniform",
+            signal_grid="cube",     # 12x12-native signals (user decision 2026-07-28)
         )
         base.update(overrides)
         return cls.v0_5(**base)

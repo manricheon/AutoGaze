@@ -708,7 +708,7 @@ class Borissal(nn.Module):
         return keep_mask_grid
 
     def _anchor_novelty_select(self, sal, ratio, B, T_grid, H_grid, W_grid,
-                               N_pf, L, device):
+                               N_pf, L, device, maps_at_cube=False):
         """v0.7 "Datdol" selection: anchor + novelty + residual, one exact topk.
 
         Motion is not saliency here -- it only says WHEN to update; appearance
@@ -759,12 +759,16 @@ class Borissal(nn.Module):
         if cfg.novelty_shortterm_weight > 0.0:
             N = N + cfg.novelty_shortterm_weight * _minmax_norm_global(motion_p, eps)
 
-        def to_cube(x):
-            return F.avg_pool2d(
-                x.reshape(B * T_grid, 1, H_grid, W_grid), c, c
-            ).view(B, T_grid, Sc)
-
-        A_c, N_c = to_cube(A), to_cube(N)
+        if maps_at_cube:
+            # signal_grid="cube": maps were computed at the cube grid already
+            # (patch_size*c pooling inside _saliency_scores) -- no re-pool.
+            A_c, N_c = A.reshape(B, T_grid, Sc), N.reshape(B, T_grid, Sc)
+        else:
+            def to_cube(x):
+                return F.avg_pool2d(
+                    x.reshape(B * T_grid, 1, H_grid, W_grid), c, c
+                ).view(B, T_grid, Sc)
+            A_c, N_c = to_cube(A), to_cube(N)
 
         # Budgets -- python ints from config + static shapes only.
         K_patch = min(max(1, round(ratio * L)), L)
@@ -861,6 +865,10 @@ class Borissal(nn.Module):
                 raise ValueError("anchor_novelty is incompatible with the block gate (use score_coarsen cubes)")
             if cfg.keyframe_prior:
                 raise ValueError("anchor_novelty is incompatible with keyframe_prior (its allocation boost is dead here)")
+            if cfg.signal_grid not in ("fine", "cube"):
+                raise ValueError(f"unknown signal_grid: {cfg.signal_grid!r}")
+        elif cfg.signal_grid != "fine":
+            raise ValueError("signal_grid is an anchor_novelty knob; the topk path always computes at the patch grid")
         eps = cfg.eps
 
         # Explicit int() casts: under torch.jit.trace / torch.export, .shape components
@@ -879,7 +887,16 @@ class Borissal(nn.Module):
         N_pf = H_grid * W_grid
         L = T_grid * N_pf
 
-        sal = self._saliency_scores(video, tubelet_size, patch_size, motion_weight_setting)
+        # v0.7 "cube" signal grid: run the WHOLE signal pipeline at
+        # patch_size*score_coarsen (e.g. 32px -> 12x12) -- the chunky variant.
+        # Selection unit and the final patch-16 output contract are unchanged;
+        # only where the signals live differs. The fine 24x24 grid remains the
+        # OUTPUT geometry (H_grid/W_grid/N_pf/L above are untouched).
+        cube_signals = (cfg.selection_mode == "anchor_novelty" and cfg.signal_grid == "cube")
+        sig_patch = patch_size * cfg.score_coarsen if cube_signals else patch_size
+        if cube_signals and (H % sig_patch or W % sig_patch):
+            raise ValueError(f"signal_grid='cube' needs H,W divisible by patch_size*score_coarsen={sig_patch}")
+        sal = self._saliency_scores(video, tubelet_size, sig_patch, motion_weight_setting)
         S, motion_n, spatial_n, w = sal["score"], sal["motion_norm"], sal["spatial_norm"], sal["w"]
 
         if cfg.score_ema_alpha > 0.0:
@@ -902,7 +919,7 @@ class Borissal(nn.Module):
         # the score itself. Token grid stays H_grid x W_grid (downstream
         # positions unchanged). Pair with block_size=1 (the two coherence
         # mechanisms are redundant). c=1 (default) is a no-op / bit-identical.
-        if cfg.score_coarsen > 1:
+        if cfg.score_coarsen > 1 and not cube_signals:
             c = cfg.score_coarsen
             if H_grid % c != 0 or W_grid % c != 0:
                 raise ValueError(
@@ -912,8 +929,18 @@ class Borissal(nn.Module):
                  .reshape(B, T_grid, H_grid, W_grid))
 
         if cfg.selection_mode == "anchor_novelty":
+            c = cfg.score_coarsen
+            if H_grid % c != 0 or W_grid % c != 0:
+                raise ValueError(
+                    f"score_coarsen={c} requires grid {H_grid}x{W_grid} divisible by c")
             keep_mask_grid = self._anchor_novelty_select(
-                sal, ratio, B, T_grid, H_grid, W_grid, N_pf, L, device)
+                sal, ratio, B, T_grid, H_grid, W_grid, N_pf, L, device,
+                maps_at_cube=cube_signals)
+            if cube_signals:
+                # scores contract stays on the fine grid: expand the cube-grid S
+                S = (S.view(B, T_grid, H_grid // c, 1, W_grid // c, 1)
+                     .expand(B, T_grid, H_grid // c, c, W_grid // c, c)
+                     .reshape(B, T_grid, H_grid, W_grid))
             scores_flat = S.reshape(B, T_grid, N_pf)
             coarse_score = None
         else:

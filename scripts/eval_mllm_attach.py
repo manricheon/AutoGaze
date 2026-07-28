@@ -79,6 +79,8 @@ SELECTORS = {
     "v0.7": lambda s: BorissalConfig.v0_7(scale=s),
     # E-B(review): full-site coverage even at low budgets -- K_a = min(K_cubes, Sc)
     "v0.7-cov": lambda s: BorissalConfig.v0_7(scale=s, anchor_fraction=1.0),
+    # signal_grid comparison: "fine" = original 24x24 signals (v0.7 default is now "cube")
+    "v0.7-fine": lambda s: BorissalConfig.v0_7(scale=s, signal_grid="fine"),
 }
 
 

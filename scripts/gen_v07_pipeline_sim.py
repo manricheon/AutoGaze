@@ -101,12 +101,21 @@ def build_clip(path, label):
     m = Borissal(BorissalConfig.v0_7(scale=SCALE))
     cfg = m.config
     eps = cfg.eps
-    sal = m._saliency_scores(video, TUB, PATCH, 0.0)
+    # v0_7 default is signal_grid="cube": the model computes ALL signals at
+    # patch*score_coarsen (32px -> 12x12). Replicate exactly, or the
+    # bit-equality assert below fires.
+    SIG_PATCH = PATCH * cfg.score_coarsen if cfg.signal_grid == "cube" else PATCH
+    sal = m._saliency_scores(video, TUB, SIG_PATCH, 0.0)
     lg, sp, mp = sal["luma_grid"], sal["spatial_p"], sal["motion_p"]
-    B, T_grid, Hg, Wg = lg.shape
+    B, T_grid, Hg, Wg = lg.shape          # cube mode: this IS the cube grid
     c = cfg.score_coarsen
-    Hc, Wc = Hg // c, Wg // c
-    Sc, n_cubes, L = Hc * Wc, T_grid * Hc * Wc, T_grid * Hg * Wg
+    if cfg.signal_grid == "cube":
+        Hc, Wc = Hg, Wg
+        FH, FW = Hg * c, Wg * c           # fine output grid (24x24)
+    else:
+        Hc, Wc = Hg // c, Wg // c
+        FH, FW = Hg, Wg
+    Sc, n_cubes, L = Hc * Wc, T_grid * Hc * Wc, T_grid * FH * FW
 
     # --- signal maps, exactly as the branch builds them --------------------
     edge_g = _minmax_norm_global(sp, eps)
@@ -118,10 +127,13 @@ def build_clip(path, label):
     nov_st = _minmax_norm_global(mp, eps)
     N = nov_med + cfg.novelty_shortterm_weight * nov_st
 
-    def to_cube(x):
-        return F.avg_pool2d(x.reshape(B * T_grid, 1, Hg, Wg), c, c).view(B, T_grid, Sc)
-
-    A_c, N_c = to_cube(A), to_cube(N)
+    if cfg.signal_grid == "cube":
+        A_c, N_c = A.reshape(B, T_grid, -1), N.reshape(B, T_grid, -1)
+        Hc2, Wc2 = Hg, Wg          # maps already live on the cube grid
+    else:
+        def to_cube(x):
+            return F.avg_pool2d(x.reshape(B * T_grid, 1, Hg, Wg), c, c).view(B, T_grid, Sc)
+        A_c, N_c = to_cube(A), to_cube(N)
     anchor_rank = A_c - cfg.anchor_novelty_lambda * N_c
     best_val, best_t = cube_best_time(anchor_rank)
     R = N_c + cfg.residual_appearance_weight * A_c
@@ -154,9 +166,9 @@ def build_clip(path, label):
 
         # ASSERT: replicated math == the model's own selection, bit for bit
         sel = m.select(video, gazing_ratio=ratio)
-        model_keep = sel.keep_mask[0].view(T_grid, Hg, Wg)
+        model_keep = sel.keep_mask[0].view(T_grid, FH, FW)
         mine = (keep_c.view(B, T_grid, Hc, 1, Wc, 1)
-                .expand(B, T_grid, Hc, c, Wc, c).reshape(B, T_grid, Hg, Wg))[0]
+                .expand(B, T_grid, Hc, c, Wc, c).reshape(B, T_grid, FH, FW))[0]
         assert torch.equal(mine, model_keep), f"viz drifted from model at ratio {ratio}"
 
         tiers = torch.full((T_grid, Sc), -1, dtype=torch.long)
