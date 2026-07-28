@@ -1849,3 +1849,38 @@ as v0_7's default (user decision), fine remains the comparison knob.** The
 V-JEPA axis was NOT re-measured for true-cube (the earlier coarse number was
 the 64px variant -- do not reuse it); add cube-vs-fine to the CUDA A/B
 matrix.
+
+
+## 2026-07-28 -- v0.8 round opened: generation-and-judge validation (pre-registered)
+
+The proxy stack hit its ceiling: SigLIP gist prefers uniform scatter, the NLL
+judge's effect sizes (cube-vs-fine 0.0008 nats/tok) sit BELOW its run-to-run
+noise (+-0.0016, measured by the same random selector scoring 0.0262 vs 0.0278
+across two runs), and random beats every selector on NLL at ratio 0.5
+(P1-echo). None of these can rank v0.7-line candidates at the margins that
+matter. This round replaces the decision metric with the actual task: the
+small stack GENERATES descriptions, a large model JUDGES them against frozen
+video frames. Everything is pre-registered in v08-prereg.md BEFORE any sweep
+runs; the proxies are demoted to an elimination-only screen.
+
+Design decisions of record:
+- Frame-grounded judging, NOT dense-caption-referenced: the dense caption is
+  Qwen3-VL-2B output with its own hallucinations and is already consumed by
+  the NLL metric -- judging against it would reward 2B-mimicry (circularity).
+  8 byte-frozen timestamped frames per clip are the ground truth; identical
+  frames across all candidates of a clip make undersampling a shared
+  handicap, not a bias.
+- Pairwise, blinded, order-swapped (disagreement -> tie), sign-tested.
+  Absolute rubric scores only for the final holdout report.
+- dev-60 / holdout-120 stratified from the 1K pilot pool (seed 20260728,
+  motion terciles x scene k-means k=20); holdout touched exactly once;
+  eval16 demoted to smoke. Power: dev-60 detects >=67% win rate, holdout-120
+  >=62% (alpha 0.05, power 0.8) -- smaller effects are declared undetectable
+  rather than over-read.
+- Judge cost = zero API money by architecture: the harness is file-based
+  (jobs.jsonl -> verdicts.jsonl), the primary judge is Claude Code session
+  subagents reading the frozen frames, the secondary judge is the Gemini
+  free tier for cross-checking winners only. The judge itself must pass a
+  5-check validation suite (incl foreign-caption swap and a verbosity probe)
+  before any real scoring, and a length-bias monitor (|r|>0.4 = gamed)
+  runs over every round.

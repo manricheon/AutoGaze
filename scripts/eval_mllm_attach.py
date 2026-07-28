@@ -205,6 +205,12 @@ def main():
                         "extracted from docs/borissal/evalset_manifest.json); restricts "
                         "--videos-dir to exactly those clips, in file order")
     p.add_argument("--max-new-tokens", type=int, default=96)
+    p.add_argument("--prompt", default=PROMPT,
+                   help="user prompt for description generation; deployment will ship its "
+                        "own prompt, so keep this pinned WITHIN a comparison round and let "
+                        "results.json record it (args are saved verbatim)")
+    p.add_argument("--system-prompt", default=None,
+                   help="optional system message prepended to the chat template")
     p.add_argument("--generate", action="store_true", help="also greedy-decode each pruned config")
     p.add_argument("--device", default=None)
     p.add_argument("--dtype", default=None, choices=[None, "float32", "bfloat16", "float16"])
@@ -274,9 +280,11 @@ def main():
         video = load_video(str(path), num_frames=args.num_frames, size=args.scale)
         rgb = unnormalize(video)[0].permute(0, 2, 3, 1).clamp(0, 1).float().cpu().numpy()
 
-        prompt = proc.apply_chat_template(
-            [{"role": "user", "content": [{"type": "video"}, {"type": "text", "text": PROMPT}]}],
-            tokenize=False, add_generation_prompt=True)
+        messages = ([{"role": "system", "content": [{"type": "text", "text": args.system_prompt}]}]
+                    if args.system_prompt else [])
+        messages.append({"role": "user",
+                         "content": [{"type": "video"}, {"type": "text", "text": args.prompt}]})
+        prompt = proc.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = _processor_inputs(proc, rgb, prompt).to(device)
         ref_caption = _dense_caption(model, proc, inputs, args.max_new_tokens)
         if not ref_caption:
