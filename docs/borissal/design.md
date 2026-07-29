@@ -2058,3 +2058,41 @@ Notes:
 Artifacts: outputs/borissal/v08_sweep/{stageb_verdicts.jsonl,
 stageb_verdict_report.json, stageb_verdict_parts/, stageb_jobs.jsonl,
 stageb_025/captions.json}.
+
+
+## 2026-07-30 -- Stage B-0.5 verdict (A7 rule): round winner = v0.7 DEFAULT
+
+dev-60 @0.5 extension complete: 840/840 verdicts (420 order-swapped
+comparisons; roster top-2 lambda variants + default + random), 40 judge
+agents (30 were Stage B agents resumed in-context -- frames already
+loaded, ~3 tool calls each). QC: order-swap agreement 69.3% (lower than
+0.25's 79.4%, expected -- 0.5 captions differ more subtly), length-bias
+r = -0.035 (clean), vs-random tie rates 27-33% (< 40% fallback gate).
+
+  spec            vs-random W/T/L (win)  p       vs-dense loss
+  fine+l0.75      29/18/13  (48.3%)      .0195   41.7%
+  fine+l0.25      29/16/15  (48.3%)      .0488   40.0%
+  v0.7 default    28/20/12  (46.7%)      .0166   31.7%
+  random          --                             56.7%
+
+A7 both-ratio winner rule:
+1. Gate (beat random both ratios, p<.05): ALL THREE PASS -- the user's
+   "must win at 0.25 AND 0.5" floor is met by every candidate.
+2. argmax min(WR@0.25, WR@0.5): l0.75 48.3, l0.25 48.3, default 46.7 --
+   all inside the 2%p tie window.
+3. Tie-break, mean vs-dense loss across ratios: default 45.9% <
+   l0.75 53.3% < l0.25 56.7%.
+**Round winner: v0.7 default (cube grid, unchanged).**
+
+Reading: a real trade-off surfaced. The fine grid + novelty-lambda
+variants are stronger exactly at 0.25 (higher vs-random WR, cleanest
+action axis) but lose more information vs dense at 0.5, where the cube
+default's larger contiguous regions preserve detail better. Under the
+combined robustness rule the default's drop-minimization wins. The knob
+sweep therefore does NOT displace the v0.7 preset; fine+l0.75 remains
+the best 0.25-specialist (design note: a ratio-conditional preset is a
+plausible v0.8 mechanism candidate, gated on Stage C).
+
+Artifacts: outputs/borissal/v08_sweep/{stageb05_verdicts.jsonl,
+stageb05_verdict_report.json, stageb05_verdict_parts/, stageb05_jobs.jsonl,
+stageb_05/captions.json}.
