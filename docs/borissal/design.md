@@ -2012,3 +2012,49 @@ uninformative above ~0.5 budget. Knob ranking stays with the on-stack
 generation+judge pipeline (Stage B/C).
 Artifacts: outputs/borissal/claude_screen/{captions_raw.jsonl,
 judge_{jobs,verdicts}_{025,05,075}.jsonl, screen_report_{025,05,075}.json}.
+
+
+## 2026-07-29 -- Stage B verdict (dev-60, ratio 0.25): winner = fine + anchor_novelty_lambda=0.75
+
+Full frame-grounded blinded judging on dev-60: 1080 verdicts (540
+order-swapped comparisons; 4 specs x {vs-random, vs-dense} + random
+vs-dense), 40 sonnet judge agents, KV-cached generator throughout (A5).
+QC: 1080/1080 collected, order-swap agreement 79.4% (disagreement -> tie,
+conservative), length-bias r = 0.175 (< 0.4 gate -- no verbosity gaming).
+Two agent files returned `overall` nested inside `axes`; mechanically
+re-homed (content untouched), recorded here.
+
+Per-spec, pair-level results (n=60 clips each):
+
+  spec                       vs-random W/T/L (win)     vs-dense L (loss)
+  fine+lambda0.25            38/11/11  (63.3%) p=1e-4  44 (73.3%)
+  fine+lambda0.75            37/14/ 9  (61.7%) p<1e-4  39 (65.0%)
+  v0.7 default               36/15/ 9  (60.0%) p=1e-4  36 (60.0%)
+  fine+wst0.5                33/14/13  (55.0%) p=.0045 40 (66.7%)
+  random                     --                        51 (85.0%)
+
+Winner rule (pre-registered): highest vs-random win rate @0.25;
+ties within +-2%p broken by lowest vs-dense loss rate. lambda0.25 (63.3%)
+and lambda0.75 (61.7%) fall inside the 2%p window; tie-break goes to
+lambda0.75 (65.0% vs 73.3% vs-dense loss).
+**Stage B winner: v0.7,signal_grid=fine,anchor_novelty_lambda=0.75.**
+
+Notes:
+- Every selector spec beats random significantly (sign test, two-sided);
+  the judge cleanly separates selectors from random AND selectors from
+  dense -- both margins in the expected direction, first time this round.
+- The judge ordering disagrees with the NLL ordering (NLL had lambda0.25
+  best, lambda0.75 last among fine variants). This is the weak-proxy
+  point made concrete: NLL ranks within-family variants differently from
+  frame-grounded description quality. Per prereg, NLL was demotion-only;
+  the judge decides.
+- Axis view (vs-random, pooled judgments): lambda0.75 has the cleanest
+  actions axis (54W/8L) and temporal axis (26W/9L) -- the direction the
+  user cares about for action recognition / risk detection.
+- v0.7 default has the lowest vs-dense loss overall (60.0%) but sits
+  3.3%p below the top vs-random win rate, outside the pre-registered
+  tie window; it advances to Stage C as the comparison arm anyway.
+
+Artifacts: outputs/borissal/v08_sweep/{stageb_verdicts.jsonl,
+stageb_verdict_report.json, stageb_verdict_parts/, stageb_jobs.jsonl,
+stageb_025/captions.json}.
