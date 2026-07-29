@@ -2096,3 +2096,48 @@ plausible v0.8 mechanism candidate, gated on Stage C).
 Artifacts: outputs/borissal/v08_sweep/{stageb05_verdicts.jsonl,
 stageb05_verdict_report.json, stageb05_verdict_parts/, stageb05_jobs.jsonl,
 stageb_05/captions.json}.
+
+
+## 2026-07-31 -- Stage C FINAL (holdout-120, single aggregation): success criteria MET; lambda0.75 dominates observationally
+
+All 7,200 verdicts collected (120 clips x 5 pairs x 2 ratios x 2 orders
+x 3 repeats; judged by the session's resumable sonnet agent pool; the
+final 7 verdicts (0.3%) were judged directly by the coordinating model
+after the agent pool was exhausted -- recorded for transparency).
+Aggregation ran ONCE, per A8: per-repeat order-swap agreement (disagree
+-> tie), then 3-repeat majority per comparison.
+
+QC: order-swap agreement 75.2% (3,600 pairs), 3-repeat unanimity 61.0%,
+length-bias r = -0.049 (clean).
+
+  ratio  arm            vs-random W/T/L (win, 95% CI)      p        vs-dense loss
+  0.25   v0.7 default   63/33/24  (52.5%, [.44,.61])       3e-5     75.0%
+  0.25   fine+l0.75     63/31/26  (52.5%, [.44,.61])       1e-4     68.3%
+  0.25   random         --                                          83.3%
+  0.5    v0.7 default   47/46/27  (39.2%, [.31,.48])       .027     45.8%
+  0.5    fine+l0.75     64/34/22  (53.3%, [.44,.62])       1e-5     38.3%
+  0.5    random         --                                          53.3%
+
+PRE-REGISTERED VERDICT: success criteria met. The confirmed round
+winner (v0.7 default) beats random significantly at 0.25 (p=3e-5) and
+at 0.5 (p=.027); the vs-dense-reduction clause is vacuous
+(winner == default). **The v0.8 preset candidate is therefore the
+UNCHANGED v0.7 default** -- this knob sweep produced no preset change,
+and per A8 the observational arm cannot alter that this round.
+
+OBSERVATIONAL FINDING (recorded, not acted on): fine+lambda0.75
+dominates or ties the default on every holdout metric -- equal
+vs-random at 0.25, +14.1%p vs-random at 0.5 (53.3% vs 39.2%), and
+lower vs-dense loss at both ratios (68.3% vs 75.0% @0.25; 38.3% vs
+45.8% @0.5). This REVERSES the dev-60 A7 tie-break (which preferred
+the default on dev vs-dense loss) and is consistent with dev noise
+flipping a close call. fine+lambda0.75 is hereby designated the
+PRE-REGISTERED PRIMARY CANDIDATE for the next confirmation round: a
+fresh dev set, single comparison (fine+l0.75 vs v0.7 default, both
+ratios, vs-random and vs-dense), win = adopt as preset. No further
+knob search before that confirmation.
+
+Round artifacts: outputs/borissal/v08_sweep/{stagec_final_report.json,
+stagec_final_chart.png, stagec_verdicts_r{1,2,3}.jsonl,
+stagec_verdict_parts_r{1,2,3}/, stagec_repair_r{1,2,3}/,
+stagec_jobs.jsonl, stagec/captions.json}.
