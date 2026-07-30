@@ -775,6 +775,49 @@ class Borissal(nn.Module):
         K_cubes = min(max(T_grid, int(round(K_patch / cube_area))), n_cubes)
         K_a = min(int(round(cfg.anchor_fraction * K_cubes)), Sc)
 
+        # Adaptive Checkerboard Refresh (ACR): pick j refresh tubelets (one per
+        # equal temporal window; at the window's mean-novelty argmax when
+        # keyframe_dynamic, else the window center) and force a checkerboard of
+        # cube sites there, parity alternating with refresh ORDER so two
+        # consecutive refreshes jointly cover the whole grid. Counts are
+        # config/ratio-derived ints (static shapes); the per-batch tubelet
+        # choice is data-dependent VALUES only (argmax), which is trace-safe.
+        kf_mask = torch.zeros(B, T_grid, Sc, dtype=torch.bool, device=device)
+        kf_t_mask = torch.zeros(B, T_grid, dtype=torch.bool, device=device)
+        j_kf = int(cfg.keyframe_refresh)
+        if j_kf > 0:
+            if j_kf > T_grid:
+                raise ValueError(f"keyframe_refresh={j_kf} exceeds T_grid={T_grid}")
+            K_kf = min(int(round(cfg.keyframe_keep * Sc)), Sc // 2)
+            # Feasibility: every non-refresh tubelet must keep its floor cube.
+            if j_kf * K_kf > K_cubes - (T_grid - j_kf):
+                K_kf = max(0, (K_cubes - (T_grid - j_kf)) // j_kf)
+            if K_kf > 0:
+                g = N_c.mean(dim=-1)                            # (B, T_grid)
+                ii = torch.arange(Hc, device=device).view(Hc, 1).expand(Hc, Wc)
+                jj = torch.arange(Wc, device=device).view(1, Wc).expand(Hc, Wc)
+                parity_grid = ((ii + jj) % 2).reshape(Sc)       # (Sc,) in {0,1}
+                for k in range(j_kf):                           # j_kf is a config int
+                    lo, hi = k * T_grid // j_kf, (k + 1) * T_grid // j_kf
+                    if cfg.keyframe_dynamic:
+                        t_k = g[:, lo:hi].argmax(dim=-1) + lo   # (B,)
+                    else:
+                        t_k = torch.full((B,), (lo + hi - 1) // 2,
+                                         dtype=torch.long, device=device)
+                    kf_t_mask.scatter_(1, t_k.unsqueeze(1),
+                                       torch.ones(B, 1, dtype=torch.bool, device=device))
+                    cells = parity_grid == (k % 2)              # (Sc,) bool
+                    # keyframe_keep < 0.5: keep the top-appearance subset of
+                    # the checkerboard cells at the chosen tubelet.
+                    A_t = A_c.gather(1, t_k.view(B, 1, 1).expand(B, 1, Sc)).squeeze(1)
+                    A_m = A_t.masked_fill(~cells.unsqueeze(0), float("-inf"))
+                    _, cell_idx = A_m.topk(K_kf, dim=-1)        # (B, K_kf)
+                    flat_idx = t_k.unsqueeze(1) * Sc + cell_idx
+                    flat = kf_mask.reshape(B, n_cubes)
+                    flat.scatter_(1, flat_idx,
+                                  torch.ones_like(flat_idx, dtype=torch.bool))
+                    kf_mask = flat.view(B, T_grid, Sc)
+
         # Post-anchor ranking: changed cubes by novelty, unchanged by appearance.
         R = N_c + cfg.residual_appearance_weight * A_c          # (B, T_grid, Sc)
 
@@ -789,11 +832,17 @@ class Borissal(nn.Module):
                  + max(0.0, cfg.residual_appearance_weight)
                  * (1.0 + max(0.0, cfg.dog_blob_weight) + max(0.0, cfg.anchor_lap_weight)))
         anchor_boost = r_max + 1.0
-        floor_boost = r_max + anchor_boost + 1.0
+        kf_boost = r_max + anchor_boost + 1.0
+        floor_boost = r_max + kf_boost + 1.0
 
         anchor_mask = torch.zeros(B, T_grid, Sc, dtype=torch.bool, device=device)
-        if K_a > 0:
+        if K_a > 0 and j_kf < T_grid:
             anchor_rank = A_c - cfg.anchor_novelty_lambda * N_c
+            if j_kf > 0:
+                # Refresh tubelets already provide coverage there; placing a
+                # site's single anchor on one would double-tax the budget.
+                anchor_rank = anchor_rank.masked_fill(
+                    kf_t_mask.unsqueeze(-1), float("-inf"))
             best_val, best_t = cube_best_time(anchor_rank)      # (B, Sc) each
             _, site_idx = best_val.topk(K_a, dim=-1)            # (B, K_a)
             t_at = best_t.gather(1, site_idx)                   # (B, K_a)
@@ -802,7 +851,7 @@ class Borissal(nn.Module):
             flat.scatter_(1, flat_idx, torch.ones_like(flat_idx, dtype=torch.bool))
             anchor_mask = flat.view(B, T_grid, Sc)
 
-        C0 = R + anchor_boost * anchor_mask.to(R.dtype)
+        C0 = R + anchor_boost * anchor_mask.to(R.dtype) + kf_boost * kf_mask.to(R.dtype)
         # Floor: every tubelet's best cube survives (temporal coverage). If a
         # tubelet holds an anchor, its floor mark lands ON that anchor (the
         # +4.0 makes it the tubelet max), so anchored tubelets consume no
@@ -869,6 +918,10 @@ class Borissal(nn.Module):
                 raise ValueError(f"unknown signal_grid: {cfg.signal_grid!r}")
         elif cfg.signal_grid != "fine":
             raise ValueError("signal_grid is an anchor_novelty knob; the topk path always computes at the patch grid")
+        if cfg.keyframe_refresh > 0 and cfg.selection_mode != "anchor_novelty":
+            raise ValueError("keyframe_refresh (ACR) is an anchor_novelty mechanism; it does not compose with the topk path")
+        if not (0.0 < cfg.keyframe_keep <= 0.5) and cfg.keyframe_refresh > 0:
+            raise ValueError("keyframe_keep must be in (0, 0.5] -- a checkerboard holds half the sites")
         eps = cfg.eps
 
         # Explicit int() casts: under torch.jit.trace / torch.export, .shape components

@@ -214,6 +214,21 @@ class BorissalConfig:
     # budget. Different gate than static_guard (periodic+scene-cut vs low-motion).
     keyframe_prior: bool = False
     keyframe_gop: int = 8
+    # Adaptive Checkerboard Refresh (ACR) -- v0.9 candidate mechanism, only
+    # active in selection_mode="anchor_novelty" (the v0.7 line). j refresh
+    # tubelets are chosen (one per equal temporal window; dynamic = at the
+    # window's novelty argmax, else the window center) and get a checkerboard
+    # of cube sites with ALTERNATING parity, so two consecutive refreshes
+    # jointly cover the full grid at half density each ("I-frame" style global
+    # scene capture). Non-refresh tubelets keep the anchor+novelty scoring
+    # ("P-frame" mover tracking); anchors are excluded from refresh tubelets
+    # (their coverage role is already served). keyframe_keep < 0.5 retains the
+    # top-appearance subset of the checkerboard cells; the count is clamped so
+    # every non-refresh tubelet keeps at least its floor cube. All counts are
+    # config/ratio-derived python ints -- static shapes, trace-safe.
+    keyframe_refresh: int = 0            # j: number of refresh tubelets (0 = off)
+    keyframe_keep: float = 0.5           # fraction of cube sites kept at a refresh tubelet
+    keyframe_dynamic: bool = True        # adaptive placement (novelty argmax per window)
     keyframe_weight: float = 0.5         # appearance-edge SCORE boost at keyframes
     keyframe_alloc_boost: float = 1.0    # extra token ALLOCATION share at keyframes (uniform only)
     keyframe_scene_thresh: float = 2.0  # scene-cut fires above this x mean luma jump

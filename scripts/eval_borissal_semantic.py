@@ -134,6 +134,9 @@ def build_selection(spec: str, video: torch.Tensor, ratio: float, spread: float)
     overrides = {}
     for kv in filter(None, ov.split(",")):
         k, val = kv.split("=", 1)
+        if val.strip().lower() in ("true", "false"):
+            overrides[k.strip()] = val.strip().lower() == "true"
+            continue
         try:
             overrides[k.strip()] = float(val) if "." in val else int(val)
         except ValueError:
