@@ -88,6 +88,10 @@ def main():
     p.add_argument("--verdicts", default=None, help="verdict JSONL (optional)")
     p.add_argument("--jobs", default=None, help="judge jobs JSONL (needed with --verdicts)")
     p.add_argument("--videos-dir", default=str(REPO_ROOT / "videos" / "internvid_pilot"))
+    p.add_argument("--manifest", default=str(MANIFEST),
+                   help="eval-set manifest holding the frozen frame paths "
+                        "(dev-60/holdout-120 by default; pass evalset_dev60b.json "
+                        "for the v0.9 set)")
     p.add_argument("--num-frames", type=int, default=16)
     p.add_argument("--scale", type=int, default=384)
     p.add_argument("--frames-per-clip", type=int, default=4)
@@ -101,7 +105,8 @@ def main():
     from autogaze.models.borissal.video_io import load_video          # noqa: E402
     from eval_borissal_semantic import build_selection                # noqa: E402
 
-    manifest = {c["name"]: c for c in json.loads(MANIFEST.read_text())["clips"]}
+    manifest = {c["name"]: c
+                for c in json.loads(Path(args.manifest).read_text())["clips"]}
     if Path(args.clips).exists():
         clips = [l.strip() for l in Path(args.clips).read_text().splitlines() if l.strip()]
     else:
