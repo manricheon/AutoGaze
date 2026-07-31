@@ -2141,3 +2141,73 @@ Round artifacts: outputs/borissal/v08_sweep/{stagec_final_report.json,
 stagec_final_chart.png, stagec_verdicts_r{1,2,3}.jsonl,
 stagec_verdict_parts_r{1,2,3}/, stagec_repair_r{1,2,3}/,
 stagec_jobs.jsonl, stagec/captions.json}.
+
+---
+
+## v0.9 round -- lambda0.75 confirmation duel (dev-60b): NOT ADOPTED
+
+Pre-registered in docs/borissal/v09-prereg.md (commit f7fc3e9) before
+any caption was generated. Primary decision = a single head-to-head
+duel, `v0.7,signal_grid=fine,anchor_novelty_lambda=0.75` vs the v0.7
+default, on a fresh 60-clip set (dev-60b, seed 20260731, disjoint from
+dev-60 / holdout-120 / eval16; manifest docs/borissal/evalset_dev60b.json).
+Both ratios, order-swapped twice per clip => 240 judgments.
+
+PROTOCOL DEVIATION (recorded): the round pre-registered sonnet
+sub-agents as judges. The session's sub-agent spawn budget (200) was
+exhausted during generation and the resumable pool was garbage
+collected, so all 240 primary judgments were made directly by the
+coordinating model, blind to arm identity (job ids only), with the
+frozen 8-frame strips as ground truth and the same 5-axis rubric. One
+consequence is *positive* for consistency: a single judge produced
+both members of every order-swapped pair, and order-swap agreement was
+therefore 100% (0/60 disagreements at either ratio) -- so the swap
+control no longer measures judge stability this round, only that the
+judge was self-consistent. Treat the tie counts as the honest signal of
+"no discernible difference" rather than as a stability estimate.
+
+RESULT (aggregated once, per prereg):
+
+  ratio  fine+l0.75  v0.7  tie   decisive win-rate (95% CI)   sign-test p
+  0.25   24          27    9     0.471 [0.341, 0.605]         0.78
+  0.5    20          20    20    0.500 [0.352, 0.648]         1.00
+
+Share of all 60 clips: @0.25 fine 40.0% vs v0.7 45.0% (-5.0 pp);
+@0.5 33.3% vs 33.3% (+0.0 pp). Length-gaming monitor r = -0.016 (clean).
+
+Per-axis (fine / v0.7 / tie): objects 25/24/11 @0.25 and 17/16/27 @0.5;
+actions 4/10/46 and 3/8/49; scene 6/6/48 and 3/3/54; temporal 6/5/49 and
+3/4/53; hallucination 17/19/24 and 14/11/35. No axis is significant; the
+only directional hint is actions, where the *default* leads at both
+ratios (p=.18 / .23).
+
+Motion terciles (overall, fine/v0.7/tie): @0.25 low 8/8/4, mid 10/8/2,
+high 6/11/3; @0.5 low 7/8/5, mid 4/7/9, high 9/5/6. The high-motion
+cells point in opposite directions at the two ratios, i.e. noise.
+
+PRE-REGISTERED VERDICT: the adoption rule required a significant win at
+both ratios, or a win at one ratio plus a +-2pp draw at the other. We
+got a non-significant 5pp deficit at 0.25 and an exact draw at 0.5, so
+**lambda0.75 is NOT adopted; the v0.7 default remains the preset.**
+Neither is it a significant loss, so nothing is retired -- it is simply
+not better on data it has not already been selected on.
+
+INTERPRETATION: the v0.8 holdout advantage of fine+lambda0.75 (+14.1pp
+vs-random at 0.5) did not reproduce as a direct pairwise edge on fresh
+clips. Both v0.8's dev tie-break and its holdout observation were
+close calls that flipped; this third, independent look says the two
+configurations are interchangeable at the caption level. Per the
+prereg's own logic, that closes the lambda line: no further
+lambda/signal_grid search without a new mechanism to test.
+
+Round artifacts: outputs/borissal/v09_round/{main_duel_result.json,
+duel_verdicts_main.jsonl, duel_compact.json, gen/captions.json,
+gen/results.json, judge_jobs.jsonl, judge_parts_jobs/, RESUME.md}.
+
+CARRIED OVER (not judged this session): the four ACR observational
+arms (keyframe_refresh in {1,2}, dynamic/static) -- 1,680 judgments
+already built as jobs in outputs/borissal/v09_round/judge_parts_jobs/.
+Their dev-60b NLL preview (recorded, not decisive) favours
+keyframe_refresh=2 dynamic at both ratios (+0.241 vs +0.309 nats @0.25;
++0.086 vs +0.109 @0.5 against dense), which is the reason the arms were
+built. Procedure to resume: outputs/borissal/v09_round/RESUME.md.
