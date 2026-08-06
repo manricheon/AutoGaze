@@ -1,0 +1,1311 @@
+# Borissal — progress / handoff log
+
+Read this file first when resuming work on the patch-selector line in a new
+session. See `design.md` in this directory for the full design rationale.
+
+Versioning: the current non-learned selector is **Borissal v0**
+(`autogaze.models.borissal.MODEL_TAG == "borissal-v0"`); the learned
+successor (Phase 2) will be **Borissal v1**. Earlier entries below predate
+this naming and call v0 "Borissal-signal" — left as written, since this file
+is a historical log, not a living reference (see `design.md`/`reference.md`
+for the current name).
+
+---
+
+## 2026-07-14 — Phase 1 (Borissal-signal) implemented and verified
+
+**Branch**: `feat/selector` at the time (later renamed to `feat/borissal` the
+same day — see next entry; `feat/borissal` is the durable target branch name
+for all of this patch-selector work going forward).
+
+**Status**: Phase 1 complete. Non-learned, feed-forward, grid_thw-native
+saliency selector implemented, environment set up on Mac via uv, and
+qualitative verification passed.
+
+**What was done:**
+- `pyproject.toml`: dropped `flash_attn` from base deps (moved to new
+  `[project.optional-dependencies].cuda`), bumped `transformers` to
+  `>=5.5,<6`, `requires-python` to `>=3.11`.
+- `uv venv --python 3.11 && uv pip install -e .` — installed cleanly on
+  macOS. Resolved: `torch==2.13.0` (CPU/MPS wheel), `transformers==5.13.1`.
+  `uv pip install -e '.[dev]'` for pytest.
+- New package `autogaze/models/borissal/`:
+  `configuration_borissal.py`, `modeling_borissal.py` (`Borissal`,
+  `Selection`), `adapters.py` (`to_vjepa2`, `to_autogaze_gazing_info`),
+  `video_io.py` (PyAV decode, no transformers video processor).
+- `scripts/eval_borissal_qualitative.py` — standalone overlay renderer.
+- `tests/test_borissal.py` — 7 tests, all passing.
+- `docs/borissal/{design.md,progress.md}` (this pair of files).
+- No existing repo files touched other than `pyproject.toml`. `train.py`,
+  `trainer.py`, legacy `models/autogaze/`, `tasks/` untouched.
+
+**Verified (commands + results):**
+```
+uv run python -c "import torch, transformers; print(transformers.__version__, torch.backends.mps.is_available())"
+# -> 5.13.1 True
+
+uv run pytest tests/test_borissal.py -v
+# -> 7 passed
+
+uv run python scripts/eval_borissal_qualitative.py \
+  --video assets/example_input.mp4 --gazing-ratio 0.5 --motion-weight 0.5 \
+  --tubelet-size 2 --scale 384 --patch 16 --out /tmp/borissal_eval/sal_r50_m50.png
+# -> grid_thw = [8, 24, 24]; num_keep = 2304/4608; per_frame_keep uniform 288 each
+```
+
+**Qualitative result** (visual inspection of the overlay PNGs, `gazing_ratio`
+swept to 0.3-0.5, `motion_weight` swept 0.0/0.5/1.0 on
+`assets/example_input.mp4`, a screen-recording-style clip with slides/diagram
++ scrolling subtitle bar):
+- Selected patches consistently concentrate on informative regions (diagram
+  lines, subtitle text, speaker silhouette edges) and avoid flat/background
+  regions (blurred stage background, blank slide whitespace) — sanity check
+  passed for both motion-only (`motion_weight=1.0`) and spatial-only
+  (`motion_weight=0.0`) extremes.
+- The two extremes select visibly different (not identical) patch sets in
+  the diagram region across frames (where node highlight colors change frame
+  to frame), confirming the motion and spatial terms are contributing
+  distinct signal, not one dominating trivially. Also confirmed
+  programmatically in `test_motion_weight_changes_selection` with a
+  synthetic video (isolated moving block vs. static high-contrast edge).
+- This video's content has text/graphics that are both edge-rich *and*
+  changing, so motion-only and spatial-only overlaps are large — a more
+  motion-distinct test video (e.g. static background + one moving object)
+  would show starker separation; not needed for Phase 1 sign-off given the
+  synthetic unit test already isolates this.
+
+**Known trade-off accepted (see design.md):** bumping `transformers` to
+`>=5.5,<6` repo-wide likely breaks importing the legacy AutoGaze custom
+modeling classes (`autogaze/models/autogaze/*`, `vision_encoders/siglip/*`,
+`tasks/video_mae_reconstruction/*`) which target `~=4.51`. Not verified
+either way in this session (no reason to import them for Phase 1). If the
+legacy NTP/GRPO training path needs to run again, it will need its own
+environment (pin transformers back to `~=4.51` there) or a migration pass —
+out of scope for Phase 1.
+
+**Open / not yet done:**
+- Checkpoints: none required for Phase 1 (fully non-learned). No weights
+  downloaded this session. `weights/` dir exists in the repo (untracked) but
+  is empty/unused by Phase 1.
+- V-JEPA2.1L exact repo id / checkpoint and its native token flatten order:
+  **not yet confirmed** — needed before Phase 3 (and before treating
+  `adapters.to_vjepa2` as more than a documented stub). Action item carried
+  from the design doc.
+- Optional dense-vs-sparse reconstruction sanity (`--recon` flag mentioned in
+  planning) was **not implemented** — Phase 1 sign-off criteria was
+  qualitative-only per explicit direction, so this was skipped as
+  unnecessary scope. Revisit only if a quantitative pre-Phase-2 baseline is
+  wanted.
+- Committed to git as of this entry (commit `86c3a69`, on what was then
+  `feat/selector`), local only, not pushed.
+
+**Next up (Phase 2, not started):** learned selector (TSM or conv3d backbone
++ scoring head + straight-through top-k), using Borissal-signal's
+motion/spatial maps as candidate input features or initialization. See
+design.md's "Open items for Phase 2/3".
+
+---
+
+## 2026-07-14 (same day) — ratio 0.5/0.25 examples, real latency benchmark, mobile readiness gate
+
+Pre-Phase-2 checkpoint requested by the user: show 0.5/0.25 ratio examples,
+measure actual speed, and review operator/burden concerns for the eventual
+mobile target — all **before** starting Phase 2. See design.md's new
+"Mobile readiness review" section for the full write-up; this entry is the
+session log / numbers.
+
+**What was done:**
+- Regenerated `outputs/borissal/{r50_m50_grad_uniform,r25_m50_grad_uniform}/`
+  via the existing `scripts/borissal_dump_outputs.py` (no script changes
+  needed). `num_keep` scaled exactly with ratio: 2304 (r=0.5) vs 1152
+  (r=0.25) out of L=4608 — precisely half, as expected. Overlay comparison
+  confirms r=0.25 stays concentrated on the same high-saliency regions
+  (subtitle bar, diagram edges) just more sparsely.
+- New `scripts/borissal_benchmark.py`: measures `Borissal.select()` latency
+  (B=1,T=16,384x384 clip, no video decode) across
+  device×gazing_ratio×per_frame_allocation, plus a `torch.profiler` op
+  breakdown. Results land in `outputs/borissal/benchmark/` (gitignored):
+  `latency_cpu.json`, `latency_mps.json`, `profiler_cpu.txt`.
+  - CPU: 6.7-11.6ms mean per clip (86-150 clips/sec).
+  - MPS: 150-210ms mean (4.8-6.5 clips/sec) — **slower than CPU**, a known
+    MPS per-op-dispatch-overhead quirk for small tensors, not representative
+    of real mobile hardware.
+  - Profiler: sort-family ops (`aten::sort` + `aten::topk` combined) are now
+    under 6% of self-CPU-time; dominant cost is ordinary
+    elementwise/reduction/pooling arithmetic over the raw pixel grid
+    (`aten::mean`, `aten::sum`, `aten::avg_pool2d`, etc.) — all
+    universally mobile-supported ops.
+- `autogaze/models/borissal/modeling_borissal.py` — two fixes, both
+  behavior-preserving for eager execution (all 7 tests still pass):
+  1. Replaced the selector's own double-`argsort` rank-based top-k with
+     `torch.topk(k_max) + scatter_` (`torch.topk` has first-class mobile
+     support — TFLite `TopKV2`, CoreML `top_k` — general `sort`/`argsort`
+     does not). Verified semantically equivalent (both select exactly the
+     top-k highest-scoring patches per tubelet).
+  2. Fixed a **real `torch.jit.trace` failure**: `B, T, C, H, W =
+     video.shape` unpacking didn't yield plain Python ints under tracing,
+     breaking `round()` calls downstream. Fixed with an explicit
+     `int(x) for x in video.shape` cast — one line, no eager-mode behavior
+     change.
+- Empirically traced the full model (not just reasoned about it) and found
+  a **real correctness trap**: `per_frame_allocation="proportional"` bakes
+  its data-dependent per-tubelet split into the traced graph, so re-running
+  the same traced graph on different video content of the same shape gives
+  a silently wrong, stale result (verified: `num_keep=2293` traced vs.
+  correct `2304` fresh eager, on new random content). `"uniform"` allocation
+  has no such issue (config/shape-derived, not data-dependent) — verified
+  correct across repeated trials with fresh content.
+- `docs/borissal/design.md`: added "## Mobile readiness review" section
+  with the full latency table, profiler summary, the two fixes, the trace
+  findings, and concrete constraints carried into Phase 2 (prefer
+  `topk`-style ops; treat data-independent allocation as the mobile-export
+  -safe default; export one artifact per fixed input shape; real on-device
+  latency still needs measuring once mobile export tooling exists).
+
+**Verified (commands):**
+```
+uv run pytest tests/test_borissal.py -q                     # 7 passed (before and after both fixes)
+uv run python scripts/borissal_dump_outputs.py --video assets/example_input.mp4 --gazing-ratio 0.25 --motion-weight 0.5
+uv run python scripts/borissal_benchmark.py                 # latency + profiler, see numbers above
+git status --short                                           # outputs/ still fully untracked
+```
+
+**Not done / explicitly out of scope this round:** no ONNX/CoreML export
+attempt (used `torch.jit.trace` only — zero extra dependencies, already
+installed with torch); no on-device (phone) latency measurement; the
+"proportional" trace-correctness trap was found and documented but NOT
+fixed (fixing it would mean either forcing "uniform"-only for any traced/
+exported path, or adding a genuinely dynamic export mechanism — deferred as
+a Phase 2/3 design decision, not a Phase 1 blocker since Phase 1 itself is
+never traced/exported, only Python-called).
+
+**Next up (Phase 2, unchanged):** learned selector (TSM or conv3d backbone +
+scoring head + straight-through top-k). New mobile-readiness constraints to
+carry in: prefer topk-style ops, keep allocation policy mobile-export-safe
+(or explicitly scope data-dependent allocation out of any traced/exported
+path), export against a fixed input shape.
+
+---
+
+## 2026-07-14 (same day) — Branch renamed to feat/borissal; stage-by-stage outputs/ dump
+
+**Branch**: `feat/selector` renamed in place to **`feat/borissal`**
+(`git branch -m feat/selector feat/borissal`) — this is now the confirmed
+durable branch name for the whole patch-selector line (Phases 1-3), per
+direct instruction. Use `feat/borissal` going forward; don't recreate
+`feat/selector`.
+
+**What was done:**
+- `autogaze/models/borissal/modeling_borissal.py`: added
+  `Borissal.select_with_intermediates(...)` (returns `(Selection,
+  intermediates)` where `intermediates = {motion_norm, spatial_norm, score}`,
+  each `(B, T_grid, H_grid, W_grid)`, pre-top-k). Implemented via a shared
+  private `_select_impl(..., want_intermediates)` so `select()`'s existing
+  signature/behavior/tests are unchanged (verified: same 7 tests still pass,
+  plus a manual check that `select()` and `select_with_intermediates()` agree
+  on `grid_thw`/`keep_index`).
+- New `autogaze/models/borissal/viz.py`: shared rendering helpers extracted
+  from the eval script — `render_frame_strip` (all-frames thumbnail strip),
+  `render_overlay` (moved as-is from `eval_borissal_qualitative.py`),
+  `render_heatmap_grid` (per-tubelet heatmap + colorbar, used for
+  motion/spatial/score), `render_allocation_bar` (per-tubelet kept-count bar
+  chart). `tubelet_title(t, tubelet_size)` labels each tubelet column with
+  its covered frame range, e.g. "t=3 (frames 6-7)".
+- `scripts/eval_borissal_qualitative.py`: refactored to import
+  `render_overlay` from `viz.py` instead of defining it locally (behavior
+  unchanged, re-ran and confirmed identical output).
+- New `scripts/borissal_dump_outputs.py`: runs the full pipeline and writes,
+  per run, to `outputs/borissal/<run_name>/` (default `run_name` derived from
+  config, e.g. `r50_m50_grad_uniform`):
+  `00_input_frames.png` (all `num_frames` raw decoded frames in one strip —
+  not just one representative per tubelet), `01_motion.png`, `02_spatial.png`,
+  `03_score.png` (per-tubelet heatmaps, `T_grid`=8 columns for the default
+  config), `04_overlay.png` (final selection), `05_allocation.png`
+  (`per_frame_keep` bar chart — the direct visual answer to "is the
+  per-frame/per-tubelet selection-count allocation policy visible"), and
+  `summary.json` (full config + `grid_thw`/`num_keep`/`per_frame_keep`).
+
+**Clarification (user question, direct answer for the record):** the
+per-frame (per-tubelet) selection-count allocation policy
+(`BorissalConfig.per_frame_allocation`: `uniform` | `proportional`) was
+**already implemented** in Phase 1 (see the previous entry / design.md §4) —
+this session only added the `05_allocation.png` visualization of its effect;
+no allocation logic changed.
+
+**Verified (commands + results):**
+```
+uv run python scripts/borissal_dump_outputs.py --video assets/example_input.mp4 --gazing-ratio 0.5 --motion-weight 0.5
+# -> outputs/borissal/r50_m50_grad_uniform/  (grid_thw=[8,24,24], num_keep=2304/4608, per_frame_keep all 288)
+
+uv run python scripts/borissal_dump_outputs.py --video assets/example_input.mp4 --gazing-ratio 0.3 --motion-weight 0.0
+# -> outputs/borissal/r30_m0_grad_uniform/   (num_keep=1384/4608, per_frame_keep all 173)
+
+uv run python scripts/borissal_dump_outputs.py --video assets/example_input.mp4 --gazing-ratio 0.3 --motion-weight 1.0
+# -> outputs/borissal/r30_m100_grad_uniform/ (num_keep=1384/4608, per_frame_keep all 173)
+
+uv run python scripts/borissal_dump_outputs.py --video assets/example_input.mp4 --gazing-ratio 0.5 --motion-weight 0.5 --per-frame-allocation proportional
+# -> outputs/borissal/r50_m50_grad_proportional/ (per_frame_keep = [318,253,304,317,256,245,279,332] -- visibly non-uniform)
+
+uv run pytest tests/test_borissal.py -q
+# -> 7 passed (unchanged)
+
+git status --short   # outputs/ does not appear at all (gitignore:2 "outputs/")
+git check-ignore -v outputs/borissal/r50_m50_grad_uniform/summary.json
+# -> confirms .gitignore:2:outputs/ matches
+```
+
+**Qualitative confirmation:** opened `00_input_frames.png` (all 16 raw
+frames), `01_motion.png`/`03_score.png` (motion heatmap lights up on the
+scrolling subtitle bar and the diagram region, matching the earlier overlay
+finding), and the two `05_allocation.png` bar charts side by side — `uniform`
+shows a flat 288-per-tubelet bar chart, `proportional` shows visibly varying
+bars (245-332) that track each tubelet's saliency energy. This is the
+intended visual proof that the allocation policy has a real, visible effect.
+
+**Not done / explicitly out of scope this round:** no reconstruction/encoder
+sanity added (still qualitative-only per standing direction); V-JEPA2.1L repo
+id still unconfirmed (unchanged open item from the previous entry).
+
+**Repro note for a fresh session:** `outputs/` is gitignored and this
+session's generated runs live only on this machine — if you need them again,
+just re-run the four commands above (they're deterministic given the same
+`assets/example_input.mp4` and config).
+
+---
+
+## 2026-07-14 (same day) — Reference doc added; content-adaptive auto-tuning scoped then deferred
+
+Follow-up to the mobile-readiness round: the user clarified that Borissal's
+selected patches feed a **description task** downstream (patch → encoder →
+LLM → description), and asked for (a) a polished, non-verbose reference doc
+on the selector's operations/policies framed around that, and (b) an
+"auto"-tuning option for the various knobs, prioritized speed > exact
+`gazing_ratio` compliance > fit-for-purpose selection.
+
+**What was done:**
+- New `docs/borissal/reference.md` — a concise "what and why" reference,
+  deliberately distinct from this file's dev-log and `design.md`'s
+  decision-rationale style. Sections: (1) **Why saliency** — the core
+  motivation, framed around the description-task pipeline and a
+  video-codec analogy (codecs encode what *changed*/is salient rather than
+  every pixel; Borissal approximates that directly on decoded frames
+  instead of using real motion vectors), plus why feed-forward/single-scale/
+  top-k was chosen over AutoGaze's autoregressive/multi-scale approach; (2)
+  algorithm walkthrough; (3) config-knob table with defaults + rationale;
+  (4) `Selection` output schema; (5) a pointer-only performance/mobile
+  summary (no duplication of design.md's numbers); (6) a "not yet built"
+  note for deferred auto-tuning.
+- **Scoped, then explicitly deferred**: investigated auto-tuning the
+  selector's knobs. Finding: `spatial_op="grad"`, `pooling="avg"`, and
+  `per_frame_allocation="uniform"` are *already* the fast+exact-ratio-safe
+  preset (confirmed against the current `BorissalConfig` defaults), so the
+  only knob whose optimal value genuinely varies per-clip is `motion_weight`
+  (fixed at 0.5). Designed a concrete, cheap, non-learned approach —
+  `motion_weight="auto"` computing `motion_energy / (motion_energy +
+  spatial_energy)` from the already-computed `motion_p`/`spatial_p` tensors
+  (near-zero added cost) — but the user then said to **hold off**: "추후 더
+  고도화해보자. 학습 기반 모델도 추가로 있을 거니까" (revisit alongside/after
+  the learned selector, Phase 2). **No code was changed for this** — it's a
+  deliberate deferral, not an oversight; don't re-propose the plain
+  energy-ratio version without checking whether Phase 2's learned selector
+  changes what "auto" should mean.
+- Follow-up consistency check (user asked to read `reference.md` against
+  the rest of the docs): found and fixed two real staleness issues in
+  `design.md` — (1) its own "Saliency algorithm" section still described
+  the pre-swap `argsort`-twice top-k, contradicting its own later "Mobile
+  readiness review" section (which correctly describes the `torch.topk`
+  swap) and the actual code; fixed to describe `torch.topk`, pointing to
+  the Mobile readiness review section for detail. (2) its "Files" list
+  hadn't been updated since Phase 1's initial commit — added `viz.py`,
+  `scripts/borissal_dump_outputs.py`, `scripts/borissal_benchmark.py`, and
+  `docs/borissal/reference.md`. `reference.md` itself was accurate — it was
+  `design.md` that had drifted.
+
+**Verified:** re-read both `design.md` sections after the edit to confirm
+they no longer contradict each other; no code/tests touched this round, so
+no need to re-run `pytest`.
+
+**Not done / explicitly out of scope this round:** `motion_weight="auto"`
+implementation itself (deliberately deferred, see above); any other
+auto-tuning knob.
+
+**Next up (Phase 2, unchanged):** learned selector. When it lands, revisit
+whether/how to auto-tune `motion_weight` (or fold it into the learned
+scoring head entirely, making the question moot) — this is an open design
+question for Phase 2, not a Phase 1 task.
+
+---
+
+## 2026-07-14 (same day) — Standalone core, device auto-select, canonical keep-index interface verified
+
+User asked three things: (1) confirm the model is mostly/entirely standard
+PyTorch ops and will "just work" on a Linux/CUDA box, (2) add an option to
+auto-pick the fastest device per machine, (3) make the model implementation
+standalone-portable. Also, mid-round, the user pasted back a canonical
+selector-output interface spec from another agent's investigation of the
+real downstream pipeline (Qwen-VL-style sparse encoder over V-JEPA2) and
+asked to check Borissal's output against it.
+
+**(1) Answered (no code needed), verified by grep, not just recalled:**
+confirmed the entire `autogaze/models/borissal/` package had exactly one
+`autogaze.*` import (`autogaze.utils.get_gazing_pos_from_gazing_mask`),
+zero custom CUDA/C++ extensions, zero `torch.jit.script`, zero hardcoded
+`"cpu"`/`"mps"`/`"cuda"` branches — every op used (mean/abs/sub/pad/sqrt/
+avg_pool2d/max_pool2d/conv2d/topk/arange/scatter_/clamp/floor/argsort) is
+standard `aten` with existing CUDA kernels. Conclusion: runs on Linux/CUDA
+with zero code changes, just `.to("cuda")`.
+
+**(2) Device auto-select** — asked the user to pick a mechanism (static
+priority vs. live self-benchmark); they chose static. New
+`autogaze/models/borissal/device.py`:
+`resolve_device(mode="auto")` → `cuda` if available, else `cpu` (**not**
+`mps` — this session's own benchmark data showed mps slower than cpu for
+Borissal's small-tensor workload; `mps` is still usable via
+`mode="mps"`), and `available_devices()` (enumeration, for
+`borissal_benchmark.py`'s "test every device" use case, which is a
+different job from "pick one" and was kept separate rather than forced
+into `resolve_device`). Replaced three near-identical local
+`resolve_device`/`available_devices` copies in
+`eval_borissal_qualitative.py`, `borissal_dump_outputs.py`, and
+`borissal_benchmark.py` with imports from the new module. Re-ran all
+three scripts to confirm identical behavior.
+
+**(3) Standalone** — inlined the one remaining `autogaze.utils` import
+(`get_gazing_pos_from_gazing_mask`, verbatim, ported as `_pack_gazing_mask`
+inside `modeling_borissal.py`). Result: `configuration_borissal.py` +
+`modeling_borissal.py` + `adapters.py` + `device.py` now depend on
+**`torch` only** — confirmed via `grep` (zero `autogaze.*` imports
+remaining). `video_io.py`/`viz.py` stay as-is (already had no
+cross-dependency on the core files; they're this repo's dev-tooling, not
+needed by the model). `docs/borissal/reference.md` gained a "Standalone"
+section (§6) documenting exactly this.
+
+**(Canonical downstream interface, added mid-round)** — user's pasted spec:
+selector output must be a flat, per-video, ascending list of kept patch
+indices, `idx = t*N + n` (`n` = row-major within-frame), sorted by
+(frame, row, col), because the real downstream encoder's mask-gather +
+RoPE position recovery depends on that exact order. **Checked this against
+`Selection.keep_index` before writing any code** (a quick in-memory
+verification script, batch of 4, both `uniform` and `proportional`
+allocation) and found it **already matches exactly** — Borissal's native
+flatten order (`t*(H_grid*W_grid)+h*W_grid+w`) *is* `t*N+n`, and the
+packer's stable sort already preserves ascending order among kept entries.
+No algorithm change was needed. What *was* added: a new
+`adapters.to_canonical_keep_indices(selection) -> list[Tensor]` (per-video
+1-D ascending tensor, `-1` padding stripped — the exact shape a
+`keep_indices_per_video`-style handoff expects), and two new tests
+(`test_keep_index_is_ascending_per_row`, `test_to_canonical_keep_indices`)
+to lock this contract down so a future top-k change can't silently break
+it. Steps 3-6 of the user's pasted spec (processor/model/encoder/LLM
+internals) are explicitly out of scope for Borissal — noted, not
+implemented.
+
+**Verified (commands):**
+```
+uv run pytest tests/test_borissal.py -v          # 9 passed (7 previous + 2 new)
+grep -rln "^from autogaze\|^import autogaze" autogaze/models/borissal/{configuration_borissal,modeling_borissal,adapters,device}.py
+                                                   # -> no matches (standalone confirmed)
+uv run python scripts/eval_borissal_qualitative.py --video assets/example_input.mp4 ...
+uv run python scripts/borissal_dump_outputs.py --video assets/example_input.mp4 ...
+uv run python scripts/borissal_benchmark.py       # all three re-verified after the device.py refactor
+```
+Also spot-checked `to_canonical_keep_indices` against the real
+`assets/example_input.mp4` clip (not just synthetic tensors): ascending,
+correct length, matches `num_keep`.
+
+**Docs touched:** `design.md` — new "Canonical downstream interface"
+section, a new "Key design decisions" row for standalone-portability, and
+fixed several now-inaccurate "reused legacy `autogaze/utils.py`" phrasings
+left over from before the inlining (found while updating, not left for
+later). `reference.md` — new "Canonical downstream interface" (§5) and
+"Standalone" (§6) sections; renumbered §6→§8 ("Not yet built") and fixed
+its internal cross-reference.
+
+**Not done / explicitly out of scope:** the actual processor/model/
+encoder/LLM integration code (steps 3-6 of the user's pasted spec) —
+Borissal only needed to satisfy the *selector's* half of the contract,
+confirmed done. No ONNX/CoreML export attempted this round either (still
+just `torch.jit.trace`, from the previous round).
+
+**Next up (Phase 2, unchanged):** learned selector — carries forward all
+prior mobile-readiness constraints, plus: keep the canonical ascending
+`idx=t*N+n` output contract intact regardless of how the scoring/top-k
+mechanism changes (there's now a test guarding it).
+
+---
+
+## 2026-07-14 (same day) — motion_weight="auto" implemented, before Phase 2/3
+
+User decided to complete the previously-deferred `motion_weight` auto-tuning
+now, before moving on to Phase 2/3, and asked for a before/after comparison
+shown separately.
+
+**What was done:**
+- `configuration_borissal.py`: `motion_weight: Union[float, Literal["auto"]]`
+  (default unchanged, `0.5`).
+- `modeling_borissal.py`: when `motion_weight_setting == "auto"`,
+  `w = motion_energy / (motion_energy + spatial_energy + eps)` computed from
+  `motion_p`/`spatial_p` **before** `_minmax_norm` (using the post-normalization
+  maps would erase the absolute-magnitude signal needed here — min-max
+  normalization always rescales to `[0,1]` regardless of original energy).
+  Per-video (`(B,1,1,1)`, broadcasts against the `(B,T_grid,H_grid,W_grid)`
+  score maps). Exposed via a new `motion_weight_used` `(B,)` field in the
+  `select_with_intermediates` intermediates dict — deliberately *not* added
+  to `Selection` itself, to avoid touching the output contract that was just
+  locked down with tests/the canonical-interface work last round.
+- `scripts/{borissal_dump_outputs.py,eval_borissal_qualitative.py}`:
+  `--motion-weight` now accepts the literal string `"auto"` (custom argparse
+  type; `float()` otherwise) and both scripts print/record the *resolved*
+  value alongside the requested setting (`borissal_dump_outputs.py`'s
+  `summary.json` gained a `motion_weight_used` field; its combined-score
+  heatmap title shows both).
+- `tests/test_borissal.py`: two new tests —
+  `test_motion_weight_auto_adapts_to_content` (static synthetic clip →
+  `w<0.2`, high-motion synthetic clip → `w>0.5`, motion > static) and
+  `test_motion_weight_fixed_unaffected_by_auto_support` (explicit float
+  behavior unchanged by "auto" existing). 11/11 tests pass (9 previous + 2
+  new).
+
+**Before/after comparison (shown to the user directly, also saved to
+`outputs/borissal/`, gitignored):**
+- Real clip (`assets/example_input.mp4`): fixed `motion_weight=0.5`
+  (`r50_m50_grad_uniform/`) vs. `motion_weight="auto"` → resolved `w≈0.354`
+  (`r50_mauto_grad_uniform/`). Overlays are visually similar for this
+  particular clip — expected, since its content (on-screen text + diagram)
+  is both edge-rich *and* changing, so the auto value lands close to but
+  below the neutral 0.5 rather than at an extreme.
+- Synthetic contrast pair (ad hoc, not a permanent script — reused
+  `render_overlay` directly): a fully static clip (identical frame repeated)
+  resolves to **`w=0.000`** and the overlay shows selection concentrated
+  purely on the static block's edge; a clip with a small bright block
+  sweeping across low-texture background resolves to **`w≈0.697`** and the
+  overlay visibly tracks the block's per-tubelet position. Saved to
+  `outputs/borissal/{auto_demo_static,auto_demo_motion}/04_overlay.png`.
+  This pair demonstrates the actual adaptive range much more clearly than
+  the real clip does.
+
+**Verified (commands):**
+```
+uv run pytest tests/test_borissal.py -v          # 11 passed
+uv run python scripts/eval_borissal_qualitative.py --video assets/example_input.mp4 --motion-weight auto --out ...
+uv run python scripts/borissal_dump_outputs.py --video assets/example_input.mp4 --motion-weight auto
+                                                   # both scripts print "motion_weight = auto (resolved = 0.354)"
+```
+
+**Docs touched:** `reference.md` §3 (motion_weight row + explanation) and §8
+(moved from "not yet built" to "implemented, other knobs intentionally not
+auto-tuned"); `design.md` gained a "Content-adaptive `motion_weight`"
+section (algorithm, rationale for using pre-normalization energy, where the
+resolved value is exposed, verification numbers) and a small step-6 update
+in the algorithm walkthrough.
+
+**Not done / explicitly out of scope:** auto-tuning any other knob
+(`spatial_op`/`pooling`/`per_frame_allocation`) — each already defaults to
+the fast+ratio-safe choice regardless of content, so there was nothing to
+gain; revisit only if a real future need appears.
+
+**Aside (not a code decision):** user asked whether to start using the
+"Fable" model now or later. Recommended waiting for a natural scope
+boundary (e.g. the start of Phase 2) rather than switching mid-task, mainly
+so this session's accumulated context isn't lost — but this is the user's
+call, not something resolved here.
+
+**Next up (Phase 2, unchanged):** learned selector. `motion_weight="auto"`
+being done removes it from Phase 2's "carry forward" list — Phase 2 can
+decide independently whether its scoring head needs anything like it at
+all (a learned head may fold this decision in implicitly).
+
+---
+
+## 2026-07-14 (same day) — Phase 2+3 implemented: Borissal v1 + V-JEPA2 SSL training
+
+Combined plan approved with 10 explicit user requirements (transformers
+==5.5.0 pin, differentiability first, random gazing_ratio during training,
+peak-memory tracking, DDP support, composable losses, self-inference/viz/
+profiling for v0+v1, minimal-data local training check, a training-method
+doc, and expanded v0-leverage options). All implemented this session.
+Canonical training doc: `docs/borissal/training.md`. Engineering summary:
+design.md's "Borissal v1 + SSL training" section.
+
+**New files:** `modeling_borissal_v1.py` (BorissalV1: TSM-style 2D CNN,
+~114K params, `input_mode: maps|pixels|both`, `residual_scoring`; same
+Selection contract + canonical ascending keep_index as v0),
+`vjepa2_sparse.py` (functional sparse-encoder forward over the stock HF
+encoder + frozen `VJEPA2Teacher` wrapper — the only core file importing
+transformers), `losses.py` (predictor-coverage / dense-sparse-match /
+entropy / v0-distill, weight-composable), `data.py` (VideoFolderDataset
+reusing video_io), `scripts/train_borissal_v1.py` (DDP-under-torchrun or
+single-device, per-batch ratio sampling rank-synced, jsonl logging incl.
+peak memory), `tests/test_borissal_v1.py` (9 tests),
+`docs/borissal/training.md`. Extended: dump/benchmark scripts got
+`--model v0|v1 --checkpoint` + peak-memory column; `BorissalV1Config`
+added; `weights/` added to .gitignore (was merely untracked).
+
+**Verified (highlights, all on this Mac):**
+- transformers==5.5.0 reinstalled; vjepa2 sparse primitives re-verified
+  identical to the 5.13.1 exploration; all pre-existing tests green.
+- **Two real bugs found empirically during smoke** (would have silently
+  broken training): (1) operator precedence made the Gumbel term
+  constant-NaN → topk ignored scores entirely (selection frozen); (2) raw
+  softmax probs (~1/N_pf) starved the ST gradient ~1000x. Both fixed +
+  regression-tested. 20/20 tests pass.
+- Plumbing proof: v0-distill-only smoke run collapsed loss 2.26 → 0.03 in
+  30 steps with healthy gradients.
+- **V-JEPA 2.1 checkpoints do not load into native transformers vjepa2**
+  (confirmed via load report on `davevanveen/vjepa2.1-vitb-fpc64-384`:
+  dual patch embeds / modality embeds / distillation norms / predictor
+  proj 1664). True-2.1 teachers (the team's torch.hub vjepa2.1l/b) need a
+  small adapter behind the teacher wrapper — interface already designed
+  for it; grid convention identical so nothing else changes.
+- **Real-teacher local check** (user req 8): official
+  `facebook/vjepa2-vitl-fpc64-256` (326M, patch16/tubelet2 asserted,
+  native load) on MPS, 30 steps, batch 1, scale 256, duplicated example
+  clips: ~8s/step, peak 1.4GB, gradients strong (norm 24–244 — vs ~0 with
+  a random tiny teacher, showing the real feature space genuinely
+  discriminates selections). **Honest caveat:** predictor-coverage loss
+  did NOT visibly decrease in 30 steps on this degenerate single-clip
+  dataset (8.18→8.28 fluctuation) — expected at this scale; the
+  optimization mechanism itself is proven by the v0-distill collapse
+  above. Real learning-curve claims need the Linux/CUDA run on
+  AutoGaze-Training-Data.
+- Before/after overlays (`outputs/borissal/v1_real_{before,after}/`):
+  the 30-step checkpoint visibly changes selection behavior vs random
+  init; checkpoint save→reload→inference path works
+  (`--model v1 --checkpoint`).
+- v0 vs v1 benchmark (`--model both`): v1 CPU ~17-18ms/clip (~2.7x v0,
+  includes internal v0 signal computation in `both` mode), peak-mem column
+  now reported.
+
+**Not done / open:** torch.hub V-JEPA2.1 teacher adapter (three methods,
+when scale training starts); loss-combination/input_mode experiment matrix
+at scale (training.md §3); predictor fine-tuning option.
+
+**Next up:** push, then Linux/CUDA scale training on AutoGaze-Training-Data
+(torchrun recipe in training.md §6), teacher = team's vjepa2.1l via adapter
+or HF ViT-L as-is.
+
+---
+
+## 2026-07-14 (same day) — V-JEPA 2.1 torch.hub teacher + oracle-reference coverage loss
+
+User asked to fetch V-JEPA 2.1 from the official torch.hub and to check
+whether its predictor is usable. Both done; one upstream bug and one design
+adaptation along the way.
+
+**Findings:**
+- Official `facebookresearch/vjepa2` torch.hub exposes 2.1 entrypoints
+  (`vjepa2_1_vit_base_384`, `vjepa2_1_vit_large_384`, ...), all returning
+  `(encoder, predictor)` — **predictor included** (depth 12 for B/L),
+  img384/patch16/tubelet2 (grid matches ours).
+- **Upstream bug**: the repo's main hardcodes `VJEPA_BASE_URL =
+  "http://localhost:8300"` (dev leftover; the real
+  `https://dl.fbaipublicfiles.com/vjepa2` is commented out). Workaround:
+  pre-download the .pt into `~/.cache/torch/hub/checkpoints/` (done for
+  `vjepa2_1_vitb_dist_vitG_384.pt`, 1.66GB).
+- The original encoder supports sparse natively (`masks=[keep_index]`) and
+  its token order is the same canonical t-major — verified shapes:
+  dense (1,4608,768), sparse (1,1382,768) at ratio 0.3/384.
+- **2.1's predictor projects to the DISTILLATION-teacher space (1664-d,
+  ViT-gigantic; `return_all_tokens=True` → (x_pred, x_context))**, not the
+  encoder's own 768-d. So plain "predict vs own dense features" coverage
+  can't be wired. User asked if 2.1-L/B alone (no gigantic) is workable →
+  **oracle-reference coverage** designed and implemented: run the SAME
+  predictor head twice — reference pass (no-grad) with context = ALL dense
+  tokens, student pass with context = selected only — and MSE the two in
+  the same 1664-d space, same positions. "Selection should make the
+  sparse-context prediction match the full-information prediction." Our
+  adaptation, not a published recipe (flagged in training.md §5);
+  user approved direction explicitly.
+
+**Implementation:** `autogaze/models/borissal/vjepa21_hub.py`
+(`VJEPA21HubTeacher`, same 3-method interface; ST gate applied at encoder
+OUTPUT features there — no clean input-embedding injection point in the
+original code; equally valid gradient conduit). Trainer: `--teacher
+hub:<entrypoint>` scheme + automatic oracle-reference targets for hub
+teachers. Verified: gate gradient flows, teacher params isolated, 20/20
+tests green.
+
+**Local training run (2.1-B, MPS, 30 steps, batch 1, scale 384, fixed
+ratio 0.3, duplicated example clips):** ran end-to-end, checkpoint saved,
+peak 602MB, ~125s/step (dense + oracle predictor + sparse + student
+predictor + backward). Loss scale ~0.05-0.08 (same-head comparison, small
+by construction). **Honest caveats:** loss did not decrease on this
+degenerate single-clip setup, and grad_norm decayed 0.17→0.0002 over 30
+steps — consistent with score-head saturation (softmax sharpening kills
+the ST soft path). For scale runs, start with `--w-entropy > 0` and/or a
+lower lr; this is exactly what the training.md §3 experiment matrix is
+for. Mechanism validation (the purpose of this run) is complete.
+
+---
+
+## 2026-07-14 (same day) — Borissal v0.2: seven elements, quantitative gate, preset finalized
+
+User specified v0.2's element list (frame-diff motion, clustering, noise/
+consistency penalty, global top-k + minimum floor, edge blending, optional
+center bias, local/global score blending) with hard requirements: every
+element justified, fast, fully vectorized, judged against the video-
+description task. A skeleton review (requested by the user, "Fable 입장에서
+고도로 검토") added the key process change: a label-free quantitative
+adoption gate instead of eyeball-only tuning.
+
+**Implemented** (all config-gated, defaults byte-identical to v0.1;
+`BorissalConfig.v0_2()` preset): `motion_diff=frame|tubelet` +
+`frame_diff_agg`, resize-based coarse-to-fine block gate (`block_size`),
+`motion_noise_floor` (topk-quantile dead-zone), `motion_consistency=
+double_diff` (experimental, excluded — see below), `per_frame_allocation=
+"global"` + `min_keep_per_frame_ratio`, `score_norm_blend`, `center_bias`
+(off by default). New `scripts/eval_borissal_coverage.py` (coverage +
+uniqueness metrics, random-selection anchor). Dump script gained
+`--preset/--block-size/--noise-floor/...` flags, `07_coarse.png`, and a
+`contiguity` metric in summary.json. Tests 20 → 33, all green throughout.
+
+**Final preset** (gate-verified Pareto-best vs v0.1 at ratio 0.25 on the
+example clip: coverage 8.226<8.249 AND uniqueness 8.370>8.300; contiguity
+2.31→2.94; latency 5.9→12.2ms CPU): frame-diff + quantile floor + global
+allocation (25% floor) + blend 0.7 + block gate b=2.
+
+**Key findings recorded in design.md's "Borissal v0.2" section** (the
+substance of this round — read it when resuming):
+1. Coverage-alone is scatter-biased — random beat all saliency configs on
+   it; gate rule is therefore two-metric; the SAME bias affects the v1 SSL
+   objective (Phase 3 scale runs should add an anti-scatter term).
+2. Under global allocation the c2f gate was silently fully-open (worst-
+   case sizing) — the metric exposed it; fixed with 2x-share sizing.
+3. double_diff: negative result (normalization cancels its benefit;
+   suppresses untextured movers) — excluded from preset, knob retained.
+4. Corrected double-diff semantics claim (removes ghosting/uncorrelated
+   noise, NOT single-frame events).
+
+**Verified:** 33/33 tests; budget exactness for global(+c2f) across
+ratios; concentration on high-energy tubelets (synthetic); center-bias
+tie-break; blend beta=1 identity; qualitative overlays
+(`outputs/borissal/v02_final_preset/`); gate JSONs
+(`outputs/borissal/gate_v02*.json`).
+
+**Open:** validate the preset's gate numbers on more clips than
+example_input.mp4 (single-clip numbers are indicative, not conclusive);
+`center_bias` remains per-domain; low-ratio (<0.1) callers should set
+block_size=1.
+
+---
+
+## 2026-07-14 (same day) — v0.2 signals wired into v1 training; collapse monitoring added
+
+User asked whether the training setup is complete and v0.2-based, how the
+loss is composed, whether gazing_ratio varies during training, and whether
+the "always selects the same patches" collapse is a live risk. Gap analysis
+answered honestly (infra complete; v1's internal v0 signals were still
+v0.1; collapse risk real — its signature was observed twice) and the gaps
+were closed this round:
+
+1. **v0.2 → v1 signal wiring**: `BorissalV1Config.v0_preset` (default
+   "v0.2") — the learned scorer's input maps / residual base now come from
+   the gate-validated v0.2 SIGNAL knobs (frame-diff, noise floor, score
+   blend); selection-stage knobs (global/block) are internally overridden
+   to cheap defaults since v1 does its own selection. `--input-v0-preset`
+   in the trainer for ablation.
+2. **v1 global-allocation inference**: `_selection_from_scores` gained the
+   global branch (exact K_total + per-tubelet floor + canonical ascending —
+   contract-tested), so a trained v1 can serve selections with the same
+   allocation policy as the v0.2 preset.
+3. **Anti-scatter loss option**: `uniqueness_reward` in losses.py (capped
+   negative MSE of rest→selected reconstruction; gradient reaches the
+   selector via an INVERSE ST gate on the unselected side — verified by
+   test). Counters the measured scatter bias of pure coverage.
+4. **Collapse monitoring + safer default**: trainer logs
+   `probe_overlap_prev` (fixed-clip eval-mode selection IoU across log
+   points; pinned 1.0 + dying grad = frozen selector) and
+   `score_entropy_mean`; `--w-entropy` default changed 0 → 0.01 (both
+   real-teacher smokes had shown grad death from score saturation).
+
+**Verified:** 36/36 tests (3 new: preset paths, v1 global contract,
+uniqueness gradient flow). Smoke (tiny teacher, entropy default +
+`--w-uniqueness 0.1`): all three loss terms active,
+`score_entropy_mean` RISES 3.90→4.15 (saturation counteracted),
+`probe_overlap_prev` fluctuates 0.09–0.30 (no freeze; random-selection
+reference ≈ 0.3 at ratio 0.3).
+
+**Loss composition summary as of now** (the user's question, for the
+record): main = predictor coverage (oracle-reference variant for hub-2.1
+teachers); optional weighted terms = dense-sparse match (aux only),
+score entropy (default 0.01), v0-distill warmup (decayed), uniqueness
+reward (anti-scatter, default 0); gazing_ratio sampled per batch
+(uniform 0.15–0.75, rank-synced) so the selector trains budget-general.
+
+---
+
+## 2026-07-14 (same day) — gradient-reach diagnostics for unselected/low-score patches
+
+User relayed a team concern: do unselected (or very low-probability)
+patches receive gradient during training, or do they freeze out? Answered
+with analysis + live instrumentation:
+
+- **Channels** (documented in training.md §2): softmax Jacobian coupling
+  (∝ p_j — vanishes as p_j→0), Gumbel exploration (the real revival
+  channel; protected by the entropy default), the entropy term itself,
+  and the uniqueness inverse gate. The concern is legitimate in the limit
+  — hence measurement, not just argument.
+- **Instrumentation**: `forward_train` now retains the logits' grad
+  (`out["logits"].grad` readable after backward); the trainer logs
+  `lgrad_sel_mean` / `lgrad_unsel_mean` / `lgrad_low_decile_mean` /
+  `lgrad_unsel_zero_frac` every log point.
+- **Measured (smoke, entropy 0.01 + uniqueness 0.1)**: zero-grad fraction
+  among unselected = 0.0; unselected mean ≈ 0.5–0.6× selected mean;
+  lowest-prob decile same order — no freeze-out under current defaults.
+  Alarm rule for scale runs recorded in training.md (low-decile collapsing
+  orders below selected ⇒ raise --w-entropy / gumbel_tau).
+- New test `test_gradient_reaches_unselected_and_low_prob_patches`
+  (37/37 green).
+
+---
+
+## 2026-07-14 (same day) — first real-teacher trend run analyzed; rolling checkpoints
+
+User asked how to verify training health (locally and at scale). Delivered
+three ways: the field guide (training.md §7.5), a one-page dashboard
+plotter (`scripts/plot_borissal_training.py` — 6 panels matching the six
+health signals), and a live demonstration: a 40-step trend run
+(HF V-JEPA2-L teacher, MPS, lr 3e-4, uniform ratio 0.15–0.75, w_ent 0.01,
+duplicated example clips).
+
+**Dashboard findings (the demonstration run):**
+- No collapse: grad_norm alive (30–700, spiking on low-ratio steps),
+  probe IoU peaked 0.85 then relaxed to 0.64 (never pinned at 1.0),
+  gradient zero-frac 0.0 throughout.
+- **Real warning caught by our own instruments**: score entropy stable
+  ~5.0 until step 25 then accelerating fall to 2.64 (max ln256=5.55) —
+  the real teacher's coverage gradients overpower w_ent=0.01 at lr 3e-4;
+  the entropy loss term rose 0.15→2.9 fighting back. Recommendation
+  recorded for scale runs: **start lr 1e-4, w_entropy 0.05**, watch the
+  entropy slope as the primary early signal.
+- v0-overlap ≈ sampled ratio throughout ⇒ v1's selection statistically
+  independent of v0 at this (non-)scale — expected for 40 steps on
+  duplicated clips.
+- Checkpoint comparison (30-step 2.1-B checkpoint vs untrained): training
+  demonstrably restructures selection; the trained pattern leans toward
+  edges/bands — the documented coverage scatter/anchor bias expressing
+  itself ("is edge-band selection right?" — no: it is the loss's
+  interpolation-anchor preference, not the description-task optimum;
+  `--w-uniqueness` is the built-in counterweight to enable at scale).
+- Ops note: MPS sec/step degraded 18→203s over the long session (thermal/
+  memory pressure) — trend experiments of this size belong on Linux.
+
+**Fix from a real mistake:** the 40-step run's weights were LOST (killed
+before the end-of-run save; --save-every defaulted to 0). The trainer now
+writes an overwritten `checkpoint_last.pt` at every log point, so any
+interrupted run keeps its latest weights. Verified: rolling checkpoint
+saves and reloads; 37/37 tests green.
+
+---
+
+## 2026-07-14 (same day) — theory-driven upgrade: WP-A/B/C landed
+
+User asked for model-level improvements and a more principled training
+design, backed by literature research. Two parallel surveys (token
+selection / differentiable top-k; SSL informative masking / selector
+training mechanics) were mapped onto the three measured pathologies —
+P1 scatter bias, P2 score saturation, P3 edge/band drift. Headline
+finding: **P1/P3 are the coverage objective's provable optimum**
+(facility-location/D-optimal equivalence; I-JEPA scattered-17.6 vs
+blocks-54.2; REAL-X off-distribution prior exploitation), so the
+objective — not the training tricks — had to change. Full notes:
+design.md "Theory notes", training.md §8.
+
+**WP-A — anti-saturation bundle (P2, published numbers):**
+- `router_z_loss` (ST-MoE, coeff 1e-3) — default ON (`--w-zloss`).
+- Cosine score head with learnable temperature (X-MoE) —
+  `cosine_scores=True` default; |logit| ≤ temp by construction.
+- ST path upgraded to the CANONICAL ST-Gumbel-softmax (soft path from the
+  same noised logits, τ = 2/3 fixed — `gumbel_tau` semantics changed from
+  noise scale to softmax temperature). `probs` output stays clean
+  (noise-free) so entropy monitoring semantics are preserved.
+- Score head + temperature on lower lr (`--head-lr-scale 0.1`);
+  `--entropy-anneal-steps` optional decay.
+- Smoke: grad-reach stratification improved (unsel/low-decile within the
+  same order as selected vs ~30x gap before).
+
+**WP-B — objective inversion + block geometry (P1/P3):**
+- `predictor_coverage_loss(floor=...)`: coverage as a CONSTRAINT
+  (`relu(mse − floor)`, `--coverage-floor`), zero scatter pressure below
+  the floor; uniqueness (`--w-uniqueness`) promoted to primary in the §8
+  recipe.
+- `hardness_rank_loss` (HPM): score head ranks REST tokens by per-token
+  predictor error — pairwise BCE, reuses the coverage pass (free);
+  `--w-hardness`, experimental.
+- `train_block_size=2`: block-structured ST selection in `forward_train`
+  (block-mean logits → block Gumbel-top-k → gate expanded; budget snapped
+  to whole blocks). Inference `select()` untouched.
+
+**WP-C — RLOO/REINFORCE phase (AdaMAE precedent):**
+- `--rl-after-step N --rl-samples 4 --rl-cov-weight 1.0`: hard
+  Gumbel-top-k sampling, reward = uniqueness − λ·relu(coverage − floor)
+  computed fully under no_grad (no teacher backward ⇒ lower peak memory),
+  Kool leave-one-out baseline, Plackett-Luce surrogate logp. Verified in
+  smoke: clean phase handover at step N, NaN-free, REINFORCE gradient
+  reaches ~100% of logits.
+
+Surveyed-and-rejected list (DPP diversity, SIMPLE/perturbed top-k,
+GradNorm, SemMAE/AutoMAE machinery) recorded with reasons in design.md;
+REAL-X calibration / EVAL-X audit / Frame-Voyager model selection deferred
+to Linux compute (training.md §7.8). Tests 37 → **43 green** (z-loss,
+cosine bound, coverage floor gating, hardness direction, block ST
+contract, RLOO smoke). Old-checkpoint compat: dump script defaults
+`cosine_scores=False` for pre-upgrade checkpoints.
+
+**WP-A validation — 40-step A/B against the baseline trend run** (same
+teacher facebook/vjepa2-vitl-fpc64-256, scale 256, bs 1, lr 3e-4, w_ent
+0.01, duplicated example clips; `weights/borissal_v1_trend_wpa/`):
+- **Saturation counter-evidence (the success criterion):** baseline
+  entropy fell monotonically 5.39 → 2.64 and was ACCELERATING downward at
+  step 40; WP-A entropy is mean-reverting — dipped to 3.09 at step 20,
+  RECOVERED to 4.55 by step 40. No runaway sharpening with the z-loss +
+  cosine-head bundle in place.
+- Probe IoU stays 0.34–0.63 (baseline crept to 0.85) — more selection
+  mobility, no freeze; grad_norm alive both runs (WP-A less spiky: no
+  700-class outliers).
+- Coverage loss flat ~8 in both — no learning expected at 40 steps on
+  duplicated clips; this A/B tests optimizer dynamics only.
+- **Honest caveats to watch at scale:** (a) the z_loss VALUE drifts up
+  29 → 79 (coverage gradient arm-wrestling the bound; the cosine head
+  caps the worst case, but if it keeps climbing raise `--w-zloss`);
+  (b) `lgrad_low_decile_mean` dipped to ~3e-6 around step 20–30 (τ=2/3
+  concentrates the relaxed backward on high-prob tokens) before
+  recovering with the entropy — if the low-decile channel stays collapsed
+  at scale, the §8 RL phase is the saturation-proof fallback.
+
+---
+
+## 2026-07-15 — architecture review: GCNet-lite global context; SSL-only recipe locked
+
+User challenged the training approach ("is the model itself the problem —
+does it just guide its initial results through?"). Settled with
+measurements + two codebase investigations, reviewed by Fable:
+
+- **v0-passthrough concern rejected** (untrained/trained v1 vs v0 Spearman
+  ≈ 0); **real gap found instead**: the TSM stack is local (~9×9 cells,
+  55–200× near/far perturbation decay) while coverage/uniqueness are
+  clip-global questions.
+- **gazing_labels.json investigated**: NOT human gaze — precomputed
+  reconstruction-optimal orders (another recon-family proxy; also absent
+  locally). **AutoGaze precedent investigated**: its GRPO reward is
+  `-VideoMAE recon loss` only; downstream attaches later in a separate
+  repo → proxy-only training is the project's own precedent; the
+  "demote uniqueness to experimental" idea was withdrawn.
+- **Adopted: `_GlobalContext` (GCNet-lite)**, default on — learned weighted
+  per-frame + clip summaries, zero-init transform (exact no-op at init;
+  attn conv wakes at step 1 — measured), injected BEFORE the last TSM block
+  (a per-frame-constant context added at the head would rely solely on the
+  cosine normalization for positional interaction). +8.3K params, CPU
+  select() 14.5ms (budget 25ms), Selection contract untouched.
+- **Recipe locked: SSL(ST)-only for stage 1; RL deferred** with an explicit
+  re-enable trigger (entropy collapse / dying grads despite WP-A + context)
+  — documented in training.md §8.
+- New `scripts/borissal_model_diagnostics.py` (v0-corr / perturbation RF /
+  brightness-corr; old-checkpoint compat). Tests 43 → **46 green**.
+
+---
+
+## 2026-07-15 (same day) — local recipe test judged; scale-run playbook locked
+
+Ran the full §8 recipe locally (60 steps, HF vitl-256, warmup 20 →
+uniqueness 1.0 + floor 8.0, GCNet-lite on) and closed the judgment loop:
+
+- **Recipe health: PASS.** Warmup learned then annealed off (v0_distill
+  8.5→3.1), uniqueness held as primary, coverage-floor overflow bounded
+  (0.07–0.37), entropy gentle (4.86→4.45), probe IoU 0.75–0.82 (not
+  pinned), post-training v0 correlation 0.05 (no passthrough).
+- **Visual: PASS.** No edge bands; selection follows content (screen
+  diagram + subtitles + shelf) and is frame-consistent; v0.2 misses the
+  screen content that trained v1 picks up.
+  (outputs/borissal/cmp_recipe_* — gitignored.)
+- **Quantitative gate: NOT YET.** v1 uniqueness 7.85 < random 7.93 < v0.2
+  8.37 at ratio 0.25 (design.md gate row) — the objective didn't move in
+  60 steps on one duplicated clip; this is the bar the scale run must
+  clear early. Also recorded: visual appeal and the uniqueness metric
+  DISAGREED on this clip — the pleasing bright-screen selection measures
+  as predictable content.
+- **eval_borissal_coverage.py extended**: `v1:<checkpoint>` selector spec
+  (old-checkpoint compat) and `--teacher hub:*` with oracle-reference
+  targets (needed to measure the 2.1-L coverage-floor baseline before the
+  scale run).
+- **training.md §7 rewritten as a judgment ladder** (items 0–6: floor
+  baseline measurement → early uniqueness trend → collapse guards →
+  per-checkpoint diagnostics → adoption gate → visual → RL trigger) and
+  §6 scale-run command updated to the full recipe (lr 1e-4, warmup 500,
+  uniqueness-primary + measured floor).
+
+Next: Linux scale run per §6/§7. Everything else is blocked on that.
+
+---
+
+## 2026-07-15 (same day) — scale-run readiness package: resume, logging, Linux assets, export, VideoMAE gate
+
+Five-part prep batch before the Linux scale run (user request):
+
+1. **Full resume**: checkpoints now carry optimizer state + RNG (+step, as
+   before); `--resume <path|auto>` rebuilds the exact (trunk, head) param
+   groups then restores. Verified: 6-step run → resume → z_loss continues
+   its trajectory (no cold-optimizer spike). DDP resumes reseed
+   deterministically (checkpoint holds rank0's stream only).
+2. **Logging backends**: `--log-backend {none,tensorboard,wandb}`, default
+   tensorboard (offline-safe; new base dep). Scalars = all jsonl fields;
+   images = probe-clip selection overlay + score heatmap per log point.
+   wandb is explicit opt-in (fails loudly). jsonl unchanged (source of
+   truth for plot/judgment tooling).
+3. **Linux asset reuse**: VideoFolderDataset takes comma-separated roots
+   (point it at the five AutoGaze-Training-Data train/ dirs), skips
+   unreadable clips with a warning (was: one bad file killed the worker),
+   `--max-files` subset option. `--hub-repo-dir` enables OFFLINE torch.hub
+   teachers (source=local clone). Checklist §7 item 1.5.
+4. **Mobile-export pre-check** (`scripts/export_borissal_check.py`):
+   v0.2 AND v1 (cosine+gctx) now PASS jit.trace + ONNX-17 (v1 → 4.2 MB).
+   Fixed two real export bugs it caught: stable-argsort → unique-key plain
+   argsort in `_pack_gazing_mask` (semantics identical, keys unique by
+   construction), and missing int() shape casts in
+   `_selection_from_scores` (trace round() pitfall, v0's old bug class).
+5. **Cross-family VideoMAE recon gate**
+   (`scripts/eval_borissal_videomae_recon.py` +
+   `adapters.to_videomae_gazing_info`): Borissal selections scored by the
+   ORIGINAL AutoGaze videomae.pt (multi-scale 265-token/frame layout,
+   tubelet→frame duplication, 5.5.0 pruning-API shim, module. prefix
+   strip; 0 missing keys). First numbers (ratio 0.25): random 0.183 <
+   v0.2 0.338 < v1-60step 1.224 — exactly the theory-predicted scatter
+   ordering; strips confirm the mechanism. Doubles as the FIRST end-to-end
+   consumer of the canonical keep-index contract. Reference axis, not an
+   adoption gate (design.md).
+
+Tests 46 → **47 green** (adapter mapping unit test). videomae.pt lives at
+weights/VideoMAE_AutoGaze/ (gitignored).
+
+---
+
+## 2026-07-15 (same day) — description-task alignment: semantic gate + spread_fraction hybrid
+
+User reframed the criterion ("the selection is FOR video description") and
+contributed the key intuition ("spread evenly, concentrate on what
+matters") — which turned out to be exactly AutoGaze's multi-scale essence
+(its coarse scales reserve ~26% of every frame's tokens for global gist).
+Target budget confirmed: gazing_ratio 0.25–0.5.
+
+**Semantic gate** (`scripts/eval_borissal_semantic.py`, SigLIP2-384,
+24×24 tokens 1:1 with the main grid, eval-only — training stays pure
+V-JEPA SSL): honest metric iteration recorded — the first attempt
+(mean-pool gist + cosine-to-mean importance) was won by random at exactly
+chance level, i.e. it measured TYPICALITY; both metrics now use the MAP
+head's own attention. **First axis where saliency beats random** (recall
+at ratio 0.25: v0.2 0.300 vs random 0.267; at 0.5: 0.552 vs 0.524) — the
+pre-registered design-review alarm does NOT fire.
+
+**Hybrid allocation** (`_hybrid_topk` + `spread_fraction`, v0+v1, uniform
+2D / global 3D stratification, time-first quotas via largest remainder;
+inference-only): full three-axis sweep at ratio 0.25 —
+
+| config | sem-gist | sem-recall | VJEPA cov(<) / uniq(>) | VMAE recon(<) |
+|---|---|---|---|---|
+| v0.2 s=0 | 0.879 | 0.300 | 8.226 / 8.370 | 0.338 |
+| **v0.2 s=0.25** | 0.899 | **0.309** | 8.211 / 8.353 | 0.287 |
+| v0.2 s=0.5 | 0.899 | 0.283 | 8.201 / 8.267 | 0.254 |
+
+s=0.25 improves EVERY axis (recall included) — sweet spot matching the
+AutoGaze coarse-share precedent; s=0.5 starts costing recall/uniqueness.
+For the barely-trained v1-60step, spread helps massively (recon 1.22→0.68,
+gist 0.835→0.914). **Best deployable config today: v0.2 + spread 0.25.**
+
+Two real export bugs found by extending the check to the hybrid/global
+path (scalar-True scatter_ untraceable → tensor src; time-slice quota
+needed against tie-break starvation — caught by test). Export 6/6 PASS
+(v1+global+spread included). Judgment ladder item 4 rewritten: semantic
+recall is now the PRIMARY adoption axis. Tests 47 → **49 green**.
+
+---
+
+## 2026-07-15 (same day) — defaults audit + doc sync
+
+Full audit of code defaults vs docs (user request). Verdicts:
+- **Kept (rationale re-confirmed)**: all v0/v1 config defaults incl.
+  spread_fraction=0.0 as the backward-compat baseline (the measured
+  s=0.25 sweet spot is single-clip evidence — recorded as the recommended
+  DEPLOY override in reference.md §3, not baked into the preset until the
+  scale run confirms it); recipe loss terms stay opt-in (§6 command is
+  the recipe's source of truth); ratio sampling 0.15–0.75 (wider than the
+  0.25–0.5 target = generalization margin).
+- **Changed (footgun)**: trainer `--lr` default 1e-3 → **1e-4** — the
+  recommendation and the §6 scale command both said 1e-4; forgetting the
+  flag would have run 10x hot. Smokes don't measure convergence, so the
+  lower default costs nothing.
+- **Doc fixes**: stale test count (43→49); reference.md §7 still claimed
+  a stable-sort in the packer (removed in the ONNX fix); reference.md §8
+  rewritten as a **Borissal v1 knob table** (cosine_scores /
+  global_context / gumbel_tau 2/3 / train_block_size / v0_preset /
+  spread — previously documented nowhere as a table); deploy
+  recommendation (v0.2 + global + spread 0.25, single-clip caveat) added
+  to reference.md §3.
+
+---
+
+## 2026-07-15 (same day) — Linux runbook: offline manifest + 4/8-GPU launch
+
+Scale-run plan re-cut for the actual target machine (user-confirmed: 4 or
+8 GPUs, restricted egress — plan as offline, carry assets in). New
+**`linux-runbook.md`**: transfer-bundle manifest (dataset / 2.1-L teacher
+.pt / vjepa2 clone / SigLIP2 HF-cache seed / videomae.pt / optional pip
+wheelhouse — `uv pip download` doesn't exist, use pip), online-baseline +
+offline install variants, smoke gate (pytest + 1-GPU tiny run + resume
+check; first CUDA validation of the hub 2.1-**L** teacher), floor
+measurement, 4-GPU (`bs8/accum4`) and 8-GPU (`bs8/accum2`) launches at
+global batch 128, then the §7.7 ladder → gate → verdict branches.
+training.md §7.6 de-staled (resume + logging gaps were closed 2026-07-15
+but still listed; now notes the SigLIP2 hardcoded-id offline caveat,
+`eval_borissal_semantic.py` needs a seeded HF cache + `HF_HUB_OFFLINE=1`).
+Tests still 49 green. Execution order unchanged: the Linux run per
+runbook/§6/§7 remains the blocker for everything else.
+
+---
+
+## 2026-07-15 (same day) — approach-ko.md: plain-language Korean explainer
+
+New **`approach-ko.md`**: a LIVING document explaining the approach's
+theoretical background in easy Korean — architecture (v0/v0.2 signals,
+v1 TSM + GCNet-lite + cosine head), token selection/allocation policy
+(budget rules, spread hybrid, block coherence), training method (the
+coverage→uniqueness objective inversion and why, loss table, Gumbel-ST,
+saturation fixes, deferred RL, frozen-model roles table), and the
+three-axis evaluation with semantic recall primary. Keep it updated
+whenever the approach changes; design/reference/training.md stay the
+source of numbers.
+
+---
+
+## 2026-07-15 (same day) — Mac real-data pilot: 500 steps on 1K InternVid clips
+
+First-ever run on REAL diverse data (all prior local runs used one
+duplicated clip). Setup: the HF dataset ships as monolithic tar.gz
+archives (InternVid 90 GB), so the first 1,000 clips (402 MB) were
+STREAM-extracted (curl | tarfile, stop after N — gzip is sequential, only
+the consumed prefix downloads) into `videos/internvid_pilot/` (gitignored).
+Real-data floor measured first: random coverage 7.852 / uniqueness 7.553
+(vitl-256, ratio 0.25, 4 clips) — note it differs from the old single-clip
+8.2 scale. Run: §6 recipe at 500 steps, batch 2, warmup 50, floor 7.85,
+MPS, ~33 s/step (real-clip PyAV decode dominates; single-clip runs were
+~11 s/step). Checkpoints under `weights/borissal_v1_pilot_internvid/`.
+
+**Training health**: collapse guards all passed (probe IoU 0.89–0.91,
+overflow ≤ 0.71 bounded, grad spikes only on floor-activation steps and
+clipped at 10.0 — the logged grad_norm is pre-clip). Two watch items:
+`loss/uniqueness_reward` linear slope −0.017/100 steps post-warmup ≈
+FLAT (same magnitude as the 60-step verdict), and `score_entropy_mean`
+drifting down −0.28/100 steps (5.36 → 3.87 final; not P2 freefall, but
+would cross the 3.5 alarm in ~300 more steps at this slope).
+
+**Gates (4 real clips, ratio 0.25) — both v1 bars CLEARED for the first
+time:**
+
+| config | cov(<) | uniq(>) | sem-recall(>) | sem-gist | VMAE recon(<, ref) |
+|---|---|---|---|---|---|
+| random | 7.852 | 7.553 | 0.228 | 0.940 | 0.209 |
+| v0.2 | 7.921 | 7.730 | 0.295 | 0.868 | 0.253 |
+| v1@100 | 7.913 | 7.793 | 0.296 | 0.903 | — |
+| v1@300 | 7.924 | 7.801 | — | — | — |
+| v1@500 | 7.948 | 7.763 | **0.327** | 0.924 | 0.499 |
+
+VideoMAE recon (4-clip mean, s=0) reproduces the theory-predicted
+scatter ordering random < v0.2 < v1 on real data too — reference axis
+only, as documented. Visual artifacts: recon strips under
+`outputs/borissal/pilot_gate/videomae_recon_{1..4}/`, selection
+overlay/score dumps under `outputs/borissal/pilot_v{1s500,02}_*/`
+(gitignored).
+
+Readings: (a) the old local "v1 uniqueness < random" failure was a
+single-clip eval ARTIFACT — on real data every checkpoint beats random
+(and v0.2) on uniqueness; (b) that uniqueness edge comes from the
+v0-distill warmup, not from further training (flat 100→500 at fixed
+ratio 0.25, matching the flat training slope); (c) BUT on the PRIMARY
+semantic-recall axis the extra 400 steps DID help: 0.296 → 0.327,
+beating v0.2's 0.295 mean — first evidence that training moves the
+description-aligned metric even while ratio-0.25 uniqueness stays flat.
+Caveat: n=4 clips, high per-clip variance (v1@500 recall 0.23–0.45) —
+encouraging, not conclusive. Ladder §7.7 item-4 reference numbers
+updated to these real-data values.
+
+Open question for the scale run (sharpened, not answered): does
+uniqueness-primary optimization bite with global batch 128 + hub 2.1-L
+at 384 (vs pilot's batch 2 + vitl-256), and does entropy's slow drift
+mean-revert or keep sliding toward 3.5?
+
+---
+
+## 2026-07-16 — Trend runs E0 (pilot→1000 steps) & E3 (block2): more training
+wins, block training loses; 4-clip v0.2 comparison corrected
+
+Two arms (user-chosen from the "model vs training vs data" decomposition),
+judged on a NEW held-out eval set — 16 InternVid clips never seen in
+training (`videos/internvid_eval16/`, stream-extracted past the first
+1000) — with semantic recall as the tracked per-checkpoint metric, since
+it was the only axis that moved in the pilot.
+
+**E0 — extend the pilot 500→1000 steps, unchanged recipe (`--resume auto`;
+first real use of full resume). Verdict: the "not enough training"
+hypothesis holds.** Held-out recall curve (random 0.250 ±0.003, v0.2
+0.325 ±0.022):
+
+| step | 100 | 200 | 300 | 400 | 500 | 600 | 700 | 800 | 900 | 1000 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| recall | .208 | .241 | .280 | .267 | .258 | .251 | .289 | .320 | .307 | .315 |
+
+Clear rise with a 400–600 dip that coincides with the entropy sag (the
+drift mean-reverted after resume: 3.87 → 4.84 → settle ~4.4 — the §7
+alarm never fired). gist climbs 0.898 → 0.933, closing on random's
+0.946. Uniqueness at fixed 0.25 stays ~flat (7.768 @1000 vs 7.763 @500)
+— recall trends while uniqueness doesn't, so track held-out semantic
+recall PER CHECKPOINT at scale, not just at the end.
+
+**CORRECTION of the 2026-07-15 4-clip claim** ("v1@500 recall 0.327 beats
+v0.2 0.295"): on the 16-clip held-out set v1@500 is 0.258 vs v0.2 0.325 —
+the 4-clip win was noise. Honest current picture: v1 catches UP to v0.2
+by steps 800–1000 (0.31–0.32, overlapping error bars); "beats random" is
+stable from ~step 300.
+
+**E3 — fresh 500 steps with `--train-block-size 2` (the theory-survey
+card: object-chunk selection + on-distribution predictor). Verdict:
+LOSES at pilot scale — do NOT add to the §6 recipe.** Held-out recall
+flat at 0.20–0.24 (≈ random, far below the plain run's 0.258@500),
+gist DECLINING 0.893 → 0.877, uniqueness 7.693 @500 (below plain 7.763).
+Entropy was gentler (4.50 vs 3.87 at step 500) but bought nothing.
+Recorded as a negative result; the design.md open item "inference-side
+block selection if block-trained wins" stays shelved unless the scale
+run says otherwise.
+
+**Scale-run recipe impact**: §6 command unchanged (no block flag). At
+batch 2 the recall trend needed ~700+ steps to clear its own noise; at
+global batch 128 expect it far earlier — judge ladder item 1 on held-out
+recall per checkpoint alongside the uniqueness trend. E4
+(description-aligned aux distill) stays shelved: its trigger condition
+("E0/E3 flat") did NOT fire — E0 is rising on pure SSL.
+
+Artifacts: `weights/borissal_v1_pilot_internvid/` (now 10 ckpts),
+`weights/borissal_v1_pilot_block2/`, curves in
+`outputs/borissal/pilot_gate/e{0,3}_curve_*.json` (all gitignored).
+
+**Follow-up diagnostics (same day, user asked "is single-scale the
+limit — model vs training vs data?"):**
+- `borissal_model_diagnostics.py` untrained vs pilot@500:
+  `perturb_near_over_far` 120.3 → **32.2** (the zero-init global-context
+  path OPENED on real data — it barely moved in 60 single-clip steps),
+  `brightness_spearman` +0.81 → **−0.65** (init bias not just erased but
+  inverted; content took over), `v0_spearman` 0.02 (no passthrough).
+  Argues against a model-side wall at this evidence scale.
+- Spread on REAL data is ~neutral on the semantic axes (4-clip means):
+  v1@500 recall 0.327→0.319, gist 0.924→0.933 at s 0→0.25; v0.2
+  similarly flat. The single-example-clip finding that s=0.25 improves
+  every axis does NOT transfer to these clips — keep spread as a deploy
+  knob for recon/coverage recovery, not as a semantic-recall lever.
+- Where a single-scale cost IS visible: gist stays below random for
+  every saliency config (0.87–0.93 vs 0.940) — subset pooling loses a
+  little global summary, structurally. For trained v1 the gap is small
+  (−0.016) and primary recall more than compensates. Verdict recorded:
+  current numbers show an OPTIMIZATION-scale question (flat uniqueness
+  at 500 steps/batch 2), not a demonstrated single-scale ceiling;
+  revisit multi-scale (summary tokens = downstream-contract change)
+  only if the scale run's captioner-side results say gist/recon gaps
+  matter.
+
+---
+
+## 2026-07-26 — MLLM true-token-drop attach; ratio-1.0 budget bug fixed; encoder-free design spec
+
+Answered the user's question "can we build a real downstream on this Mac?" and
+then built the attach path it implies. Full design/measurement records in
+`design.md` (three new sections) and `encoder-free-attach.md`.
+
+**The honest answer on Mac feasibility** (Apple M1 / 16GB, torch 2.13+MPS,
+transformers 5.5.0): "pick an encoder (V-JEPA / SigLIP2 / DINOv2) + bolt on
+Qwen3.5-2B" is NOT possible without training a connector -- an LLM only
+understands its own vision tower's embeddings. What IS possible with zero
+training is **token pruning inside a pretrained VLM**, and
+`Qwen/Qwen3-VL-2B-Instruct` is already fully cached (4.0 GB) with geometry that
+matches Borissal exactly (patch16 / temporal_patch2 / spatial_merge2 <-> v0.5/v0.6
+`score_coarsen=2`). Per user decision the Mac downstream RUN is skipped; this
+round delivers the code, the tests, and the CUDA runbook.
+
+**1. Real bug fixed first (blocked the attach's own correctness gate).** The
+recorded ratio-1.0 ANOMALY was `_largest_remainder` clamping AFTER budget-exact
+rounding, silently discarding allocation above per-tubelet capacity (v0.6's
+keyframe boost was the only preset path to exceed it): 4072/4608 patches at
+gazing_ratio=1.0. New `_waterfill` enforces bounds before rounding and
+redistributes the residual, branch-free for trace/ONNX, with a deadband so float
+noise cannot perturb recorded preset allocations. Bit-identical to the old code
+whenever no bound is hit (0/3000 random trials differ) while the old code leaked
+budget in 433/3000. `proportional` had the same latent bug. Tests 108 -> 153;
+export check extended to v0.5/v0.6-global/v0.6-uniform, 14/14 PASS.
+
+**2. True token drop into Qwen3-VL / Qwen3.5.** New
+`adapters.to_qwen3vl_video_tokens` (patch -> merged-token remap, verified against
+an independent replay of the processor's permute) and
+`autogaze/models/borissal/attach_qwen3vl.py` (eval-only, outside the traced core).
+Two stages: `llm` (full ViT then drop -- leaks, surviving tokens saw the dropped
+ones) and `encoder` (only selected patches enter the ViT -- leak-free, the setting
+that actually tests the AutoGaze claim). mrope is handled by computing dense
+position ids with the model's own code and deleting dropped columns, which is
+exact because Qwen's post-vision position advance is grid-derived, not
+token-count-derived. **Gate: keep-all reproduces the vanilla forward bit-exactly
+(max|diff| 0.0) for both stages**, and deepstack is asserted to actually reach the
+LLM. 13 new tests on the cached 32 MB `tiny-random-qwen3-vl` (skip if absent),
+total 166 green.
+
+**3. Harness** `scripts/eval_mllm_attach.py`: primary metric = teacher-forced NLL
+of the DENSE caption under each pruned input (deterministic, one forward, no judge
+model, no ground-truth captions -- the local clips are mp4-only). Smoked
+end-to-end on real clips with the tiny model, both stages, generation included.
+Real-model run is CUDA work.
+
+**4. Encoder-free design spec** (`encoder-free-attach.md`): `google/gemma-4-12B`
+is `gemma4_unified` and its vision config has **no `num_hidden_layers` and no
+`hidden_size`** -- there is no vision transformer at all (16px patches ->
+`Linear(3*16^2, 3840)` -> (x,y) coordinate embedding -> 3x3 average pool -> 280
+soft tokens -> LLM). Zero patch-to-patch attention before the LLM, so pruning is
+pure information removal and the leak distinction disappears. Maps to Borissal
+`score_coarsen=3`. Two blockers keep it on CUDA: 12B bf16 ~= 24 GB > 16 GB, and
+**transformers 5.5.0 registers `gemma4`/`_text`/`_vision`/`_audio` but NOT
+`gemma4_unified`** (upgrade required; the pin `>=5.5,<6` allows it, and the 166
+tests + 14 export cases are the regression gate for that upgrade).
+
+**5. Logged a previously-unrecorded result**: 16f-vs-32f (committed 2026-07-24)
+is flat for both v0.3 and v0.6 (|delta| <= 0.002), so frame count does not change
+the v0.3-vs-v0.6 proxy picture. Also flagged in design.md that the
+`internvid_pilot` (24-clip) tables and the held-out `internvid_eval16` tables are
+NOT directly comparable.
+
+Next: run `eval_mllm_attach.py` on CUDA with the real 2B, `--prune-stage encoder`,
+and let it arbitrate the v0.6 all-on bet (proxy-worst, adopted purely on
+saliency-v3.1's downstream evidence).
+
+---
+
+## 2026-07-27 — Borissal v0.7 "Datdol": anchor-novelty selector designed, built, gated
+
+User commissioned a fresh selector design for the V-JEPA 2.1-L + Qwen stack
+(torch/GPU, mobile-safe, ratio-robust), explicitly asking for an agent-review
+loop. Full record in design.md ("Borissal v0.7 Datdol").
+
+- **Architecture**: motion = when to update, appearance = what to represent —
+  budget splits into anchor (each site once, transit-guarded) / novelty
+  (|luma − temporal median|, frame-rate independent) / residual appearance.
+  One exact-budget boosted topk; every-tubelet floor; whole 2×2 cubes
+  (Qwen-merge aligned). `selection_mode="anchor_novelty"`, preset `v0_7`.
+- **Review loop**: 2 Plan agents attacked design v1 (6 HIGH/BLOCKER: anchor-pool
+  topk crash at ratio ≥0.5, per-tubelet-norm argmax degeneracy, judge validity,
+  eval plumbing, preset lineage leak, tie unsafety) — all fixed in v2 before
+  implementation. Post-implementation adversarial review: legacy path verified
+  bit-identical, 6 more findings fixed (config-derived boost margins, real
+  transit/hard-cut tests, benchmark/eval guards).
+- **Gates** (pre-registered): primary NLL judge fires ADOPT (v0.7 beats v0.5,
+  20/32 pairs, p=0.108 — recorded as not significant) **but random beats both
+  saliency configs** (P1-echo at caption level; all configs within ~0.005
+  nats/tok of each other on this slice-local judge). V-JEPA uniqueness
+  expectation failed for a structural reason (metric anti-aligned with dedup —
+  post-hoc, documented); coverage improved. SigLIP: gist at both ratios and mean
+  recall@0.5 beat v0.5 (paired split even, 8/16). Latency 11.7/22.7 ms (16f/32f) within budget (archived). Tests
+  171→192, export 16/16.
+- **Standing**: v0.5 stays deploy default; v0.7 is the challenger for the CUDA
+  V-JEPA A/B. The "nothing beats random locally" reading applies to the whole
+  v0.x line on this judge, not to Datdol alone.
