@@ -81,6 +81,13 @@ SELECTORS = {
     "v0.7-cov": lambda s: BorissalConfig.v0_7(scale=s, anchor_fraction=1.0),
     # signal_grid comparison: "fine" = original 24x24 signals (v0.7 default is now "cube")
     "v0.7-fine": lambda s: BorissalConfig.v0_7(scale=s, signal_grid="fine"),
+    # v0.8 "Sikhye" (ported from patchstack dev @cee52b0): NOT a BorissalConfig -- it is
+    # a standalone nn.Module (modeling_borissal_v08.BorissalV08) that owns its own
+    # allocation, so it is handled by an early branch in _token_selection. The entry
+    # exists only so `--configs v0.8` passes the _known() gate; calling it is a bug.
+    "v0.8": lambda s: (_ for _ in ()).throw(
+        RuntimeError("v0.8 is not a BorissalConfig -- it must take the "
+                     "_token_selection early branch, not _selector_config")),
 }
 
 
@@ -120,6 +127,33 @@ def _token_selection(name, video, scale, ratio, merge, partial_blocks, generator
         k = max(1, round(ratio * n_tok))
         idx = torch.randperm(n_tok, generator=generator)[:k].sort().values.unsqueeze(0)
         return idx, (idx[0][:, None] * merge * merge + torch.arange(merge * merge)).reshape(1, -1), 0
+    base_name, knobs = _parse_spec(name)
+    if base_name == "v0.8":
+        # v0.8 owns its own signals AND its own per-slot allocation, so it is not a
+        # BorissalConfig: build the module directly and pass ',k=v' straight through as
+        # knobs (w_a/w_d/w_n/rho/kappa/gamma/tau/alpha/sig_gate).
+        #
+        # DEFAULT patch_size=32 = Qwen's MERGED token grid (16 x merge 2), then
+        # expand_selection_2x back to the patch-16 grid -- same trick as "coarse:".
+        # Why it matters: v0.8 selects per patch with no 2x2 cube constraint, so on the
+        # patch-16 grid almost every merged block comes out PARTIAL and
+        # partial_blocks="any" promotes each to a whole token. Measured at 384/16f/
+        # ratio 0.25: patch16 -> 616 tokens (568 partial) vs v0.7's 288. That is 2.1x
+        # the budget -- not comparable. Selecting on the merged grid makes one selected
+        # unit == one Qwen token: 288 tokens, 0 partial, budget-exact.
+        # Pass patch_size=16 explicitly to get the (non-comparable) patch-grid variant.
+        import sys as _sys
+        _sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        from eval_borissal_semantic import expand_selection_2x
+        from autogaze.models.borissal.modeling_borissal_v08 import BorissalV08
+        v08_patch = knobs.pop("patch_size", 16 * merge)
+        v08_tubelet = knobs.pop("tubelet_size", 2)
+        sel, _aux = BorissalV08(None, tubelet_size=v08_tubelet,
+                                patch_size=v08_patch, **knobs)(video, ratio)
+        if v08_patch == 16 * merge:
+            sel = expand_selection_2x(sel)
+        out = to_qwen3vl_video_tokens(sel, merge, partial_blocks)
+        return out["keep_token_index"], out["qwen_patch_index"], out["n_partial_blocks"]
     if name.startswith("coarse:"):
         # 12x12-native signals+selection, expanded 2x back to the patch-16 grid
         import sys as _sys

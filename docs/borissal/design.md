@@ -2211,3 +2211,70 @@ Their dev-60b NLL preview (recorded, not decisive) favours
 keyframe_refresh=2 dynamic at both ratios (+0.241 vs +0.309 nats @0.25;
 +0.086 vs +0.109 @0.5 against dense), which is the reason the arms were
 built. Procedure to resume: outputs/borissal/v09_round/RESUME.md.
+
+## v0.8 "Sikhye" ported in from patchstack (2026-08-15): standalone single file
+
+Not a round -- a code move. v0.8 was developed in the sibling `patchstack` repo
+(`dev` @ `cee52b0`); the evaluation harness, dev-60b and the frozen judge frames
+live only here, so the selector came to the data.
+
+**What v0.8 is.** A training-free selector that internalises the codec/route
+experiments as its own signals: I-slot = appearance, P-slot = change (frame
+diff) + surprise (temporal-median deviation), soft 2x2 coarsen, and a
+"rate-control lite" per-slot budget `w = gamma*softmax((log E + kappa*g)/tau) +
+(1-gamma)/T_grid`. Nine knobs, all injectable (`V08Params`), `learnable=True`
+makes every theta an `nn.Parameter`, and everything up to the hard top-k is
+differentiable (aux returns the pre-top-k soft score/counts as the ST bridge).
+
+**Standalone by construction.** `modeling_borissal_v08.py` imports nothing but
+`torch` + `dataclasses` -- no sibling modules. `_pack_gazing_mask`,
+`_minmax_norm`, `_coherence_gate_grid`, `_mc_residual_scores`,
+`_selection_from_mask` and `Selection` are inlined verbatim from their sources
+(listed in the module docstring). Nothing in the repo does `isinstance(...,
+Selection)`, so the redefinition is safe for the adapters.
+
+**The one piece that had to be re-derived.** The original takes a frozen
+`Borissal` backbone purely to read `select_with_intermediates(...)
+["spatial_norm"]` as the appearance channel. Dropping that dependency meant
+resolving the preset chain `v0_5 -> v0_3 -> v0_2 -> class defaults`; only seven
+knobs actually reach `spatial_norm`: `luma_mode="mean"`,
+`spatial_diff="tubelet"`, `spatial_op="grad"`, `pooling="avg"`,
+`coherence_gate=True`, `coherence_at_grid=True`, `coherence_gamma=1.0`.
+Worth recording because it is the easy mistake: v0_3's `dog_blob_weight=0.5`
+does NOT reach it -- `_extra_channels` feeds only the final `fused_blend`, which
+is downstream of `spatial_norm` (`modeling_borissal.py:561` vs `:562-569`).
+
+`spatial_backbone` is therefore optional now (default `None` = in-file
+appearance). Passing a real backbone still works and is what the parity gate
+compares against.
+
+**Parity (the only thing that makes a port trustworthy)** -- bit-exact on both
+`keep_index` and `scores`:
+
+| check | cases | result |
+|---|---|---|
+| in-file appearance vs frozen backbone | 8 (tubelet 1/2 x 128/224px x ratio .25/.5) | all identical |
+| vs patchstack | 12 (above + `gamma=1.0,kappa=2.0` variant) | all identical |
+
+**Harness wiring, and a trap worth naming.** v0.8 is an `nn.Module`, not a
+`BorissalConfig`, so `_token_selection` branches on it early; the `SELECTORS`
+entry exists only to pass the `_known()` gate and raises if ever called.
+The trap: v0.8 selects per patch with no 2x2 cube constraint, so on the patch-16
+grid nearly every Qwen merged block is PARTIAL and `partial_blocks="any"`
+promotes each to a whole token. Measured at 384/16f/ratio 0.25 that is **616
+tokens (568 partial) against v0.7's 288** -- 2.1x the budget, i.e. not a
+comparison at all. The fix is to select on the merged grid directly
+(`patch_size = 16 * merge = 32`) and `expand_selection_2x` back, the same trick
+the `coarse:` specs use: 288 tokens, 0 partial, budget-exact. That is the
+default; `patch_size=16` is still reachable explicitly for the non-comparable
+variant.
+
+Smoke (1 clip, 16 new tokens, encoder stage, ratio 0.25) ran end to end with
+both arms at 288 tokens. It printed an NLL ordering, which is **not** recorded
+as evidence here -- one clip, and NLL has already been caught disagreeing with
+judged outcomes once on this project. v0.8 vs v0.7 is a judged round, not done.
+
+Tests: `tests/test_borissal_v08.py` (12, ported from patchstack `test_v08.py`
+plus the standalone-vs-backbone parity case). Suite 208 -> 220 green.
+Originals untouched: `configuration_borissal`, `modeling_borissal`,
+`signals_v03`, `adapters`, and the v1 track.
