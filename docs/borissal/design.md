@@ -2278,3 +2278,70 @@ Tests: `tests/test_borissal_v08.py` (12, ported from patchstack `test_v08.py`
 plus the standalone-vs-backbone parity case). Suite 208 -> 220 green.
 Originals untouched: `configuration_borissal`, `modeling_borissal`,
 `signals_v03`, `adapters`, and the v1 track.
+
+**2026-08-15 follow-up: `st_gate()` -- the ST bridge the file was missing.**
+The port above carried the *inference* core; patchstack turned out to have a
+full training harness sitting outside the model file
+(`patchstack/scripts/train.py`, 715 lines, ST + GRPO, ~14 completed runs with
+saved `theta` checkpoints under `outputs/v08_t2_*.pt`) that never got ported.
+Nothing needed reporting upstream -- patchstack's `dev` is local-only (no
+remote) and unchanged since the port (`git log cee52b0..dev --
+modeling_borissal_v08.py` is empty) -- so the fix was to pull the missing
+piece in, not push anything out.
+
+Added, all additive (forward() and the copied helpers are still untouched --
+the parity table above still holds): `st_gate(sel, aux, rate_grad=True)`,
+`V08Params.clamp_()`, a `_ToyEncoder` for self-contained examples, and a CLI
+(`python modeling_borissal_v08.py {infer,eval,train}`). `st_gate()` is
+`train.py:531-549` moved over logic-unchanged: a per-slot
+`softmax(scores_soft) x N_pf` gate on the score side, times a
+`c_soft/c_soft.detach()` ratio on the allocation side when `rate_grad=True`.
+Both factors are needed for full knob coverage --
+`w_a/w_d/w_n/rho/alpha/sig_gate` only reach the score factor,
+`kappa/gamma/tau/w_d/w_n` only reach the allocation factor -- verified by
+`test_v08_st_gate_knob_coverage` (negative control: `rate_grad=False` drops
+kappa/gamma/tau to `grad is None`).
+
+Worth recording precisely because it corrects a trap the file itself was
+setting: `_largest_remainder`'s docstring used to claim the bridge was
+`counts_st = counts + raw - raw.detach()`. That form is never implemented
+anywhere in patchstack either -- grep for `counts_st` turns up nothing but
+that one comment -- and `counts` enters `topk(k=...)` as a size argument, not
+a multiplicative gate, so the line alone creates no gradient path. patchstack
+already burned itself on the *adjacent* wrong guess once (commit `b910d3c`:
+an earlier *global* `softmax x L` gate suppressed I-slot gate mass ~2.7x and
+starved `w_a`'s gradient -- the per-slot form above is the fix). Anyone
+reading only the old comment would likely re-derive the same wrong shape.
+The docstring now points at `st_gate()` instead of describing a formula.
+
+`st_gate()`'s only contract with a consumer is `(B, K)` float, forward value
+1.0, same order as `keep_index` -- exactly what
+`vjepa2_sparse.sparse_encoder_forward` (`:66`) multiplies in, and not specific
+to that encoder: any token-gather encoder (including a small VLM) takes the
+same two tensors, `keep_index` and `gate`. Parity with patchstack was checked
+without running `train.py` (`RUN_TRAIN=1`-gated, needs its own data) -- since
+`(sel, aux)` is already proven bit-identical (parity table above) and
+`st_gate()` is a pure function of it, `test_v08_st_gate_matches_patchstack_formula`
+just re-derives `train.py:536-549` inline and asserts `torch.equal`.
+
+`batch=1` guard is unchanged and deliberately so -- lifting it (~10 lines:
+batch `c_soft`, reuse `modeling_borissal.py:116`'s vectorized
+`_largest_remainder`) buys nothing until `sparse_encoder_forward` accepts `-1`
+padding, since per-row-different allocation makes `keep_index` ragged at
+B>1. `B=1` + grad-accum is the free path; patchstack's 14 completed runs are
+proof it's sufficient.
+
+Joint selector-encoder-**LLM** backprop was considered and explicitly
+rejected, per two standing prohibitions already on record here
+(`docs/borissal/training.md:423`, `design.md:797` above, both citing the L2X
+"selection as communication" degeneracy) and per patchstack's own answer:
+`train.py:235` scores an LLM (Qwen3VL) as a frozen `torch.no_grad()` GRPO
+reward, never backprops into it, and gates the joint track (`t3`) permanently
+on prerequisites that never got met. AutoGaze's own `rl_microbatch`
+(`train_borissal_v1.py:214-294`) already follows the same shape. So the
+two-track split going forward: `st_gate()` differentiates the selector into
+the **encoder**; an LLM stays a frozen reward source, reached through RL, not
+this bridge.
+
+Tests: +3 (`test_v08_demos_run`, `test_v08_st_gate_knob_coverage`,
+`test_v08_st_gate_matches_patchstack_formula`). Suite 220 -> 223 green.

@@ -1,5 +1,9 @@
 """borissal v0.8 "Sikhye" — route/코덱 실험의 원리를 자체 신호로 내재화한 차세대 셀렉터.
 
+진입점: `python modeling_borissal_v08.py {infer,eval,train}`. 학습 계약은 `st_gate()`
+(hard 선택을 미분 가능하게 잇는 straight-through 게이트) — 어떤 토큰-gather 인코더에도
+꽂힌다, V-JEPA 전용 아님.
+
 이 파일은 **완전 독립**이다. 형제 모듈을 import하지 않으며 외부 의존은 `torch`뿐 —
 다른 레포에 그대로 떨어뜨려도 동작한다.
 
@@ -14,12 +18,18 @@
   Selection               AutoGaze modeling_borissal.py:41-55 (필드 동일 — 어댑터는
                           isinstance 검사를 하지 않으므로 재정의해도 그대로 먹는다)
 
-원본과 다른 점은 딱 둘:
+원본과 다른 점은 셋:
   1. 런타임 import(`from ...selector import ...`)를 파일 내 private 함수 참조로 교체.
   2. `spatial_backbone`이 필수 → **옵션(기본 None)**. None이면 아래
      `_appearance_spatial_norm`이 외형 A를 만든다(= 독립 경로). 원본 `Borissal`
      인스턴스를 넘기면 그쪽 `spatial_norm`을 쓴다(= patchstack과 동일 경로).
      두 경로가 같은 결과를 내야 한다 — 이식 정확성의 자기검증 지점.
+  3. **학습·사용 배선을 파일 안으로**: `st_gate()` · `V08Params.clamp_()` ·
+     `_ToyEncoder` · `_demo_{infer,eval,train}` + CLI. patchstack
+     `scripts/train.py:531-581`(dev @ cee52b0)에서 이전 — 로직 무변경. patchstack엔
+     이미 완성된 학습 하네스(ST+GRPO, θ 체크포인트 14종)가 있고 이 파일은 그중
+     인코더까지 미분되는 부분만 가져온다; remote가 없는 로컬 레포라 이전은 수동
+     파일 복사다.
 
 ---- 이하 원본 독스트링 ----
 
@@ -42,6 +52,8 @@
 지점으로 명시 (aux의 soft 출력이 학습 손실용).
 """
 
+import argparse
+import time
 from dataclasses import dataclass
 
 import torch
@@ -303,6 +315,17 @@ class V08Params(nn.Module):
             else:
                 self.register_buffer(k, t)
 
+    @torch.no_grad()
+    def clamp_(self) -> None:
+        """optimizer.step() 뒤 매번 호출 — projected gradient. 무제약이면 NaN이 실증됐다:
+        tau가 하한 밖·gamma가 [0,1] 밖으로 표류하면 st_gate()의 0/0이 재현되고, alpha가
+        [0,1] 밖이면 soft-coarsen 외삽이 의미를 잃는다.
+        [출처] patchstack scripts/train.py:576-581 — rate_grad 여부와 무관하게 무조건
+        적용(조건부면 counts_soft 항을 나중에 추가할 때 재발)."""
+        self.tau.clamp_(min=0.05)
+        self.gamma.clamp_(0.0, 1.0)
+        self.alpha.clamp_(0.0, 1.0)
+
 
 def _z(x: torch.Tensor) -> torch.Tensor:
     """클립 전역 z-정규화 (미분 가능·단조 아핀 — 순위 보존)."""
@@ -321,8 +344,11 @@ def _soft_coarsen(S: torch.Tensor, alpha: torch.Tensor, c: int = 2) -> torch.Ten
 
 
 def _largest_remainder(raw: torch.Tensor, total: int, min_val: int, cap: int) -> torch.Tensor:
-    """연속 카운트 → 정수 배분 (합 보존·min·cap). hard 지점 — 학습 시 ST 브리지:
-    counts_st = counts + raw - raw.detach() (v1 st_gate 패턴, aux.c_soft 사용)."""
+    """연속 카운트 → 정수 배분 (합 보존·min·cap). hard 지점 — 학습 시 ST 브리지는
+    `counts_st = counts + raw - raw.detach()` **가 아니다** (그 형태는 patchstack에도
+    구현된 적 없는 주석뿐이고, `counts`가 `topk`의 크기 인자라 곱셈 위치가 아니어서
+    이 한 줄만으론 gradient 경로가 안 생긴다). 실제 형태는 `st_gate()`의 `w_slot` 비율
+    (`(c_sel + eps) / (c_sel.detach() + eps)`, 아래 `st_gate` 참고)."""
     if total < len(raw) * min_val:
         raise ValueError(f"budget {total} < slots {len(raw)} × min {min_val} — "
                          "ratio가 너무 낮음 (전 slot 최소 보장 불가)")
@@ -447,3 +473,197 @@ class BorissalV08(nn.Module):
             mask[:, t].scatter_(-1, idx, torch.ones_like(idx, dtype=torch.bool))
         sel = _selection_from_mask(S, mask.reshape(B, T_grid, Hg, Wg))
         return sel, {"scores_soft": S, "counts_soft": c_soft}
+
+
+# =============================================================================
+# 학습 배선 — patchstack scripts/train.py:531-581 (dev @ cee52b0)에서 이전, 로직 무변경
+# =============================================================================
+
+
+def st_gate(sel: Selection, aux: dict, rate_grad: bool = True) -> torch.Tensor:
+    """hard 선택을 미분 가능하게 잇는 straight-through 게이트 → (B, K), forward 값 1.0.
+
+    토큰을 gather하는 어떤 인코더에도 꽂힌다 (V-JEPA 전용 아님):
+        tokens = embed(video).gather(1, sel.keep_index[..., None].expand(-1, -1, D))
+        tokens = tokens * st_gate(sel, aux).unsqueeze(-1)   # ← 여기로 grad가 흐른다
+    (곱셈 자리·차원을 직접 안 맞추려면 `st_gate_apply(sel, aux, tokens)` 참고.)
+    AutoGaze에서는 `sparse_encoder_forward(..., gate=st_gate(sel, aux))`
+    (vjepa2_sparse.py:66이 같은 곱을 한다).
+
+    [출처] patchstack scripts/train.py:531-549 — 로직 무변경.
+
+    ⚠️ slot별 softmax × N_pf 다. **전역 softmax × L 아니다** — 전역 형태는 I-slot
+    게이트 질량을 ~2.7× 억압해 `w_a` 그래디언트를 굶긴다 (patchstack b910d3c에서
+    실측·정정). `_largest_remainder` 독스트링이 한때 말하던
+    `counts_st = counts + raw - raw.detach()`는 patchstack에도 구현된 적이 없다 —
+    실제 형태는 아래 `w_slot` 비율이다.
+
+    rate_grad=True면 토큰별 자기 slot의 `c_soft/c_soft.detach()`를 곱해 배분 노브
+    (kappa/gamma/tau)까지 학습시킨다. `+1e-6`은 필수 — tau가 하한이고 gamma→1이면
+    비최대 slot의 c_soft가 0이 되어 0/0 NaN (patchstack 1차 캠페인 step 225 발산 원인).
+    """
+    S, c_soft = aux["scores_soft"], aux["counts_soft"]
+    B, T_grid, Hg, Wg = S.shape
+    N_pf, L = Hg * Wg, T_grid * Hg * Wg
+    keep = sel.keep_index
+    if bool((keep < 0).any()):
+        raise ValueError("st_gate: keep_index에 -1 패딩 — 인코더가 거부한다 "
+                         "(B=1로 쓰거나 패딩 인식 인코더가 필요)")
+    p = torch.softmax(S.reshape(B, T_grid, N_pf), dim=-1) * N_pf
+    p_kept = p.reshape(B, L).gather(1, keep)
+    gate = 1.0 + p_kept - p_kept.detach()
+    if rate_grad:
+        c_sel = c_soft.gather(1, keep // N_pf)
+        gate = gate * ((c_sel + 1e-6) / (c_sel.detach() + 1e-6))
+    return gate
+
+
+def st_gate_apply(sel: Selection, aux: dict, tokens: torch.Tensor,
+                  rate_grad: bool = True) -> torch.Tensor:
+    """`tokens * st_gate(...).unsqueeze(-1)` 한 줄 편의 함수 — 곱하는 자리·차원을
+    맞추는 실수를 없앤다. `tokens`는 `sel.keep_index` 순서로 이미 gather된 (B, K, D).
+
+        kept = embed(video).gather(1, sel.keep_index[..., None].expand(-1, -1, D))
+        kept = st_gate_apply(sel, aux, kept)      # 곱셈 자체는 여전히 필수 (st_gate 참고)
+
+    곱한다는 요구사항은 없앨 수 없다 — hard top-k + 희소 연산(진짜로 토큰을 버려서
+    계산량을 줄이는 것)을 동시에 가지려면, gradient가 셀렉터로 돌아갈 유일한 인과
+    경로가 "곱해진 값이 loss에 들어간다"뿐이기 때문. 이 함수는 그 지점을 표준화할
+    뿐이다.
+    """
+    return tokens * st_gate(sel, aux, rate_grad).unsqueeze(-1)
+
+
+# =============================================================================
+# 예시 — python modeling_borissal_v08.py {infer,eval,train}
+# =============================================================================
+
+
+class _ToyEncoder(nn.Module):
+    """예시 전용 장난감 인코더 — 진짜 지표 아님, 계약 시연용.
+
+    토큰 = 패치 평균 (avg_pool2d, 셀렉터와 같은 tubelet/patch 격자). kept 토큰만 임베드해
+    (gate가 있으면 곱하고) 평균 풀로 컨텍스트를 만들고, 그 컨텍스트로 **전체** 패치를
+    복원해 미선택 위치의 MSE를 잰다 — patchstack t2의 coverage loss를 축소한 형태.
+    `gate.unsqueeze(-1)`을 곱하는 자리가 `sparse_encoder_forward`(vjepa2_sparse.py:66)와
+    정확히 같은 자리 — 그게 이 클래스의 존재 이유다.
+    """
+
+    def __init__(self, tubelet_size: int = 2, patch_size: int = 16, dim: int = 16):
+        super().__init__()
+        self.tubelet_size = tubelet_size
+        self.patch_size = patch_size
+        self.embed = nn.Linear(3, dim)
+        self.decode = nn.Linear(dim, 3)
+
+    def _tokens(self, video: torch.Tensor) -> torch.Tensor:
+        B, T, C, H, W = (int(x) for x in video.shape)
+        T_grid, p = T // self.tubelet_size, self.patch_size
+        g = F.avg_pool2d(video.reshape(B * T, C, H, W), p, p).reshape(B, T, C, H // p, W // p)
+        g = g.reshape(B, T_grid, self.tubelet_size, C, H // p, W // p).mean(2)
+        # t-major flatten — sel.keep_index와 같은 순서 (i = t*N_pf + h*Wg + w)
+        return g.permute(0, 1, 3, 4, 2).reshape(B, -1, C)
+
+    def forward(self, video: torch.Tensor, keep_index: torch.Tensor,
+                gate: torch.Tensor = None):
+        tokens = self._tokens(video)                                  # (B, L, 3)
+        emb = self.embed(tokens)                                      # (B, L, dim)
+        kept = emb.gather(1, keep_index.unsqueeze(-1).expand(-1, -1, emb.shape[-1]))
+        if gate is not None:
+            kept = kept * gate.unsqueeze(-1)
+        ctx = kept.mean(dim=1, keepdim=True)                          # (B, 1, dim)
+        recon = self.decode(ctx.expand(-1, tokens.shape[1], -1))      # (B, L, 3)
+        return recon, tokens
+
+    def loss(self, video: torch.Tensor, keep_index: torch.Tensor,
+             gate: torch.Tensor = None) -> torch.Tensor:
+        """미선택 위치만의 재구성 MSE."""
+        recon, tokens = self(video, keep_index, gate)
+        B, L, _ = tokens.shape
+        rest_mask = torch.ones(B, L, dtype=torch.bool, device=tokens.device)
+        rest_mask.scatter_(1, keep_index, False)
+        return ((recon - tokens) ** 2)[rest_mask].mean()
+
+
+def _demo_infer(frames: int = 8, size: int = 224, ratio: float = 0.25) -> None:
+    """선택 생성만 — 인코더에 붙이기 전 최소 확인."""
+    torch.manual_seed(0)
+    m = BorissalV08(tubelet_size=2, patch_size=16)
+    sel, _aux = m(torch.rand(1, frames, 3, size, size), ratio)
+    print(f"num_keep={int(sel.num_keep)} / L={sel.scores.shape[1]}")
+    print(f"per_frame_keep={sel.per_frame_keep.tolist()}")
+    print(f"keep_index[:10]={sel.keep_index[0, :10].tolist()}")
+    print(f"keep_coords[0]={sel.keep_coords[0, 0].tolist()}  (t, h, w)")
+
+
+def _demo_eval(frames: int = 8, size: int = 224, ratio: float = 0.25) -> None:
+    """① ratio 스윕 (예산 정확도·slot 분포·CPU 지연·결정성).
+    ② _ToyEncoder 재구성 MSE — random / uniform grid / v0.8 3자 비교.
+    ⚠️ ②는 장난감 인코더 기준이다 — 진짜 VLM 성능 지표가 아니다."""
+    torch.manual_seed(0)
+    m = BorissalV08(tubelet_size=2, patch_size=16)
+    video = torch.rand(1, frames, 3, size, size)
+
+    print("-- ratio 스윕 --")
+    for r in (0.10, 0.25, 0.50):
+        t0 = time.perf_counter()
+        sel, _aux = m(video, r)
+        dt_ms = (time.perf_counter() - t0) * 1e3
+        sel2, _aux2 = m(video, r)
+        L = sel.scores.shape[1]
+        print(f"ratio={r:.2f} num_keep={int(sel.num_keep):4d} "
+              f"expected={round(r * L):4d} per_frame_keep={sel.per_frame_keep.tolist()} "
+              f"deterministic={torch.equal(sel.keep_mask, sel2.keep_mask)} {dt_ms:5.1f}ms")
+
+    print("-- 재구성 MSE (장난감 인코더 기준 — 진짜 VLM 성능 아님) --")
+    sel, _aux = m(video, ratio)
+    K, L = sel.keep_index.shape[1], sel.scores.shape[1]
+    enc = _ToyEncoder(tubelet_size=2, patch_size=16)
+    torch.manual_seed(0)
+    random_idx = torch.randperm(L)[:K].sort().values.unsqueeze(0)
+    uniform_idx = torch.arange(0, L, max(L // K, 1))[:K].unsqueeze(0)
+    with torch.no_grad():
+        for name, idx in (("random", random_idx), ("uniform grid", uniform_idx),
+                          ("borissal v0.8", sel.keep_index)):
+            print(f"{name:14s} MSE={float(enc.loss(video, idx)):.4f}")
+
+
+def _demo_train(frames: int = 8, size: int = 224, ratio: float = 0.25) -> None:
+    """셀렉터 → _ToyEncoder(gate) → loss → backward → step → clamp_().
+    노브 9개 grad 논제로 + 게이트 forward==1.0을 단언한다 — "이 파일만으로 학습
+    가능한가"의 자기검증."""
+    torch.manual_seed(0)
+    m = BorissalV08(learnable=True, learn_signal=True, tubelet_size=2, patch_size=16)
+    enc = _ToyEncoder(tubelet_size=2, patch_size=16)
+    params = list(m.parameters()) + list(enc.parameters())
+    opt = torch.optim.AdamW(params, lr=1e-2, weight_decay=0.0)  # wd=0: θ는 제어 노브지 가중치가 아님
+
+    video = torch.rand(1, frames, 3, size, size)
+    sel, aux = m(video, ratio)
+    gate = st_gate(sel, aux)
+    assert torch.allclose(gate, torch.ones_like(gate)), "게이트 forward 값은 1.0이어야 함"
+
+    loss = enc.loss(video, sel.keep_index, gate)
+    opt.zero_grad()
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(params, 1.0)
+
+    for name, p in m.params.named_parameters():
+        g = float(p.grad.abs()) if p.grad is not None else 0.0
+        print(f"{name:9s} grad={g:+.6f}")
+        assert g > 0, f"{name}: grad 0 — st_gate 두 경로(scores_soft/counts_soft)가 다 붙었는지 확인"
+    opt.step()
+    m.params.clamp_()
+    print(f"OK — 노브 9개 전부 논제로. loss={float(loss.detach()):.4f} "
+          f"num_keep={int(sel.num_keep)} per_frame_keep={sel.per_frame_keep.tolist()}")
+
+
+if __name__ == "__main__":
+    _ap = argparse.ArgumentParser(description="borissal v0.8 — 선택 생성/측정/학습 예시")
+    _ap.add_argument("mode", nargs="?", default="infer", choices=["infer", "eval", "train"])
+    _ap.add_argument("--frames", type=int, default=8)
+    _ap.add_argument("--size", type=int, default=224)
+    _ap.add_argument("--ratio", type=float, default=0.25)
+    _args = _ap.parse_args()
+    {"infer": _demo_infer, "eval": _demo_eval, "train": _demo_train}[_args.mode](
+        frames=_args.frames, size=_args.size, ratio=_args.ratio)

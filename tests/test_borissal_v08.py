@@ -11,7 +11,8 @@ import time
 import pytest
 import torch
 
-from autogaze.models.borissal.modeling_borissal_v08 import BorissalV08
+from autogaze.models.borissal.modeling_borissal_v08 import (
+    BorissalV08, _demo_eval, _demo_infer, _demo_train, st_gate, st_gate_apply)
 
 
 def _video(seed=0, T=8, S=128):
@@ -184,6 +185,64 @@ def test_v08_signal_refiner_identity_and_two_phase_grads():
     got = any(p.grad is not None and float(p.grad.abs().max()) > 0
               for p in with_ref.refiner.parameters())
     assert got, "sig_gate=0.5인데 refiner 가중치 grad 없음"
+
+
+def test_v08_demos_run():
+    """하단 CLI 예시(infer/eval/train)가 썩지 않게 CI에 태운다."""
+    for fn in (_demo_infer, _demo_eval, _demo_train):
+        fn(frames=8, size=128, ratio=0.25)
+
+
+def test_v08_st_gate_knob_coverage():
+    """음성 대조: rate_grad=False면 배분 노브(kappa/gamma/tau)가 죽어야 한다
+    (죽지 '않으면' 게이트가 의도한 경로로 안 붙은 것).
+
+    ⚠️ rate_grad=False면 그래프 경로 자체가 없어 grad는 0 텐서가 아니라 **None**이다
+    (c_soft는 forward에서 계산되지만 _largest_remainder가 detach해 가져가고, 점수
+    경로는 이 셋에 안 닿는다)."""
+    m = BorissalV08(None, tubelet_size=1, patch_size=16, learnable=True)
+    sel, aux = m(_video(), 0.5)
+    gate = st_gate(sel, aux, rate_grad=False)
+    (gate * torch.randn_like(gate)).sum().backward()
+    for name in ("kappa", "gamma", "tau"):
+        p = getattr(m.params, name)
+        assert p.grad is None or float(p.grad.abs()) == 0.0, \
+            f"{name}: rate_grad=False인데 grad 있음"
+    for name in ("w_a", "rho", "alpha"):
+        p = getattr(m.params, name)
+        assert p.grad is not None and float(p.grad.abs()) > 0, \
+            f"{name}: 점수 경로 노브인데 grad 없음"
+
+
+def test_v08_st_gate_matches_patchstack_formula():
+    """train.py:536-549 인라인 수식을 그대로 복붙해 같은 (sel, aux)에 돌려 torch.equal.
+
+    train.py를 돌릴 필요 없음 — V-4가 이미 (sel, aux) 비트 일치를 증명했고
+    st_gate()는 그 순수함수이므로, 형식 등가만 확인하면 이식 정확성이 닫힌다."""
+    m = BorissalV08(None, tubelet_size=1, patch_size=16, learnable=True)
+    sel, aux = m(_video(), 0.5)
+
+    S, c_soft = aux["scores_soft"], aux["counts_soft"]
+    B, T_grid, Hg, Wg = S.shape
+    N_pf = Hg * Wg
+    keep = sel.keep_index
+    p = torch.softmax(S.reshape(B, T_grid, N_pf), dim=-1) * N_pf
+    p_kept = p.reshape(B, -1).gather(1, keep)
+    gate_inline = 1.0 + p_kept - p_kept.detach()
+    c_sel = c_soft.gather(1, keep // N_pf)
+    gate_inline = gate_inline * ((c_sel + 1e-6) / (c_sel.detach() + 1e-6))
+
+    assert torch.equal(st_gate(sel, aux), gate_inline)
+
+
+def test_v08_st_gate_apply_matches_manual_multiply():
+    """st_gate_apply(sel, aux, tokens) == tokens * st_gate(sel, aux).unsqueeze(-1)."""
+    m = BorissalV08(None, tubelet_size=1, patch_size=16, learnable=True)
+    sel, aux = m(_video(), 0.5)
+    K = sel.keep_index.shape[1]
+    tokens = torch.randn(1, K, 4)
+    manual = tokens * st_gate(sel, aux).unsqueeze(-1)
+    assert torch.equal(st_gate_apply(sel, aux, tokens), manual)
 
 
 def test_v08_old_8key_ckpt_loads_strict_false():
