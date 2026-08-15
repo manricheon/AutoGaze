@@ -361,3 +361,80 @@ def to_qwen3vl_video_tokens(
         "num_tokens_total": T_grid * Hm * Wm,
         "n_partial_blocks": n_partial,
     }
+
+
+def to_gemma4_video_tokens(selection: Selection, pooling_kernel_size: int = 3) -> dict:
+    """Bridge to Gemma 4's video vision tower (`Gemma4VisionModel`, `transformers`
+    `models/gemma4`).
+
+    REQUIRES the selector to have run at the POOLED grid directly --
+    `patch_size = 16 * pooling_kernel_size` (48 by default: Gemma 4's raw
+    `patch_size=16` times its default `pooling_kernel_size=3`) and
+    `tubelet_size=1` (Gemma 4 encodes each video frame independently). This is
+    not the Qwen pattern (fine 16px grid + `score_coarsen` cube-tie + a
+    reshape here to detect partial blocks): v0.8 has no `score_coarsen`
+    knob -- its own coarsening (`alpha`, `_soft_coarsen`) is a soft 2x2 mix,
+    not a hard k-way tie for arbitrary k -- so at pool_k=3, top-k almost never
+    respects 3x3 cell boundaries on its own (measured: 30 of 32 cells partial
+    on a random draw). Running the selector one level coarser sidesteps the
+    problem instead of detecting it: each of v0.8's own units IS one Gemma 4
+    pooling cell, so partial-cell selection is impossible by construction, at
+    the cost of computing the selector's saliency signals (A/D/N) at 48px
+    resolution instead of its usual 16px.
+
+    Gemma 4 has no merge-before-encoder step like Qwen: pooling happens AFTER
+    the 16-layer encoder (`Gemma4VisionPooler`), and it always divides by
+    `pooling_kernel_size**2` regardless of how many patches in a cell
+    survived (`_avg_pool_by_positions`, modeling_gemma4.py:603) -- a partial
+    cell would be a silently biased-low average, not a token-count problem
+    like Qwen's partial merge block. Moot here since cells can't be partial.
+
+    Returns a dict:
+      - `patch_row_index` (T_grid, max_K) long -- ascending raw-16px-patch row
+        index per frame (row-major `h*W_raw+w`, matching Gemma 4's own
+        `convert_video_to_patches` + position-id `meshgrid(..., indexing="xy")`
+        order -- verified against `video_processing_gemma4.py`, not assumed),
+        -1 padded to the batch's per-frame max kept-patch count. Every frame's
+        own count is an exact multiple of `pooling_kernel_size**2` (whole
+        cells, expanded from v0.8's own kept units), so the -1 padding is
+        always whole extra cells.
+      - `cell_keep_mask` (T_grid, Hc, Wc) bool -- which pooled cells survived
+        (== `Selection.keep_mask` reshaped; Hc, Wc are v0.8's own grid here)
+      - `n_kept_per_frame` (T_grid,) long
+      - `pooled_grid` (T_grid, Hc, Wc) tuple -- passed to `attach_gemma4.py`
+        because `Gemma4VisionPooler`'s own kernel-index math re-derives the
+        grid width from whichever patches are physically present in a call,
+        which breaks (collides or raises) on a scattered, non-contiguous
+        subset -- exactly what a saliency-based selection produces. Passing
+        the true grid instead of re-deriving it is the fix; see
+        `attach_gemma4.py`'s module docstring.
+    """
+    k = int(pooling_kernel_size)
+    if k < 1:
+        raise ValueError(f"pooling_kernel_size must be >= 1, got {k}")
+
+    T_grid, Hc, Wc = (int(x) for x in selection.grid_thw[0].tolist())
+    B = selection.keep_mask.shape[0]
+    if B != 1:
+        raise NotImplementedError("to_gemma4_video_tokens: B=1 only (matches BorissalV08's own batch guard)")
+
+    cell_keep = selection.keep_mask.reshape(B, T_grid, Hc, Wc)   # v0.8's own grid == pooled grid
+    n_kept_per_frame = cell_keep.reshape(B, T_grid, -1).sum(dim=-1)[0]
+
+    # Each kept (hc, wc) cell expands to its k*k raw-16px-patch rows. Row-major
+    # h*W_raw+w with W_raw = Wc*k, so (Hc, k, Wc, k) reshapes straight to
+    # (Hc*k, Wc*k) = (H_raw, W_raw) with no permute -- Gemma 4's pooling reads
+    # positions, not sequence order, so the k*k rows don't need to stay
+    # contiguous, but the row-major INDEX formula must still match the
+    # processor's own patch ordering.
+    raw_mask = cell_keep.unsqueeze(3).unsqueeze(5).expand(B, T_grid, Hc, k, Wc, k)
+    raw_mask = raw_mask.reshape(B, T_grid, Hc * k * Wc * k)[0]   # (T_grid, H_raw*W_raw)
+
+    patch_row_index, _ = _pack_gazing_mask(raw_mask)              # (T_grid, max_K), -1 padded
+
+    return {
+        "patch_row_index": patch_row_index,
+        "cell_keep_mask": cell_keep[0],
+        "n_kept_per_frame": n_kept_per_frame,
+        "pooled_grid": (T_grid, Hc, Wc),
+    }
